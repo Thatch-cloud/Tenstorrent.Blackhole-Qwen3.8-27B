@@ -1,0 +1,97 @@
+THIRD-PARTY NOTICES
+===================
+
+This repository contains original work under the MIT licence (see LICENSE), one
+patch derived from Apache-2.0 code, and build definitions that fetch third-party
+components at build time.
+
+Nothing third-party is vendored or redistributed in this repository. The
+Dockerfiles clone or install each component from its own upstream source when an
+image is built, and the resulting images are subject to the licences below.
+
+
+1. This repository's original work
+----------------------------------
+
+    docker/*.Dockerfile, scripts/*, docs/*, README.md
+
+MIT Licence, Copyright (c) 2026 Thatch. See LICENSE.
+
+
+2. Derived from Apache-2.0 code — NOT MIT
+------------------------------------------
+
+    patches/53320-fix-fir-batch-truncation.patch
+
+    and the equivalent in-line edit applied at build time by
+    docker/tenstorrent-bringup-prstack.Dockerfile, which rewrites
+    models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+
+This is a one-character modification to a source file belonging to
+tenstorrent/tt-metal, which is licensed under the Apache License, Version 2.0. As
+a derivative of that file it is offered under the **Apache License, Version 2.0**,
+not under this repository's MIT licence, and it carries tt-metal's copyright
+upstream. It has been offered back to the upstream project.
+
+    tt-metal:  https://github.com/tenstorrent/tt-metal
+    Licence:   Apache-2.0 — https://github.com/tenstorrent/tt-metal/blob/main/LICENSE
+
+The MIT licence in LICENSE does not apply to this patch. Where the two conflict,
+Apache-2.0 governs the patch and its output.
+
+
+3. Components fetched at build time
+------------------------------------
+
+tt-metal / TT-NN
+    Cloned by docker/tenstorrent-bringup.Dockerfile at the pinned TT_METAL_REF.
+    https://github.com/tenstorrent/tt-metal
+    Apache-2.0
+
+Upstream tt-metal pull requests #53314, #53319, #53320
+    Fetched as diffs by docker/tenstorrent-bringup-prstack.Dockerfile and applied
+    to the tt-metal tree. Contributions to an Apache-2.0 project; Apache-2.0.
+    https://github.com/tenstorrent/tt-metal/pull/53314
+    https://github.com/tenstorrent/tt-metal/pull/53319
+    https://github.com/tenstorrent/tt-metal/pull/53320
+
+vllm-tt-plugin
+    Installed by docker/tenstorrent-vllm-plugin.Dockerfile.
+    https://github.com/tenstorrent/vllm-tt-plugin
+    Apache-2.0
+
+vLLM
+    Installed at the tag the plugin pins.
+    https://github.com/vllm-project/vllm
+    Apache-2.0
+
+PyTorch, transformers, and the remaining Python dependencies
+    Installed from tt-metal's own requirements-dev.txt and from PyPI. Each
+    retains its own licence; consult the installed distributions.
+
+Ubuntu 22.04 base image and its packages
+    https://hub.docker.com/_/ubuntu
+    Individual package licences apply.
+
+
+4. Model weights
+-----------------
+
+Qwen/Qwen3.8-27B
+    Not distributed here. Downloaded from Hugging Face at run time by whoever
+    runs the image, subject to the licence and any use restrictions stated on the
+    model card at the time of download.
+    https://huggingface.co/Qwen/Qwen3.8-27B
+
+Benchmark data: GSM8K (openai/grade-school-math) was used to produce the
+correctness figures in README.md. No portion of the dataset is redistributed
+here.
+    https://github.com/openai/grade-school-math
+
+
+5. Verifying this notice
+-------------------------
+
+Licences change. The statements above reflect each project's stated licence at
+the time of writing; confirm against the upstream LICENSE file and the model card
+before relying on them for a distribution or compliance decision.

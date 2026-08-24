@@ -1,0 +1,34 @@
+Fix batch truncation in _causal_conv1d_fir introduced by tenstorrent/tt-metal#53320.
+
+#53320 replaced a Python slice with an explicit ttnn.slice to keep the rm_only
+hop in DRAM (a sound fix for an L1 OOM at bank_manager.cpp:451). But writing the
+bounds out by hand pinned the BATCH end to a literal 1, so every user past the
+first is silently discarded whenever B >= 2.
+
+Symptom, on a 1x2 Blackhole mesh (2x p150a, "P300") running qwen36 at TP=2:
+
+    tt/gdn/tp.py:934  q = ttnn.slice(conv, (0, 0, 0), (B, T, kd))
+    RuntimeError: TT_FATAL @ slice_device_operation.cpp:126:
+      args.slice_end[i] <= tensor_args.input.padded_shape()[i]
+      Ends 2 must be less than or equal to the shape of the tensor 1
+
+conv arrives as Shape([1, 128, 5120]) where [2, 128, 5120] is required. The
+downstream slice is correct; the truncation happens upstream in the FIR.
+
+Verified on silicon with this one-character change:
+
+    3 passed, 10 deselected in 112.57s
+    batched GDN prefill (B=2)        PCC min=0.99999 max=1.00000  lens=[128, 96]
+    batched chunk-outer carry (B=2)  PCC min=1.00000 max=1.00000
+    batched GDN prefill (B=4)        PCC min=0.99998 max=1.00000  lens=[128, 96, 64, 128]
+
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+@@ -219,7 +219,7 @@ def _causal_conv1d_fir(
+     out = None
+     for k in range(kernel_size):
+-        x_slice = ttnn.slice(x_padded, (0, k, 0), (1, k + T, D), memory_config=_dram)
++        x_slice = ttnn.slice(x_padded, (0, k, 0), (B, k + T, D), memory_config=_dram)
+         if k != 0:
+             x_slice = ttnn.to_layout(x_slice, ttnn.TILE_LAYOUT)
+         if out is None:
