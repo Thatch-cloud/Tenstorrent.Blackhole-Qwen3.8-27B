@@ -3,8 +3,8 @@
 Qwen3.8-27B ships a Multi-Token Prediction head (`mtp_num_hidden_layers = 1`). This is what it
 took to turn that into an actual end-to-end speedup on a 2-card p150a mesh, and what it cost.
 
-> **Status:** working, and **marginal**. 1.03× at `mean_accepted ≈ 2.04`. Below ~2.0 acceptance
-> it drops under parity. Read [Caveats](#caveats) before relying on this.
+> **Status:** working, and **marginal**. 1.018× at `mean_accepted ≈ 2.04`, where break-even sits
+> at 2.003. Below that it drops under parity. Read [Caveats](#caveats) before relying on this.
 
 ---
 
@@ -13,11 +13,15 @@ took to turn that into an actual end-to-end speedup on a 2-card p150a mesh, and 
 | | ms/step | speedup |
 | --- | ---: | ---: |
 | baseline decode | 61.8 | 1.00× |
-| speculative, K=2 | 122.3 | **1.032×** |
+| speculative, K=2 | 123.9 | **1.018×** |
 
 Normalised at the pooled `mean_accepted = 2.04`, three interleaved A/B pairs, host load average
 3.1–6.9. Raw per-run ratios ranged 0.954–1.150 purely because acceptance varied 1.885–2.205 —
 see [Measuring this honestly](#measuring-this-honestly).
+
+The step time is stated **after normalising the verify phase across arms**. Verify is untouched by
+these changes, so it acts as a control; the raw totals (135.1 → 122.3) credited ~3.2 ms of verify
+drift to the result and overstated it as 1.032×.
 
 **The speedup model:**
 
@@ -100,10 +104,12 @@ Per step at K=2, instrumented (`SD_DRAFT_PROFILE=1`):
 
 | phase | before | after | how |
 | --- | ---: | ---: | --- |
-| verify | 104.8 | 104.8 | traced; already fast |
+| verify | 104.1 | 104.1 | traced; already fast, and unchanged by either fix |
 | draft | 22.9 | 13.4 | device-side untilize |
 | rollback | 14.1 | 5.9 | persistent carry buffer |
-| **total** | **135.1** | **122.3** | |
+
+The two fixes were measured against **different baselines** (the rollback A/B predates the untilize
+work; the untilize A/B had the carry fix on in both arms), so their savings should not be summed.
 
 ### Rollback: 14.1 → 5.9 ms
 
@@ -167,13 +173,17 @@ that came out of it:
   diagnostic — but it means a "slightly noisy" run can be perfectly good for one column and
   worthless for the next.
 * **Normalise before comparing.** Acceptance varies run to run and the speedup is linear in it.
+* **Check the phases your change cannot affect.** They are controls. Interleaving arms handles
+  drift *between* pairs, not drift *within* an untouched phase — and the first version of this
+  page overstated the result by 1.4 points because ~3.2 ms of verify noise happened to point the
+  right way.
 
 ---
 
 ## Caveats
 
-* **Marginal.** 1.03× needs `mean_accepted ≥ ~2.0`. A measured run at 1.885 gave 0.954× — below
-  parity. Acceptance is prompt-dependent.
+* **Marginal.** 1.018× against a break-even acceptance of **2.003** — the margin is ~1.8%, not a
+  comfortable one. A measured run at 1.885 gave 0.954×, below parity. Acceptance is prompt-dependent.
 * **Output is not bit-identical to non-speculative decoding**, and this is expected. A `T`-row
   projection accumulates differently from `T` single-row ones. Agreement is ~1e-6 and the device
   is deterministic, so long generations diverge — typically after ~9 tokens. Divergence is
@@ -192,13 +202,29 @@ that came out of it:
 
 ```
 speculative-decoding/
-  ttnn-op/gdn_decay/          custom ttnn op: T fused GDN recurrence steps, all T states out
+  run.sh                        reference runner -- the script that produced these numbers,
+                                with host-specific values lifted into env vars
+  ttnn-op/gdn_decay/            custom ttnn op: T fused GDN recurrence steps, all T states out
   harness/
-    test_gdn_decode_multi.py  multi-token GDN (composed + fused), rollback carry
-    mtp_module.py             the MTP draft head
-    spec_generate.py          end-to-end loop, phase instrumentation, correctness gates
-docs/speculative-decoding.md  this file
+    test_gdn_decode_multi.py    multi-token GDN (composed + fused), rollback carry
+    mtp_module.py               the MTP draft head
+    spec_generate.py            end-to-end loop, phase instrumentation, correctness gates
+    patch_hidden_retention.py   REQUIRED -- see below
+    patch_mtp_weight_load.py    REQUIRED -- see below
+docs/speculative-decoding.md    this file
 ```
+
+### Two patches the harness cannot run without
+
+Both patch files copied out of the serving image, so what gets mounted is provably image + patch:
+
+* **`patch_hidden_retention.py`** — the target model does not retain the hidden state the MTP head
+  drafts from. Without this the draft head has nothing to consume.
+* **`patch_mtp_weight_load.py`** — the stock weight mapping **drops the `mtp.`-prefixed tensors**.
+  Without this the head loads, runs, and produces garbage, which is a considerably worse failure
+  than not loading at all.
+
+`run.sh` applies the first one itself on every run so the mounted file can never drift.
 
 The op drops into `ttnn/cpp/ttnn/operations/transformer/` and needs registering in
 `sources.cmake`, the kernels glob in `CMakeLists.txt`, and `transformer_nanobind.cpp`.
