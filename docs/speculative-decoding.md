@@ -3,17 +3,21 @@
 Qwen3.8-27B ships a Multi-Token Prediction head (`mtp_num_hidden_layers = 1`). This is what it
 took to turn that into an actual end-to-end speedup on a 2-card p150a mesh, and what it cost.
 
-> **Status:** working, and **marginal**. 1.018× at `mean_accepted ≈ 2.04`, where break-even sits
-> at 2.003. Below that it drops under parity. Read [Caveats](#caveats) before relying on this.
+> **Status:** working. **~1.03–1.05×** at `mean_accepted = 2.04`, with break-even acceptance at
+> **1.936**. Read [Caveats](#caveats) before relying on this — in particular, absolute speedups
+> here carry ~±1.5% of session-to-session drift, so only within-sweep deltas are firm.
 
 ---
 
 ## Result
 
-| | ms/step | speedup |
-| --- | ---: | ---: |
-| baseline decode | 61.8 | 1.00× |
-| speculative, K=2 | 123.9 | **1.018×** |
+| | ms/step | speedup @ acc 2.04 | break-even acceptance |
+| --- | ---: | ---: | ---: |
+| baseline decode | 61.9 | 1.00× | — |
+| speculative, K=2 | **119.8** | **1.054×** | **1.936** |
+
+Break-even acceptance is arguably the more useful number: it is what decides whether a given
+prompt distribution wins at all.
 
 Normalised at the pooled `mean_accepted = 2.04`, three interleaved A/B pairs, host load average
 3.1–6.9. Raw per-run ratios ranged 0.954–1.150 purely because acceptance varied 1.885–2.205 —
@@ -104,12 +108,34 @@ Per step at K=2, instrumented (`SD_DRAFT_PROFILE=1`):
 
 | phase | before | after | how |
 | --- | ---: | ---: | --- |
-| verify | 104.1 | 104.1 | traced; already fast, and unchanged by either fix |
-| draft | 22.9 | 13.4 | device-side untilize |
+| verify | 102.9 | 102.9 | traced; already fast, unchanged by any of the fixes |
+| draft | 22.9 | 11.2 | device-side untilize, then tracing the MTP forward |
 | rollback | 14.1 | 5.9 | persistent carry buffer |
 
-The two fixes were measured against **different baselines** (the rollback A/B predates the untilize
-work; the untilize A/B had the carry fix on in both arms), so their savings should not be summed.
+Each fix was measured against **its own control**, and the three baselines differ — the rollback
+A/B predates the untilize work, and the MTP-trace A/B had both earlier fixes on in both arms. Their
+savings should not be summed.
+
+### Tracing the MTP forward: draft 13.5 → 11.2 ms
+
+The forward was almost pure host dispatch. Tracing it needs persistent input buffers, since
+`cp_tt`, `cos`, `sin` and `emb_tt` are built fresh per call and a trace bakes addresses in.
+
+| phase | no trace | traced |
+| --- | ---: | ---: |
+| `mtp` | 4.65 | **0.30** |
+| `read` | 6.57 | 8.88 |
+| **draft** | **13.53** | **11.16** |
+
+Dispatch is 94% gone, but **a third of it reappears in `read`** — the replay is non-blocking, so its
+device work lands in the readback wait instead of being paid up front. The honest saving is the
+draft delta, −2.4 ms/step, not the −4.4 the `mtp` column alone suggests.
+
+**Three live traces coexist.** The width-1/width-T hang documented under [Caveats](#caveats) does
+*not* generalise to trace count: this trace owns its I/O (allocated once, only ever written via
+`ttnn.copy`), so it does not participate in the decode-trace buffer reuse that makes the
+width-1/width-T pair fatal. It is captured after the width-T trace so that verify — the expensive
+one, whose loss would be silent — is not the earlier-captured party.
 
 ### Rollback: 14.1 → 5.9 ms
 
@@ -182,8 +208,11 @@ that came out of it:
 
 ## Caveats
 
-* **Marginal.** 1.018× against a break-even acceptance of **2.003** — the margin is ~1.8%, not a
-  comfortable one. A measured run at 1.885 gave 0.954×, below parity. Acceptance is prompt-dependent.
+* **Margin is small and acceptance-dependent.** Break-even sits at **1.936**; below that it drops
+  under parity, and acceptance is prompt-dependent.
+* **Absolute speedups carry ~±1.5% session drift.** The same configuration measured 1.018× in one
+  sweep and 1.033× in another with nothing changed but the session. Only within-sweep deltas
+  against a matched control are firm.
 * **Output is not bit-identical to non-speculative decoding**, and this is expected. A `T`-row
   projection accumulates differently from `T` single-row ones. Agreement is ~1e-6 and the device
   is deterministic, so long generations diverge — typically after ~9 tokens. Divergence is
@@ -235,6 +264,7 @@ The op drops into `ttnn/cpp/ttnn/operations/transformer/` and needs registering 
 | --- | --- |
 | `SD_FAST_CARRY=1` | persistent rollback carry (−8.1 ms/step) |
 | `SD_DRAFT_RM_READ=1` | device-side untilize before readback (−7.0 ms/step) |
+| `SD_TRACE_MTP=2` | trace the MTP forward (−2.4 ms/step); `=1` probes it in isolation |
 | `SD_DRAFT_PROFILE=1..4` | phase breakdown; 2 syncs after enqueue, 3 double-reads, 4 adds a 4-byte read |
 | `SD_FORCE_REJECT=1` | control: degenerates to plain decoding, so `mean_accepted` must be exactly 1.000 |
 | `SD_CHECK=1` | rollback and sequential-equivalence gates |

@@ -62,6 +62,10 @@ _DRAFT_FAST_READ = os.environ.get("SD_DRAFT_FAST_READ") == "1"
 _DRAFT_PROFILE_TWICE = os.environ.get("SD_DRAFT_PROFILE") in ("3", "4")
 _DRAFT_PROFILE_TINY = os.environ.get("SD_DRAFT_PROFILE") == "4"
 _DRAFT_RM_READ = os.environ.get("SD_DRAFT_RM_READ") == "1"
+_TRACE_MTP = os.environ.get("SD_TRACE_MTP") == "1"
+_DRAM = ttnn.DRAM_MEMORY_CONFIG
+_TRACE_MTP_LOOP = os.environ.get("SD_TRACE_MTP") == "2"
+_mtp_tr = {}
 _rmread_ck = [0]
 _rmread_bad = [0]
 _fastread_ck = [0]
@@ -392,8 +396,79 @@ def main():
                        framework="pt") as f:
             E = f.get_tensor("model.language_model.embed_tokens.weight")
         print("SD MTP head built", flush=True)
+        if _TRACE_MTP_LOOP:
+            _z_cp = torch.zeros((1,), dtype=torch.int32)
+            _c0, _s0 = rot_mats_decode(mesh, args.rope_head_dim, args.max_seq_len,
+                                       args.rope_theta, _z_cp)
+            _mtp_tr["emb"] = ttnn.clone(replicate_to_device(
+                mesh, E[0].reshape(1, 1, 1, -1).to(torch.bfloat16)), memory_config=_DRAM)
+            _mtp_tr["hid"] = ttnn.clone(replicate_to_device(
+                mesh, torch.zeros(1, 1, 1, args.dim, dtype=torch.bfloat16)), memory_config=_DRAM)
+            _mtp_tr["cp"] = ttnn.clone(ttnn.from_torch(
+                _z_cp, dtype=ttnn.int32, device=mesh, mesh_mapper=rep), memory_config=_DRAM)
+            _mtp_tr["cos"] = ttnn.clone(_c0, memory_config=_DRAM)
+            _mtp_tr["sin"] = ttnn.clone(_s0, memory_config=_DRAM)
+            print("SD mtp_trace persistent inputs allocated", flush=True)
+        if _TRACE_MTP:
+            import time as _tm
+            _rep_n = int(os.environ.get("SD_TRACE_MTP_REPS", "30"))
+            _tok0 = 100
+            _emb_h = E[_tok0].reshape(1, 1, 1, -1).to(torch.bfloat16)
+            _cp_h = torch.zeros((1,), dtype=torch.int32) + 40
+            _cos, _sin = rot_mats_decode(mesh, args.rope_head_dim, args.max_seq_len,
+                                         args.rope_theta, _cp_h)
+            _hid_h = torch.randn(1, 1, 1, args.dim, dtype=torch.float32).to(torch.bfloat16)
+            # Persistent inputs: a captured trace bakes these addresses in, so they are allocated
+            # ONCE and only ever written through ttnn.copy afterwards -- the same discipline
+            # rec_state needs (see the width-1 warm note).
+            P_emb = ttnn.clone(replicate_to_device(mesh, _emb_h), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            P_hid = ttnn.clone(replicate_to_device(mesh, _hid_h), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            P_cp = ttnn.clone(ttnn.from_torch(_cp_h, dtype=ttnn.int32, device=mesh, mesh_mapper=rep),
+                              memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            P_cos = ttnn.clone(_cos, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            P_sin = ttnn.clone(_sin, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            print("SD mtp_trace persistent inputs allocated", flush=True)
+
+            _fw = lambda: mtp.forward(P_emb, P_hid, P_cp, P_cos, P_sin, page_table=mtp_pt)
+            for _ in range(3):                      # compile every kernel before capture:
+                _eager = _fw()                      # "Cannot load new binaries during trace capture"
+            ttnn.synchronize_device(mesh)
+            _ref = ttnn.to_torch(ttnn.get_device_tensors(_eager)[0]).float().reshape(-1)
+
+            t0 = _tm.perf_counter()
+            for _ in range(_rep_n):
+                _fw()
+            ttnn.synchronize_device(mesh)
+            _t_eager = (_tm.perf_counter() - t0) / _rep_n
+
+            try:
+                _tid = ttnn.begin_trace_capture(mesh, cq_id=0)
+                _out_t = _fw()
+                ttnn.end_trace_capture(mesh, _tid, cq_id=0)
+                print(f"SD mtp_trace captured id={_tid}", flush=True)
+            except Exception as _ex:
+                print(f"SD mtp_trace CAPTURE FAILED: {type(_ex).__name__}: {_ex}", flush=True)
+                raise SystemExit(0)
+
+            ttnn.execute_trace(mesh, _tid, cq_id=0, blocking=True)
+            ttnn.synchronize_device(mesh)
+            _got = ttnn.to_torch(ttnn.get_device_tensors(_out_t)[0]).float().reshape(-1)
+            _pcc = float(torch.corrcoef(torch.stack([_ref, _got]))[0, 1])
+            print(f"SD mtp_trace replay pcc={_pcc:.6f} vs eager", flush=True)
+
+            t0 = _tm.perf_counter()
+            for _ in range(_rep_n):
+                ttnn.execute_trace(mesh, _tid, cq_id=0, blocking=False)
+            ttnn.synchronize_device(mesh)
+            _t_tr = (_tm.perf_counter() - t0) / _rep_n
+            print(f"SD mtp_trace eager={_t_eager*1e3:.3f} ms traced={_t_tr*1e3:.3f} ms "
+                  f"saving={(_t_eager-_t_tr)*1e3:.3f} ms/draft "
+                  f"({(_t_eager-_t_tr)*1e3*K_SPEC:.3f} ms/step at K={K_SPEC})", flush=True)
+            ttnn.release_trace(mesh, _tid)
+            print("SD mtp_trace probe done (no verify trace was captured)", flush=True)
+            raise SystemExit(0)
         # 10ad: every flag announces itself, so an A/B can assert the arm actually engaged.
-        print(f"SD flags dev_argmax={_DRAFT_DEV_ARGMAX} profile={_DRAFT_PROFILE} fast_read={_DRAFT_FAST_READ}", flush=True)
+        print(f"SD flags dev_argmax={_DRAFT_DEV_ARGMAX} profile={_DRAFT_PROFILE} fast_read={_DRAFT_FAST_READ} mtp_trace={_TRACE_MTP_LOOP}", flush=True)
 
         def _propose(hidden_tt, token, mtp_pos):
             """K chained MTP drafts from the target's hidden at the accepted position."""
@@ -409,7 +484,17 @@ def main():
                 cos, sin = rot_mats_decode(mesh, args.rope_head_dim, args.max_seq_len,
                                            args.rope_theta, cp)
                 _c = _t()
-                hid_in = mtp.forward(emb_tt, hid_in, cp_tt, cos, sin, page_table=mtp_pt)
+                if _TRACE_MTP_LOOP:
+                    # Write this draft's inputs into the buffers the trace baked in, then replay.
+                    ttnn.copy(emb_tt, _mtp_tr["emb"])
+                    ttnn.copy(hid_in, _mtp_tr["hid"])
+                    ttnn.copy(cp_tt, _mtp_tr["cp"])
+                    ttnn.copy(cos, _mtp_tr["cos"])
+                    ttnn.copy(sin, _mtp_tr["sin"])
+                    ttnn.execute_trace(mesh, _mtp_tr["id"], cq_id=0, blocking=False)
+                    hid_in = _mtp_tr["out"]
+                else:
+                    hid_in = mtp.forward(emb_tt, hid_in, cp_tt, cos, sin, page_table=mtp_pt)
                 if _DRAFT_PROFILE_SYNC:
                     ttnn.synchronize_device(mesh)
                 _d = _t()
@@ -522,6 +607,17 @@ def main():
         hid_buf = model._last_hidden
         assert hid_buf.shape[-2] == T_TOK, f"hidden is {list(hid_buf.shape)}, expected {T_TOK} rows"
         print(f"SD warm width={T_TOK} captured, hidden={list(hid_buf.shape)}", flush=True)
+        if _TRACE_MTP_LOOP:
+            _mfw = lambda: mtp.forward(_mtp_tr["emb"], _mtp_tr["hid"], _mtp_tr["cp"],
+                                       _mtp_tr["cos"], _mtp_tr["sin"], page_table=mtp_pt)
+            for _ in range(3):                    # compile before capture
+                _mtp_tr["out"] = _mfw()
+            ttnn.synchronize_device(mesh)
+            _mtp_tr["id"] = ttnn.begin_trace_capture(mesh, cq_id=0)
+            _mtp_tr["out"] = _mfw()
+            ttnn.end_trace_capture(mesh, _mtp_tr["id"], cq_id=0)
+            print(f"SD mtp_trace captured id={_mtp_tr['id']} (after the width-{T_TOK} trace)",
+                  flush=True)
         # Probed in two halves so a hang localises itself: an unfinished device program stalls
         # the synchronize, a readback problem stalls only the second call.
         start.restore()

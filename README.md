@@ -249,19 +249,20 @@ they're two dies on one board or two boards on a cable.
 
 The model ships an MTP draft head. Turning it into an actual end-to-end win took a custom ttnn op
 for multi-token Gated DeltaNet recurrence, plus two fixes in places the obvious model does not
-look — **1.018x** at `mean_accepted = 2.04`, where break-even sits at 2.003.
+look — **~1.05x** at `mean_accepted = 2.04`, where break-even acceptance sits at **1.936**.
 
 | phase | before | after |
 | --- | ---: | ---: |
-| verify | 104.1 | 104.1 |
-| draft | 22.9 | 13.4 |
+| verify | 102.9 | 102.9 |
+| draft | 22.9 | 11.2 |
 | rollback | 14.1 | 5.9 |
 
 Notably the custom kernel is *not* what crossed break-even: it took verify from 1.27x to 1.53x
 and the system still lost end to end, because drafting and rollback sat outside the model that
 motivated it.
 
-Marginal, and honest about it — a ~1.8% margin, and below 2.003 acceptance it falls under parity. Full write-up,
+Honest about the margin — below 1.936 acceptance it falls under parity, and absolute speedups
+carry ~±1.5% session drift. Full write-up,
 including the negative results and the measurement practices that came out of several vacuous
 A/Bs, in **[docs/speculative-decoding.md](docs/speculative-decoding.md)**. Code in
 `speculative-decoding/`.
