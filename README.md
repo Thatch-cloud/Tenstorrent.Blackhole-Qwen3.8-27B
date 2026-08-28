@@ -197,7 +197,9 @@ docker run -d --name ttserve -p 127.0.0.1:8000:8000 -w /opt/vllm-tt-plugin \
   python3 -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
     --max_model_len 4096 --max-num-seqs 8 --no-enable-prefix-caching \
-    --block-size 64 --reasoning-parser qwen3 --port 8000 --host 0.0.0.0 \
+    --block-size 64 --reasoning-parser qwen3 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --port 8000 --host 0.0.0.0 \
     --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
 ```
 
@@ -237,6 +239,7 @@ each one prevents. The short version:
 | `l1_small_size: 24576` | `ttnn.conv1d` cannot allocate; error misleadingly reads as OOM |
 | `--max-num-seqs 8` | B=32 hits a matmul divisibility assert at TP=2 |
 | `--reasoning-parser qwen3` | users receive raw chain-of-thought in `content` |
+| `--tool-call-parser qwen3_coder` + `--enable-auto-tool-choice` | tool calls arrive as raw `<tool_call><function=...>` markup in `content`, `tool_calls` stays null, and `tool_choice: "auto"` is rejected |
 | `MESH_DEVICE=P300` | the demo path defaults to `(1,4)` and asks for four cards |
 
 Two Blackhole devices are a **`P300`** as far as tt-metal is concerned —
