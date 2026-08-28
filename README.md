@@ -231,6 +231,12 @@ misleading `maximum context length` 400. 64k is the measured comfort zone
 "validate PCC at long context" caveat. If you serve smaller, drop the env var
 and the caveat together.
 
+Two measurements elsewhere in this README predate this sizing: the GSM8K score
+and the ~510 s readiness figure were both taken with the earlier
+`--max_model_len 4096`, no-`QWEN_SDPA_BF8` command. Treat them as approximate
+for this configuration until re-run — GSM8K in particular, since
+`QWEN_SDPA_BF8=1` is the flag the accuracy caveat attaches to.
+
 **Readiness takes ~510 s** — weights, warmup, and prefill trace capture. Budget
 at least 600 s. A default 30 s initial delay will restart-loop forever, and the
 symptom reads as a broken image rather than an impatient probe.
@@ -261,8 +267,11 @@ they're two dies on one board or two boards on a cable.
 ## Driving it from a terminal harness
 
 The endpoint is stock OpenAI chat-completions, so terminal coding agents can
-use it directly. Verified shapes for Grok Build and Kimi CLI below; anything
-that takes an OpenAI-compatible `base_url` follows the same pattern.
+use it directly. Config shapes for Grok Build and Kimi CLI below — field names
+are taken from each harness's current docs, not from runs against installed
+versions, so if a config is rejected, compare against the docs for the version
+you have first. Anything that takes an OpenAI-compatible `base_url` follows
+the same pattern.
 
 **Reach it through a tunnel, not a re-published port.** The server is bound to
 loopback on the serving host on purpose — it has no authentication. From a
