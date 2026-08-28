@@ -113,10 +113,12 @@ estimator is **group-blind**, computing an 838 MB weight tensor for a depthwise
 conv whose real weight is ~80 KB.
 
 > **Read this before depending on it.** These PRs are authored by an agent account
-> (`ctxbot`) from a fork and carry essentially no human review — two have zero
-> reviews, one has only a bot review. Their silicon receipts are detailed and
+> (`ctxbot`) from a fork and carry little human review — as of 2026-08-28, #53314
+> is in an active review cycle (changes requested and addressed, awaiting
+> re-review); #53319 and #53320 have none. Their silicon receipts are detailed and
 > matched our hardware exactly (we reproduced #53319's reported failure
-> byte-for-byte: same program number, same two L1 addresses, same file and line).
+> byte-for-byte: same program number, same two L1 addresses, same file and line —
+> [now posted on the PR](https://github.com/tenstorrent/tt-metal/pull/53319#issuecomment-5451571926)).
 > That is strong corroboration. It is not maintainer endorsement.
 
 ### Our fix on top: batch truncation in the GDN FIR conv
@@ -139,7 +141,9 @@ placement, numerics unchanged"* — and the module's own tests only ever run
 `batch_size=1`, so nothing caught it.
 
 Fix is `(1, k + T, D)` → `(B, k + T, D)`; `B` is already in scope. Verified on
-silicon: batched GDN prefill at B=2 and B=4 pass at PCC 0.99998–1.00000.
+silicon: batched GDN prefill at B=2 and B=4 pass at PCC 0.99998–1.00000. Offered
+upstream as a committable suggestion on
+[#53320](https://github.com/tenstorrent/tt-metal/pull/53320#discussion_r3879948665).
 
 ---
 
@@ -253,13 +257,15 @@ Recorded because absence of evidence is useful too.
 (`matmul_program_config.cpp:1069`) — one bug with four manifestations, in unit
 tests and end-to-end alike. A *divisibility* assert: the shape factors at TP=4 and
 does not at TP=2, because halving device count doubles per-device M. B=8 works.
+Filed as [#54724](https://github.com/tenstorrent/tt-metal/issues/54724).
 
 **Batched prefill above B=4.** `BH ≤ ncores` in
 `chunk_gdn_phased_program_factory.cpp:137`, where `BH = B × Nv_tp` and
 `Nv_tp = linear_num_value_heads / TP`. At TP=2 with 48 value heads that's
 `8 × 24 = 192 > 110` compute cores. Prompts over 256 tokens sidestep it by
 prefilling per-user, which is why long-context B=8 works and *short*-context B=8
-needs `QWEN_BATCHED_GROUPED=0`.
+needs `QWEN_BATCHED_GROUPED=0`. Filed as
+[#54725](https://github.com/tenstorrent/tt-metal/issues/54725).
 
 **On-device sampling.** Hard-refused below TP=4: vocab 248,320 gives 124,160
 logits/device at TP=2, over the 65,536 ceiling. Host sampling works
@@ -275,7 +281,8 @@ The original work here — the Dockerfiles, the build script, and the documentat
 **The patch in `patches/` is not.** It is a one-line change to tt-metal, which is
 Apache-2.0, so it is a derivative work of Apache-2.0 code and is offered under
 **Apache-2.0**, not MIT. The same applies to the equivalent in-line fix applied by
-`docker/tenstorrent-bringup-prstack.Dockerfile`. It is offered upstream.
+`docker/tenstorrent-bringup-prstack.Dockerfile`. It is
+[offered upstream](https://github.com/tenstorrent/tt-metal/pull/53320#discussion_r3879948665).
 
 tt-metal, the vLLM plugin, and the model weights are the property of their
 respective owners under their own licences and are neither vendored nor
