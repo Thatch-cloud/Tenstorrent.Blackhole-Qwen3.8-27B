@@ -1015,8 +1015,23 @@ engagement lines asserted at start and end): 56/60 = 93.3%** — 2 unparseable +
 and a single low-margin token flipping on 60 greedy 2k-token chains is within what the
 README's own 58 vs this plan's 57 already showed — but the rule is the rule: **the fold is
 not adopted on this result.** It stays behind `QWEN_GDN_NORM_GATE=1`, default off, and a
-larger sample (200 items, fold on vs off) is queued to settle whether 56 is noise or
-drift. Its gain is −0.7 ms ITL (−1.4%), so nothing ships on a doubt.
+larger sample (200 items, fold on vs off) was run to settle whether 56 is noise or drift.
+
+**200 items, same stack, fold on vs off (interleaved-order: fold first):**
+
+| | correct | wrong | unparseable (over 2,048 tokens) |
+| --- | --- | --- | --- |
+| fold off | 187/200 = 93.5% | 3 | 10 |
+| fold on | 186/200 = 93.0% | 3 | 11 |
+
+One item in 200, and it is a chain that ran past the token budget, not a wrong answer;
+the wrong count is identical. Noise-level — but the fold sat one item under on both
+samples, and its gain is −0.7 ms ITL (−1.4%), so nothing ships on a doubt. **Not adopted
+as measured.** The principled fix is not more samples but matching the chain it replaces:
+the fold rounds once in fp32 where the composed path rounds to bf16 after `rms_norm·w`,
+after `silu(z)` and after the multiply — packing `xw` and `silu(z)` to bf16 before the
+final multiply (kernel-only change) makes the fold reproduce the composed numerics to
+accumulation order, after which the gate question disappears. That variant is next.
 
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused
