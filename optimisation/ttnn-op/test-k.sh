@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run the gdn_conv_gates unit test in the serving image with the opgraft-K libraries and
-# kernel sources mounted (same graft shape as arun.sh graft=1), on card M only.
+# Run a K unit test in the serving image with the opgraft-K libraries and every grafted op's
+# kernel sources mounted (same graft shape as arunk.sh), on card M only.
 #   test-k.sh [test-file]
 set -u
 T=${1:-$HOME/kwork/test_gdn_conv_gates.py}
@@ -16,6 +16,7 @@ timeout 900 docker run --rm --name ktest \
   -v "$G/_ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so:ro" \
   -v "$G/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro" \
   -v "$G/gdn_conv_gates:$OPS/gdn_conv_gates:ro" \
+  -v "$G/gdn_norm_gate:$OPS/gdn_norm_gate:ro" \
   -v "$G/decode_gated_delta_rule:$OPS/decode_gated_delta_rule:ro" \
   -v "$G/gdn_decay:$OPS/gdn_decay:ro" \
   -v "$T:/tmp/test_k.py:ro" \

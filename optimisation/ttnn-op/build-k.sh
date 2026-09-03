@@ -1,53 +1,33 @@
 #!/bin/bash
-# Build the gdn_conv_gates op inside the ttbuild container (tt-metal 9f9cd4fd, the rev the
-# serving image carries), then assemble ~/opgraft-K: the graft dir with the rebuilt .so
-# files plus every JIT kernel source the runners mount.
-#   build-k.sh            incremental ninja build + graft assembly
+# Build the K ops inside the ttbuild container (tt-metal 9f9cd4fd, the rev both serving images
+# carry), then assemble ~/opgraft-K: the rebuilt libraries plus every grafted op's JIT kernel
+# sources and the wrapper, which the runners bind-mount over either image.
+#   build-k.sh            incremental ninja build (~30 s) + graft assembly
 set -u
 OPS=/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer
-SRC=$HOME/kwork/gdn_conv_gates          # op source (synced from the workstation)
 G=$HOME/opgraft-K
 
 echo "### build start $(date -Is)"
-docker exec ttbuild rm -rf $OPS/gdn_conv_gates
-docker cp "$SRC" ttbuild:$OPS/gdn_conv_gates
-# milestone 2: the recurrence op with the packed-layout reader (a patched copy of the graft's op)
-docker exec ttbuild rm -rf $OPS/decode_gated_delta_rule
-docker cp "$HOME/kwork/decode_gated_delta_rule" ttbuild:$OPS/decode_gated_delta_rule
-docker exec ttbuild sh -c "cd /opt/tt-metal && python3 - <<'PY'
-import re
-p='ttnn/cpp/ttnn/operations/transformer/sources.cmake'; s=open(p).read()
-if 'gdn_conv_gates' not in s:
-    s=s.replace('    decode_gated_delta_rule/decode_gated_delta_rule.cpp\n',
-      '    gdn_conv_gates/gdn_conv_gates.cpp\n    gdn_conv_gates/device/gdn_conv_gates_device_operation.cpp\n    gdn_conv_gates/device/gdn_conv_gates_program_factory.cpp\n    decode_gated_delta_rule/decode_gated_delta_rule.cpp\n',1)
-    s=s.replace('    decode_gated_delta_rule/decode_gated_delta_rule_nanobind.cpp\n',
-      '    decode_gated_delta_rule/decode_gated_delta_rule_nanobind.cpp\n    gdn_conv_gates/gdn_conv_gates_nanobind.cpp\n',1)
-    open(p,'w').write(s); print('sources.cmake: gdn_conv_gates added')
-p='ttnn/cpp/ttnn/operations/transformer/CMakeLists.txt'; s=open(p).read()
-if 'gdn_conv_gates' not in s:
-    s=s.replace('    gdn_decay/device/kernels/*.cpp\n','    gdn_decay/device/kernels/*.cpp\n    gdn_conv_gates/device/kernels/*.cpp\n',1)
-    open(p,'w').write(s); print('CMakeLists: kernel glob added')
-p='ttnn/cpp/ttnn/operations/transformer/transformer_nanobind.cpp'; s=open(p).read()
-if 'gdn_conv_gates' not in s:
-    s=s.replace('#include \"decode_gated_delta_rule/decode_gated_delta_rule_nanobind.hpp\"\n',
-      '#include \"decode_gated_delta_rule/decode_gated_delta_rule_nanobind.hpp\"\n#include \"gdn_conv_gates/gdn_conv_gates_nanobind.hpp\"\n',1)
-    s=s.replace('    bind_decode_gated_delta_rule(mod);\n','    bind_decode_gated_delta_rule(mod);\n    bind_gdn_conv_gates(mod);\n',1)
-    open(p,'w').write(s); print('transformer_nanobind: bind added')
-PY"
-# incremental build of the two libraries only
-# the grafted recurrence op's factory shares a unity TU with chunk_gated_delta_rule's: give its
-# CB-index namespace a unique name (host code only; the JIT kernel sources are untouched)
-docker exec ttbuild sh -c "cd /opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/decode_gated_delta_rule/device && grep -q 'namespace cbd ' decode_gated_delta_rule_program_factory.cpp || sed -i -e 's/^namespace cb {/namespace cbd {/' -e 's|^}  // namespace cb$|}  // namespace cbd|' -e 's/\bcb::/cbd::/g' decode_gated_delta_rule_program_factory.cpp && grep -c 'cbd::' decode_gated_delta_rule_program_factory.cpp"
+# Replace (not nest into) each op tree in the build container.
+for op in gdn_conv_gates gdn_norm_gate decode_gated_delta_rule; do
+  docker exec ttbuild rm -rf $OPS/$op
+  docker cp "$HOME/kwork/$op" ttbuild:$OPS/$op
+done
+# decode_gated_delta_rule is upstream #53587's op plus patch_packed.py (K milestone 2); its CB
+# namespace is renamed there too because the transformer ops are unity-built and per-file
+# `namespace cb` blocks collide.
+docker cp "$HOME/kwork/register_ops.py" ttbuild:/tmp/register_ops.py
+docker exec ttbuild python3 /tmp/register_ops.py
 docker exec ttbuild bash -c "cd /opt/tt-metal && set -o pipefail && ninja -C build_Release ttnn/_ttnncpp.so ttnn/_ttnn.so 2>&1 | tail -25"
 rc=$?
 echo "### ninja rc=$rc $(date -Is)"
 if [ "$rc" != "0" ]; then echo "### build FAILED; graft not assembled"; exit 1; fi
 mkdir -p "$G"
 docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so "$G/_ttnncpp.so"
-docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnn.so "$G/_ttnn.so"
-rm -rf "$G/gdn_conv_gates" "$G/decode_gated_delta_rule" "$G/gdn_decay"
-docker cp ttbuild:$OPS/gdn_conv_gates "$G/gdn_conv_gates"
-cp -r "$HOME/kwork/decode_gated_delta_rule" "$G/"   # packed-capable reader (JIT source)
-cp -r "$HOME/opgraft-53587/gdn_decay" "$G/"
-cp "$HOME/kwork/ttnn_delta_rule_ops.py" "$G/"   # wrapper with the packed entry (in-place patch included)
-ls -la "$G" | head; echo "### graft assembled $(date -Is)"
+docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnn.so "$G/_ttnn.so"   # the Python module (binding lives here)
+for op in gdn_conv_gates gdn_norm_gate decode_gated_delta_rule; do
+  rm -rf "$G/$op"; cp -r "$HOME/kwork/$op" "$G/$op"
+done
+rm -rf "$G/gdn_decay"; cp -r "$HOME/opgraft-53587/gdn_decay" "$G/"
+cp "$HOME/kwork/ttnn_delta_rule_ops.py" "$G/"   # wrapper with the packed + in-place entries
+ls -la "$G" | head -12; echo "### graft assembled $(date -Is)"

@@ -916,6 +916,35 @@ fp32 (`QWEN35_GDN_DECODE_BF16` unset) — the typecasts, which C already removes
 norm+gate kernel is the next slice, and it can absorb the `o` relayout by producing
 the gated, normed output directly in the `[1,B,Nv·Dv]` layout the out-projection wants.
 
+**Kernel 3, norm + gate — built, correct, and a measured NEGATIVE as a standalone op
+(2026-09-03 06:00–06:15).** `gdn_decode_norm_gate` takes `o` as the recurrence writes it
+(ROW_MAJOR sticks) plus `z` and `norm_w`, and writes `rms_norm(o)·w·silu(z)` straight into
+the `[1,B,Nv·Dv]` tiles the out-projection wants. Two designs were tried on silicon:
+
+| design | cores at B=8 | per layer (traced, B=8) | vs composed 22.4 µs |
+| --- | --- | --- | --- |
+| (bt, h) instances, RISC scatter of 32 sticks into tiles, 30 tile passes | 24 | 27.7 µs | +5.3 |
+| (bt, h, ct) instances, unpacker `tilize` of the row-major block, 15 passes | 96 | 41.0 µs | +18.6 |
+
+Both are numerically right (PCC 0.999998, errors at bf16 output rounding). Neither can
+win: the six composed ops (`to_layout`, two `reshape`, `rms_norm`, `silu`, `multiply`) are
+launch-bound at ~3.7 µs each on a mature relayout and a tuned norm kernel, while a
+fused instance pays a dozen unpacker/packer reconfigurations (`tilize_init/uninit`,
+each `*_init`, each `reconfig_data_format`) in series — the 96-core version got
+*slower* because that fixed cost, not the work, dominates. Plain `tilize_block` also does
+not carry fp32 row-major input (PCC ≈ 0), so the op validates `o` as bf16. Kept in
+`optimisation/ttnn-op/gdn_norm_gate/` behind `QWEN_GDN_NORM_GATE=1` (default off) as
+the record.
+
+**What would win** is not a separate op: fold the norm + gate into the recurrence op's
+compute (its per-head `o` row is already in DST; the row-sum machinery exists; `z`'s row
+is the same gather as `v`'s) and have its writer send each head's gated 128-element row
+by NOC into the L1 of an assembler core per (batch-tile, head) — L1 sub-page writes are
+fine; only DRAM sub-page writes are the forbidden thing — which writes the four full
+output tiles once a semaphore counts 32 rows. That removes all six ops for ~10 extra
+tile passes and one semaphore round: ≈ −20 µs per layer, ≈ −1 ms/step at B=8. It is the
+next kernel, and it is a change to the recurrence op, not a new one.
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
