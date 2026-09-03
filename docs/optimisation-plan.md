@@ -811,6 +811,67 @@ Each is a real ttnn op with a program factory, in the same mould as the branch's
 first: it is the kernel that already exists, and it measures the per-op floor directly
 (the A/B delta ÷ ops removed is the number the rest of K is sized from).
 
+### K — first kernel built and passing: `gdn_decode_conv_gates` (2026-09-03)
+
+**What it is.** One Device 2.0 op (`optimisation/ttnn-op/gdn_conv_gates/`, reader /
+compute / writer + program factory, Apache-2.0) that replaces, per GDN layer per decode
+step, the conv shift-register (K copies), the four-tap FIR + SiLU (multiply, 3 mac, silu),
+the `B < Bmax` pad, and both gates (sigmoid; add+softplus; multiply) — **12 ops → 1**.
+Inputs are the tensors the model already holds: `qkv` `[1,B,C]`, the K persistent
+`conv_states` `[1,Bmax,C]` (advanced **in place**, same buffers, so the decode trace's
+address discipline holds), the K `taps` `[1,1,C]`, `a`/`b` `[1,B,Nv]`, `dt_bias`,
+`neg_exp_A`. Outputs `conv_out` `[1,B,C]`, `beta`, `g` `[1,B,Nv]`.
+
+**Design choices that matter.**
+* Work unit = one (batch-tile, channel-tile) page; one core per page over the 110-core
+  grid (C = 5120 → 160 channel tiles at B ≤ 32), gates on one spare core. **Every DRAM
+  access is a full tile page** — no sub-page reads or writes anywhere, which is the rule
+  the recurrence op's authors learned the hard way (§A).
+* The shift register is advanced by the same core that consumed the pages, through the
+  compute kernel's pass-through copy, so the in-place write is ordered by the CB
+  dependency alone; one owner per page, no cross-core hazard.
+* Rows of `x` at or beyond the active batch enter the shift register as zeros (a core-side
+  L1 row zero), which is what bucketed decode needs and what the `ttnn.pad` did.
+* Runtime args carry `Buffer*`, not addresses, so program-cache hits re-resolve them.
+* The conv accumulates in fp32 and rounds once to bf16; the composed path rounded after
+  every `mac`. Softplus is rounded to bf16 before the `neg_exp_A` multiply, matching the
+  composed graph (and avoiding the mixed bf16×fp32 srcA/srcB corruption the recurrence
+  kernel documents).
+
+**Unit test on silicon (card M, `optimisation/ttnn-op/test_gdn_conv_gates.py`), first
+run:**
+
+| case | conv PCC | beta PCC | g PCC | shift-register | state addresses |
+| --- | --- | --- | --- | --- | --- |
+| B=8, Bmax=8 | 0.999998 | 0.999996 | 0.999997 | exact | stable |
+| B=1, Bmax=8 (bucketed) | 0.999998 | 0.999998 | 0.999998 | exact | stable |
+| B=3, Bmax=8 (bucketed) | 0.999998 | 0.999996 | 0.999997 | exact | stable |
+| B=32, Bmax=32 | 1.000000 | 0.999996 | 0.999996 | exact | stable |
+
+Max abs error is bf16 rounding (conv 0.02 on N(0,1)-scale values; g 0.12 at B=32 where
+softplus × neg_exp_A reaches ~30). Host-dispatched cached call: 36 µs at B=8 (device
+time inside the trace will be less).
+
+**Build.** Incremental in the `ttbuild` container (tt-metal `9f9cd4fd`, the serving
+image's rev): `optimisation/ttnn-op/build-k.sh` registers the op in `sources.cmake`,
+the kernel glob and `transformer_nanobind.cpp`, runs `ninja` for the two libraries
+(~25 s incremental), and assembles `~/opgraft-K` (both `.so` + every grafted op's JIT
+kernel sources). Two traps recorded there: the transformer ops are **unity-built**, so a
+per-file `namespace cb {}` of CB indices collides across ops (the grafted recurrence
+factory's had to be renamed too — host code only); and `docker cp` into an existing
+directory nests instead of replacing.
+
+**Wiring (milestone 1).** `wrap-K/tp.py` = the in-place `tp.py` + the op behind
+`QWEN_GDN_CONV_GATES=1`; the control arm is the same mounts with the flag off. The q/k/v
+split, GQA `repeat_interleave` and the `[1,B,Nv] → [B,1,Nv]` reshapes stay for now.
+**Milestone 2** retargets the recurrence op's reader to consume `conv_out`'s `[B, C]`
+layout directly (row b, cols h·Dk…; GQA becomes a source-head index), which removes
+those 13 ops and the reader's row gathers — host-side change to the recurrence op, so a
+rebuild, but the kernels already do this gather.
+
+**A/B queued:** two interleaved pairs at B=8 (`batched_128_b8`, host mode, A + in-place
+on), then two at B=1 (`traced_128`). Result below when it lands.
+
 ### A. The fused kernel already on the branch, applied to plain decode
 
 **What exists.** `speculative-decoding/ttnn-op/gdn_decay/` is a working ttnn op,
