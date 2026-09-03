@@ -1,0 +1,94 @@
+--- a/models/demos/blackhole/qwen36/tt/tp_common.py
++++ b/models/demos/blackhole/qwen36/tt/tp_common.py
+@@ -6,12 +6,26 @@
+ mesh shard/replicate, FP8 dequant, HF weight reorder for per-device sharding.
+ """
+ import math
++import os
++import os as _os
+ 
+ import torch
+ 
+ import ttnn
+ from models.common.utility_functions import is_blackhole
+ 
++def _ccl_links(env, default):
++    """CCL link count, overridable per call-site. Announces itself when overridden.
++
++    Upstream hardcodes these; with 2 QSFP-DD cables the fabric offers 4 links per hop
++    and the p150_x2 descriptor exposes them, but nothing in the model asks for more
++    than it was written for. See tt_ccl.get_num_links() for the principled version."""
++    v = int(os.environ.get(env) or default)
++    if v != default:
++        print(f"[CCL_LINKS] {env}={v} (upstream default {default})", flush=True)
++    return v
++
++
+ # Hardware constants
+ TILE_SIZE = 32
+ DRAM_CORES = 8
+@@ -79,8 +93,27 @@
+     return 1
+ 
+ 
++_grid_seen = set()
++
++
++def _grid_announce(n_tiles, max_r, max_c, target):
++    """Print once per distinct shape so an A/B can prove the override engaged."""
++    key = (n_tiles, max_r, max_c, target)
++    if key not in _grid_seen:
++        _grid_seen.add(key)
++        print(f"[MM_GRID] k_tiles={n_tiles} max={max_r}x{max_c} target={target}", flush=True)
++
++
+ def _find_grid(n_tiles, target=32):
+-    max_r, max_c = 8, 8
++    # max_r/max_c = 8,8 is a Wormhole grid assumption: it caps the DRAM-sharded decode
++    # matmul at 8x8=64 cores, and `target` then deliberately picks the divisor nearest
++    # 32. Blackhole p150a exposes 11x10 = 110 worker cores, so the MLP gate/up and GDN
++    # qkv matmuls (k_tiles=160) run on 32 of 110 when 80 (=8x10) divides cleanly.
++    max_r = int(_os.environ.get("QWEN_MM_GRID_MAX_R") or 8)
++    max_c = int(_os.environ.get("QWEN_MM_GRID_MAX_C") or 8)
++    target = int(_os.environ.get("QWEN_MM_GRID_TARGET") or target)
++    if (max_r, max_c) != (8, 8) or target != 32:
++        _grid_announce(n_tiles, max_r, max_c, target)
+     possible = [k for k in range(1, max_r * max_c + 1) if n_tiles % k == 0]
+     possible.sort(key=lambda x: abs(x - target))
+     for cores in possible:
+@@ -356,7 +389,7 @@
+     x4 = ttnn.reshape(x, (1, 1, S, K_local))
+     # AG-bound: 2 ethernet links parallelize the gather (P150x4 max; traced_8k TTFT win). grid.x must
+     # = num_links*workers, and the 7-wide default (prime) forces 1 link -> widen to 8 (2 links, 4 workers).
+-    num_links = 2
++    num_links = _ccl_links("QWEN_CCL_AG_LINKS", 2)
+     grid = (8, grid[1])
+     workers = grid[0] // num_links
+     cfg = ttnn.MinimalMatmulConfig(
+@@ -400,7 +433,7 @@
+     x: K-sharded [.,S,K/tp]; weight: tile-pair-interleaved [gate|up] [K, 2N/tp]. Emits silu(gate)*up of width N/tp."""
+     S, K_local = x.shape[-2], x.shape[-1]
+     x4 = ttnn.reshape(x, (1, 1, S, K_local))
+-    num_links = 2
++    num_links = _ccl_links("QWEN_CCL_AG_LINKS", 2)
+     grid = (8, grid[1])
+     workers = grid[0] // num_links
+     cfg = ttnn.MinimalMatmulConfig(
+@@ -481,7 +514,7 @@
+         multi_device_global_semaphore=tt_ccl.get_and_cycle_rs_semaphore_handles(),
+         reduce_scatter_core_grid_offset=rs_offset,
+         barrier_semaphore=tt_ccl.get_and_cycle_barrier_semaphore_handle(),
+-        num_links=1,
++        num_links=_ccl_links("QWEN_CCL_RS_DECODE_LINKS", 1),
+         memory_config_rs=ttnn.DRAM_MEMORY_CONFIG,
+         topology=topology,
+         subdevice_id=None,
+@@ -558,7 +591,7 @@
+     interm, out_buf = _mmrs_prefill_shared_bufs(tt_ccl, M, N, nd, dtype)
+     x4 = ttnn.reshape(x, (1, 1, M, K_local))
+     # RS-bound: 2 ethernet links parallelize the fp32 cross-device reduce (traced_8k win).
+-    num_links = 2
++    num_links = _ccl_links("QWEN_CCL_RS_PREFILL_LINKS", 2)
+     if grid is None or rs_offset is None:
+         grid, rs_offset = _mmrs_prefill_placement(tt_ccl.mesh_device, num_links)
+     per_core_N = max(1, math.ceil(N / TILE_SIZE / grid[0]))

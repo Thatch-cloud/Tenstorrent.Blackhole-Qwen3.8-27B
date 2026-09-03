@@ -1,0 +1,182 @@
+--- a/models/demos/blackhole/qwen36/tt/model.py
++++ b/models/demos/blackhole/qwen36/tt/model.py
+@@ -21,6 +21,85 @@
+ from models.tt_transformers.tt.common import Mode, get_block_size, num_blocks_in_seq
+ 
+ 
++
++class _ShardGreedySeeds:
++    """No-op seed manager: shard-greedy is deterministic, so seeds have no effect."""
++
++    def __init__(self, max_batch_size):
++        self.max_batch_size = max_batch_size
++
++    def apply_slot_remap(self, *a, **k):
++        pass
++
++    def reset_seed_from_slots(self, *a, **k):
++        pass
++
++    def reset_seed_from_slots_if_needed(self, *a, **k):
++        pass
++
++    def align_seed_counters_to_positions(self, *a, **k):
++        pass
++
++    def get_new_values(self, *a, **k):
++        pass
++
++    def has_active_request_seed(self):
++        return False
++
++
++class _ShardGreedyTT:
++    def __init__(self, max_batch_size):
++        self.max_batch_size = max_batch_size
++        self.force_argmax_sampling = True
++
++
++class _ShardGreedySampler:
++    """Greedy-only stand-in for SamplingGenerator (optimisation-plan row 3d).
++
++    TP=2 puts 124,160 logits on each device, over the multi-device TopK kernel ceiling
++    of 65,536, so the real sampler cannot be built and the endpoint gathers the full
++    vocab to host every step. This object satisfies the Generator sampling contract so
++    the on-device path is taken, while the work is done by Model._shard_greedy_reduce
++    inside the decode trace: each device argmaxes its OWN vocab shard and returns
++    [1,1,2,B] fp32 (idx row, val row); the winning device per user is picked on host in
++    process_output_decode from 2*2*B floats. No collective, no sampling trace. Greedy
++    only: temperature>0 requests get argmax (warned once). QWEN36_SHARD_GREEDY=1 enables.
++    """
++
++    def __init__(self, args):
++        # The Generator asserts the sampling width is a multiple of 32 (the real sampler
++        # always runs >=32 wide); the value only sizes host-side param chunks here.
++        width = max(32, -(-args.max_batch_size // 32) * 32)
++        self.tt_sampling = _ShardGreedyTT(width)
++        self.seed_manager = _ShardGreedySeeds(width)
++        self._warned = False
++
++    def set_trace_bucket(self, bucket):
++        pass
++
++    def reset_trace(self):
++        pass
++
++    def apply_prefill_state(self, *a, **k):
++        pass
++
++    def apply_decode_state(self, sampling_params_chunks, *, reset_batch=False, prompt_tokens=None, output_tokens=None):
++        if self._warned:
++            return
++        for sp in sampling_params_chunks:
++            t = getattr(sp, "temperature", 0)
++            ts = list(t) if isinstance(t, (list, tuple)) else [t]
++            if any((x or 0) > 0 for x in ts):
++                self._warned = True
++                logger.warning("QWEN36_SHARD_GREEDY: temperature>0 requested; shard-greedy always returns argmax")
++                return
++
++    def capture_trace(self, logits, *, tt_out_tok=None, skip_precompile=False):
++        return logits  # the reduce already lives inside the decode trace
++
++    def sample(self, logits, *, enable_trace=True, tt_out_tok=None, skip_precompile=False):
++        return logits  # [1,1,2,B] per-shard (idx, val); winner picked in process_output_decode
++
+ class Qwen36Model:
+     """Qwen3.5-9B text LM on Blackhole P150. HF_MODEL env var selects checkpoint."""
+ 
+@@ -60,6 +139,10 @@
+             self.sampling = SamplingGenerator(args=args, mesh_device=mesh_device, tt_ccl=self.tt_ccl)
+         else:
+             self.sampling = None
++        self._shard_greedy = self.sampling is None and os.environ.get("QWEN36_SHARD_GREEDY", "0") == "1"
++        if self._shard_greedy:
++            self.sampling = _ShardGreedySampler(args)
++            logger.info("QWEN36_SHARD_GREEDY=1: greedy decode sampled on device via the per-shard reduce")
+ 
+         # Framework Embedding (mesh-aware; replicates on 1-device mesh).
+         from models.tt_transformers.tt.embedding import Embedding
+@@ -3228,6 +3311,53 @@
+         host = self.prepare_decode_inputs_host(tokens, current_pos, page_table=page_table)
+         return copy_host_to_device(host, mesh_device=self.mesh_device)
+ 
++    def _shard_greedy_reduce(self, sharded_logits):
++        """Per-device argmax+max over this device's vocab shard -> [1,1,2,B] fp32.
++
++        Mirrors the demo's "shard" batched-decode mode (text_demo.py _argmax_dev_b /
++        _maxval_dev_b), which is byte-identical to host argmax over the gathered vocab.
++        All ops are device ops so this is safe to capture inside the decode trace.
++        """
++        B = sharded_logits.shape[2]
++        per_shard = sharded_logits.shape[3]
++        C = 32
++        R = (((per_shard + C - 1) // C) + 31) // 32 * 32
++
++        rm = ttnn.to_layout(sharded_logits, ttnn.ROW_MAJOR_LAYOUT)
++        idx = ttnn.argmax(rm, dim=-1, keepdim=False)           # [1,1,B] int32
++        ttnn.deallocate(rm)
++
++        padded = ttnn.pad(sharded_logits, [(0, 0), (0, 0), (0, 0), (0, R * C - per_shard)], value=-1e30)
++        grid = ttnn.reshape(padded, (1, B, R, C))
++        part = ttnn.max(grid, dim=-1)
++        part_row = ttnn.reshape(part, (1, 1, B, R))
++        val = ttnn.max(part_row, dim=-1)                        # [1,1,B]
++        for t in (padded, grid, part, part_row):
++            ttnn.deallocate(t)
++
++        # argmax requires (and returns) ROW_MAJOR; max returns TILE. ttnn.concat rejects
++        # mixed layouts, so bring the index side to TILE before combining.
++        idx_t = ttnn.to_layout(ttnn.reshape(idx, (1, 1, 1, B)), ttnn.TILE_LAYOUT)
++        val_t = ttnn.reshape(val, (1, 1, 1, B))
++        if val_t.layout != ttnn.TILE_LAYOUT:
++            val_t = ttnn.to_layout(val_t, ttnn.TILE_LAYOUT)
++        idx_f = ttnn.typecast(idx_t, ttnn.float32)
++        val_f = ttnn.typecast(val_t, ttnn.float32)
++        out = ttnn.concat([idx_f, val_f], dim=2)                # [1,1,2,B]
++        for t in (idx, val, idx_t, val_t, idx_f, val_f):
++            try:
++                ttnn.deallocate(t)
++            except Exception:
++                pass
++        if not getattr(self, "_shard_greedy_logged", False):
++            self._shard_greedy_logged = True
++            print(
++                f"QWEN36_SHARD_GREEDY engaged: per-shard argmax in-trace, B={B}"
++                f" per_shard={per_shard} -> {list(out.shape)}",
++                flush=True,
++            )
++        return out
++
+     def ttnn_decode_forward(
+         self,
+         tokens,
+@@ -3248,6 +3378,8 @@
+         if on_device_logits:
+             assert self.sampling is not None, "on_device_logits=True but self.sampling is None"
+             logits = self._forward_decode(tokens, cos, sin, current_pos, page_table, sharded_lm_head=True)
++            if self._shard_greedy:
++                return self._shard_greedy_reduce(logits)
+             # Sampler runs >=32-wide; pad B up to it (else shape mismatch). Extra slots unused.
+             sampler_batch = self.sampling.tt_sampling.max_batch_size
+             B = logits.shape[2]
+@@ -3262,6 +3394,19 @@
+         """Convert decode output to host torch. Host-sampling returns logits [B,S,vocab];
+         on-device sampling returns sampled token ids or sampled-token log-probs.
+         """
++        if is_tokens and getattr(self, "_shard_greedy", False) and tt_out.shape[-2] == 2:
++            # Shard-greedy output is [1,1,2,B] per device (idx row, val row), not token ids.
++            nd = self.num_devices
++            per_shard = self.args.vocab_size // nd
++            g = ttnn.to_torch(tt_out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh_device, dim=0))
++            # Decode bucketing returns only the active prefix, so the width here can be
++            # narrower than the B the Generator asks for; pick over what is present and
++            # truncate like the plain token path does.
++            g = g.reshape(nd, 2, -1).float()
++            w = min(B, g.shape[-1])
++            idxs, vals = g[:, 0, :w].long(), g[:, 1, :w]
++            d = torch.argmax(vals, dim=0)
++            return (d * per_shard + idxs[d, torch.arange(w)]).reshape(-1)[:B]
+         if is_tokens or is_log_probs:
+             # Sampled ids and old-path sampled-token log-probs are replicated across devices.
+             if self.num_devices > 1:

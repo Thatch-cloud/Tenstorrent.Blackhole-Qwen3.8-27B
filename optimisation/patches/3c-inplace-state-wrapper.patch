@@ -1,0 +1,21 @@
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
+@@ -471,6 +471,7 @@
+     initial_state=None,
+     device=None,
+     high_precision=False,
++    inplace_state=False,
+ ):
+     """T=1 decode path: no loop/slice overhead. Returns o [B,1,H,V], state [B,H,K,V]."""
+     B = q.shape[0]
+@@ -483,7 +484,9 @@
+     if _fused_decode_enabled():
+         op = _fused_decode_op()
+         if op is not None:
+-            return _decode_gated_delta_rule_fused(op, q, k, v, beta, g, scale, initial_state, device, high_precision)
++            return _decode_gated_delta_rule_fused(
++                op, q, k, v, beta, g, scale, initial_state, device, high_precision, inplace_state=inplace_state
++            )
+ 
+     # high_precision: fp32 step avoids bf16 decay quantization error over long decode.
+     if high_precision:

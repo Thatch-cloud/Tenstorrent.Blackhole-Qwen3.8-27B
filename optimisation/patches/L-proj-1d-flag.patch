@@ -1,0 +1,19 @@
+--- a/models/demos/blackhole/qwen36/tt/model_config.py
++++ b/models/demos/blackhole/qwen36/tt/model_config.py
+@@ -206,7 +206,15 @@
+ 
+         # Input-projection 1D decode (DEFAULT): same idea for attn QKV+gate and GDN QKVZAB in-projections.
+         # Weights load interleaved (prefill AGMM verified bit-identical); tuned grids per test_mlp_matmul_sweep.
+-        self.proj_1d_decode = True
++        # Lever L (2026-09-03): the 1D-mcast in-projection path was tuned at TP=4. At TP=2 the
++        # per-device K=5120 in-projections (GDN qkvzab, attention QKV) measured 19-20% FASTER on
++        # the DRAM-width-sharded path the model already carries (arm D, section 3.2), while
++        # K=8704 (MLP down, its own mlp_1d_decode switch) is 2.3x slower there. QWEN_PROJ_1D=0
++        # flips only this switch. Announces itself so an A/B can prove it engaged.
++        import os as _os
++        self.proj_1d_decode = _os.environ.get("QWEN_PROJ_1D", "1") != "0"
++        if not self.proj_1d_decode:
++            print("[PROJ_1D] QWEN_PROJ_1D=0: in-projections on the DRAM-width-sharded decode path", flush=True)
+         self.attn_qkv_decode_1d_progcfg = tpc.create_matmul_1d_decode_progcfg(
+             M, self.dim, self.attn_qkv_fused_dim_tp, num_cores=64
+         )

@@ -1,0 +1,43 @@
+--- a/models/demos/blackhole/qwen36/tt/model_config.py
++++ b/models/demos/blackhole/qwen36/tt/model_config.py
+@@ -16,6 +16,19 @@
+ GDN_CONV1D_L1_SMALL_SIZE = 24576
+ 
+ 
++def _cores(env, default):
++    """num_cores for a 1D decode matmul, overridable for sweeps.
++
++    The literals below were tuned on P150x4 (see the wide1d_* comments). At TP=2 each
++    device holds twice the weight per matmul, so the optimum may differ. Announces
++    itself whenever it differs from the tuned default."""
++    import os as _o
++    v = int(_o.environ.get(env) or default)
++    if v != default:
++        print(f"[MM_CORES] {env}={v} (tuned default {default})", flush=True)
++    return v
++
++
+ class Qwen36ModelArgs(ModelArgs):
+     """Qwen3.5-9B ModelArgs for Blackhole P150."""
+ 
+@@ -191,17 +204,17 @@
+             M,
+             self.dim,
+             self.hidden_dim // tp,
+-            num_cores=44,
++            num_cores=_cores("QWEN_MLP_W1_CORES", 44),
+             fused_activation=ttnn.UnaryOpType.SILU,
+             grid_w=self.decode_grid_w,
+         )
+         self.mlp_w3_decode_1d_progcfg = tpc.create_matmul_1d_decode_progcfg(
+-            M, self.dim, self.hidden_dim // tp, num_cores=44, grid_w=self.decode_grid_w
++            M, self.dim, self.hidden_dim // tp, num_cores=_cores("QWEN_MLP_W3_CORES", 44), grid_w=self.decode_grid_w
+         )
+         # down: num_cores=33 -> 11x3 on BH, the fastest measured config (wide1d_11x3c, ~63us, +28% vs
+         # the old 8x2). On WH (decode_grid_w=8) this falls back to 8x5.
+         self.mlp_w2_decode_1d_progcfg = tpc.create_matmul_1d_decode_progcfg(
+-            M, self.hidden_dim // tp, self.dim, num_cores=33, grid_w=self.decode_grid_w
++            M, self.hidden_dim // tp, self.dim, num_cores=_cores("QWEN_MLP_W2_CORES", 33), grid_w=self.decode_grid_w
+         )
+ 
+         # Input-projection 1D decode (DEFAULT): same idea for attn QKV+gate and GDN QKVZAB in-projections.

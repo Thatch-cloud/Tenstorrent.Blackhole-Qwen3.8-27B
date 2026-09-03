@@ -1,0 +1,27 @@
+--- a/models/common/modules/tt_ccl.py
++++ b/models/common/modules/tt_ccl.py
+@@ -1,6 +1,7 @@
+ # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+ # SPDX-License-Identifier: Apache-2.0
+ 
++import os as _os
+ from typing import Optional
+ 
+ import ttnn
+@@ -212,6 +213,16 @@
+         "N150x4": (1, 1),
+     }
+     device_links = link_dict[device_name]
++    # Two cabled p150a boards are named "P300" because _determine_device_name keys
++    # purely off device count -- so they inherit a real p300's on-package link count
++    # of 2, regardless of how many QSFP-DD cables are actually fitted. With a second
++    # cable this rig has 4 links up (confirmed via the UMD cluster descriptor), and
++    # nothing here notices. Override announces itself so an A/B can prove it engaged.
++    _ovr = _os.environ.get("QWEN_CCL_NUM_LINKS")
++    if _ovr:
++        print(f"[CCL_LINKS] get_num_links -> {_ovr} for {device_name} "
++              f"(table said {device_links})", flush=True)
++        return int(_ovr)
+     if cluster_axis is None:
+         return min(device_links)
+     if cluster_axis in (0, 1):

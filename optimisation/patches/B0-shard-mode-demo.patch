@@ -1,0 +1,40 @@
+--- a/models/demos/blackhole/qwen36/tt/model.py
++++ b/models/demos/blackhole/qwen36/tt/model.py
+@@ -3246,13 +3246,31 @@
+ 
+         cos, sin = unpack_rope(rot_mat_idxs)
+         if on_device_logits:
+-            assert self.sampling is not None, "on_device_logits=True but self.sampling is None"
++            # The assert used to require self.sampling here, which conflates two callers.
++            # "sample" mode needs the TopK sampler; the demo's "shard" mode does NOT -- it
++            # only wants the vocab-sharded logits so it can run its own tile-parallel
++            # argmax+max per device (_argmax_dev_b) and read back two tiny [nd, B] tensors.
++            # self.sampling is None at TP=2 (248,320 vocab / 2 = 124,160 logits/device is
++            # over the multi-device TopK kernel's 65,536 ceiling), so the assert blocked
++            # "shard" for a sampler it never touches. "sample" mode self-guards in the demo
++            # (falls back to "host" when model.sampling is None), so dropping the assert
++            # cannot expose it. The batch padding exists only to match the sampler's >=32
++            # width; "shard" reads logits.shape[2] and slices to B, so it is skippable.
+             logits = self._forward_decode(tokens, cos, sin, current_pos, page_table, sharded_lm_head=True)
+-            # Sampler runs >=32-wide; pad B up to it (else shape mismatch). Extra slots unused.
+-            sampler_batch = self.sampling.tt_sampling.max_batch_size
+-            B = logits.shape[2]
+-            if B < sampler_batch:
+-                logits = ttnn.pad(logits, [(0, 0), (0, 0), (0, sampler_batch - B), (0, 0)], value=0.0)
++            if self.sampling is not None:
++                # Sampler runs >=32-wide; pad B up to it (else shape mismatch). Extra slots unused.
++                sampler_batch = self.sampling.tt_sampling.max_batch_size
++                B = logits.shape[2]
++                if B < sampler_batch:
++                    logits = ttnn.pad(logits, [(0, 0), (0, 0), (0, sampler_batch - B), (0, 0)], value=0.0)
++            elif not getattr(self, "_shard_no_sampler_logged", False):
++                self._shard_no_sampler_logged = True
++                print(
++                    "QWEN36_SHARD_NO_SAMPLER engaged: on_device_logits without a TopK sampler"
++                    f" (TP={self.num_devices}); returning unpadded sharded logits"
++                    f" {list(logits.shape)}",
++                    flush=True,
++                )
+             # Bare tensor (not a tuple): the traced path passes this straight to capture_trace().
+             return logits
+         logits = self._forward_decode(tokens, cos, sin, current_pos, page_table)

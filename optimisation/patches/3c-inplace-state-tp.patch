@@ -1,0 +1,48 @@
+--- a/models/demos/blackhole/qwen36/tt/gdn/tp.py
++++ b/models/demos/blackhole/qwen36/tt/gdn/tp.py
+@@ -1091,6 +1091,14 @@
+ 
+         # fp32 decode step by default (QWEN35_GDN_DECODE_BF16=1 reverts)
+         init_state = self.rec_state if B == Bmax else self._slice_along(self.rec_state, 0, 0, B)
++        # QWEN_GDN_FUSED_INPLACE=1: ask the fused op to write the new state straight into
++        # rec_state (its _inplace variant) instead of allocating h and copying it back.
++        # Legal only when init_state IS the persistent buffer (B == Bmax, no slice). The
++        # composed path ignores the flag, so the caller decides by IDENTITY below, not env.
++        _want_inplace = (
++            os.environ.get("QWEN_GDN_FUSED_INPLACE") == "1"
++            and self._stable_state and B == Bmax and init_state is self.rec_state
++        )
+         o, new_rec = recurrent_gated_delta_rule_decode_ttnn(
+             q,
+             k,
+@@ -1101,14 +1109,28 @@
+             initial_state=init_state,
+             device=self.mesh,
+             high_precision=(os.environ.get("QWEN35_GDN_DECODE_BF16") != "1"),
++            inplace_state=_want_inplace,
+         )
++        # The op returns *in.initial_state, but nanobind hands back a NEW Python wrapper
++        # around the same device buffer, so `is` sees two objects. Compare the buffer.
++        try:
++            _did_inplace = _want_inplace and new_rec.buffer_address() == init_state.buffer_address()
++        except Exception:
++            _did_inplace = False
++        if _want_inplace and not getattr(self, "_inplace_logged", False):
++            self._inplace_logged = True
++            print(f"QWEN_GDN_FUSED_INPLACE requested; in-place happened={_did_inplace}"
++                  f" (same buffer={new_rec.buffer_address() == init_state.buffer_address()})", flush=True)
+         if init_state is not self.rec_state:
+             ttnn.deallocate(init_state)
+         if self._stable_state:
+             # In-place update preserves rec_state address for decode trace replay
+             if B == Bmax:
+-                ttnn.copy(new_rec, self.rec_state)
+-                ttnn.deallocate(new_rec)
++                if _did_inplace:
++                    pass  # new_rec IS rec_state: nothing to copy, and freeing it would free the state
++                else:
++                    ttnn.copy(new_rec, self.rec_state)
++                    ttnn.deallocate(new_rec)
+             else:
+                 self._write_recurrent_state_prefix(new_rec, B)
+         else:
