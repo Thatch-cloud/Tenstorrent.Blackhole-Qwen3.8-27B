@@ -102,14 +102,12 @@ for f in ("~/arunk.sh", "~/arunk8.sh"):
     p = os.path.expanduser(f); s = open(p).read()
     if "gdn_norm_gate" in s: continue
     out = []; done = False
-    for l in s.split("
-"):
+    for l in s.splitlines():
         out.append(l)
         if not done and re.search(r'G="\$G -v \$O/gdn_conv_gates:\$OPS/gdn_conv_gates:ro"', l):
             out.append('  G="$G -v $O/gdn_norm_gate:$OPS/gdn_norm_gate:ro"'); done = True
     assert done, f
-    open(p, "w").write("
-".join(out)); print(f, "norm_gate mount added")
+    open(p, "w").write(chr(10).join(out) + chr(10)); print(f, "norm_gate mount added")
 PYM
 for o in ~/arunk.sh ~/arunk8.sh; do
   grep -q "QWEN_GDN_NORM_GATE" $o || sed -i 's|-e QWEN_GDN_PACKED_QKV="\${PACKED:-0}"|-e QWEN_GDN_PACKED_QKV="${PACKED:-0}" -e QWEN_GDN_NORM_GATE="${NORMGATE:-0}"|' $o

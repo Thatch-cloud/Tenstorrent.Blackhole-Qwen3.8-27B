@@ -775,7 +775,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the whole GDN decode layer (71 ops → ~10) — **two kernels DONE and gated: conv+gates −1.78/−2.40 ms, packed q/k/v −2.40/−2.70 ms (B=1/B=8); endpoint −6.5 ms ITL, GSM8K 57/60**; norm+gate kernel next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K's two kernels 4.2 / 5.1) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
+| K | Fuse the GDN decode layer — **three of four slices DONE and gated: conv+gates, packed q/k/v, direct projection read: −5.0 ms B=1 / −7.4 ms B=8 (demo); endpoint −6.5 ms ITL before the direct read, GSM8K 57/60**; norm+gate as a standalone op measured negative (fold into the recurrence op next) | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K 5.0 / 7.4) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -953,7 +953,25 @@ unaligned, spanning two tiles), gathering the 24 gate columns per element in L1 
 one or two source tiles. `patch_direct.py`; unit test passes at both projection widths
 and bucketed batches. Wired behind `QWEN_GDN_PROJ_DIRECT=1` (`_project_qkvzab_raw` keeps
 the projection whole; only `z` is still sliced, for the output gate). Removes the `qkv`,
-`ab`, `a` and `b` slices — 4 ops per layer. A/B queued.
+`ab`, `a` and `b` slices — 4 ops per layer.
+
+**A/B (both arms conv+gates + packed on; two interleaved pairs each; engagement asserted):**
+
+| | direct read off | direct read on | Δ |
+| --- | --- | --- | --- |
+| B=8 `exec_sync` | 52.63 / 52.80 | **50.32 / 50.67** | **−2.22 ms (−4.2%)** |
+| B=1 `exec_sync` | 46.82 / 46.96 | **46.11 / 46.42** | **−0.62 ms (−1.3%)** |
+
+More than four launches' worth at B=8: the `a`/`b` slices end mid-tile, and the model's
+own comment records that such a slice "untilizes the full 4120-wide tensor" — a real
+relayout, not a view. Endpoint A/B and GSM8K on the resulting stack queued.
+
+**K so far (demo device step, A + in-place baseline → after kernels 1, 2 and 4):**
+
+| | before K | after K | Δ | from the README's composed decode |
+| --- | --- | --- | --- | --- |
+| B=1 | 51.3 ms | **46.3 ms** | −5.0 ms (−9.8%) | 54.45 → 46.3, **−15%** |
+| B=8 | 57.9 ms | **50.5 ms** | −7.4 ms (−12.8%) | 70.6 → 50.5, **−28%** |
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
