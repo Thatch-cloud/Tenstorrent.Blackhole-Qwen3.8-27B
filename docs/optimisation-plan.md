@@ -240,10 +240,11 @@ biggest identified lever, and it is not in this plan.**
 > -v ~/ttcache:/ttcache -e TT_METAL_CACHE=/ttcache    # readiness 510-615 s -> 165-270 s
 > ```
 >
-> **K's two kernels (2026-09-03): −4.2 ms at B=1, −5.1 ms at B=8 on the demo step** —
+> **K's two kernels (2026-09-03): −4.2 ms at B=1, −5.1 ms at B=8 on the demo step, and
+> on the endpoint ship 61.3 → 54.8 ms ITL (−10.6%, +12% per user; GSM8K gate running)** —
 > need the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + three op dirs)
-> plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1`.
-> Endpoint A/B in progress.
+> plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
+> QWEN_GDN_FUSED_INPLACE=1` (`rig/runshipk.sh 2` is the exact command).
 >
 > Two more need a mounted file: lever E (`get_num_links` override, −1.35 ms; upstream
 > #55125) and the in-place state write (−0.42 / −3.26 ms; `wrap-3c/`). B0's shard
@@ -914,6 +915,28 @@ kernel, §4 K item 3, ~6 ops), the `[1,B,C]`-side reshapes in the projection, an
 fp32 (`QWEN35_GDN_DECODE_BF16` unset) — the typecasts, which C already removes. The
 norm+gate kernel is the next slice, and it can absorb the `o` relayout by producing
 the gated, normed output directly in the `[1,B,Nv·Dv]` layout the out-projection wants.
+
+**K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
+and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
+interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
+carries the same tt-metal revision):**
+
+| arm | config | ITL | per user | aggregate | engagement | output md5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ks-a | ship | 61.91 ms | 16.15 | 122.5 | | `6438f6f7e690` |
+| kk-a | ship + in-place + K | **56.52 ms** | 17.69 | 129.7 | in-place, conv+gates, packed | `be88aa23c04f` |
+| kk-b | ship + in-place + K | **53.11 ms** | 18.83 | 145.6 | in-place, conv+gates, packed | `be88aa23c04f` |
+| ks-b | ship | 60.71 ms | 16.47 | 128.0 | | `6438f6f7e690` |
+
+Ship 61.3 ms → ship + K **54.8 ms: −6.5 ms ITL (−10.6%), +12.0% per user** (16.3 →
+18.3 tok/s). The two K arms hash identically to each other (deterministic) and differ
+from the ship arms, as they must: the conv now accumulates in fp32 and rounds once
+where the composed path rounded after every `mac`. The 60-item GSM8K gate on this
+exact stack is running; 57/60 is the bar.
+
+Endpoint chain so far, per user at 8 streams: README composed ≈ 12.6 → A 14.6 → ship
+16.3 → **ship + K 18.3 tok/s (+45% over the README endpoint)**; ITL 68.3 (A) → 61.3 →
+54.8 ms.
 
 **A/B at B=8 (`batched_128_b8`, host mode, A + in-place on; two interleaved pairs; engagement
 line asserted per arm):**
