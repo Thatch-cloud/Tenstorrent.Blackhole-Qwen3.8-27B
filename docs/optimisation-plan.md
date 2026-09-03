@@ -970,8 +970,28 @@ assembly). Trace-replayed device time per layer:
 Wired behind `QWEN_GDN_NORM_GATE=1` (which now means the fold; the standalone op stays
 off): in direct mode `z` goes in as a column window of the projection output, so the last
 slice goes too. The GDN decode layer is now matmul → conv+gates → recurrence(+norm+gate)
-→ matmul → all-reduce: the "71 ops → ~10" the lever table promised. Demo A/B, endpoint
-A/B and GSM8K queued.
+→ matmul → all-reduce: the "71 ops → ~10" the lever table promised.
+
+**Demo A/B (conv+gates + packed + direct on in both arms; lever C on — see the trap
+below; two interleaved pairs; engagement asserted):**
+
+| | fold off | fold on | Δ |
+| --- | --- | --- | --- |
+| B=8 `exec_sync` | 47.28 / 47.23 | **46.51 / 46.54** | **−0.73 ms (−1.5%)** |
+| B=1 `exec_sync` | 44.29 / 44.3 | **44.11 / 44.10** | −0.18 ms (−0.4%) |
+
+Half the microbench's −1.47 ms at B=8; the pairs agree to 0.05 ms, so it is a real,
+smaller number — the model's z is a window of an 8,240-wide L1 tensor rather than the
+microbench's exact-width one, and the composed ops it replaces were already partly
+overlapped in the trace. **With lever C the whole stack now stands at 44.1 ms (B=1) and
+46.5 ms (B=8) on the demo**: from the README's composed decode, −19% and −34%.
+
+> **Trap, cost one round.** The first fold A/B ran the GDN step in fp32 (the demo runners'
+> default), where the wrapper typecasts the op's inputs to fp32 — and in direct mode `z`
+> is the *whole* 8,240-wide projection output, so one large typecast per layer ate the
+> saving (50.15 vs 50.3 ms). The ship configuration runs bf16 (lever C), where no
+> typecast exists; the A/B above is measured that way. Any fp32-mode user of the fold
+> should slice `z` first.
 
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused

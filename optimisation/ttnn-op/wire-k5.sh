@@ -105,6 +105,25 @@ s = s.replace("            if z is not qkv_src_for_z_check(z, _direct):\n       
 open(p, "w").write(s)
 print("wrap-K/tp.py wired for the fold")
 PYEOF
+python3 - <<'PYL'
+# z lifetime: in direct + fold mode z IS the projection output, so it must outlive the conv
+# kernel (which otherwise frees qkv) and be freed once the recurrence has consumed it.
+import os
+p = os.path.expanduser("~/wrap-K/tp.py"); s = open(p).read()
+NL = chr(10)
+a = NL.join(["            ttnn.deallocate(qkv)",
+             "            if _direct:",
+             "                a = b = None  # same buffer as qkv: already freed", ""])
+b = NL.join(["            if not (_direct and _ng_fold):",
+             "                ttnn.deallocate(qkv)  # direct+fold: qkvzab is still z, freed after the recurrence",
+             "            if _direct:",
+             "                a = b = None  # same buffer as qkv: freed with it", ""])
+if a in s: s = s.replace(a, b, 1)
+c = NL.join(["            if not (_direct and _ng_fold):", "                ttnn.deallocate(z)", ""])
+d = NL.join(["            ttnn.deallocate(z)  # in direct+fold mode this is qkvzab itself", ""])
+if c in s: s = s.replace(c, d, 1)
+open(p, "w").write(s); print("z lifetime:", "qkv kept" if b in s else "already", "|", "z freed once" if d in s else "already")
+PYL
 python3 -c "import ast,os;ast.parse(open(os.path.expanduser('~/wrap-K/tp.py')).read());print('wrap-K/tp.py parses')"
 python3 -c "import ast,os;ast.parse(open(os.path.expanduser('~/wrap-K/ttnn_delta_rule_ops.py')).read());print('wrap-K wrapper parses')"
 grep -n "_ng_fold\|z_col_offset=_z_off\|gated = o" ~/wrap-K/tp.py | head -8
