@@ -1112,6 +1112,23 @@ matmul → all-reduce plus one `z` slice: the "71 ops → ~10" the lever table p
 | B=1 | 51.3 ms | **46.3 ms** | −5.0 ms (−9.8%) | 54.45 → 46.3, **−15%** |
 | B=8 | 57.9 ms | **50.5 ms** | −7.4 ms (−12.8%) | 70.6 → 50.5, **−28%** |
 
+**Recurrence op internals — the reader's zeroing (2026-09-04).** With K closed the
+recurrence op itself is 4.7 ms/step at B=8 (99 µs × 48). Its reader gathers each head's
+q/k/v row by DMA-ing the full tile page and then zeroing the other 31 rows with RISC word
+stores — ~1,000 words per tile, twelve tiles per head. A timing-only experiment with the
+zeroing removed put the op at **81.5 µs (from 99.1) at B=8 and 45.3 µs (from 62.3) at
+B=1**: ~17 µs per layer of serial RISC stores, exposed on the first instance of every
+core. The zeros were needed by exactly one consumer — the rank-1 write `kcol @ delta`,
+whose matmul contracts over rows — so it is now two broadcasts (delta's row 0 against the
+all-ones tile, then column 0 of the transposed key across columns), one product per
+element and bit-identical to the matmul; every other consumer is row-independent, and the
+neighbouring rows the DMA brings in are the tensor's own finite values.
+`patch_reader_fast.py`, kernel-only. Tests: fold and packed paths pass; packed vs
+unpacked still byte-identical. **Op: 99.0 → 88.3 µs at B=8, 62.2 → 48.2 µs at B=1**
+(the broadcast form costs ~3 µs per instance over the matmul, which is why the
+broadcast version sits above the timing-only 81.5). Demo A/B old graft vs new and an
+endpoint hash arm queued.
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
