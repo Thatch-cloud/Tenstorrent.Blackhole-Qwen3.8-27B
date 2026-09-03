@@ -993,6 +993,31 @@ overlapped in the trace. **With lever C the whole stack now stands at 44.1 ms (B
 > typecast exists; the A/B above is measured that way. Any fp32-mode user of the fold
 > should slice `z` first.
 
+**Endpoint (ship + in-place + K with direct read, fold off vs on; interleaved off, on, on,
+off; ITL at 8 streams; all engagement lines asserted):**
+
+| arm | fold | ITL | per user | aggregate | output md5 |
+| --- | --- | --- | --- | --- | --- |
+| kf-off-a | off | 49.04 ms | 20.39 | 154.8 | `be88aa23c04f` |
+| kf-on-a | **on** | **47.99 ms** | 20.84 | 160.6 | `fde2d758cd66` |
+| kf-on-b | **on** | **48.32 ms** | 20.69 | 158.1 | `fde2d758cd66` |
+| kf-off-b | off | 48.65 ms | 20.56 | 157.1 | `be88aa23c04f` |
+
+**−0.7 ms ITL (−1.4%), +1.4% per user**, deterministic (both fold arms hash alike) and
+numerically distinct from the composed chain (one fp32 rounding instead of six bf16 ones),
+so the GSM8K gate below is the correctness call. Best arm on this endpoint so far:
+**48.0 ms ITL, 20.8 tok/s per user, 160.6 aggregate.**
+
+**GSM8K gate with the fold (60 items, 8 concurrent, 2,048 tokens, greedy; all five
+engagement lines asserted at start and end): 56/60 = 93.3%** — 2 unparseable + 2 wrong,
+**one item under the 57/60 bar** every adopted lever has met. The fold's numerics are
+*more* precise than the chain it replaces (one fp32 rounding instead of six bf16 ones),
+and a single low-margin token flipping on 60 greedy 2k-token chains is within what the
+README's own 58 vs this plan's 57 already showed — but the rule is the rule: **the fold is
+not adopted on this result.** It stays behind `QWEN_GDN_NORM_GATE=1`, default off, and a
+larger sample (200 items, fold on vs off) is queued to settle whether 56 is noise or
+drift. Its gain is −0.7 ms ITL (−1.4%), so nothing ships on a doubt.
+
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused
 `[qkv|z|a|b]` matmul output as `x` with `channels=C` (the conv indexes pages by the real
