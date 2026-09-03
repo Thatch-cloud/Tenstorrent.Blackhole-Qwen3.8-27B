@@ -769,7 +769,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the whole GDN decode layer (71 ops → ~10) | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A has taken 2.55 / 9.5) | weeks; A is the first slice | numerics; trace-address discipline |
+| K | Fuse the whole GDN decode layer (71 ops → ~10) — **first kernel (conv+gates) DONE: −1.78 ms B=1 / −2.40 ms B=8**; milestone 2 (packed q/k/v into the recurrence reader) next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, conv+gates 1.78 / 2.40) | days per kernel now that the build loop is 2 min | numerics; trace-address discipline |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -869,8 +869,55 @@ layout directly (row b, cols h·Dk…; GQA becomes a source-head index), which r
 those 13 ops and the reader's row gathers — host-side change to the recurrence op, so a
 rebuild, but the kernels already do this gather.
 
-**A/B queued:** two interleaved pairs at B=8 (`batched_128_b8`, host mode, A + in-place
-on), then two at B=1 (`traced_128`). Result below when it lands.
+**A/B at B=8 (`batched_128_b8`, host mode, A + in-place on; two interleaved pairs; engagement
+line asserted per arm):**
+
+| arm | conv+gates | `exec_sync` (device step) | per-user tok/s |
+| --- | --- | --- | --- |
+| k8-off-a | off | 57.85 ms | 15.58 |
+| k8-on-a | **on** | 55.66 ms | 15.65 |
+| k8-on-b | **on** | 55.32 ms | 16.23 |
+| k8-off-b | off | 57.93 ms | 14.79 |
+
+**−2.40 ms per step (−4.1%) at B=8**, exactly where the op-count arithmetic put it
+(12 ops × ~6.5 µs × 48 layers ≈ 3.7 ms removed, ~1.3 ms of kernel added). The
+tok/s column is host mode's readback noise (4.9–7.1 ms between arms); `exec_sync` is
+the number, as everywhere else in this plan. Composed baseline for this stack was
+58.0 ms (§3c), so the stack now stands at **55.5 ms at B=8**: 70.6 → 55.5 from the
+README's composed decode, −21%.
+
+> **Trap, cost one round.** The first A/B ran unengaged with the numbers at the
+> control's level and an empty engagement line: the B=8 runner's graft path sits on a
+> line shared with another assignment, so an anchored `sed` missed it and the arm
+> mounted the old libraries — where the flag check falls through to the composed path
+> *silently*. Assert the engagement line before reading any number.
+
+**A/B at B=1 (`traced_128`, same stack, two interleaved pairs, engagement asserted):**
+
+| arm | conv+gates | `exec_sync` | decode tok/s |
+| --- | --- | --- | --- |
+| k1-off-a | off | 51.20 ms | 19.23 |
+| k1-on-a | **on** | 49.50 ms | 19.54 |
+| k1-on-b | **on** | 49.53 ms | 19.50 |
+| k1-off-b | off | 51.40 ms | 19.01 |
+
+**−1.78 ms per step (−3.5%) at B=1.** Stack after K's first kernel: **49.5 ms at B=1,
+55.5 ms at B=8** on the A + in-place baseline (C and D on top of that on the endpoint).
+Both deltas match 12 ops × the §3.3 per-op floor (3.4 µs at B=1, 6.5 µs at B=8) × 48
+layers minus ~0.2–1.3 ms of kernel, which also says the kernel itself is cheap.
+
+**Device-time microbench (`optimisation/ttnn-op/bench_conv_gates.py`: both variants
+captured into a 64-iteration trace and replayed, B=8, card M):**
+
+| | per layer-step | × 48 layers |
+| --- | --- | --- |
+| composed (4 copies, multiply, 3 mac, silu, sigmoid, add+softplus, multiply) | 81.3 µs | 3.90 ms |
+| `gdn_decode_conv_gates` | **34.1 µs** | 1.64 ms |
+| saved | 47.2 µs | **2.27 ms/step** |
+
+The A/B's −2.40 ms and the microbench's −2.27 ms agree. The op itself at 34 µs is
+launch + one round of full-page DMA on ~80 cores; there is room (more cores per
+instance, fewer barriers) but it is already the smaller half.
 
 ### A. The fused kernel already on the branch, applied to plain decode
 

@@ -94,7 +94,7 @@ grep -n "_conv_composed\|return conv$\|QWEN_GDN_CONV_GATES engaged\|_cg_beta is 
 
 for f in arun.sh arun8.sh; do
   o=~/${f/arun/arunk}
-  sed -e 's|^O=\$HOME/opgraft-53587|O=$HOME/opgraft-K|' \
+  sed -e 's|O=\$HOME/opgraft-53587|O=$HOME/opgraft-K|' \
       -e 's|  G="\$G -v \$O/decode_gated_delta_rule:\$OPS/decode_gated_delta_rule:ro"|  G="$G -v $O/decode_gated_delta_rule:$OPS/decode_gated_delta_rule:ro"\n  G="$G -v $O/gdn_conv_gates:$OPS/gdn_conv_gates:ro"|' \
       -e 's|  G="\$G -v \$HOME/wrap-3c/tp.py:\$Q/tt/gdn/tp.py:ro"|  G="$G -v $HOME/wrap-K/tp.py:$Q/tt/gdn/tp.py:ro"|' \
       -e 's|-e QWEN_GDN_FUSED_DECODE="\$FLAG"|-e QWEN_GDN_FUSED_DECODE="$FLAG" -e QWEN_GDN_CONV_GATES="${CONVGATES:-0}"|' \
