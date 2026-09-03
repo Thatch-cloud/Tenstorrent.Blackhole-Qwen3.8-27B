@@ -11,6 +11,9 @@ G=$HOME/opgraft-K
 echo "### build start $(date -Is)"
 docker exec ttbuild rm -rf $OPS/gdn_conv_gates
 docker cp "$SRC" ttbuild:$OPS/gdn_conv_gates
+# milestone 2: the recurrence op with the packed-layout reader (a patched copy of the graft's op)
+docker exec ttbuild rm -rf $OPS/decode_gated_delta_rule
+docker cp "$HOME/kwork/decode_gated_delta_rule" ttbuild:$OPS/decode_gated_delta_rule
 docker exec ttbuild sh -c "cd /opt/tt-metal && python3 - <<'PY'
 import re
 p='ttnn/cpp/ttnn/operations/transformer/sources.cmake'; s=open(p).read()
@@ -44,7 +47,7 @@ docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so "$G/_ttnncpp.so"
 docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnn.so "$G/_ttnn.so"
 rm -rf "$G/gdn_conv_gates" "$G/decode_gated_delta_rule" "$G/gdn_decay"
 docker cp ttbuild:$OPS/gdn_conv_gates "$G/gdn_conv_gates"
-cp -r "$HOME/opgraft-53587/decode_gated_delta_rule" "$G/"
+cp -r "$HOME/kwork/decode_gated_delta_rule" "$G/"   # packed-capable reader (JIT source)
 cp -r "$HOME/opgraft-53587/gdn_decay" "$G/"
-cp "$HOME/opgraft-53587/ttnn_delta_rule_ops.py" "$G/"
+cp "$HOME/kwork/ttnn_delta_rule_ops.py" "$G/"   # wrapper with the packed entry (in-place patch included)
 ls -la "$G" | head; echo "### graft assembled $(date -Is)"

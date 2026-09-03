@@ -1,0 +1,93 @@
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
+@@ -461,6 +461,71 @@
+     return o, h
+ 
+ 
++_packed_decode_op_cache = None
++_packed_decode_engaged_logged = False
++
++
++def _packed_decode_op():
++    """Resolve ttnn.transformer.decode_gated_delta_rule_packed once (cached); None if absent."""
++    global _packed_decode_op_cache
++    if _packed_decode_op_cache is None:
++        _packed_decode_op_cache = getattr(getattr(ttnn, "transformer", None), "decode_gated_delta_rule_packed", None) or False
++    return _packed_decode_op_cache or None
++
++
++def recurrent_gated_delta_rule_decode_packed_ttnn(
++    qkv,
++    beta,
++    g,
++    num_k_heads,
++    num_v_heads,
++    head_k,
++    head_v,
++    scale=None,
++    initial_state=None,
++    device=None,
++    high_precision=False,
++    inplace_state=False,
++):
++    """T=1 decode on the PACKED layout (K milestone 2): qkv [1,B,C] straight from the conv+gates
++    kernel (channels q|k|v head-major), beta/g [1,B,H]. The fused op's reader does the head
++    gather and the GQA expansion, so no slice / reshape / repeat_interleave on the host graph.
++    Returns o [B,1,H,V] TILE, state [B,H,K,V]. Requires the packed binding (no composed fallback)."""
++    op = _packed_decode_op()
++    if op is None:
++        raise RuntimeError("decode_gated_delta_rule_packed binding is absent; mount the K graft")
++    global _packed_decode_engaged_logged
++    if not _packed_decode_engaged_logged:
++        _packed_decode_engaged_logged = True
++        print(
++            "QWEN_GDN_PACKED_QKV engaged: ttnn.transformer.decode_gated_delta_rule_packed"
++            f" (qkv {list(qkv.shape)} Nk={num_k_heads} H={num_v_heads} K={head_k} V={head_v}"
++            f" inplace_state={inplace_state})",
++            flush=True,
++        )
++    if high_precision:
++        qkv = ttnn.typecast(qkv, ttnn.float32)
++        beta = ttnn.typecast(beta, ttnn.float32)
++        g = ttnn.typecast(g, ttnn.float32)
++        if initial_state is not None and initial_state.dtype != ttnn.float32:
++            initial_state = ttnn.typecast(initial_state, ttnn.float32)
++    o, h = op(
++        qkv,
++        beta,
++        g,
++        num_k_heads,
++        num_v_heads,
++        head_k,
++        head_v,
++        scale=scale if scale is not None else head_k**-0.5,
++        initial_state=initial_state,
++        inplace_state=inplace_state,
++        memory_config=ttnn.DRAM_MEMORY_CONFIG,
++    )
++    o = ttnn.to_layout(o, ttnn.TILE_LAYOUT)
++    return o, h
++
++
+ def recurrent_gated_delta_rule_decode_ttnn(
+     q,
+     k,
+@@ -471,6 +536,7 @@
+     initial_state=None,
+     device=None,
+     high_precision=False,
++    inplace_state=False,
+ ):
+     """T=1 decode path: no loop/slice overhead. Returns o [B,1,H,V], state [B,H,K,V]."""
+     B = q.shape[0]
+@@ -483,7 +549,9 @@
+     if _fused_decode_enabled():
+         op = _fused_decode_op()
+         if op is not None:
+-            return _decode_gated_delta_rule_fused(op, q, k, v, beta, g, scale, initial_state, device, high_precision)
++            return _decode_gated_delta_rule_fused(
++                op, q, k, v, beta, g, scale, initial_state, device, high_precision, inplace_state=inplace_state
++            )
+ 
+     # high_precision: fp32 step avoids bf16 decay quantization error over long decode.
+     if high_precision:

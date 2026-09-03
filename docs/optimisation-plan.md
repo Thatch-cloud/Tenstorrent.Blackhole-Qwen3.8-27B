@@ -864,10 +864,16 @@ directory nests instead of replacing.
 **Wiring (milestone 1).** `wrap-K/tp.py` = the in-place `tp.py` + the op behind
 `QWEN_GDN_CONV_GATES=1`; the control arm is the same mounts with the flag off. The q/k/v
 split, GQA `repeat_interleave` and the `[1,B,Nv] → [B,1,Nv]` reshapes stay for now.
-**Milestone 2** retargets the recurrence op's reader to consume `conv_out`'s `[B, C]`
-layout directly (row b, cols h·Dk…; GQA becomes a source-head index), which removes
-those 13 ops and the reader's row gathers — host-side change to the recurrence op, so a
-rebuild, but the kernels already do this gather.
+**Milestone 2 — built and exact (2026-09-03 05:00).** `decode_gated_delta_rule_packed`:
+the recurrence op's reader now takes `conv_out` `[1,B,C]` and `beta`/`g` `[1,B,Nv]`
+directly (`optimisation/ttnn-op/patch_packed.py` against upstream #53587's op; compute
+and writer untouched). Head (b,h) reads row b at tile column `off + head·Dt`, and q/k come
+from GQA source head `h // rf`, so the model's 3 slices, 8 reshapes and 2
+`repeat_interleave`s are gone — 13 more ops per layer. Equivalence test
+(`test_packed.py`, card M): packed vs unpacked **byte-identical** `o` and new state at
+B=1/8/32 bf16 and B=8 fp32; in-place works on the packed path. Build 27 s incremental.
+Wired behind `QWEN_GDN_PACKED_QKV=1` (requires the conv+gates kernel engaged); A/B on top
+of milestone 1 queued.
 
 **A/B at B=8 (`batched_128_b8`, host mode, A + in-place on; two interleaved pairs; engagement
 line asserted per arm):**
