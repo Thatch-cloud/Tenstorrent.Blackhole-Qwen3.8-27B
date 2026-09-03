@@ -1,6 +1,6 @@
 --- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
 +++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
-@@ -461,6 +461,71 @@
+@@ -461,6 +461,90 @@
      return o, h
  
  
@@ -29,6 +29,10 @@
 +    device=None,
 +    high_precision=False,
 +    inplace_state=False,
++    return_row_major=False,
++    z=None,
++    norm_w=None,
++    z_col_offset=0,
 +):
 +    """T=1 decode on the PACKED layout (K milestone 2): qkv [1,B,C] straight from the conv+gates
 +    kernel (channels q|k|v head-major), beta/g [1,B,H]. The fused op's reader does the head
@@ -46,12 +50,21 @@
 +            f" inplace_state={inplace_state})",
 +            flush=True,
 +        )
++    fused_ng = z is not None
 +    if high_precision:
 +        qkv = ttnn.typecast(qkv, ttnn.float32)
 +        beta = ttnn.typecast(beta, ttnn.float32)
 +        g = ttnn.typecast(g, ttnn.float32)
 +        if initial_state is not None and initial_state.dtype != ttnn.float32:
 +            initial_state = ttnn.typecast(initial_state, ttnn.float32)
++        if fused_ng:
++            z = ttnn.typecast(z, ttnn.float32)
++            norm_w = ttnn.typecast(norm_w, ttnn.float32)
++    extra = {}
++    if fused_ng:
++        # K's last slice: the op finishes o -> rms_norm * norm_w * silu(z) and returns the gated
++        # [1,B,H*V] TILE tensor the out-projection consumes (assembled across cores in L1).
++        extra = {"z": z, "norm_w": norm_w, "z_col_offset": z_col_offset}
 +    o, h = op(
 +        qkv,
 +        beta,
@@ -63,16 +76,22 @@
 +        scale=scale if scale is not None else head_k**-0.5,
 +        initial_state=initial_state,
 +        inplace_state=inplace_state,
-+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
++        memory_config=ttnn.L1_MEMORY_CONFIG if fused_ng else ttnn.DRAM_MEMORY_CONFIG,
++        **extra,
 +    )
-+    o = ttnn.to_layout(o, ttnn.TILE_LAYOUT)
++    if fused_ng:
++        return o, h  # o is already the gated TILE output
++    # return_row_major: hand o back as the op wrote it (one [V] stick per head) for the
++    # norm+gate kernel, which consumes that layout directly (K milestone 3).
++    if not return_row_major:
++        o = ttnn.to_layout(o, ttnn.TILE_LAYOUT)
 +    return o, h
 +
 +
  def recurrent_gated_delta_rule_decode_ttnn(
      q,
      k,
-@@ -471,6 +536,7 @@
+@@ -471,6 +555,7 @@
      initial_state=None,
      device=None,
      high_precision=False,
@@ -80,7 +99,7 @@
  ):
      """T=1 decode path: no loop/slice overhead. Returns o [B,1,H,V], state [B,H,K,V]."""
      B = q.shape[0]
-@@ -483,7 +549,9 @@
+@@ -483,7 +568,9 @@
      if _fused_decode_enabled():
          op = _fused_decode_op()
          if op is not None:

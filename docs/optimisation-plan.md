@@ -946,6 +946,33 @@ output tiles once a semaphore counts 32 rows. That removes all six ops for ~10 e
 tile passes and one semaphore round: ≈ −20 µs per layer, ≈ −1 ms/step at B=8. It is the
 next kernel, and it is a change to the recurrence op, not a new one.
 
+**K's last slice — norm + gate folded into the recurrence op, built and exact (2026-09-04).**
+`decode_gated_delta_rule_packed` with `z` and `norm_w` now finishes each head's row inside
+the op — `rms_norm(o)·norm_w·silu(z)` on the row-0 tiles, reusing rings that are dead once
+`o` exists (only two circular buffers were free) — and returns `gated [1,B,H·V]` TILE
+directly. The layout problem that made a standalone op lose is solved across cores: each
+head core scatters its gated row's 16-element chunks by NOC into the L1 assembly slot of
+the (batch-tile, head) assembler core and bumps that core's semaphore; after its own
+instances the assembler waits for the row count, writes the Vt full output tiles, and
+resets the semaphore for the next replay. L1 sub-page writes are fine; only DRAM sub-page
+writes were ever the problem. `patch_fuse_ng.py` on top of `patch_packed.py`.
+
+Unit test (`test_fuse_ng.py`, card M, first run): PCC 0.999997 against the unfused op
+plus torch norm/gate in all five cases — B=8, bucketed B=3 and B=1, `z` as a column
+window of the projection output, and B=32 (768 heads, seven per core, the full 32-row
+assembly). Trace-replayed device time per layer:
+
+| | recurrence op + 6 composed ops | recurrence op with the fold | Δ |
+| --- | --- | --- | --- |
+| B=8 | 128.6 µs | **98.0 µs** | −30.6 µs → **−1.47 ms/step** |
+| B=1 | 64.9 µs | **60.7 µs** | −4.2 µs → −0.20 ms/step |
+
+Wired behind `QWEN_GDN_NORM_GATE=1` (which now means the fold; the standalone op stays
+off): in direct mode `z` goes in as a column window of the projection output, so the last
+slice goes too. The GDN decode layer is now matmul → conv+gates → recurrence(+norm+gate)
+→ matmul → all-reduce: the "71 ops → ~10" the lever table promised. Demo A/B, endpoint
+A/B and GSM8K queued.
+
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused
 `[qkv|z|a|b]` matmul output as `x` with `channels=C` (the conv indexes pages by the real
