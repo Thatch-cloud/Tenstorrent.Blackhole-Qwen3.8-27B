@@ -241,7 +241,7 @@ biggest identified lever, and it is not in this plan.**
 > ```
 >
 > **K's two kernels (2026-09-03): −4.2 ms at B=1, −5.1 ms at B=8 on the demo step, and
-> on the endpoint ship 61.3 → 54.8 ms ITL (−10.6%, +12% per user; GSM8K gate running)** —
+> on the endpoint ship 61.3 → 54.8 ms ITL (−10.6%, +12% per user; GSM8K 57/60, gate passed)** —
 > need the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + three op dirs)
 > plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
 > QWEN_GDN_FUSED_INPLACE=1` (`rig/runshipk.sh 2` is the exact command).
@@ -775,7 +775,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the whole GDN decode layer (71 ops → ~10) — **two kernels DONE: conv+gates −1.78/−2.40 ms, packed q/k/v −2.40/−2.70 ms (B=1/B=8)**; norm+gate kernel next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K's two kernels 4.2 / 5.1) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
+| K | Fuse the whole GDN decode layer (71 ops → ~10) — **two kernels DONE and gated: conv+gates −1.78/−2.40 ms, packed q/k/v −2.40/−2.70 ms (B=1/B=8); endpoint −6.5 ms ITL, GSM8K 57/60**; norm+gate kernel next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K's two kernels 4.2 / 5.1) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -931,8 +931,11 @@ carries the same tt-metal revision):**
 Ship 61.3 ms → ship + K **54.8 ms: −6.5 ms ITL (−10.6%), +12.0% per user** (16.3 →
 18.3 tok/s). The two K arms hash identically to each other (deterministic) and differ
 from the ship arms, as they must: the conv now accumulates in fp32 and rounds once
-where the composed path rounded after every `mac`. The 60-item GSM8K gate on this
-exact stack is running; 57/60 is the bar.
+where the composed path rounded after every `mac`. **GSM8K gate on this exact stack
+(60 items, 8 concurrent, 2,048 tokens, greedy; engagement asserted at start and end):
+57/60 = 95.0%** — the bar. The miss composition shifted (2 unparseable + 1 wrong, against
+1 + 2 before), which is the fp32-accumulated conv moving a few low-margin tokens, not a
+drift. **K's two kernels are adopted.**
 
 Endpoint chain so far, per user at 8 streams: README composed ≈ 12.6 → A 14.6 → ship
 16.3 → **ship + K 18.3 tok/s (+45% over the README endpoint)**; ITL 68.3 (A) → 61.3 →
