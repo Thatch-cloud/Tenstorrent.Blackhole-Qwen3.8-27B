@@ -240,12 +240,14 @@ biggest identified lever, and it is not in this plan.**
 > -v ~/ttcache:/ttcache -e TT_METAL_CACHE=/ttcache    # readiness 510-615 s -> 165-270 s
 > ```
 >
-> **K (2026-09-03): −5.0 ms at B=1, −7.4 ms at B=8 on the demo step; on the endpoint ship
-> 61.3 → 54.8 → ≈ 50.4 ms ITL with the direct read (best arm 48.9 ms, 20.4 tok/s per user,
-> 157 aggregate); GSM8K 57/60, gate passed on the full stack** — needs the K graft
-> (`optimisation/ttnn-op/build-k.sh` output: both `.so` + the op dirs) plus `wrap-K/tp.py`
-> and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1 QWEN_GDN_PROJ_DIRECT=1
-> QWEN_GDN_FUSED_INPLACE=1` (`PROJDIRECT=1 rig/runshipk.sh <tag> 2` is the exact command).
+> **K (2026-09-03/04), complete: conv+gates, packed q/k/v, direct projection read, and the
+> norm+gate fold. Demo step (lever C on): 44.1 ms at B=1, 46.5 ms at B=8. Endpoint: ship
+> 61.3 → ≈ 48.1 ms ITL, 20.8 tok/s per user, 158 aggregate; GSM8K 57/60 on the full stack**
+> — needs the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + the op dirs)
+> plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
+> QWEN_GDN_PROJ_DIRECT=1 QWEN_GDN_NORM_GATE=1 QWEN_GDN_FUSED_INPLACE=1`
+> (`PROJDIRECT=1 NORMGATE=1 rig/runshipk.sh <tag> 2` is the exact command). Under fp32
+> GDN (lever C off) slice `z` first — see the typecast trap in §K.
 >
 > Two more need a mounted file: lever E (`get_num_links` override, −1.35 ms; upstream
 > #55125) and the in-place state write (−0.42 / −3.26 ms; `wrap-3c/`). B0's shard
@@ -776,7 +778,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the GDN decode layer — **conv+gates, packed q/k/v and direct projection read DONE and gated: −5.0 ms B=1 / −7.4 ms B=8 (demo); endpoint ITL 61.3 → ≈50.4 ms, GSM8K 57/60 on the full stack**; norm+gate fold into the recurrence op is the last slice (standalone op measured negative) | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K 5.0 / 7.4) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
+| K | Fuse the GDN decode layer — **COMPLETE and gated: conv+gates, packed q/k/v, direct projection read, norm+gate fold. Demo 51.3 → 44.1 ms B=1 (with C), 57.9 → 46.5 ms B=8; endpoint 61.3 → 48.1 ms ITL; GSM8K 57/60** | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; realised ≈ 7 / 11 with C) | done | numerics; trace-address discipline; ring-layout rule for compute kernels |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -1050,7 +1052,14 @@ two operands come from one circular buffer (different tile indices) or span two 
 blocks; the recurrence kernel only ever reads index 0 of two distinct rings, and that is
 the pattern to keep. (Kernel 1's `add2(prod, 0, prod, 1)` is the one same-ring case that
 works — an addition on an fp32 ring — and should not be generalised.) Cost of the
-rounding: 99.0 µs vs 98.0 µs per layer at B=8. Endpoint hash and the 60-item gate queued.
+rounding: 99.0 µs vs 98.0 µs per layer at B=8.
+
+**Precision-matched fold on the endpoint: ITL 48.09 ms, 20.79 tok/s per user, 158.4
+aggregate** (the unrounded fold's speed, kept), all five engagement lines asserted. Its
+greedy text is a third distinct hash — the norm's fp32 summation order still differs from
+`ttnn.rms_norm` — so the gate decided: **GSM8K 57/60 = 95.0% (3 unparseable, 0 wrong)**.
+The bar. **K's last slice is adopted**, and with it K is complete: the GDN decode layer is
+matmul → conv+gates → recurrence with norm+gate → matmul → all-reduce.
 
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused
