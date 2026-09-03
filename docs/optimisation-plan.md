@@ -1031,7 +1031,26 @@ as measured.** The principled fix is not more samples but matching the chain it 
 the fold rounds once in fp32 where the composed path rounds to bf16 after `rms_norm·w`,
 after `silu(z)` and after the multiply — packing `xw` and `silu(z)` to bf16 before the
 final multiply (kernel-only change) makes the fold reproduce the composed numerics to
-accumulation order, after which the gate question disappears. That variant is next.
+accumulation order, after which the gate question disappears.
+
+**Precision-matched fold (2026-09-03/04).** Four variants on silicon, three of which hung
+the card (board reset each time) before the fourth ran:
+
+| variant | where the bf16 intermediates lived | result |
+| --- | --- | --- |
+| 1 | `xw` staged in the writer's output ring | hang — two consumers of one ring |
+| 2 | `xw`, `zs` as two blocks in the (widened) norm-weight ring, multiply reading tile `i` and tile `Vt+i` of that one ring | hang |
+| 3 | same ring, both pushed as one contiguous 2·Vt block, same two-index multiply | hang |
+| 4 | round-trip copies (fp32 → bf16 ring → fp32) one Vt block at a time; multiply reads index 0 of two **distinct** rings, as the unrounded fold did | **runs; all cases pass** |
+
+The watcher (`TT_METAL_WATCHER`) settled it: reader finished, writer in `cb_wait_front`,
+compute stalled at the unpack→math→pack register handshake (`UPAD` / `MWDD`) — a producer
+stuck, not data starvation. The common factor of the three hangs was a binary op whose
+two operands come from one circular buffer (different tile indices) or span two pushed
+blocks; the recurrence kernel only ever reads index 0 of two distinct rings, and that is
+the pattern to keep. (Kernel 1's `add2(prod, 0, prod, 1)` is the one same-ring case that
+works — an addition on an fp32 ring — and should not be generalised.) Cost of the
+rounding: 99.0 µs vs 98.0 µs per layer at B=8. Endpoint hash and the 60-item gate queued.
 
 **Milestone 4 — the conv+gates kernel reads the projection output directly (built and
 exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused

@@ -343,7 +343,7 @@ constexpr uint32_t wf = tt::CBIndex::c_31;  // [Vt] fp32 norm_w (persistent fron
 """
     new = """    add_cb(cbd::scratch, fng ? per_core * Vt : 2, 1, df_io);  // fused: per_core assembly slots of Vt tiles
     if (fng) {
-        add_cb(cbd::w, Vt, 1, df_io);
+        add_cb(cbd::w, Vt, 2, df_io);  // norm_w once; then the two bf16-rounded intermediates per head
         add_cb(cbd::wf, Vt, 1, tt::DataFormat::Float32);
         // one semaphore per assembly slot, on every core (ids 0..per_core-1)
         for (uint32_t sidx = 0; sidx < per_core; sidx++) {
@@ -481,8 +481,22 @@ def reader_cpp(s):
     // [bh_start, bh_start + n_inst) of head-instances.
     for (uint32_t bh = bh_start; bh < bh_start + n_inst; ++bh) {"""
     new = """    if constexpr (FNG) {
-        // norm_w [1,1,V]: pages 0..Vt-1, row 0 -- gathered once, held for the whole kernel.
-        gather_row(w_acc, cb_w, Vt, 0, 0);
+        // norm_w [1,1,V]: pages 0..Vt-1, row 0 -- gathered once into a FULL-RING (2*Vt) block so
+        // the ring's pointers stay aligned to the compute's per-head 2*Vt blocks; the second
+        // half is unused.
+        CircularBuffer cbw(cb_w);
+        cbw.reserve_back(2 * Vt);
+        const uint32_t wbase = cbw.get_write_ptr();
+        for (uint32_t t = 0; t < Vt; t++) {
+            noc.async_read(w_acc, cbw, tb_io, {.page_id = t}, {.offset_bytes = t * tb_io});
+        }
+        noc.async_read_barrier();
+        for (uint32_t t = 0; t < Vt; t++) {
+            const uint32_t p = wbase + t * tb_io;
+            zero(p + 16 * elem, (256 - 16) * elem / 4);
+            zero(p + (256 + 16) * elem, (1024 - 272) * elem / 4);
+        }
+        cbw.push_back(2 * Vt);
     }
 
     // Per-instance loop: this core owns the contiguous chunk
@@ -535,9 +549,11 @@ def compute_cpp(s):
     new = """    compute_kernel_hw_startup(cb_q, cb_k, cb_out);
 
     if constexpr (FNG) {
-        WAIT(cb_w, Vt);
+        // norm_w arrives as a full-ring (2*Vt) block so cb_w's pointers stay block-aligned;
+        // only the first Vt tiles carry data.
+        WAIT(cb_w, 2 * Vt);
         copy_tiles(cb_w, cb_wf, Vt);
-        POP(cb_w, Vt);
+        POP(cb_w, 2 * Vt);
         WAIT(cb_wf, Vt);  // persistent front for the whole kernel
     }
 
@@ -565,17 +581,39 @@ def compute_cpp(s):
             WAIT(cb_qn, Vt);
             POP(cb_vread, Vt);
             POP(cb_sc2, 1);
-            ew(cb_qn, cb_wf, cb_kn, Vt, 2);  // xw = xn * norm_w  (row-0 tiles: plain elementwise)
-            WAIT(cb_kn, Vt);
-            POP(cb_qn, Vt);
+            // The composed chain rounds to io (bf16) after rms_norm*w, after silu(z) and after the
+            // multiply; do the same so the fold reproduces its numerics to accumulation order.
+            // Both rounded intermediates live in cb_w (io, 2*Vt pages), which after the one-time
+            // norm_w read is produced and consumed by this kernel alone -- NOT in z's ring, where
+            // the reader's next-instance v push races the compute's own pushes (a deadlock the
+            // first attempt found), and not in cb_out, whose only consumer is the writer.
             WAIT(cb_v, Vt);  // z (gathered after v)
             copy_tiles(cb_v, cb_vf, Vt);  // zf fp32
             POP(cb_v, Vt);
             WAIT(cb_vf, Vt);
-            silu_tiles(cb_vf, cb_delta, Vt);  // zs = silu(z)
+            // Round each intermediate to io (bf16) with a copy round-trip through cb_w (one
+            // Vt-page block at a time; two per head == the ring, so the pointers stay aligned),
+            // then multiply as fp32 x fp32 from two distinct rings exactly as the unrounded fold
+            // did. Every binary op reads index 0 of two different CBs -- the proven pattern.
+            ew(cb_qn, cb_wf, cb_kn, Vt, 2);  // xw = xn * norm_w (fp32)
+            WAIT(cb_kn, Vt);
+            POP(cb_qn, Vt);
+            copy_tiles(cb_kn, cb_w, Vt);  // -> bf16
+            WAIT(cb_w, Vt);
+            POP(cb_kn, Vt);
+            copy_tiles(cb_w, cb_kn, Vt);  // -> fp32 again, now bf16-valued
+            WAIT(cb_kn, Vt);
+            POP(cb_w, Vt);
+            silu_tiles(cb_vf, cb_delta, Vt);  // zs = silu(z) (fp32)
             WAIT(cb_delta, Vt);
             POP(cb_vf, Vt);
-            ew(cb_kn, cb_delta, cb_out, Vt, 2);  // gated = xw * zs -> io
+            copy_tiles(cb_delta, cb_w, Vt);  // -> bf16
+            WAIT(cb_w, Vt);
+            POP(cb_delta, Vt);
+            copy_tiles(cb_w, cb_delta, Vt);  // -> fp32 again, bf16-valued
+            WAIT(cb_delta, Vt);
+            POP(cb_w, Vt);
+            ew(cb_kn, cb_delta, cb_out, Vt, 2);  // gated = bf16(xw * zs) -> io
             POP(cb_kn, Vt);
             POP(cb_delta, Vt);
         } else {
@@ -588,7 +626,67 @@ def compute_cpp(s):
     s = s.replace(old, new, 1)
     old = """// out = S * scalar[0,0], n tiles.
 void bcast_scalar_mul("""
-    new = """// out = silu(in), n tiles (copy to fp32 DST, SFPU silu).
+    new = """// out = A[ia0+i] (op) B[ib0+i], n tiles (operands may be two page ranges of ONE CB).
+void ew_off(uint32_t a, uint32_t ia0, uint32_t b, uint32_t ib0, uint32_t o, uint32_t n, int op) {
+    cb_reserve_back(o, n);
+    pack_reconfig_data_format(o);
+    reconfig_data_format(a, b);
+    if (op == 0) {
+        add_init(a, b);
+    } else if (op == 1) {
+        sub_init(a, b);
+    } else {
+        mul_init(a, b);
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        tile_regs_acquire();
+        if (op == 0) {
+            add_tiles(a, b, ia0 + i, ib0 + i, 0);
+        } else if (op == 1) {
+            sub_tiles(a, b, ia0 + i, ib0 + i, 0);
+        } else {
+            mul_tiles(a, b, ia0 + i, ib0 + i, 0);
+        }
+        tile_regs_commit();
+        tile_regs_wait();
+        pack_tile(0, o, i);
+        tile_regs_release();
+    }
+    cb_push_back(o, n);
+}
+
+// One contiguous 2n-tile block in `o`: tiles [0,n) = xn * w (elementwise, row-0 tiles), tiles
+// [n,2n) = silu(zf). Reserved and pushed as ONE block so both halves are contiguous and a
+// consumer may read tile n+i as operand B; `o` must be a 2n-page ring with aligned pointers.
+void xw_zs_block(uint32_t xn, uint32_t w, uint32_t zf, uint32_t o, uint32_t n) {
+    cb_reserve_back(o, 2 * n);
+    pack_reconfig_data_format(o);
+    reconfig_data_format(xn, w);
+    mul_init(xn, w);
+    for (uint32_t i = 0; i < n; i++) {
+        tile_regs_acquire();
+        mul_tiles(xn, w, i, i, 0);
+        tile_regs_commit();
+        tile_regs_wait();
+        pack_tile(0, o, i);
+        tile_regs_release();
+    }
+    reconfig_data_format_srca(zf);
+    copy_tile_to_dst_init_short(zf);
+    silu_tile_init();
+    for (uint32_t i = 0; i < n; i++) {
+        tile_regs_acquire();
+        copy_tile(zf, i, 0);
+        silu_tile(0);
+        tile_regs_commit();
+        tile_regs_wait();
+        pack_tile(0, o, n + i);
+        tile_regs_release();
+    }
+    cb_push_back(o, 2 * n);
+}
+
+// out = silu(in), n tiles (copy to fp32 DST, SFPU silu).
 void silu_tiles(uint32_t in, uint32_t o, uint32_t n) {
     cb_reserve_back(o, n);
     pack_reconfig_data_format(o);
