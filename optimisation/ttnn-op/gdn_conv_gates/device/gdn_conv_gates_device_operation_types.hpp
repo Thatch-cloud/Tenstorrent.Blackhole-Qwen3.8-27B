@@ -19,6 +19,15 @@ struct GdnConvGatesParams {
     uint32_t Nv;    // value heads on this device (gate width)
     uint32_t K;     // conv taps (== conv_states.size() == taps.size())
     tt::tt_metal::MemoryConfig output_mem_config;
+    // Direct read of the fused projection output (milestone 4): x may be wider than C (pages
+    // index by Wt = its real width in tiles) and a / b may be column windows of a wider
+    // tensor at any element offset -- the gate reader gathers them per element.
+    uint32_t Wt = 0;      // x's width in tiles (== C/32 when x is exactly the conv channels)
+    bool gates_packed = false;
+    uint32_t AWt = 0;     // a's width in tiles
+    uint32_t a_col = 0;   // element column of head 0 in a
+    uint32_t BWt = 0;     // b's width in tiles
+    uint32_t b_col = 0;   // element column of head 0 in b
 };
 
 // All TILE, one dtype (bf16 or fp32), on device. conv_states are read AND written by the

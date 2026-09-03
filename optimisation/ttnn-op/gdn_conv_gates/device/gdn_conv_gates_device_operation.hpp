@@ -37,6 +37,9 @@ std::vector<Tensor> gdn_conv_gates(
     const Tensor& dt_bias,
     const Tensor& neg_exp_A,
     uint32_t batch,
+    uint32_t channels,
+    uint32_t a_col,
+    uint32_t b_col,
     const tt::tt_metal::MemoryConfig& output_mem_config);
 
 }  // namespace ttnn::prim

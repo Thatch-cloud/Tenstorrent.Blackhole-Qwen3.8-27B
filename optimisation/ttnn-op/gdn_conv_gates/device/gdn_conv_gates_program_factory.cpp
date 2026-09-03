@@ -48,6 +48,7 @@ constexpr uint32_t nega = tt::CBIndex::c_9;   // 1 io   neg_exp_A (row 0)
 constexpr uint32_t sp = tt::CBIndex::c_10;    // 1 io   softplus(a + dt_bias)
 constexpr uint32_t beta = tt::CBIndex::c_11;  // 1 io
 constexpr uint32_t g = tt::CBIndex::c_12;     // 1 io
+constexpr uint32_t gsrc = tt::CBIndex::c_13;  // 2 io   source tiles for the packed gate gather
 }  // namespace cbcg
 
 tt::tt_metal::ProgramDescriptor GdnConvGatesProgramFactory::create_descriptor(
@@ -107,11 +108,15 @@ tt::tt_metal::ProgramDescriptor GdnConvGatesProgramFactory::create_descriptor(
     add_cb(cbcg::sp, 1, 2, df_io);
     add_cb(cbcg::beta, 1, 2, df_io);
     add_cb(cbcg::g, 1, 2, df_io);
+    add_cb(cbcg::gsrc, 2, 1, df_io);
 
     const std::string kdir = "ttnn/cpp/ttnn/operations/transformer/gdn_conv_gates/device/kernels/";
 
-    // Reader compile args: {K, Ct, Nvt, B, xBt} + accessors (x, st0..3, tap0..3, a, b, dt_bias, neg_exp_A).
-    std::vector<uint32_t> reader_ct = {K, Ct, Nvt, attrs.B, xBt};
+    // Reader compile args: {K, Ct, Nvt, B, xBt, Wt, GP, AWt, ACOL, BWt, BCOL, Nv} + accessors
+    // (x, st0..3, tap0..3, a, b, dt_bias, neg_exp_A). Wt == Ct unless x is the wider
+    // projection output; GP selects the per-element gate gather.
+    std::vector<uint32_t> reader_ct = {
+        K, Ct, Nvt, attrs.B, xBt, attrs.Wt, attrs.gates_packed ? 1u : 0u, attrs.AWt, attrs.a_col, attrs.BWt, attrs.b_col, attrs.Nv};
     TensorAccessorArgs(*in.x.buffer()).append_to(reader_ct);
     for (uint32_t j = 0; j < K; j++) {
         TensorAccessorArgs(*in.conv_states[j].buffer()).append_to(reader_ct);

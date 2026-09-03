@@ -12,7 +12,7 @@
 // Gate instances (on the gate core only): one tile each -- a and b page gi, dt_bias and
 // neg_exp_A page (gi % Nvt).
 //
-// Compile args: {K, Ct, Nvt, B, xBt} + accessor args (x, st0..st3, tap0..tap3, a, b,
+// Compile args: {K, Ct, Nvt, B, xBt, Wt, GP, AWt, ACOL, BWt, BCOL, Nv} + accessor args (x, st0..st3, tap0..tap3, a, b,
 // dt_bias, neg_exp_A). Runtime args: {inst_start, n_inst, g_n, x, st0..st3, tap0..tap3,
 // a, b, dt_bias, neg_exp_A}.
 
@@ -23,7 +23,7 @@
 #include "api/tensor/noc_traits.h"
 
 constexpr uint32_t cb_win = 0, cb_tap = 1;
-constexpr uint32_t cb_a = 6, cb_b = 7, cb_dtb = 8, cb_nega = 9;
+constexpr uint32_t cb_a = 6, cb_b = 7, cb_dtb = 8, cb_nega = 9, cb_gsrc = 13;
 
 void kernel_main() {
     constexpr uint32_t K = get_compile_time_arg_val(0);
@@ -31,9 +31,16 @@ void kernel_main() {
     constexpr uint32_t Nvt = get_compile_time_arg_val(2);
     constexpr uint32_t B = get_compile_time_arg_val(3);
     constexpr uint32_t xBt = get_compile_time_arg_val(4);
+    constexpr uint32_t Wt = get_compile_time_arg_val(5);    // x's width in tiles (Ct when not wider)
+    constexpr uint32_t GP = get_compile_time_arg_val(6);    // 1: gather a/b per element from windows
+    constexpr uint32_t AWt = get_compile_time_arg_val(7);
+    constexpr uint32_t ACOL = get_compile_time_arg_val(8);
+    constexpr uint32_t BWt = get_compile_time_arg_val(9);
+    constexpr uint32_t BCOL = get_compile_time_arg_val(10);
+    constexpr uint32_t NV = get_compile_time_arg_val(11);   // gate width (columns >= NV are padding)
     static_assert(K == 4, "reader is written for K == 4 taps");
 
-    constexpr auto x_a = TensorAccessorArgs<5>();
+    constexpr auto x_a = TensorAccessorArgs<12>();
     constexpr auto s0_a = TensorAccessorArgs<x_a.next_compile_time_args_offset()>();
     constexpr auto s1_a = TensorAccessorArgs<s0_a.next_compile_time_args_offset()>();
     constexpr auto s2_a = TensorAccessorArgs<s1_a.next_compile_time_args_offset()>();
@@ -111,7 +118,7 @@ void kernel_main() {
             const uint32_t xbase = base + 3 * tb;
             const bool have_x = bt < xBt;
             if (have_x) {
-                noc.async_read(x_acc, cb, tb, {.page_id = bt * Ct + cc}, {.offset_bytes = 3 * tb});
+                noc.async_read(x_acc, cb, tb, {.page_id = bt * Wt + cc}, {.offset_bytes = 3 * tb});
             }
             noc.async_read_barrier();
             if (!have_x) {
@@ -140,9 +147,58 @@ void kernel_main() {
         }
     }
 
+    // Gather gate tile t (output cols h in [32t, 32t+32) ∩ [0,Nv)) from a window that starts
+    // at element column `col0` of a tensor `wt` tiles wide: the source columns col0+h span one
+    // or two source tiles. Full-page reads into the scratch CB, then per-element L1 copies
+    // (16-bit at bf16, 32-bit at fp32) into the zeroed target tile.
+    auto gather_gate = [&](const auto& acc, uint32_t cb_id, uint32_t wt, uint32_t col0, uint32_t bt_g, uint32_t t) {
+        CircularBuffer cb(cb_id);
+        cb.reserve_back(1);
+        const uint32_t dst = cb.get_write_ptr();
+        zero_words(dst, tb / 4);
+        const uint32_t h0 = t * 32;
+        const uint32_t h1 = (h0 + 32 < NV) ? h0 + 32 : NV;  // exclusive: only real heads are gathered
+        const uint32_t c0 = col0 + h0;
+        const uint32_t c1 = col0 + h1 - 1;
+        const uint32_t p0 = c0 / 32;
+        const uint32_t p1 = c1 / 32;
+        CircularBuffer scb(cb_gsrc);
+        scb.reserve_back(2);
+        const uint32_t sbase = scb.get_write_ptr();
+        for (uint32_t p = p0; p <= p1; p++) {
+            noc.async_read(acc, scb, tb, {.page_id = bt_g * wt + p}, {.offset_bytes = (p - p0) * tb});
+        }
+        noc.async_read_barrier();
+        asm volatile("" ::: "memory");
+        for (uint32_t h = h0; h < h1; h++) {
+            const uint32_t c = col0 + h;
+            const uint32_t sp = sbase + (c / 32 - p0) * tb;
+            const uint32_t sc = c % 32;
+            const uint32_t dc = h - h0;
+            for (uint32_t r = 0; r < 32; r++) {
+                const uint32_t se = ((r / 16) * 2 + (sc / 16)) * 256 + (r % 16) * 16 + (sc % 16);
+                const uint32_t de = ((r / 16) * 2 + (dc / 16)) * 256 + (r % 16) * 16 + (dc % 16);
+                if (elem == 2) {
+                    auto sv = CoreLocalMem<volatile uint16_t>(sp + se * 2);
+                    auto dv = CoreLocalMem<volatile uint16_t>(dst + de * 2);
+                    dv[0] = sv[0];
+                } else {
+                    auto sv = CoreLocalMem<volatile uint32_t>(sp + se * 4);
+                    auto dv = CoreLocalMem<volatile uint32_t>(dst + de * 4);
+                    dv[0] = sv[0];
+                }
+            }
+        }
+        asm volatile("" ::: "memory");
+        scb.push_back(2);
+        scb.pop_front(2);
+        cb.push_back(1);
+    };
+
     // gates: one tile per instance gi = bt_g*Nvt + t
     for (uint32_t gi = 0; gi < g_n; ++gi) {
         const uint32_t t = gi % Nvt;
+        const uint32_t bt_g = gi / Nvt;
         auto one = [&](const auto& acc, uint32_t cb_id, uint32_t page) {
             CircularBuffer cb(cb_id);
             cb.reserve_back(1);
@@ -150,8 +206,13 @@ void kernel_main() {
             noc.async_read_barrier();
             cb.push_back(1);
         };
-        one(a_acc, cb_a, gi);
-        one(b_acc, cb_b, gi);
+        if constexpr (GP) {
+            gather_gate(a_acc, cb_a, AWt, ACOL, bt_g, t);
+            gather_gate(b_acc, cb_b, BWt, BCOL, bt_g, t);
+        } else {
+            one(a_acc, cb_a, gi);
+            one(b_acc, cb_b, gi);
+        }
         one(dtb_acc, cb_dtb, t);
         one(nega_acc, cb_nega, t);
     }

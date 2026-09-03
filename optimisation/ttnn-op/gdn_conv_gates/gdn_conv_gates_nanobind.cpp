@@ -30,6 +30,9 @@ void bind_gdn_conv_gates(nb::module_& mod) {
             batch (int, optional): active rows of x (default: all). Rows at or beyond it
                 enter the shift register as zeros (bucketed decode).
             memory_config (ttnn.MemoryConfig, optional): placement of the three outputs.
+            channels (int, optional): C when x is wider (the fused projection output).
+            a_col, b_col (int): element column of head 0 in a / b when they are column
+                windows of a wider tensor (e.g. the projection output). Default 0.
 
         Returns:
             tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]: conv_out [1,B,C], beta [1,B,Nv], g [1,B,Nv].
@@ -48,7 +51,10 @@ void bind_gdn_conv_gates(nb::module_& mod) {
         nb::arg("neg_exp_A").noconvert(),
         nb::kw_only(),
         nb::arg("batch") = nb::none(),
-        nb::arg("memory_config") = nb::none());
+        nb::arg("memory_config") = nb::none(),
+        nb::arg("channels") = nb::none(),
+        nb::arg("a_col") = 0,
+        nb::arg("b_col") = 0);
 }
 
 }  // namespace ttnn::operations::transformer

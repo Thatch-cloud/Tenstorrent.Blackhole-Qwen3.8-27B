@@ -38,7 +38,7 @@ void GdnConvGatesDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(attrs.B >= 1 && attrs.B <= attrs.Bx, "gdn_decode_conv_gates: batch must be in [1, rows of x]");
     TT_FATAL(attrs.Bx <= attrs.Bmax, "gdn_decode_conv_gates: x has more rows than the conv states");
     const auto& xs = in.x.logical_shape();
-    TT_FATAL(xs.rank() == 3 && xs[0] == 1 && xs[2] == attrs.C, "gdn_decode_conv_gates: x must be [1,B,C]");
+    TT_FATAL(xs.rank() == 3 && xs[0] == 1 && xs[2] >= attrs.C, "gdn_decode_conv_gates: x must be [1,B,W] with W >= C");
     for (uint32_t j = 0; j < attrs.K; j++) {
         check(in.conv_states[j], "conv_state");
         check(in.taps[j], "tap");
@@ -56,8 +56,11 @@ void GdnConvGatesDeviceOperation::validate_on_program_cache_miss(
     const auto& as = in.a.logical_shape();
     const auto& bs = in.b.logical_shape();
     TT_FATAL(
-        as.rank() == 3 && as[0] == 1 && as[1] == attrs.B && as[2] == attrs.Nv && bs == as,
-        "gdn_decode_conv_gates: a and b must be [1,B,Nv] with B == batch");
+        as.rank() == 3 && as[0] == 1 && as[1] >= attrs.B && as[2] >= attrs.a_col + attrs.Nv,
+        "gdn_decode_conv_gates: a must be [1,>=B,W] with W >= a_col + Nv");
+    TT_FATAL(
+        bs.rank() == 3 && bs[0] == 1 && bs[1] >= attrs.B && bs[2] >= attrs.b_col + attrs.Nv,
+        "gdn_decode_conv_gates: b must be [1,>=B,W] with W >= b_col + Nv");
     const auto& ds = in.dt_bias.logical_shape();
     const auto& ns = in.neg_exp_A.logical_shape();
     TT_FATAL(
@@ -96,9 +99,13 @@ std::vector<Tensor> gdn_conv_gates(
     const Tensor& dt_bias,
     const Tensor& neg_exp_A,
     uint32_t batch,
+    uint32_t channels,
+    uint32_t a_col,
+    uint32_t b_col,
     const tt::tt_metal::MemoryConfig& output_mem_config) {
     using OperationType = GdnConvGatesDeviceOperation;
-    const auto& xs = x.logical_shape();  // [1,Bx,C]
+    using namespace tt::constants;
+    const auto& xs = x.logical_shape();  // [1,Bx,W]
     TT_FATAL(!conv_states.empty(), "gdn_decode_conv_gates: conv_states is empty");
     const auto& ss = conv_states[0].logical_shape();
     const auto& as = a.logical_shape();
@@ -106,11 +113,20 @@ std::vector<Tensor> gdn_conv_gates(
         .B = batch,
         .Bx = xs[1],
         .Bmax = ss[1],
-        .C = xs[2],
-        .Nv = as[2],
+        .C = channels,
+        .Nv = 0,  // set below from dt_bias
         .K = static_cast<uint32_t>(conv_states.size()),
         .output_mem_config = output_mem_config,
     };
+    // Nv comes from dt_bias (always exactly [1,1,Nv]); a / b may be wider windows.
+    attrs.Nv = static_cast<uint32_t>(dt_bias.logical_shape()[-1]);
+    attrs.Wt = (static_cast<uint32_t>(xs[2]) + TILE_WIDTH - 1) / TILE_WIDTH;
+    attrs.AWt = (static_cast<uint32_t>(as[2]) + TILE_WIDTH - 1) / TILE_WIDTH;
+    attrs.BWt = (static_cast<uint32_t>(b.logical_shape()[2]) + TILE_WIDTH - 1) / TILE_WIDTH;
+    attrs.a_col = a_col;
+    attrs.b_col = b_col;
+    attrs.gates_packed = (a_col != 0) || (b_col != 0) || (static_cast<uint32_t>(as[2]) != attrs.Nv) ||
+                         (static_cast<uint32_t>(b.logical_shape()[2]) != attrs.Nv);
     auto tensor_args = OperationType::tensor_args_t{
         .x = x,
         .conv_states = conv_states,

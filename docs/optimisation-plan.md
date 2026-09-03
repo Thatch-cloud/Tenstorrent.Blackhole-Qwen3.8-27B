@@ -945,6 +945,16 @@ output tiles once a semaphore counts 32 rows. That removes all six ops for ~10 e
 tile passes and one semaphore round: ≈ −20 µs per layer, ≈ −1 ms/step at B=8. It is the
 next kernel, and it is a change to the recurrence op, not a new one.
 
+**Milestone 4 — the conv+gates kernel reads the projection output directly (built and
+exact, 2026-09-03 06:19).** `gdn_decode_conv_gates` now takes the whole fused
+`[qkv|z|a|b]` matmul output as `x` with `channels=C` (the conv indexes pages by the real
+width) and the same tensor as `a` and `b` with `a_col`/`b_col` (8192 and 8216 of 8256 here:
+unaligned, spanning two tiles), gathering the 24 gate columns per element in L1 from the
+one or two source tiles. `patch_direct.py`; unit test passes at both projection widths
+and bucketed batches. Wired behind `QWEN_GDN_PROJ_DIRECT=1` (`_project_qkvzab_raw` keeps
+the projection whole; only `z` is still sliced, for the output gate). Removes the `qkv`,
+`ab`, `a` and `b` slices — 4 ops per layer. A/B queued.
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it

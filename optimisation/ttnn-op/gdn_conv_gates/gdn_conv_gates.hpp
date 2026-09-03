@@ -33,6 +33,10 @@ namespace ttnn::transformer {
  *
  * Returns conv_out [1, B, C], beta [1, B, Nv], g [1, B, Nv] (all TILE, x's dtype).
  *
+ * Direct read (milestone 4): x may be the whole fused projection output [1, B, W] with
+ * `channels` = C (the conv reads its first C columns), and a / b may be that same tensor
+ * with `a_col` / `b_col` naming the element column where head 0 sits -- no slices needed.
+ *
  * Rows of x at or beyond `batch` (default: x's row count) are treated as zero when they
  * enter the shift register, which is what bucketed decode (B < Bmax) needs; idle rows'
  * conv_out is don't-care. One Tensix core per (batch-tile, channel-tile); the gates run
@@ -47,6 +51,9 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> gdn_decode_conv_gates(
     const ttnn::Tensor& dt_bias,
     const ttnn::Tensor& neg_exp_A,
     std::optional<uint32_t> batch = std::nullopt,
-    const std::optional<ttnn::MemoryConfig>& memory_config = std::nullopt);
+    const std::optional<ttnn::MemoryConfig>& memory_config = std::nullopt,
+    std::optional<uint32_t> channels = std::nullopt,
+    uint32_t a_col = 0,
+    uint32_t b_col = 0);
 
 }  // namespace ttnn::transformer

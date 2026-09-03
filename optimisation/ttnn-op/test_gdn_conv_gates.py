@@ -86,10 +86,56 @@ def run_case(dev, B, Bmax, seed):
     return ok
 
 
+def run_direct_case(dev, B, Bmax, seed):
+    """Milestone 4: x is the whole [qkv|z|a|b] projection output; a and b are column windows."""
+    torch.manual_seed(seed)
+    Z = NV * 128
+    W = C + Z + 2 * NV  # 8240 at this shape; the real projection pads to 8256 -- test both widths
+    for Wpad in (W, C + Z + 64):
+        full = torch.randn(1, B, Wpad)
+        st = [torch.randn(1, Bmax, C) for _ in range(K)]
+        taps = [torch.randn(1, 1, C) * 0.5 for _ in range(K)]
+        dtb = torch.randn(1, 1, NV)
+        nega = -torch.exp(torch.randn(1, 1, NV))
+        az = C + Z
+        x, a, b = full[:, :, :C], full[:, :, az : az + NV], full[:, :, az + NV : az + 2 * NV]
+        r = lambda t: t.to(torch.bfloat16).float()
+        x_pad = torch.zeros(1, Bmax, C); x_pad[:, :B] = r(x)
+        win = [r(st[1]), r(st[2]), r(st[3]), x_pad]
+        conv_ref = torch.nn.functional.silu(sum(win[j] * r(taps[j]) for j in range(K)))
+        beta_ref = torch.sigmoid(r(b))
+        g_ref = r(nega) * torch.nn.functional.softplus(r(a) + r(dtb), beta=1.0, threshold=20.0)
+        tfull = tt(dev, full)
+        tst = [tt(dev, s_) for s_ in st]
+        out, beta, g = ttnn.transformer.gdn_decode_conv_gates(
+            tfull, tst, [tt(dev, t) for t in taps], tfull, tfull, tt(dev, dtb), tt(dev, nega),
+            batch=B, memory_config=ttnn.L1_MEMORY_CONFIG, channels=C, a_col=az, b_col=az + NV,
+        )
+        out_t = ttnn.to_torch(out).float()[:, :B]
+        beta_t = ttnn.to_torch(beta).float()[:, :B]
+        g_t = ttnn.to_torch(g).float()[:, :B]
+        st_after = [ttnn.to_torch(s_).float() for s_ in tst]
+        res = {
+            "W": Wpad,
+            "conv_pcc": pcc(out_t, conv_ref[:, :B]),
+            "beta_pcc": pcc(beta_t, beta_ref),
+            "beta_maxerr": (beta_t - beta_ref).abs().max().item(),
+            "g_pcc": pcc(g_t, g_ref),
+            "shift_exact": all(torch.equal(st_after[j], win[j]) for j in range(K)),
+        }
+        ok = res["conv_pcc"] > 0.999 and res["beta_pcc"] > 0.999 and res["g_pcc"] > 0.999 and res["shift_exact"]
+        print(f"CASE direct B={B} Bmax={Bmax} W={Wpad}: {'PASS' if ok else 'FAIL'} {res}", flush=True)
+        if not ok:
+            return False
+    return True
+
+
 def main():
     dev = ttnn.open_device(device_id=0, l1_small_size=24576)
     try:
         ok = True
+        ok &= run_direct_case(dev, 8, 8, 11)
+        ok &= run_direct_case(dev, 3, 8, 12)
         ok &= run_case(dev, 8, 8, 0)
         ok &= run_case(dev, 1, 8, 1)
         ok &= run_case(dev, 3, 8, 2)
