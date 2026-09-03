@@ -240,11 +240,12 @@ biggest identified lever, and it is not in this plan.**
 > -v ~/ttcache:/ttcache -e TT_METAL_CACHE=/ttcache    # readiness 510-615 s -> 165-270 s
 > ```
 >
-> **K's two kernels (2026-09-03): −4.2 ms at B=1, −5.1 ms at B=8 on the demo step, and
-> on the endpoint ship 61.3 → 54.8 ms ITL (−10.6%, +12% per user; GSM8K 57/60, gate passed)** —
-> need the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + three op dirs)
-> plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
-> QWEN_GDN_FUSED_INPLACE=1` (`rig/runshipk.sh 2` is the exact command).
+> **K (2026-09-03): −5.0 ms at B=1, −7.4 ms at B=8 on the demo step; on the endpoint ship
+> 61.3 → 54.8 → ≈ 50.4 ms ITL with the direct read (best arm 48.9 ms, 20.4 tok/s per user,
+> 157 aggregate); GSM8K 57/60, gate passed on the full stack** — needs the K graft
+> (`optimisation/ttnn-op/build-k.sh` output: both `.so` + the op dirs) plus `wrap-K/tp.py`
+> and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1 QWEN_GDN_PROJ_DIRECT=1
+> QWEN_GDN_FUSED_INPLACE=1` (`PROJDIRECT=1 rig/runshipk.sh <tag> 2` is the exact command).
 >
 > Two more need a mounted file: lever E (`get_num_links` override, −1.35 ms; upstream
 > #55125) and the in-place state write (−0.42 / −3.26 ms; `wrap-3c/`). B0's shard
@@ -775,7 +776,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the GDN decode layer — **three of four slices DONE and gated: conv+gates, packed q/k/v, direct projection read: −5.0 ms B=1 / −7.4 ms B=8 (demo); endpoint −6.5 ms ITL before the direct read, GSM8K 57/60**; norm+gate as a standalone op measured negative (fold into the recurrence op next) | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K 5.0 / 7.4) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
+| K | Fuse the GDN decode layer — **conv+gates, packed q/k/v and direct projection read DONE and gated: −5.0 ms B=1 / −7.4 ms B=8 (demo); endpoint ITL 61.3 → ≈50.4 ms, GSM8K 57/60 on the full stack**; norm+gate fold into the recurrence op is the last slice (standalone op measured negative) | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K 5.0 / 7.4) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -964,7 +965,30 @@ the projection whole; only `z` is still sliced, for the output gate). Removes th
 
 More than four launches' worth at B=8: the `a`/`b` slices end mid-tile, and the model's
 own comment records that such a slice "untilizes the full 4120-wide tensor" — a real
-relayout, not a view. Endpoint A/B and GSM8K on the resulting stack queued.
+relayout, not a view.
+
+**Endpoint (ship + in-place + K, with vs without the direct read; interleaved off, on, on,
+off; ITL at 8 streams, first token dropped; all engagement lines asserted):**
+
+| arm | direct read | ITL | per user | aggregate | output md5 |
+| --- | --- | --- | --- | --- | --- |
+| kd-off-a | off | 53.59 ms | 18.66 | 147.2 | `be88aa23c04f` |
+| kd-on-a | **on** | 51.90 ms | 19.27 | 149.7 | `be88aa23c04f` |
+| kd-on-b | **on** | **48.92 ms** | 20.44 | 157.5 | `be88aa23c04f` |
+| kd-off-b | off | 50.32 ms | 19.87 | 153.6 | `be88aa23c04f` |
+
+Per pair −1.7 and −1.4 ms: **≈ −1.5 ms ITL (−3%)** on the endpoint, output byte-identical
+to the K stack (the slices only moved data). Host load fell from 20 to 7 across the four
+arms, which is why both halves improve down the table; the pairs are the reading. Best
+arm so far on this endpoint: **48.9 ms ITL, 20.4 tok/s per user, 157.5 aggregate** —
+against the README endpoint's ≈ 12.6 per user, +62%.
+
+**GSM8K gate on this exact stack (A + C + D + shard-greedy + in-place + K's three slices,
+direct read engaged in all 48 layers; 60 items, 8 concurrent, 2,048 tokens, greedy):
+57/60 = 95.0%** — the bar, unchanged. **K's conv+gates, packed q/k/v and direct-read are
+adopted.** What K still holds is the norm+gate fold into the recurrence op (§K3 above,
+≈ −1 ms/step at B=8), after which the GDN layer is matmul → conv+gates → recurrence →
+matmul → all-reduce plus one `z` slice: the "71 ops → ~10" the lever table promised.
 
 **K so far (demo device step, A + in-place baseline → after kernels 1, 2 and 4):**
 
