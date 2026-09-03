@@ -240,6 +240,11 @@ biggest identified lever, and it is not in this plan.**
 > -v ~/ttcache:/ttcache -e TT_METAL_CACHE=/ttcache    # readiness 510-615 s -> 165-270 s
 > ```
 >
+> **K's two kernels (2026-09-03): −4.2 ms at B=1, −5.1 ms at B=8 on the demo step** —
+> need the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + three op dirs)
+> plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1`.
+> Endpoint A/B in progress.
+>
 > Two more need a mounted file: lever E (`get_num_links` override, −1.35 ms; upstream
 > #55125) and the in-place state write (−0.42 / −3.26 ms; `wrap-3c/`). B0's shard
 > readback now reaches the endpoint too (row 3d: −4.4 ms ITL at 8 streams, greedy-only,
@@ -769,7 +774,7 @@ the two mechanisms that table exposes.
 
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
-| K | Fuse the whole GDN decode layer (71 ops → ~10) — **first kernel (conv+gates) DONE: −1.78 ms B=1 / −2.40 ms B=8**; milestone 2 (packed q/k/v into the recurrence reader) next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, conv+gates 1.78 / 2.40) | days per kernel now that the build loop is 2 min | numerics; trace-address discipline |
+| K | Fuse the whole GDN decode layer (71 ops → ~10) — **two kernels DONE: conv+gates −1.78/−2.40 ms, packed q/k/v −2.40/−2.70 ms (B=1/B=8)**; norm+gate kernel next | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; A took 2.55 / 9.5, K's two kernels 4.2 / 5.1) | days per kernel with the 2-min build loop | numerics; trace-address discipline |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -872,8 +877,43 @@ from GQA source head `h // rf`, so the model's 3 slices, 8 reshapes and 2
 `repeat_interleave`s are gone — 13 more ops per layer. Equivalence test
 (`test_packed.py`, card M): packed vs unpacked **byte-identical** `o` and new state at
 B=1/8/32 bf16 and B=8 fp32; in-place works on the packed path. Build 27 s incremental.
-Wired behind `QWEN_GDN_PACKED_QKV=1` (requires the conv+gates kernel engaged); A/B on top
-of milestone 1 queued.
+Wired behind `QWEN_GDN_PACKED_QKV=1` (requires the conv+gates kernel engaged).
+
+**A/B at B=8 on top of milestone 1 (both arms conv+gates on; two interleaved pairs; both
+engagement lines asserted per arm):**
+
+| arm | packed q/k/v | `exec_sync` |
+| --- | --- | --- |
+| p8-off-a | off | 55.45 ms |
+| p8-on-a | **on** | 52.76 ms |
+| p8-on-b | **on** | 52.93 ms |
+| p8-off-b | off | 55.64 ms |
+
+**−2.70 ms per step (−4.9%) at B=8.** K so far: 57.9 → 55.5 → **52.9 ms** at B=8
+(−5.1 ms, −8.8% in two kernels; 25 ops per layer removed of the 68). From the README's
+composed decode (70.6 ms at B=8) the stack now stands at −25%.
+
+**A/B at B=1 (same shape):**
+
+| arm | packed q/k/v | `exec_sync` | decode tok/s |
+| --- | --- | --- | --- |
+| p1-off-a | off | 49.33 ms | 20.03 |
+| p1-on-a | **on** | 47.12 ms | 20.74 |
+| p1-on-b | **on** | 47.12 ms | 20.56 |
+| p1-off-b | off | 49.71 ms | 19.29 |
+
+**−2.40 ms per step (−4.8%) at B=1.** K so far at B=1: 51.3 → 49.5 → **47.1 ms**
+(−4.2 ms, −8.2%); from the README's composed 54.45 ms, −13.5%. Note the per-op floor
+these two kernels recovered: 25 ops × 48 layers = 1,200 launches per step, worth 4.2 ms
+at B=1 and 5.1 ms at B=8 — 3.5–4.3 µs each, the §3.3 number.
+
+**What K has left.** Of the 68 small ops per layer, 25 are gone; the recurrence is one
+op; the out-projection and all-reduce stay. Remaining per layer: the `o` `to_layout`
+(ROW_MAJOR → TILE), `reshape` × 2, `rms_norm`, `silu` + `multiply` (the norm+gate
+kernel, §4 K item 3, ~6 ops), the `[1,B,C]`-side reshapes in the projection, and — under
+fp32 (`QWEN35_GDN_DECODE_BF16` unset) — the typecasts, which C already removes. The
+norm+gate kernel is the next slice, and it can absorb the `o` relayout by producing
+the gated, normed output directly in the `[1,B,Nv·Dv]` layout the out-projection wants.
 
 **A/B at B=8 (`batched_128_b8`, host mode, A + in-place on; two interleaved pairs; engagement
 line asserted per arm):**
