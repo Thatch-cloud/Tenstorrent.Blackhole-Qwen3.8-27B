@@ -782,6 +782,8 @@ the two mechanisms that table exposes.
 | | Lever | Expected | Effort | Risk |
 | --- | --- | ---: | --- | --- |
 | K | Fuse the GDN decode layer — **COMPLETE and gated: conv+gates, packed q/k/v, direct projection read, norm+gate fold. Demo 51.3 → 44.1 ms B=1 (with C), 57.9 → 46.5 ms B=8; endpoint 61.3 → 48.1 ms ITL; GSM8K 57/60** | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; realised ≈ 7 / 11 with C) | done | numerics; trace-address discipline; ring-layout rule for compute kernels |
+| K6 | Recurrence reader without row zeroing (rank-1 write as two broadcasts) — **DONE, byte-identical, gate carried** | **−0.52 ms B=8 / −0.85 ms B=1 *M*** | done | none; the op is state-bandwidth-bound at B=8 after this (state fast path and two-barrier reader both closed at 0) |
+| M | Attention decode prologue as one op (`attn_decode_prep`: head split, QK norm, partial RoPE, KV pad+reshard; 30 ops → 1) — **DONE, gated 57/60 and 188/200** | **−0.92 ms B=8 / −0.50 ms B=1 *M*; endpoint ITL ≈ 47.5 ms** | done | q/k rounding differs from the chain at the bf16 level (200-item mix 4 wrong / 8 unparseable vs 0 / 12 at equal totals) |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |

@@ -83,3 +83,10 @@ B=8). The first kernel of K replaces the conv shift-register, the four-tap FIR +
 and the beta/g gates — 14 ops per layer — with one op, and is designed so the
 recurrence op's reader can take its output layout directly, which retires the q/k/v
 split and the GQA expansion as well. Work in `ttnn-op/` as it lands.
+
+## Added 2026-09-04
+
+- `ttnn-op/attn_prep/` — `ttnn.transformer.attn_decode_prep`: the attention layer's decode prologue as one op (head split from the fused projection output, QK RMS norm with the (1+w) weight, partial rotate-half RoPE, k/v padded and emitted in the KV update's height-sharded config). Wired by `ttnn-op/patch_attn_prep_wire.py` into `tt/attention/tp.py` behind `QWEN_ATTN_PREP=1` (engagement line `QWEN_ATTN_PREP engaged`). Test: `ttnn-op/test_attn_prep.py`.
+- `ttnn-op/patch_reader_fast.py` — recurrence op reader without per-tile row zeroing (the rank-1 write is two broadcasts). Adopted, byte-identical.
+- `ttnn-op/patch_state_fast.py`, `ttnn-op/patch_reader_2barrier.py` — measured negatives, kept as records (not applied).
+- Ship stack env now also carries `QWEN_ATTN_PREP=1`; the runners take `ATTNPREP=1`.
