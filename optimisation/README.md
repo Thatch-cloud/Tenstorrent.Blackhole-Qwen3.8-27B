@@ -90,3 +90,4 @@ split and the GQA expansion as well. Work in `ttnn-op/` as it lands.
 - `ttnn-op/patch_reader_fast.py` — recurrence op reader without per-tile row zeroing (the rank-1 write is two broadcasts). Adopted, byte-identical.
 - `ttnn-op/patch_state_fast.py`, `ttnn-op/patch_reader_2barrier.py` — measured negatives, kept as records (not applied).
 - Ship stack env now also carries `QWEN_ATTN_PREP=1`; the runners take `ATTNPREP=1`.
+- `graft/Dockerfile.k` — the full ship stack as a serving BASE image (`tt-vllm:qwen38-k`): FROM the lever-A graft image the production `thatch-serving-tt` builds from, every grafted op's kernels, the rebuilt libraries, the wired model files, and the engagement flags as ENV. Shard-greedy is deliberately left out (greedy-only). Hand it to Thatch.Server's `tt-serving-image.yml` as `base`; context and the tt config stay per-model in that repo's `engine.py`.
