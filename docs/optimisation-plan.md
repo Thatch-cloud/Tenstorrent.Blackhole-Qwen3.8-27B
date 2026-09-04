@@ -1180,8 +1180,17 @@ line asserted on every 'on' arm (16 layers), demo determinism check passing:**
 Two traps on the way in, both runner-side: the op's directory needs its own graft mount
 line in every runner (the model runners mount op directories one by one; a missing mount
 is the "Kernel file … doesn't exist" throw), and the endpoint/GSM runners keep all mounts
-on one line, so a copy-the-line patch mounts every other op twice. Endpoint arm and GSM8K
-gate queued.
+on one line, so a copy-the-line patch mounts every other op twice.
+
+**Endpoint arm (single, host load 12–25): ITL 50.8 ms, output md5 `eb3f48f31cf3` (q/k
+numerics differ from the chain's at the bf16-rounding level, so the text differs).** Above the
+48–49 ms of the earlier arms, against a demo step 0.9 ms lower — the endpoint number carries
+the host loop and this arm ran under a heavier load, so an interleaved endpoint A/B is queued
+rather than a verdict from one arm. **GSM8K gate: 56/60 (2 wrong, 2 unparseable) — one
+below the 57/60 gate; not adopted as is.** The op rounds once (norm·w in fp32 → bf16) where
+the chain rounds twice (`rms_norm` emits bf16, the (1+w) multiply is a separate bf16 op);
+adding that intermediate rounding to match the chain's rounding points exactly, then
+re-gating. If the 60-item gate stays at 56, both arms go to the 200-item set.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
