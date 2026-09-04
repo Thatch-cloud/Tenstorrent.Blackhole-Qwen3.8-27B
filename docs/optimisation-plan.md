@@ -1219,7 +1219,18 @@ joins the ship stack). Honest note: the baseline's three misses were all unparse
 (answers cut at the token limit), v2's include two wrong answers (the same two as v1: Carlos'
 lemon tree 12 vs 13, the dance class 40 vs 60), so the intermediate rounding did not move
 those; with greedy decoding on 60 items a bf16-level perturbation flips individual reasoning
-paths either way. Both arms queued on the 200-item set to size that.
+paths either way. Both arms on the 200-item set (8 concurrent, 2048 tokens, greedy):
+
+| | correct | wrong | unparseable |
+| --- | --- | --- | --- |
+| prep off (current stack) | 188/200 = 94.0% | 0 | 12 |
+| prep on | 188/200 = 94.0% | 4 | 8 |
+
+Equal totals, so the gate holds at scale; the mix moved (four wrong answers — Carlos' lemon
+tree, the dance class, Gene's quilt, and the company payroll — against four fewer
+truncations). That is what a bf16-rounding-level change to q/k looks like under greedy
+decoding: some chains re-route. Flagged, not hidden; the earlier 200-item record for the
+fold (186–187/200 with ~10 wrong) shows the stack's own run-to-run band is wider than this.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
