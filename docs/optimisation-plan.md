@@ -1252,6 +1252,24 @@ attempt deadlocked on CB accounting and was not pursued). **Rule: the recurrence
 state-bandwidth-bound at B=8; only a smaller state (it is already bf16 under lever C) would
 move it, and that is a model-numerics question, not a kernel one.**
 
+**Serving the stack through the node-agent (2026-09-04).** The production endpoint is not the
+benchmark runners' hand-started container: `thatch-node-agent` (Thatch.Server) launches
+`thatch-serving-tt:latest` as `thatch-inference-Qwen-Qwen3.8-27B`, and that image is built by
+Thatch.Server's `tt-serving-image.yml` on top of a `base` tag — today
+`tt-vllm:qwen38-fused-decode`, i.e. lever A only. Context (`max_model_len` 65536 for
+`Qwen/Qwen3.8-27B`) and the tt `additional_config` are per-model kwargs in that repo's
+`engine.py`; `thinking_budget_tokens` (#2202) is a request field of the serving wrapper and
+never reaches the model. So the stack ships as a new base image, not as mounts:
+`optimisation/graft/Dockerfile.k` → `tt-vllm:qwen38-k` (FROM the lever-A image, every grafted
+op's kernels, the rebuilt libraries, the two wired model files, the ten flags as ENV; shard-greedy
+left out because it forces argmax on temperature>0 requests). Built on the rig; **smoke-tested
+standalone at 65536 context with only the image's ENV: ready in 5.5 min, all K flags engaged,
+chat streams, 8-stream ITL 54.7 ms** (≈ 47.5 + 4.4 for the absent shard-greedy + host load).
+Not pushed. To go live: push the tag to zot, run `tt-serving-image.yml` with
+`base=zot.thatch.local:5000/tt-vllm:qwen38-k`, and let the agent restart the container.
+Follow-up worth its 4.4 ms: a request-aware shard-greedy (on-device argmax only when every
+active sequence is greedy).
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
