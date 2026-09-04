@@ -1192,6 +1192,24 @@ the chain rounds twice (`rms_norm` emits bf16, the (1+w) multiply is a separate 
 adding that intermediate rounding to match the chain's rounding points exactly, then
 re-gating. If the 60-item gate stays at 56, both arms go to the 200-item set.
 
+**Endpoint A/B (interleaved off, on, on, off; 8 streams, 200 tokens, first token dropped):**
+
+| | prep off | prep on |
+| --- | --- | --- |
+| median ITL | 51.18 / 48.60 ms | **48.16 / 46.83 ms** |
+| per user | 19.5 / 20.6 tok/s | **20.8 / 21.4 tok/s** |
+| aggregate | 140 / 158 tok/s | **151 / 164 tok/s** |
+
+**≈ −2.4 ms ITL**, more than the demo's −0.9 ms device delta: the endpoint runs the model
+eagerly, so each of the ~480 op launches per step the op removes (30 × 16 layers) also cost
+host dispatch time. The single 50.8 ms arm above was load noise (its off-partner under the
+same load reads 51.2).
+
+**v2 of the op (2026-09-04): the intermediate bf16 rounding (norm → bf16 → ×(1+w) → bf16,
+the chain's two rounding points) and the reader gathering four heads per barrier instead of
+one.** Tests pass; op cost unchanged at B=8 (49.6 µs: +16 rounding passes offset by the
+grouped reads) and 44.0 µs at B=1 (from 46.4). Re-gating on the 60-item set.
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it

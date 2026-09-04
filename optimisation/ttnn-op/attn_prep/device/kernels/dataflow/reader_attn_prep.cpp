@@ -32,6 +32,7 @@ void kernel_main() {
     constexpr uint32_t KOT = get_compile_time_arg_val(6);
     constexpr uint32_t VOT = get_compile_time_arg_val(7);
     constexpr uint32_t GOT = get_compile_time_arg_val(8);
+    constexpr uint32_t HG = 4;  // heads gathered per barrier (staging ring = HDt*HG pages)
 
     constexpr auto qkv_a = TensorAccessorArgs<9>();
     constexpr auto cos_a = TensorAccessorArgs<qkv_a.next_compile_time_args_offset()>();
@@ -120,24 +121,31 @@ void kernel_main() {
                 zero_words(tbase + t * tb + (e0 + 256) * elem, cw);
             }
         }
-        // head rows: DMA the head's HDt tiles (row b lives at row r of each), scatter row r into row h
+        // head rows: DMA the heads' HDt tiles (row b lives at row r of each) in groups of HG heads
+        // behind one barrier, then scatter row r of each tile into row h of the block's tile.
         const uint32_t se0 = row_e0(r);
-        for (uint32_t h = 0; h < n_rows; h++) {
+        for (uint32_t h0 = 0; h0 < n_rows; h0 += HG) {
+            const uint32_t hn = (n_rows - h0 < HG) ? (n_rows - h0) : HG;
             CircularBuffer scb(cb_src);
-            scb.reserve_back(HDt);
+            scb.reserve_back(HDt * HG);
             const uint32_t sbase = scb.get_write_ptr();
-            const uint32_t first_page = row_page0 + off_t + h * HDt;
-            for (uint32_t t = 0; t < HDt; t++) {
-                noc.async_read(qkv_acc, scb, tb, {.page_id = first_page + t}, {.offset_bytes = t * tb});
+            for (uint32_t hh = 0; hh < hn; hh++) {
+                const uint32_t first_page = row_page0 + off_t + (h0 + hh) * HDt;
+                for (uint32_t t = 0; t < HDt; t++) {
+                    noc.async_read(qkv_acc, scb, tb, {.page_id = first_page + t}, {.offset_bytes = (hh * HDt + t) * tb});
+                }
             }
             noc.async_read_barrier();
-            const uint32_t de0 = row_e0(h);
-            for (uint32_t t = 0; t < HDt; t++) {
-                copy_words(sbase + t * tb + se0 * elem, tbase + t * tb + de0 * elem, cw);
-                copy_words(sbase + t * tb + (se0 + 256) * elem, tbase + t * tb + (de0 + 256) * elem, cw);
+            for (uint32_t hh = 0; hh < hn; hh++) {
+                const uint32_t de0 = row_e0(h0 + hh);
+                const uint32_t hb = sbase + hh * HDt * tb;
+                for (uint32_t t = 0; t < HDt; t++) {
+                    copy_words(hb + t * tb + se0 * elem, tbase + t * tb + de0 * elem, cw);
+                    copy_words(hb + t * tb + (se0 + 256) * elem, tbase + t * tb + (de0 + 256) * elem, cw);
+                }
             }
-            scb.push_back(HDt);
-            scb.pop_front(HDt);  // staging recycled by this kernel alone
+            scb.push_back(HDt * HG);
+            scb.pop_front(HDt * HG);  // staging recycled by this kernel alone
         }
         tcb.push_back(HDt);
 

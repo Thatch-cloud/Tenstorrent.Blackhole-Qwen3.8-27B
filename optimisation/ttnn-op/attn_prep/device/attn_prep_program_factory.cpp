@@ -50,6 +50,7 @@ constexpr uint32_t cosf = tt::CBIndex::c_18;  // [RDt] fp32
 constexpr uint32_t sinf = tt::CBIndex::c_19;  // [RDt] fp32
 constexpr uint32_t ta = tt::CBIndex::c_20;    // 1 fp32 rope temp
 constexpr uint32_t tb = tt::CBIndex::c_21;    // 1 fp32 rope temp
+constexpr uint32_t xnr = tt::CBIndex::c_22;   // [HDt] fp32 bf16-valued xn
 }  // namespace cbap
 
 tt::tt_metal::ProgramDescriptor AttnPrepProgramFactory::create_descriptor(
@@ -83,7 +84,7 @@ tt::tt_metal::ProgramDescriptor AttnPrepProgramFactory::create_descriptor(
             .format_descriptors = {
                 {CBFormatDescriptor{.buffer_index = static_cast<uint8_t>(idx), .data_format = fmt, .page_size = ts}}}});
     };
-    add_cb(cbap::src, HDt, 2, df_io);
+    add_cb(cbap::src, HDt * 4, 1, df_io);  // staging: 4 heads' tiles per barrier (reader HG)
     add_cb(cbap::blk, HDt, 2, df_io);
     add_cb(cbap::out, HDt, 2, df_io);
     add_cb(cbap::cos, RDt, 2, df_io);
@@ -105,6 +106,7 @@ tt::tt_metal::ProgramDescriptor AttnPrepProgramFactory::create_descriptor(
     add_cb(cbap::sinf, RDt, 1, f32);
     add_cb(cbap::ta, 1, 1, f32);
     add_cb(cbap::tb, 1, 1, f32);
+    add_cb(cbap::xnr, HDt, 1, f32);
 
     const std::string kdir = "ttnn/cpp/ttnn/operations/transformer/attn_prep/device/kernels/";
     const uint32_t q_off_t = 0;

@@ -35,7 +35,7 @@ namespace {
 
 constexpr uint32_t cb_blk = 1, cb_out = 2, cb_cos = 3, cb_sin = 4, cb_wq = 5, cb_wk = 6;
 constexpr uint32_t cb_wqf = 7, cb_wkf = 8, cb_ones = 9, cb_xf = 10, cb_sq = 11, cb_sc = 12, cb_fac = 13;
-constexpr uint32_t cb_xn = 14, cb_xw = 15, cb_rt = 16, cb_xwr = 17, cb_cosf = 18, cb_sinf = 19, cb_ta = 20, cb_tb = 21;
+constexpr uint32_t cb_xn = 14, cb_xw = 15, cb_rt = 16, cb_xwr = 17, cb_cosf = 18, cb_sinf = 19, cb_ta = 20, cb_tb = 21, cb_xnr = 22;
 
 inline void WAIT(uint32_t cb, uint32_t n) { CircularBuffer(cb).wait_front(n); }
 inline void POP(uint32_t cb, uint32_t n) { CircularBuffer(cb).pop_front(n); }
@@ -229,9 +229,17 @@ void kernel_main() {
         WAIT(cb_xn, HDt);
         POP(cb_xf, HDt);
         POP(cb_fac, 1);
-        bcast_rows_mul(cb_xn, cb_wf, cb_xw, HDt);
-        WAIT(cb_xw, HDt);
+        // round the normalised block to bf16 first: the composed chain's rms_norm emits bf16 and
+        // the (1+w) multiply is a separate bf16 op, so match both rounding points
+        copy_tiles(cb_xn, cb_rt, HDt);
+        WAIT(cb_rt, HDt);
         POP(cb_xn, HDt);
+        copy_tiles(cb_rt, cb_xnr, HDt);
+        WAIT(cb_xnr, HDt);
+        POP(cb_rt, HDt);
+        bcast_rows_mul(cb_xnr, cb_wf, cb_xw, HDt);
+        WAIT(cb_xw, HDt);
+        POP(cb_xnr, HDt);
         // round to bf16 where the composed chain does (rms_norm * w -> bf16), then back to fp32
         copy_tiles(cb_xw, cb_rt, HDt);
         WAIT(cb_rt, HDt);
