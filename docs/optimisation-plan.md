@@ -1298,7 +1298,7 @@ does not affect reachability.
 Follow-up worth its 4.4 ms: a request-aware shard-greedy (on-device argmax only when every
 active sequence is greedy).
 
-**Lever N — prefill/decode interleaving on the endpoint (scoped 2026-09-04, not started).**
+**Lever N — prefill/decode interleaving on the endpoint (scoped 2026-09-04; design in `lever-N-prefill-decode-interleave.md`, not implemented).**
 Observed on the managed container while it served real traffic: engine log `Running: 2,
 Waiting: 3`, prefill bursts of ~4,600 tok/s (prompts around 45k tokens) during which
 generation throughput fell to 0–0.6 tok/s; a 60-token probe waited 17.5 s at the container
