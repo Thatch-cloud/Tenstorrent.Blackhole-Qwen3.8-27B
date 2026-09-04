@@ -1202,10 +1202,12 @@ re-gating. If the 60-item gate stays at 56, both arms go to the 200-item set.
 | per user | 19.5 / 20.6 tok/s | **20.8 / 21.4 tok/s** |
 | aggregate | 140 / 158 tok/s | **151 / 164 tok/s** |
 
-**≈ −2.4 ms ITL**, more than the demo's −0.9 ms device delta: the endpoint runs the model
-eagerly, so each of the ~480 op launches per step the op removes (30 × 16 layers) also cost
-host dispatch time. The single 50.8 ms arm above was load noise (its off-partner under the
-same load reads 51.2).
+**≈ −2.4 ms ITL by pair means, against a device delta of −0.9 ms.** The endpoint's decode is
+traced (`qwen36_vllm.py` captures per-bucket decode traces at warmup and replays them), so
+the op-count reduction does not save host dispatch there; the difference between the two
+deltas is inside the endpoint's own spread (the two off arms read 51.2 and 48.6 under
+different host loads). The device-side −0.9 ms is the number to carry; the single 50.8 ms
+arm above was load noise (its off-partner under the same load reads 51.2).
 
 **v2 of the op (2026-09-04): the intermediate bf16 rounding (norm → bf16 → ×(1+w) → bf16,
 the chain's two rounding points) and the reader gathering four heads per barrier instead of
