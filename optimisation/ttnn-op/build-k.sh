@@ -9,7 +9,7 @@ G=$HOME/opgraft-K
 
 echo "### build start $(date -Is)"
 # Replace (not nest into) each op tree in the build container.
-for op in gdn_conv_gates gdn_norm_gate decode_gated_delta_rule; do
+for op in gdn_conv_gates gdn_norm_gate attn_prep decode_gated_delta_rule; do
   docker exec ttbuild rm -rf $OPS/$op
   docker cp "$HOME/kwork/$op" ttbuild:$OPS/$op
 done
@@ -25,7 +25,7 @@ if [ "$rc" != "0" ]; then echo "### build FAILED; graft not assembled"; exit 1; 
 mkdir -p "$G"
 docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so "$G/_ttnncpp.so"
 docker cp ttbuild:/opt/tt-metal/build_Release/ttnn/_ttnn.so "$G/_ttnn.so"   # the Python module (binding lives here)
-for op in gdn_conv_gates gdn_norm_gate decode_gated_delta_rule; do
+for op in gdn_conv_gates gdn_norm_gate attn_prep decode_gated_delta_rule; do
   rm -rf "$G/$op"; cp -r "$HOME/kwork/$op" "$G/$op"
 done
 rm -rf "$G/gdn_decay"; cp -r "$HOME/opgraft-53587/gdn_decay" "$G/"

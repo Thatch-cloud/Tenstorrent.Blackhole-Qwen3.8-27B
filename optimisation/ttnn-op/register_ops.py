@@ -9,6 +9,7 @@ ROOT = "/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer"
 OPS = [
     ("gdn_conv_gates", "bind_gdn_conv_gates"),
     ("gdn_norm_gate", "bind_gdn_norm_gate"),
+    ("attn_prep", "bind_attn_prep"),
 ]
 
 

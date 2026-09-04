@@ -17,6 +17,7 @@ timeout 900 docker run --rm --name ktest \
   -v "$G/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro" \
   -v "$G/gdn_conv_gates:$OPS/gdn_conv_gates:ro" \
   -v "$G/gdn_norm_gate:$OPS/gdn_norm_gate:ro" \
+  -v "$G/attn_prep:$OPS/attn_prep:ro" \
   -v "$G/decode_gated_delta_rule:$OPS/decode_gated_delta_rule:ro" \
   -v "$G/gdn_decay:$OPS/gdn_decay:ro" \
   -v "$T:/tmp/test_k.py:ro" \

@@ -1140,6 +1140,35 @@ Endpoint arm: ITL 48.9 ms (single arm, host noise ±1 ms), output md5 `975a74b6c
 **byte-identical to the gated fold's**, so its 57/60 carries over. **Adopted.** Demo step
 now **43.5 ms at B=1, 46.1 ms at B=8** with lever C.
 
+**Attention decode prologue — one op (2026-09-04).** The attention layer's 44 ops at B=1
+(66 at B=8) are 3.44 µs each of launch cost at B=8 and 30 of them sit between the fused
+QKV projection and the KV update: two slices, `nlp_create_qkv_heads_decode` and its three
+reshards, two `rms_norm`s and weight multiplies, two partial-RoPE chains of eight ops each
+(slice, transpose, `rotary_embedding_hf`, transpose, reshard, slice, reshard, concat) and
+two pad+reshards for the cache update. All of it is row-independent per head, so one op
+(`ttnn.transformer.attn_decode_prep`, `optimisation/ttnn-op/attn_prep/`) takes the
+projection output directly, K1-style: one core per (batch row, kind ∈ q/k/v/gate), the
+reader assembles the head block (row b of the shared tiles into row h, rows beyond the
+head count zeroed), the compute does the per-head rms norm, the (1+w) weight, a bf16
+rounding at the chain's own point, and the tile-aligned rotate-half on the first 64 dims;
+v and gate are pure copies the reader lands in the output ring. q and gate come out
+interleaved `[1,B,NH,HD]`, k and v come out `[1,B,32,HD]` in the KV update's height-sharded
+config through the tensor accessor. Dims at TP=2: NH=12, NKV=2, HD=256, RD=64, W=7168.
+
+Unit test (`test_attn_prep.py`, B=8/1/3/32): q/k PCC > 0.99999, max rel err 0.5–0.7%, v and
+gate exact, padding rows zero. Op vs the composed chain in a replayed trace:
+
+| | composed chain | `attn_decode_prep` | ×16 layers |
+| --- | ---: | ---: | ---: |
+| B=8 | 124.9 µs | **49.5** | **−1.21 ms/step** |
+| B=1 | 81.3 | **46.4** | **−0.56 ms/step** |
+
+The op itself is ~46–50 µs (≈74 tile passes plus the sequential per-head gathers), which
+leaves room: dropping the bf16 round trip saves 16 passes and issuing all 96 head reads
+before one barrier shortens the reader. Wired behind `QWEN_ATTN_PREP=1`
+(`patch_attn_prep_wire.py` → `attention/tp.py`: `_qkv_raw_decode` + `_decode_from_prep`,
+paged path only). Demo A/B, endpoint arm and GSM8K gate queued.
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
