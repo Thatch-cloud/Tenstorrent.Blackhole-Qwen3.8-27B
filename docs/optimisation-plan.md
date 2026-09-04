@@ -241,8 +241,10 @@ biggest identified lever, and it is not in this plan.**
 > ```
 >
 > **K (2026-09-03/04), complete: conv+gates, packed q/k/v, direct projection read, the
-> norm+gate fold, and the recurrence reader without row zeroing. Demo step (lever C on):
-> 43.5 ms at B=1, 46.1 ms at B=8. Endpoint: ship
+> norm+gate fold, the recurrence reader without row zeroing, and the attention decode
+> prologue as one op (`QWEN_ATTN_PREP=1`, gate 57/60). Demo step (lever C on): 43.1 ms at
+> B=1, 45.3 ms at B=8; endpoint ITL 47.5 ms (interleaved pair mean, from 49.9 without the
+> attention op). Endpoint: ship
 > 61.3 → ≈ 48.1 ms ITL, 20.8 tok/s per user, 158 aggregate; GSM8K 57/60 on the full stack**
 > — needs the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + the op dirs)
 > plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
@@ -1208,7 +1210,14 @@ same load reads 51.2).
 **v2 of the op (2026-09-04): the intermediate bf16 rounding (norm → bf16 → ×(1+w) → bf16,
 the chain's two rounding points) and the reader gathering four heads per barrier instead of
 one.** Tests pass; op cost unchanged at B=8 (49.6 µs: +16 rounding passes offset by the
-grouped reads) and 44.0 µs at B=1 (from 46.4). Re-gating on the 60-item set.
+grouped reads) and 44.0 µs at B=1 (from 46.4).
+
+**GSM8K gate on v2: 57/60 (2 wrong, 1 unparseable) — passes. Adopted** (`QWEN_ATTN_PREP=1`
+joins the ship stack). Honest note: the baseline's three misses were all unparseable
+(answers cut at the token limit), v2's include two wrong answers (the same two as v1: Carlos'
+lemon tree 12 vs 13, the dance class 40 vs 60), so the intermediate rounding did not move
+those; with greedy decoding on 60 items a bf16-level perturbation flips individual reasoning
+paths either way. Both arms queued on the 200-item set to size that.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
