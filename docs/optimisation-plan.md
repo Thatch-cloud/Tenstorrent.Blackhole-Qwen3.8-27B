@@ -1167,7 +1167,21 @@ The op itself is ~46–50 µs (≈74 tile passes plus the sequential per-head ga
 leaves room: dropping the bf16 round trip saves 16 passes and issuing all 96 head reads
 before one barrier shortens the reader. Wired behind `QWEN_ATTN_PREP=1`
 (`patch_attn_prep_wire.py` → `attention/tp.py`: `_qkv_raw_decode` + `_decode_from_prep`,
-paged path only). Demo A/B, endpoint arm and GSM8K gate queued.
+paged path only).
+
+**Demo A/B (full K stack + reader lever, lever C on; interleaved off, on, on, off), engagement
+line asserted on every 'on' arm (16 layers), demo determinism check passing:**
+
+| `exec_sync` | prep off | prep on | Δ |
+| --- | --- | --- | --- |
+| B=8 | 46.30 / 46.19 | **45.37 / 45.28** | **−0.92 ms** |
+| B=1 | 43.64 / 43.56 | **43.07 / 43.14** | **−0.50 ms** |
+
+Two traps on the way in, both runner-side: the op's directory needs its own graft mount
+line in every runner (the model runners mount op directories one by one; a missing mount
+is the "Kernel file … doesn't exist" throw), and the endpoint/GSM runners keep all mounts
+on one line, so a copy-the-line patch mounts every other op twice. Endpoint arm and GSM8K
+gate queued.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
