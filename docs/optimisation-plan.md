@@ -240,8 +240,9 @@ biggest identified lever, and it is not in this plan.**
 > -v ~/ttcache:/ttcache -e TT_METAL_CACHE=/ttcache    # readiness 510-615 s -> 165-270 s
 > ```
 >
-> **K (2026-09-03/04), complete: conv+gates, packed q/k/v, direct projection read, and the
-> norm+gate fold. Demo step (lever C on): 44.1 ms at B=1, 46.5 ms at B=8. Endpoint: ship
+> **K (2026-09-03/04), complete: conv+gates, packed q/k/v, direct projection read, the
+> norm+gate fold, and the recurrence reader without row zeroing. Demo step (lever C on):
+> 43.5 ms at B=1, 46.1 ms at B=8. Endpoint: ship
 > 61.3 → ≈ 48.1 ms ITL, 20.8 tok/s per user, 158 aggregate; GSM8K 57/60 on the full stack**
 > — needs the K graft (`optimisation/ttnn-op/build-k.sh` output: both `.so` + the op dirs)
 > plus `wrap-K/tp.py` and the wrapper, with `QWEN_GDN_CONV_GATES=1 QWEN_GDN_PACKED_QKV=1
@@ -1126,8 +1127,18 @@ neighbouring rows the DMA brings in are the tensor's own finite values.
 `patch_reader_fast.py`, kernel-only. Tests: fold and packed paths pass; packed vs
 unpacked still byte-identical. **Op: 99.0 → 88.3 µs at B=8, 62.2 → 48.2 µs at B=1**
 (the broadcast form costs ~3 µs per instance over the matmul, which is why the
-broadcast version sits above the timing-only 81.5). Demo A/B old graft vs new and an
-endpoint hash arm queued.
+broadcast version sits above the timing-only 81.5).
+
+**A/B, old graft vs new (full K stack, lever C on; interleaved old, new, new, old):**
+
+| | old reader | new reader | Δ |
+| --- | --- | --- | --- |
+| B=8 `exec_sync` | 46.74 / 46.58 | **46.13 / 46.15** | **−0.52 ms** |
+| B=1 `exec_sync` | 44.3 / 44.36 | **43.48 / 43.47** | **−0.85 ms** |
+
+Endpoint arm: ITL 48.9 ms (single arm, host noise ±1 ms), output md5 `975a74b6c413` —
+**byte-identical to the gated fold's**, so its 57/60 carries over. **Adopted.** Demo step
+now **43.5 ms at B=1, 46.1 ms at B=8** with lever C.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
