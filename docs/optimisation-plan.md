@@ -784,6 +784,7 @@ the two mechanisms that table exposes.
 | K | Fuse the GDN decode layer — **COMPLETE and gated: conv+gates, packed q/k/v, direct projection read, norm+gate fold. Demo 51.3 → 44.1 ms B=1 (with C), 57.9 → 46.5 ms B=8; endpoint 61.3 → 48.1 ms ITL; GSM8K 57/60** | **11.0 ms B=1 / 22.4 ms B=8 *M*** (ceilings; realised ≈ 7 / 11 with C) | done | numerics; trace-address discipline; ring-layout rule for compute kernels |
 | K6 | Recurrence reader without row zeroing (rank-1 write as two broadcasts) — **DONE, byte-identical, gate carried** | **−0.52 ms B=8 / −0.85 ms B=1 *M*** | done | none; the op is state-bandwidth-bound at B=8 after this (state fast path and two-barrier reader both closed at 0) |
 | M | Attention decode prologue as one op (`attn_decode_prep`: head split, QK norm, partial RoPE, KV pad+reshard; 30 ops → 1) — **DONE, gated 57/60 and 188/200** | **−0.92 ms B=8 / −0.50 ms B=1 *M*; endpoint ITL ≈ 47.5 ms** | done | q/k rounding differs from the chain at the bf16 level (200-item mix 4 wrong / 8 unparseable vs 0 / 12 at equal totals) |
+| N | Prefill/decode interleaving on the endpoint: resumable model prefill + vLLM chunking + alternate-mode policy in the TT plugin scheduler — **scoped, not started** | decode stalls 10–14 s → ~0.5 s with a long prompt in flight *E*; prefill +10–15% | 3–5 d | model-level: the GDN prefill scratch is B=1, so one in-flight prefill per lane; chunk-boundary numerics gate |
 | A | Fused T=1 decode op — **DONE, and it already existed** | **−2.55 ms B=1 / −9.5 ms B=8 *M*** | done | PCC 0.9999, unchanged |
 | B0 | Host round-trip, Python-only half: device-side untilize before readback + on-device RoPE gather | **3–5 ms at B=8 *E***; ~0.3 at B=1 | hours | none |
 | J | bf4 gate/up read rate → bf8's (page size / layout) | **≤ 3.5 ms *E***; microbench decides | days | none if layout-only |
@@ -1296,6 +1297,55 @@ behind it, because the model-library provision creates a load job, not a placeme
 does not affect reachability.
 Follow-up worth its 4.4 ms: a request-aware shard-greedy (on-device argmax only when every
 active sequence is greedy).
+
+**Lever N — prefill/decode interleaving on the endpoint (scoped 2026-09-04, not started).**
+Observed on the managed container while it served real traffic: engine log `Running: 2,
+Waiting: 3`, prefill bursts of ~4,600 tok/s (prompts around 45k tokens) during which
+generation throughput fell to 0–0.6 tok/s; a 60-token probe waited 17.5 s at the container
+and 41.6 s through the gateway before its first token, then decoded at 38 / 47 ms per token.
+On this stack a long prefill freezes every other stream's decode until the prompt is done:
+~10 s for 45k tokens, ~14 s for a full 65536.
+
+*Why, in the code.* The Tenstorrent vLLM plugin (`vllm_tt_plugin`, in the serving image)
+cannot mix prefill and decode in a step. Its `TTLaneCoordinator` picks one mode per step
+and "if any lane wants to prefill, the whole step is prefill-only"; a lane wants to prefill
+whenever a request is waiting and a slot is free, or a partial prefill exists. So with
+requests arriving, decode steps run only when nothing is waiting. Chunking would bound the
+freeze, but the managed container runs `enable_chunked_prefill=False` with
+`max_num_batched_tokens=2048`, and the prompt is one vLLM step anyway: the Qwen3.6/3.8 TT
+model's prefill is "model-owned" — `prefill_forward` takes a whole prompt and walks its own
+2048-token chunk trace internally against a single persistent B=1 GDN prefill scratch, with
+no entry point to stop at a chunk boundary and resume next step. The plugin's scheduler and
+runner do support token-chunked continuations (`is_prefill_chunk`,
+`intermediate_prefill_mask`); the model does not.
+
+*Design.* Three pieces, in dependency order:
+1. **Resumable prefill in the TT model** (`qwen36/tt/qwen36_vllm.py` + the model's
+   `prefill_traced_chunked`): accept a start position (`num_computed_tokens`) and run one
+   2048-token chunk per call, carrying the GDN recurrent state and conv taps in the
+   persistent scratch between calls; at most one in-flight prefill per lane (the scratch is
+   B=1). KV is paged, so chunk writes already land; positions come from the chunk-outer trace
+   that long prompts already replay. Gate: a long prompt's output byte-identical chunked vs
+   whole.
+2. **Turn on vLLM-level chunking** for the model: `enable_chunked_prefill: True`,
+   `max_num_batched_tokens: 2048` in Thatch.Server's `_PER_MODEL_VLLM_KWARGS`.
+3. **Interleave policy in `TTLaneCoordinator._negotiate_forced_mode`**: when a partial
+   prefill exists and decodes are running, alternate — one prefill chunk step, then R decode
+   steps (env `TT_DECODE_STEPS_PER_PREFILL_CHUNK`, default 1) — instead of "prefill whenever
+   pending"; keep the KV-pressure decode fallback and the forced modes.
+
+*Expected.* A prefill chunk step ≈ 0.45 s (2048 at ~4.6k tok/s) plus the drain the plugin
+imposes before every prefill ("every async op is forced to complete before the next
+prefill", ≈ one decode step). Alternating 1:1 bounds a decode stream's stall at ~0.5 s
+instead of 10–14 s, at ~10–15% on the long request's prefill time. The number to measure is
+the decode stream's p99 inter-token gap with one 45k-token request in flight, before and
+after, on a 2-stream harness; plus prefill wall time, GSM8K, and the 262k continuation check.
+
+*Where it lives and effort.* The model change is in the tt-metal model tree the serving image
+carries (a graft patch in `Dockerfile.k`, upstream later); the policy change is in
+Tenstorrent's plugin (same treatment); the kwargs in Thatch.Server. 3–5 days including the
+gates. Cheaper stopgaps do not exist: without a chunk boundary the scheduler has nothing to
+yield at, and shrinking the model's internal chunk changes nothing the scheduler can see.
 
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
