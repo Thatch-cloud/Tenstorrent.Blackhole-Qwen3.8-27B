@@ -1265,8 +1265,16 @@ op's kernels, the rebuilt libraries, the two wired model files, the ten flags as
 left out because it forces argmax on temperature>0 requests). Built on the rig; **smoke-tested
 standalone at 65536 context with only the image's ENV: ready in 5.5 min, all K flags engaged,
 chat streams, 8-stream ITL 54.7 ms** (≈ 47.5 + 4.4 for the absent shard-greedy + host load).
-Not pushed. To go live: push the tag to zot, run `tt-serving-image.yml` with
-`base=zot.thatch.local:5000/tt-vllm:qwen38-k`, and let the agent restart the container.
+**Deployed 2026-09-04 03:15Z:** `tt-vllm:qwen38-k` pushed
+(`sha256:f1e9b1a6…`); Thatch.Server run 33832443842 of `tt-serving-image.yml` with that base
+built and verified `thatch-serving-tt:863112a` and moved `:latest` to it
+(`sha256:e23f593e…`); the rig's daemon resolves `:latest` to that build with the flags in its
+ENV. The agent (polling the spine every 5 s) creates the container on the next placed
+model-load; nothing was placed since the previous container exited two days earlier, so the
+load itself is the operator's provision call on the model-library entry (portal, or
+`POST /v1/admin/model-library/{id}/provision` on the spine). Expect 6–10 min to ready at
+65536 context; `docker logs thatch-inference-Qwen-Qwen3.8-27B | grep engaged` shows the
+stack.
 Follow-up worth its 4.4 ms: a request-aware shard-greedy (on-device argmax only when every
 active sequence is greedy).
 
