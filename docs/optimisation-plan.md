@@ -1273,8 +1273,27 @@ ENV. The agent (polling the spine every 5 s) creates the container on the next p
 model-load; nothing was placed since the previous container exited two days earlier, so the
 load itself is the operator's provision call on the model-library entry (portal, or
 `POST /v1/admin/model-library/{id}/provision` on the spine). Expect 6–10 min to ready at
-65536 context; `docker logs thatch-inference-Qwen-Qwen3.8-27B | grep engaged` shows the
-stack.
+65536 context.
+
+**Live under the agent (2026-09-04 03:29–03:42Z).** The first provision failed in the agent's
+Tenstorrent bring-up probe (exit 126, "QSFP weight-distribution links" unmet): the gate
+requires the published topology to carry a link measurement newer than the device nodes'
+last enumeration, and the day's two `tt-smi -r` resets had recreated `/dev/tenstorrent/0`;
+worse, the August links file named a third card (`blackhole-F36F…`) that has since dropped
+off the PCIe bus, so the topology writer rejected the file outright ("links file names
+unknown board"). Remedy per the design, not the override: a fresh two-card capture with the
+P300 descriptor (`capture-fabric.sh` from Thatch.Server main, run in the serving image
+against both devices — `test_system_health` reported 8 link-UP lines, one pair, count 4),
+then `systemctl --user start tt-topology.service` republished `links: true` with a fresh
+`links_measured_at_unix`. Second provision: job succeeded, the agent reaped the container
+that died on 2026-09-01 and started a new one from `thatch-serving-tt:latest`
+(`e23f593e…`); healthy at 03:37, engine loaded at 03:42 with `max_model_len=65536`. Engine
+log: 48× conv+gates, norm+gate fold, direct read, in-place; 16× attention prologue; packed
+QKV; decode trace replay. Container-local chat: 36 ms/token single stream; through
+`api.thatch.cloud` the same request answers (gateway adds ~60 ms/token of transit). The
+portal badge "Unclaimed" is the registry's orphan row — served with no authored placement
+behind it, because the model-library provision creates a load job, not a placement — and
+does not affect reachability.
 Follow-up worth its 4.4 ms: a request-aware shard-greedy (on-device argmax only when every
 active sequence is greedy).
 
