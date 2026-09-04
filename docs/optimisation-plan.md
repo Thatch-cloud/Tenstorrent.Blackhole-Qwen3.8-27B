@@ -1232,6 +1232,24 @@ truncations). That is what a bf16-rounding-level change to q/k looks like under 
 decoding: some chains re-route. Flagged, not hidden; the earlier 200-item record for the
 fold (186–187/200 with ~10 wrong) shows the stack's own run-to-run band is wider than this.
 
+**Recurrence op internals — two more probes, both closed (2026-09-04).** With the reader's
+zeroing gone the op is 88 µs at B=8 and 48 µs at B=1 (4.2 / 2.3 ms per step). Two cheap
+ideas, both byte-for-byte or PCC-clean and both kernel-only:
+
+| probe | what it removed | B=8 | B=1 | verdict |
+| --- | --- | ---: | ---: | --- |
+| state fast path (`patch_state_fast.py`, reverted) | the io→fp32 state copy on the way in (decay reads the bf16 state against a bf16 exp(g)) and the fp32→io copy on the way out (new state packed twice from one DST tile) — 32 of ~100 passes | 89.7 (from 88.3) | 49.8 (from 48.2) | nothing; reverted (it also rounded exp(g) to bf16 for no gain) |
+| two barriers per head instead of seven (`patch_reader_2barrier.py`, reverted) | five of the reader's serial DRAM round-trips | 87.8 | **51.2** (worse) | reverted |
+
+So neither compute passes nor read latency bound this op. At B=8 the arithmetic says why:
+192 head instances each read and write a 16-tile bf16 state — 12.6 MB per layer — which is
+40–60 µs at practical scattered-page DRAM rates, i.e. most of the 88 µs; the reader's
+zeroing was the one non-bandwidth item on the critical path. At B=1 (1.6 MB) the 48 µs is
+launch plus compute in some mix these probes could not separate (a stub-compute timing
+attempt deadlocked on CB accounting and was not pursued). **Rule: the recurrence op is
+state-bandwidth-bound at B=8; only a smaller state (it is already bf16 under lever C) would
+move it, and that is a model-numerics question, not a kernel one.**
+
 **K on the endpoint (2026-09-03 05:19–05:43; the ship stack A + C + D + shard-greedy, with
 and without in-place + K's two kernels; 8 streams, ITL with first token dropped,
 interleaved ship, K, K, ship; the vLLM image takes the same graft mounts because it
