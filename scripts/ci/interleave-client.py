@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import threading
 import time
 import urllib.request
 
@@ -23,6 +24,9 @@ def main():
     unit = tokenizer.encode("def stable_sort(records):\n    return sorted(records)\n", add_special_tokens=False)
     report = dict(passed=False, scope="Raw token-prompt exact output-ID/cancellation probe; not direct state snapshots",
                   results=[])
+    stop = threading.Event()
+    collector = threading.Thread(target=baseline.scrape, args=(stop, args.output), daemon=True)
+    collector.start()
     try:
         for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193):
             prompt = (unit * (length // len(unit) + 1))[:length]
@@ -53,6 +57,8 @@ def main():
         report["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
+        stop.set()
+        collector.join(timeout=5)
         (args.output / "interleave-summary.json").write_text(json.dumps(report, indent=2))
 
 
