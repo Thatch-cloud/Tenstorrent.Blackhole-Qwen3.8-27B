@@ -557,3 +557,27 @@ eager/traced shard checks and all three timing blocks, then requires an identica
 compute manifest. Rejected candidates are not forwarded. Whole-MLP testing keeps
 the native BF8 down projection, DRAM input/output and TP2 reduction; three seeds,
 Torch PCC checks, exact native-control outputs and paired traces still apply.
+
+Run [33964993645](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33964993645)
+repeated the projection gate and completed the conditional whole-MLP test:
+
+| Stage | Result |
+| --- | --- |
+| 91-core projection | Exact on both chips, eager and traced, all three seeds; 4.24–4.47% lower latency across all three paired blocks. |
+| Complete layer-0 MLP, including down projection and TP2 reduction | Exact native-control output for all three seeds, eager and traced; Torch PCC 0.99920–0.99942, unchanged from control. |
+| Complete MLP latency | Control 0.33735–0.33777 ms versus fused 0.32892–0.32962 ms; 2.37–2.50% lower latency, mean 2.447%. |
+| Promotion | Eligible for the full-model gate only. No serving default changed and no end-to-end tok/s result claimed. |
+
+The 68-core arm again missed the >2% projection requirement in one block and was
+not forwarded; 39 and 55 cores remained slower. Local helper validation passed
+75 tests, with shell syntax and whitespace checks passing. These results correct
+the prior inference from the prefill-oriented 2D kernel: properly routed,
+rounding-preserving 1D fusion can improve this decode workload, although the
+measured gain is small and does not establish the 200 tok/s target.
+
+Next gate: opt-in full-model integration with pair-packed weights replacing
+(not retaining alongside) gate/up allocations, source/precision checks on every
+layer, trace-safe B1-only dispatch and native fallback elsewhere. Verify output
+tokens and memory headroom at short and long contexts before paired serving
+timings. Do not extrapolate the layer microbenchmark to end-to-end speed or
+claim coding-quality coverage from three layer-input seeds.
