@@ -13,7 +13,7 @@ spec.loader.exec_module(comparison)
 
 
 class CompareTests(unittest.TestCase):
-    def compare(self, mutation=None, isolated=False):
+    def compare(self, mutation=None, isolated=False, mixed=False):
         with tempfile.TemporaryDirectory() as directory, mock.patch("builtins.print"):
             control, arm = Path(directory) / "control", Path(directory) / "arm"
             expected = [f"boundary-{length}" for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193)] + ["after-cancel"]
@@ -25,6 +25,9 @@ class CompareTests(unittest.TestCase):
                 for name in expected:
                     (root / f"{name}.json").write_text(json.dumps(dict(passed=True, prompt_tokens=100,
                         requested_tokens=32, output_sha256="output", token_ids_sha256="tokens")))
+                if mixed:
+                    requests = {name: dict(tokens=[1, 2], text_sha256="text") for name in ("B0", "A", "C")}
+                    (root / "mixed-traffic.json").write_text(json.dumps(dict(passed=True, baseline=requests, concurrent=requests)))
             if mutation:
                 mutation(arm)
             comparison.compare(control, arm)
@@ -32,6 +35,16 @@ class CompareTests(unittest.TestCase):
 
     def test_all_nine_checks_required(self):
         self.assertEqual(self.compare()["checks"], 9)
+
+    def test_mixed_outputs_also_match_control(self):
+        self.assertEqual(self.compare(mixed=True)["mixed_checks"], 3)
+        def mutate(arm):
+            path = arm / "mixed-traffic.json"
+            report = json.loads(path.read_text())
+            report["concurrent"]["B0"]["tokens"] = [1, 3]
+            path.write_text(json.dumps(report))
+        with self.assertRaisesRegex(AssertionError, "Mixed-traffic cross-arm divergence"):
+            self.compare(mutate, mixed=True)
 
     def test_diagnostic_repeats_are_also_equivalence_gated(self):
         self.assertEqual(self.compare(isolated=True)["checks"], 12)

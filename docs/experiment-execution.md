@@ -21,7 +21,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
-| E2 interleaving | One-token-tail bug fixed; all ratios pass boundary/output gates | Mixed-traffic isolation and latency gate running; full device KV lifecycle remains unverified |
+| E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
 | E4 fusion/pipeline | Planned, needs implementation | E3 verified state contract, one native change per arm, full-path timing |
 | E5 drafting | Lookup proposal policy passes 11 host tests; integration dependency-gated | Passing E3 before enabling lookup/MTP; no non-greedy semantic substitution |
@@ -166,3 +166,25 @@ against isolated requests and verifies actual request overlap. Boundary checks
 remain enabled in every arm. Diagnostic hashing is disabled for this run, and
 KV metrics continue to be collected. No production serving changes or automatic
 adoption follow from these tests.
+
+Mixed-traffic [33948332548](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33948332548)
+passed all four arms. The live decoder, long request and short request each match
+their isolated output IDs exactly; post-run comparison also matches all three
+against the ratio-0 isolated control. Actual overlap and short-request arrival
+before the long request's first token were verified. One smoke trial per ratio:
+
+| Decode steps/chunk | Live decoder maximum gap (s) | p99 gap (s) | Client decode tok/s | Long TTFT (s) | Short TTFT (s) |
+| --- | --- | --- | --- | --- | --- |
+| Control, no interleaving | 3.116 | 0.055 | 17.671 | 2.590 | 2.813 |
+| 1 | 0.654 | 0.556 | 17.470 | 2.836 | 3.308 |
+| 2 | 0.646 | 0.552 | 17.249 | 3.078 | 3.605 |
+| 4 | 0.647 | 0.546 | 17.148 | 3.517 | 4.132 |
+
+The maximum interruption falls approximately 79%, but one long stall becomes
+multiple chunk-sized interruptions: p99 worsens, and new-request TTFT increases.
+This is a responsiveness tradeoff, **not** a decode-throughput improvement or
+evidence of 200 committed tok/s. Ratio 1 is the next candidate for repeated
+paired measurements, not an adopted default. Cache occupancy was nonzero
+(peak 1.60-1.61%), with zero active-zero-cache samples across 1230 active samples
+and zero scrape errors. Production serving and default-off experiment flags
+remain unchanged.

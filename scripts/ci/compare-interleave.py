@@ -20,7 +20,17 @@ def compare(control, arm):
         for key in ("prompt_tokens", "requested_tokens", "output_sha256", "token_ids_sha256"):
             if reports[0][key] != reports[1][key]:
                 raise AssertionError(f"Continuation divergence: {name}, {key}")
-    result = dict(passed=True, checks=len(expected), arm=arm.name,
+    mixed_checks = 0
+    if any((root / "mixed-traffic.json").exists() for root in (control, arm)):
+        mixed = [json.loads((root / "mixed-traffic.json").read_text()) for root in (control, arm)]
+        if not all(report.get("passed") for report in mixed):
+            raise AssertionError("Failed mixed-traffic arm")
+        for name in ("B0", "A", "C"):
+            for key in ("tokens", "text_sha256"):
+                if mixed[0]["baseline"][name][key] != mixed[1]["concurrent"][name][key]:
+                    raise AssertionError(f"Mixed-traffic cross-arm divergence: {name}, {key}")
+            mixed_checks += 1
+    result = dict(passed=True, checks=len(expected), mixed_checks=mixed_checks, arm=arm.name,
                   scope="Exact output token-ID hashes; not full state certification")
     (arm / "whole-chunked-comparison.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
