@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -46,6 +46,10 @@ jobs:
         if: inputs.suite == 'model-inventory'
         shell: bash
         run: timeout 180 bash scripts/ci/model-inventory.sh
+      - name: Read-only GDN source audit
+        if: inputs.suite == 'gdn-source'
+        shell: bash
+        run: timeout -k 30 180 bash scripts/ci/gdn-source-audit.sh
       - name: Full-model baseline
         if: inputs.suite == 'baseline'
         shell: bash
