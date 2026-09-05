@@ -658,3 +658,21 @@ Device snapshots are preallocated outside trace capture and all live state
 addresses must stay fixed. Timings include snapshot copies and are diagnostic
 only. Attention KV, full-model logits, EOS/cancellation/slot epochs and all-layer
 verification remain later gates; no host test or layer pass certifies those.
+
+Run [33997659654](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33997659654),
+code `b4da5c4`, passed all 216 prefix/continuation cases (both chips, three seeds,
+five row widths, eager/trace) and all 30 stale recurrence/convolution negative
+controls. This establishes input-projection batching with native fused GDN state
+evolution for this layer fixture, not a complete verifier.
+
+Next `gdn-block` arm batches the output projection and TP reduction as well. It
+extracts the pre-projection native decode body from the SHA-pinned audited source,
+with a structural tail check, preserving the internal fused GDN arithmetic. This
+is an instance-local experimental function, not an installed source patch.
+
+The host `greedy_verify.py` contract selects the longest exact proposal prefix
+against K+1 target argmax rows. Retain state after seed plus accepted proposals;
+the target correction/bonus is emitted but remains the next unconsumed input.
+Accepted EOS suppresses later rows; correction EOS terminates without consuming
+it. Six tests cover all rejection positions, bonus/off-by-one cases and EOS.
+This selector neither calculates target predictions nor commits device state.

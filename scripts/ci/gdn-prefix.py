@@ -1,12 +1,13 @@
 """E3a: real-weight GDN prefix/rollback gate; not a full-model verifier."""
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import time
 
-from gdn_prefix import decode_projected
+from gdn_prefix import decode_projected, gated_decode
 
 
 def main():
@@ -14,16 +15,21 @@ def main():
         raise RuntimeError("Explicit hardware allocation required")
     if os.environ.get("TT_METAL_SIMULATOR") or os.environ.get("TT_METAL_SLOW_DISPATCH_MODE"):
         raise RuntimeError("Fast-dispatch hardware required")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--batch-output", action="store_true")
+    options = parser.parse_args()
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
     from models.demos.blackhole.qwen36.tt.gdn.tp import TPGatedDeltaNet, load_gdn_weights_tp
     from models.demos.blackhole.qwen36.tt.model_config import Qwen36ModelArgs
-    from models.tt_transformers.tt.ccl import TT_CCL
+    from models.tt_transformers.tt.ccl import TT_CCL, tt_all_reduce
 
     report = dict(passed=False, checks=[], timings=[], negative_controls=[],
                   scope="One real-weight GDN layer, B1 in Bmax8, TP2; no attention KV, logits, drafter or serving throughput")
     root = Path("/experiment/results")
+    report["batched_output_projection"] = options.batch_output
+    output_path = root / ("gdn-block.json" if options.batch_output else "gdn-prefix.json")
     mesh = None
     traces = []
     try:
@@ -44,6 +50,7 @@ def main():
         gdn = TPGatedDeltaNet(mesh, args, load_gdn_weights_tp(mesh, load_gdn_layer(args.CKPT_DIR, layer), args), TT_CCL(mesh))
         gdn.reset_state()
         gdn._stable_state = True
+        native_gated = gated_decode(gdn) if options.batch_output else None
         if not gdn._fuse_ab or not gdn._conv_gates_enabled() or gdn.rec_state.dtype != ttnn.bfloat16:
             raise ValueError("Expected fused projection and unchanged K-image BF16 persistent recurrence")
         live = [gdn.rec_state, *gdn.conv_states]
@@ -117,7 +124,25 @@ def main():
 
                 def operation():
                     copy(live, staging[0])
-                    return decode_projected(gdn, packed, tokens, lambda prefix: copy(live, staging[prefix]), ttnn)
+                    outputs = decode_projected(gdn, packed, tokens, lambda prefix: copy(live, staging[prefix]),
+                                               ttnn, forward=native_gated)
+                    if not options.batch_output:
+                        return outputs
+                    gated = outputs[0] if rows == 1 else ttnn.concat(outputs, dim=1)
+                    partial = gdn._row_proj(gated, gdn.tw["out"])
+                    if rows != 1:
+                        release([gated])
+                    release(outputs)
+                    partial = ttnn.reshape(partial, (1, 1, rows, partial.shape[-1]))
+                    output = tt_all_reduce(partial, mesh, gdn.tt_ccl, cluster_axis=0, dim=3,
+                                           topology=args.ccl_topology(), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                    return [output]
+
+                def read_outputs(outputs):
+                    if not options.batch_output:
+                        return [host(output) for output in outputs]
+                    shards = host(outputs[0])
+                    return [[shard[:, :, index:index + 1, :] for shard in shards] for index in range(rows)]
 
                 copy(initial, live)
                 release(operation())
@@ -138,7 +163,7 @@ def main():
                         ttnn.synchronize_device(mesh)
                     report["timings"].append(dict(seed=seed, rows=rows, mode=mode,
                                                    layer_with_snapshots_ms=1000 * (time.perf_counter() - started)))
-                    if not all(exact(host(output), expected) for output, expected in zip(outputs, expected_outputs, strict=True)):
+                    if not all(exact(output, expected) for output, expected in zip(read_outputs(outputs), expected_outputs, strict=True)):
                         raise AssertionError(f"GDN output divergence: {seed=} {rows=} {mode=}")
                     for prefix in range(rows + 1):
                         if not state_exact(state_host(staging[prefix]), expected_states[prefix]):
@@ -178,7 +203,7 @@ def main():
                 release(captured_outputs + tokens + correction + [packed])
                 for state in reference + staging:
                     release(state)
-                (root / "gdn-prefix.json").write_text(json.dumps(report, indent=2))
+                output_path.write_text(json.dumps(report, indent=2))
                 print(json.dumps(dict(seed=seed, rows=rows, exact=True)), flush=True)
             release(initial)
         report["passed"] = True
@@ -186,7 +211,7 @@ def main():
         report["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        (root / "gdn-prefix.json").write_text(json.dumps(report, indent=2))
+        output_path.write_text(json.dumps(report, indent=2))
         if mesh is not None:
             for trace in traces:
                 ttnn.release_trace(mesh, trace)

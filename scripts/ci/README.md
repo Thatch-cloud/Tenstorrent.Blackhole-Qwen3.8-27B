@@ -57,6 +57,10 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 
 ## Programme suites
 
+- `gdn-block`: extends `gdn-prefix` by batching output projection and TP reduction;
+  the fused recurrent/conv/norm/gate body is taken from the SHA-pinned native source.
+  Uses the same every-prefix and stale-state gates, without changing installed code.
+
 - `gdn-prefix`: E3a real-weight GDN prerequisite on both chips, B1 in Bmax8.
   Compare native sequential decode with batched input projection plus the same
   native fused per-token remainder. Test T=1/2/4/8/16, three seeds, eager/trace,
