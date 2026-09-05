@@ -11,8 +11,10 @@ from interleave_bench import quantile, stream
 def response(chunks, done=True):
     lines = []
     for tokens in chunks:
-        payload = {"choices": [{"index": 0, "text": "".join(tokens), "logprobs": {"tokens": tokens}}]}
+        payload = {"choices": [{"index": 0, "text": "".join(tokens), "token_ids": [ord(token) for token in tokens]}]}
         lines.append("data: " + json.dumps(payload))
+    lines.append("data: " + json.dumps(dict(choices=[], usage=dict(prompt_tokens=1,
+                       completion_tokens=sum(len(tokens) for tokens in chunks)))))
     if done:
         lines.append("data: [DONE]")
     return io.BytesIO(("\n\n".join(lines) + "\n").encode())
@@ -23,7 +25,7 @@ class StreamTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=response([["a", "b"], ["c"]])), \
                 patch("time.perf_counter", side_effect=[0.0, 1.0, 1.5]):
             result = stream("http://localhost:8000", "test", [1], 3)
-        self.assertEqual(result["tokens"], ["a", "b", "c"])
+        self.assertEqual(result["tokens"], [97, 98, 99])
         self.assertEqual(result["decode_tok_s"], 2.0)
         self.assertEqual(result["coalesced_events"], 1)
         self.assertEqual(result["ttft_s"], 1.0)

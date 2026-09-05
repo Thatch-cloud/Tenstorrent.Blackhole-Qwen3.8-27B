@@ -1,4 +1,4 @@
-"""Greedy endpoint isolation gate; token counts come from logprobs, not SSE events."""
+"""Greedy endpoint isolation gate using exact streamed token IDs, not SSE counts."""
 
 import argparse
 import hashlib
@@ -18,12 +18,14 @@ def quantile(values, fraction):
 
 def stream(base_url, model, prompt, count, ready=None, timeout=1800):
     payload = dict(model=model, prompt=prompt, max_tokens=count, temperature=0,
-                   ignore_eos=True, stream=True, logprobs=1, seed=123)
+                   ignore_eos=True, stream=True, return_token_ids=True,
+                   stream_options={"include_usage": True}, seed=123)
     request = urllib.request.Request(base_url.rstrip("/") + "/v1/completions",
                                      json.dumps(payload).encode(), {"Content-Type": "application/json"})
     started = time.perf_counter()
     events, tokens, fragments = [], [], []
     done = False
+    usage = None
     with urllib.request.urlopen(request, timeout=timeout) as response:
         for raw in response:
             line = raw.decode("utf-8").strip()
@@ -36,18 +38,23 @@ def stream(base_url, model, prompt, count, ready=None, timeout=1800):
             message = json.loads(data)
             if "error" in message:
                 raise RuntimeError(message["error"])
+            if message.get("usage"):
+                usage = message["usage"]
             for choice in message.get("choices", []):
                 if choice.get("index", 0) != 0:
                     raise RuntimeError("Expected exactly one completion")
                 fragments.append(choice.get("text", ""))
-                emitted = (choice.get("logprobs") or {}).get("tokens") or []
+                emitted = choice.get("token_ids") or []
+                if any(type(token) is not int or token < 0 for token in emitted):
+                    raise ValueError("Invalid streamed token IDs")
                 if emitted:
                     events.append((time.perf_counter(), len(emitted)))
                     tokens.extend(emitted)
                     if ready is not None:
                         ready.set()
-    if not done or len(tokens) != count or len(events) < 2:
-        raise RuntimeError(f"Incomplete stream or missing token logprobs: done={done}, tokens={len(tokens)}, expected={count}")
+    if (not done or len(tokens) != count or len(events) < 2 or usage is None
+            or usage.get("completion_tokens") != count or usage.get("prompt_tokens") != len(prompt)):
+        raise RuntimeError(f"Incomplete stream or token accounting: done={done}, tokens={len(tokens)}, expected={count}")
     gaps = [later[0] - earlier[0] for earlier, later in zip(events, events[1:])]
     duration = events[-1][0] - events[0][0]
     text = "".join(fragments)

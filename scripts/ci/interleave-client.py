@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import threading
 import time
@@ -59,6 +60,11 @@ def main():
         if any(reused[key] != original[key] for key in ("output_sha256", "token_ids_sha256")):
             raise AssertionError("Greedy continuation changed after cancellation")
         report["results"].append("after-cancel")
+        if os.environ.get("QWEN_INTERLEAVE_MIXED") == "1":
+            subprocess.run(["python3", "/experiment-optimisation/rig/interleave_bench.py",
+                            "--tokenizer", args.tokenizer, "--prompt-length", "8193", "--decoders", "1",
+                            "--decode-tokens", "512", "--output", str(args.output / "mixed-traffic.json")],
+                           check=True, timeout=600)
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
