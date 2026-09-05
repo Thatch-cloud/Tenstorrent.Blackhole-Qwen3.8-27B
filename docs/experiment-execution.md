@@ -771,3 +771,8 @@ next branch's valid prefix. Snapshot buffers are preallocated before trace captu
 This oracle is a prerequisite for the batched target verifier. It does not validate
 tree branches, stochastic acceptance, request cancellation/epoch reuse, long contexts,
 or a serving speedup. It must not turn the policy's `verifier_ready` on in serving.
+
+Initial full-model run 33999230778 loaded and warmed native decode, then failed in
+the harness's KV reader: native `ttnn.Shape` supports integer indexing, not Python
+slice indexing. No full-model correctness case ran. Convert the shape to a tuple
+before extracting dimensions, add a native-like shape regression fixture and retry.

@@ -10,6 +10,13 @@ from pathlib import Path
 from gdn_snapshot import ActiveSnapshot
 
 
+def cache_geometry(shape):
+    dimensions = tuple(shape)
+    if len(dimensions) != 4 or dimensions[0] < 2 or dimensions[2] != 64:
+        raise ValueError("Expected at least two 64-token KV pages")
+    return dimensions[1:]
+
+
 def logical_kv_prefix(host, valid_tokens):
     if type(valid_tokens) is not int or not 0 < valid_tokens <= 128:
         raise ValueError("Expected a valid prefix of the first two KV pages")
@@ -112,7 +119,7 @@ def main():
             if not 0 < valid_tokens <= 128:
                 raise ValueError("Oracle covers the first two physical pages only")
             for tensor in caches:
-                heads, block_size, width = tensor.shape[1:]
+                heads, block_size, width = cache_geometry(tensor.shape)
                 if block_size != 64:
                     raise ValueError("Expected 64-token KV pages")
                 first_pages = ttnn.slice(tensor, (0, 0, 0, 0), (2, heads, 64, width))

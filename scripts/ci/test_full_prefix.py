@@ -11,6 +11,18 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_native_shape_requires_integer_indexing(self):
+        class NativeShape:
+            def __len__(self):
+                return 4
+
+            def __getitem__(self, index):
+                if type(index) is not int:
+                    raise TypeError("Native Shape does not accept slices")
+                return (8200, 2, 64, 256)[index]
+
+        self.assertEqual(full_prefix.cache_geometry(NativeShape()), (2, 64, 256))
+
     def test_page_boundary_and_head_order(self):
         values = torch.arange(2 * 3 * 64 * 2).reshape(2, 3, 64, 2)
         for count in (63, 64, 65, 128):
