@@ -544,3 +544,16 @@ regressed relative to the preceding single-candidate probe. Generalizing the
 reader had inadvertently changed its inner tile-loop bound from compile-time
 to runtime; the retry restores compile-time specialization and compact core
 ranges before drawing conclusions about the additional cores.
+
+Run 33964808840 restored the 39-core control candidate to +5.07–5.16%. All
+four candidates remained exact. The 55-core variant was +85.50–85.57%; the
+68-core variant improved 1.94–2.06% but failed the >2% requirement in one block.
+The 91-core variant passed the prerequisite: 0.18833–0.18882 ms and 4.07–4.32%
+lower projection latency in every block. This is not end-to-end tok/s.
+
+`projection-1d` now conditionally follows its projection probe with the existing
+whole-MLP harness. It independently verifies each selected candidate's twelve
+eager/traced shard checks and all three timing blocks, then requires an identical
+compute manifest. Rejected candidates are not forwarded. Whole-MLP testing keeps
+the native BF8 down projection, DRAM input/output and TP2 reduction; three seeds,
+Torch PCC checks, exact native-control outputs and paired traces still apply.

@@ -44,13 +44,51 @@ def paired_summary(blocks):
                 max_latency_change=max(changes))
 
 
+def projection_candidates(report):
+    if report.get("passed") is not True or report.get("seeds") != [123, 456, 789]:
+        raise ValueError("Completed three-seed projection prerequisite required")
+    result = [dict(name="control", gate=44, down=33, block=8)]
+    for name, candidate in report.get("candidates", {}).items():
+        if candidate.get("exact_control") is not True or candidate.get("eligible_for_mlp_gate") is not True:
+            continue
+        blocks = candidate.get("blocks", [])
+        if len(blocks) != 3 or not all(
+            math.isfinite(block["control_ms"]) and math.isfinite(block["fused_ms"])
+            and 0 < block["fused_ms"] < .98 * block["control_ms"] for block in blocks
+        ):
+            raise ValueError("Projection latency gate is inconsistent")
+        required = {(mode + name, seed, chip) for mode in ("eager-", "trace-")
+                    for seed in report["seeds"] for chip in (0, 1)}
+        verified = {(check.get("mode"), check.get("seed"), check.get("chip"))
+                    for check in report["checks"] if check.get("exact") is True}
+        if not required <= verified:
+            raise ValueError("Missing exact projection comparisons on both chips")
+        kernel = candidate["kernel"]
+        if (kernel["pairs_per_worker"], kernel["workers"]) not in ((7, 39), (5, 55), (4, 68), (3, 91)):
+            raise ValueError("Unreviewed projection mapping")
+        result.append(dict(name=name, pairs_per_worker=kernel["pairs_per_worker"], projection_kernel=kernel))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--packing", action="store_true")
     parser.add_argument("--fusion", action="store_true")
+    parser.add_argument("--projection-report", type=Path)
     options = parser.parse_args()
     if os.environ.get("QWEN_HARDWARE_TESTS") != "1" or os.environ.get("QWEN_CARDS_ALLOCATED") != "1":
         raise RuntimeError("Explicit hardware allocation required")
+    prerequisite = None
+    if options.projection_report:
+        if options.fusion or options.packing:
+            raise ValueError("Select one experiment")
+        prerequisite = json.loads(options.projection_report.read_text())
+        configurations = projection_candidates(prerequisite)
+        if len(configurations) == 1:
+            skipped = dict(passed=False, skipped=True, reason="No projection candidate passed exactness and all timing blocks")
+            Path("/experiment/results/mlp-sweep.json").write_text(json.dumps(skipped, indent=2))
+            print(json.dumps(skipped), flush=True)
+            return
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_mlp_layer, compute_pcc
@@ -90,11 +128,13 @@ def main():
                                       mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)) for vector in vectors]
         device_input = ttnn.from_torch(vectors[0], device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
-        configurations = candidates(options.packing, options.fusion)
+        if prerequisite is None:
+            configurations = candidates(options.packing, options.fusion)
         report["packing_sweep"] = options.packing
         report["fusion_sweep"] = options.fusion
+        report["projection_prerequisite"] = str(options.projection_report) if prerequisite is not None else None
         packed_weight = None
-        if options.fusion:
+        if options.fusion or prerequisite is not None:
             from models.tt_dit.utils.tensor import prepare_for_fused_swiglu
             gate_up = torch.cat([state["gate_proj.weight"].bfloat16().T.contiguous(),
                                  state["up_proj.weight"].bfloat16().T.contiguous()], dim=-1)
@@ -116,16 +156,25 @@ def main():
             if candidate["name"] == "control":
                 args.mlp_w1_decode_1d_progcfg, args.mlp_w3_decode_1d_progcfg, args.mlp_w2_decode_1d_progcfg = frozen
                 return
-            if options.fusion:
+            if options.fusion or prerequisite is not None:
                 from models.tt_transformers.tt.ccl import tt_all_reduce
-                config = ttnn.MinimalMatmulConfig(M_block_size=1, K_block_size=8,
-                    N_block_size=candidate["nblock"], subblock_h=1, subblock_w=4,
-                    compute_with_storage_grid_size=ttnn.CoreCoord(11, 2))
+                if prerequisite is not None:
+                    from fused_1d import FusedProjection
+                    projection = FusedProjection(mesh, packed_weight, pairs_per_worker=candidate["pairs_per_worker"])
+                    if projection.manifest != candidate["projection_kernel"]:
+                        raise ValueError("Projection implementation changed since prerequisite")
+                else:
+                    config = ttnn.MinimalMatmulConfig(M_block_size=1, K_block_size=8,
+                        N_block_size=candidate["nblock"], subblock_h=1, subblock_w=4,
+                        compute_with_storage_grid_size=ttnn.CoreCoord(11, 2))
                 def fused_forward(value):
                     local = ttnn.to_memory_config(value, ttnn.L1_MEMORY_CONFIG)
-                    hidden = ttnn.experimental.minimal_matmul(local, packed_weight, config=config,
-                        memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16,
-                        compute_kernel_config=mlp.compute_kernel_config_decode, fuse_swiglu=True)
+                    if prerequisite is not None:
+                        hidden = projection(local)
+                    else:
+                        hidden = ttnn.experimental.minimal_matmul(local, packed_weight, config=config,
+                            memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16,
+                            compute_kernel_config=mlp.compute_kernel_config_decode, fuse_swiglu=True)
                     ttnn.deallocate(local)
                     partial = ttnn.linear(hidden, mlp.weights.w2,
                         compute_kernel_config=mlp.compute_kernel_config_decode,

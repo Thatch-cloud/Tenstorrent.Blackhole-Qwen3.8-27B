@@ -89,6 +89,8 @@ class FusedProjection:
         self.compute = fused_compute(original, intermediates=intermediates, pairs_per_worker=pairs_per_worker)
         self.manifest = dict(native_compute_sha256=hashlib.sha256(original.encode()).hexdigest(),
                              fused_compute_sha256=hashlib.sha256(self.compute.encode()).hexdigest(),
+                             reader_sha256={filename: hashlib.sha256(Path(__file__).with_name(filename).read_bytes()).hexdigest()
+                                            for filename in ("fused_1d_input.cpp", "fused_1d_weights.cpp")},
                              workers=len(self.workers), grid=[11, self.rows], pairs_per_worker=pairs_per_worker, k_block=8,
                              intermediates=intermediates, input_noc=1, weight_noc=0,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")

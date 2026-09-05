@@ -8,6 +8,39 @@ spec.loader.exec_module(sweep)
 
 
 class SweepTests(unittest.TestCase):
+    def projection_report(self):
+        return dict(passed=True, seeds=[123, 456, 789], candidates={"fused-91": dict(
+            exact_control=True, eligible_for_mlp_gate=True, kernel=dict(pairs_per_worker=3, workers=91),
+            blocks=[dict(control_ms=.2, fused_ms=.18) for _ in range(3)])},
+            checks=[dict(mode=mode + "fused-91", seed=seed, chip=chip, exact=True)
+                    for mode in ("eager-", "trace-") for seed in (123, 456, 789) for chip in (0, 1)])
+
+    def test_projection_prerequisite_selects_only_eligible_mapping(self):
+        report = self.projection_report()
+        self.assertEqual(sweep.projection_candidates(report)[1]["pairs_per_worker"], 3)
+        report["candidates"]["fused-91"]["eligible_for_mlp_gate"] = False
+        self.assertEqual(len(sweep.projection_candidates(report)), 1)
+
+    def test_projection_prerequisite_checks_all_shards_and_modes(self):
+        for missing in range(12):
+            report = self.projection_report()
+            del report["checks"][missing]
+            with self.assertRaises(ValueError):
+                sweep.projection_candidates(report)
+
+    def test_projection_prerequisite_rechecks_timings(self):
+        for elapsed in (.196, .2, float("nan"), 0):
+            report = self.projection_report()
+            report["candidates"]["fused-91"]["blocks"][2]["fused_ms"] = elapsed
+            with self.assertRaises(ValueError):
+                sweep.projection_candidates(report)
+
+    def test_projection_prerequisite_rejects_failed_run(self):
+        report = self.projection_report()
+        report["passed"] = False
+        with self.assertRaises(ValueError):
+            sweep.projection_candidates(report)
+
     def test_fusion_candidates_are_separate(self):
         candidates = sweep.candidates(fusion=True)
         self.assertEqual(candidates[0]["name"], "control")
