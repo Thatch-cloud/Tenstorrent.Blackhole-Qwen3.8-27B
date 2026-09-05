@@ -44,6 +44,16 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(report["ttft_s"], 1.)
         self.assertEqual(report["token_ids"], [11, 12, 13])
         self.assertFalse(report["logprobs_requested"])
+        self.assertEqual(report["sampling_options"], {"temperature": 0})
+
+    def test_fallback_options_reach_endpoint_and_report(self):
+        options = dict(temperature=.7, top_k=10, top_p=.9, presence_penalty=1.2,
+                       frequency_penalty=1.3, repetition_penalty=1.1)
+        report = self.stream(seed=456, **options)
+        self.assertEqual(report["sampling_options"], options)
+        self.assertEqual(self.payload["seed"], 456)
+        for key, value in options.items():
+            self.assertEqual(self.payload[key], value)
 
     def test_missing_ids_cannot_fall_back_to_token_strings(self):
         with self.assertRaises(AssertionError):

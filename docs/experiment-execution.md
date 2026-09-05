@@ -238,3 +238,11 @@ not a production default. Next gates are longer-context paired runs, explicit-se
 and non-greedy/penalty fallback checks on hardware, and full-model traced operation
 attribution before changing projection grids or low-level GDN kernels. Multi-request
 device sampling and composition with prefill interleaving are not certified here.
+
+The `sampling-extended` suite next runs three ABBA blocks at approximately 32K
+and 64K input tokens, still B=1 with 512 output tokens and exact ID/text gates.
+Before timing it compares host/device-labelled requests with explicit seeds 123
+and 456, seeded non-greedy sampling, each penalty type separately, and a final
+greedy recovery request. Non-greedy and penalty cases must actually select host;
+seeded greedy and post-fallback greedy must engage device force-argmax. These
+checks change request parameters only, not eligibility or sampling mathematics.

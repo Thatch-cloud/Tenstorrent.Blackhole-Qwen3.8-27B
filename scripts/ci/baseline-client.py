@@ -17,10 +17,17 @@ def quantile(values, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)] if ordered else None
 
 
-def request_stream(prompt, count, label, output, *, logprobs=False, seed=123, request_id=None):
-    payload = dict(model="qwen3.8-27b", prompt=prompt, max_tokens=count, temperature=0,
+def request_stream(prompt, count, label, output, *, logprobs=False, seed=123, request_id=None,
+                   temperature=0, top_k=None, top_p=None, presence_penalty=None,
+                   frequency_penalty=None, repetition_penalty=None):
+    sampling_options = dict(temperature=temperature, top_k=top_k, top_p=top_p,
+                            presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
+                            repetition_penalty=repetition_penalty)
+    sampling_options = {key: value for key, value in sampling_options.items() if value is not None}
+    payload = dict(model="qwen3.8-27b", prompt=prompt, max_tokens=count,
                    ignore_eos=True, stream=True, stream_options={"include_usage": True},
                    return_token_ids=True)
+    payload.update(sampling_options)
     if seed is not None:
         payload["seed"] = seed
     if request_id is not None:
@@ -65,7 +72,7 @@ def request_stream(prompt, count, label, output, *, logprobs=False, seed=123, re
     passed = (done and len(tokens) == count and usage is not None and usage.get("completion_tokens") == count
               and usage.get("prompt_tokens") == len(prompt) and (not logprobs or logprob_count == count))
     report = dict(label=label, passed=passed, prompt_tokens=len(prompt), requested_tokens=count,
-                  seed=seed, request_id=request_id,
+                  seed=seed, request_id=request_id, sampling_options=sampling_options,
                   usage=usage, finish_reason=finish, started=started, ended=ended,
                   total_s=ended - started, ttft_s=events[0][0] - started if events else None,
                   client_decode_estimate_tok_s=(len(tokens) - events[0][1]) / duration if duration else None,

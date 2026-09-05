@@ -22,16 +22,37 @@ def engagement(output, label, device):
     return matched[0]
 
 
-def measure(prompt, count, label, output, device, **kwargs):
-    report = baseline.request_stream(prompt, count, label, output, seed=None, request_id=label, **kwargs)
+def measure(prompt, count, label, output, device, seed=None, **kwargs):
+    report = baseline.request_stream(prompt, count, label, output, seed=seed, request_id=label, **kwargs)
     engagement(output, label, device)
     return report
+
+
+def fallback_checks(prompt, output):
+    checks = []
+    cases = (
+        ("seed123", True, dict(seed=123)),
+        ("seed456", True, dict(seed=456)),
+        ("non-greedy", False, dict(seed=123, temperature=.7, top_k=10, top_p=.9)),
+        ("presence", False, dict(presence_penalty=1.2)),
+        ("frequency", False, dict(frequency_penalty=1.2)),
+        ("repetition", False, dict(repetition_penalty=1.2)),
+        ("greedy-recovery", True, {}),
+    )
+    for name, device, options in cases:
+        records = [measure(prompt, 32, f"qwen-sampling-{arm}-fallback-{name}", output,
+                           arm == "device" and device, **options) for arm in ("host", "device")]
+        if any(records[0][key] != records[1][key] for key in ("token_ids_sha256", "output_sha256")):
+            raise AssertionError(f"Fallback/seed output divergence: {name}")
+        checks.append(dict(case=name, device_selected=device, matched=True))
+    return checks
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--extended", action="store_true")
     args = parser.parse_args()
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True, trust_remote_code=False)
@@ -40,7 +61,9 @@ def main():
     collector.start()
     summary = dict(passed=False, results=[], scope="B1 client-estimated ABBA sampling comparison; not engine-commit timing")
     try:
-        for length in (128, 4096):
+        if args.extended:
+            summary["fallback_checks"] = fallback_checks(baseline.make_prompt(tokenizer, 128, 0), args.output)
+        for length in ((32768, 64512) if args.extended else (128, 4096)):
             prompt = baseline.make_prompt(tokenizer, length, 0)
             warm = []
             for arm in ("host", "device"):

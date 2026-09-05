@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p /experiment/results
-if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then export QWEN_TP2_SAMPLING_EXPERIMENT=1; fi
+sampling_args=()
+if [[ "${QWEN_RUN_MODE:-baseline}" = sampling || "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]]; then
+    export QWEN_TP2_SAMPLING_EXPERIMENT=1
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]; then sampling_args=(--extended); fi
 unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_PATH
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
@@ -49,7 +53,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
 fi
 extra_args=()
 tt_config='{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824}}'
-if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then
+if [[ "${QWEN_RUN_MODE:-baseline}" = sampling || "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]]; then
     python3 /experiment-optimisation/sim/stage-sampling.py > /experiment/results/sampling-stage.json
     tt_config='{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824,"sample_on_device_mode":"decode_only"}}'
     extra_args=(--limit-mm-per-prompt '{"image":0,"video":0}' --no-enable-mm-embeds)
@@ -86,8 +90,8 @@ print(json.dumps({name: list(value.get('properties', {})) for name, value in sch
                   if 'Completion' in name}, indent=2))
 PY
 printf 'Endpoint ready; starting warmed baseline matrix\n'
-if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then
-    timeout 3600 python3 /experiment-scripts/ci/sampling-client.py --tokenizer "$MODEL_WEIGHTS_DIR" --output /experiment/results
+if [[ "${QWEN_RUN_MODE:-baseline}" = sampling || "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]]; then
+    timeout 3600 python3 /experiment-scripts/ci/sampling-client.py --tokenizer "$MODEL_WEIGHTS_DIR" --output /experiment/results "${sampling_args[@]}"
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
