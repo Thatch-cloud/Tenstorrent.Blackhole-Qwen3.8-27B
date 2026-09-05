@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory]
+        options: [inventory, hardware, model-inventory, baseline]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   inventory:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - name: Verify dedicated host
         shell: bash
@@ -46,6 +46,12 @@ jobs:
         if: inputs.suite == 'model-inventory'
         shell: bash
         run: timeout 180 bash scripts/ci/model-inventory.sh
+      - name: Full-model baseline
+        if: inputs.suite == 'baseline'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+        run: timeout 6600 bash scripts/ci/run-baseline.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
