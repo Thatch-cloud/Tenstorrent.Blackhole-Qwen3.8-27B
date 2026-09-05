@@ -14,7 +14,7 @@ root = Path(importlib.util.find_spec('vllm').origin).parent / 'entrypoints' / 'o
 report = {}
 for path in root.rglob('*protocol*.py'):
     for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ClassDef) and 'Completion' in node.name:
+        if isinstance(node, ast.ClassDef) and ('Completion' in node.name or node.name in ('StreamOptions', 'PerRequestTimingMetrics')):
             fields = {field.target.id: ast.unparse(field.annotation) for field in node.body
                       if isinstance(field, ast.AnnAssign) and isinstance(field.target, ast.Name)}
             report[str(path.relative_to(root)) + ':' + node.name] = fields

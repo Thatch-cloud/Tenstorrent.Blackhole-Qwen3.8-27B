@@ -31,7 +31,8 @@ if docker volume inspect "$volume" >/dev/null 2>&1; then
 else
     docker volume create --label thatch.qwen.experiment-cache=true "$volume" >/dev/null
 fi
-test_id=$(docker create --network none --cap-drop ALL --cap-add SYS_NICE \
+test_id=$(docker create --network none --hostname qwen-experiment --add-host qwen-experiment:127.0.0.1 \
+    --cap-drop ALL --cap-add SYS_NICE \
     --security-opt no-new-privileges --pids-limit 4096 --memory 96g --cpus 24 --shm-size 8g \
     --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \
     --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
