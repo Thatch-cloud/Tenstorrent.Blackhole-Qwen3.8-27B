@@ -247,6 +247,14 @@ is a flag-only extension of the current TT plugin. Keep the target TP2 across bo
 cards. Audit checkpoint/runtime revisions and exact feature semantics before any
 port; never execute downloaded custom model code as part of a metadata audit.
 
+The historical `speculative-decoding` branch retains only post-final-norm hidden
+states for MTP (`patch_hidden_retention.py`); that is not the five-layer feature
+interface these external drafters need. Its `spec_generate.py` also explicitly
+reports long-generation token divergence without asserting identity. Retain it
+as historical diagnostic evidence, not a ready lossless verifier or a current
+performance baseline. Audit feature lifetime, trace addresses and accepted-prefix
+selection together with recurrent/conv/KV rollback before adapting either drafter.
+
 Sequence: E3 forced-prefix/rollback correctness and T=1/2/4/8/16 verification curve;
 then checkpoint conformance and native draft kernels; then matched MTP/lookup/
 DFlash2/DSpark coding runs. Report emitted tokens per entire draft+verify+commit
