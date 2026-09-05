@@ -15,7 +15,7 @@ class Fused1DTests(unittest.TestCase):
         end = "                            } else {\n                                tile_regs_commit();"
         source = "prefix" + start + "old pack" + end + "native partial loop\n}"
         result = fused_compute(source)
-        self.assertTrue(result.startswith("prefix"))
+        self.assertIn("prefix", result)
         self.assertIn(end + "native partial loop", result)
         self.assertLess(result.index("native partial loop"), result.index("mul_binary_tile_init"))
         self.assertIn("apply_activation_from_pack<KernelActivation::SILU>(1)", result)

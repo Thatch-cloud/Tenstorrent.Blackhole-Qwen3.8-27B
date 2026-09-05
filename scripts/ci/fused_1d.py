@@ -29,6 +29,7 @@ def fused_compute(source):
     finish = result.rfind("}")
     result = result[:finish] + """
     constexpr uint32_t rounded_cb = 30;
+    cb_wait_front(rounded_cb, 14);
     reconfig_data_format_srca(rounded_cb);
     copy_tile_to_dst_init_short(rounded_cb);
     mul_binary_tile_init();
@@ -48,6 +49,7 @@ def fused_compute(source):
         cb_pop_front(rounded_cb, 2);
     }
 """ + result[finish:]
+    result = '#include "api/compute/eltwise_binary_sfpu.h"\n' + result
     return result.replace('"bmm_fused_activation.hpp"',
         '"ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp"')
 
