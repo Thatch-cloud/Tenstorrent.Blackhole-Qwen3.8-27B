@@ -96,3 +96,12 @@ model ID to the pinned local snapshot path. The guard now accepts only that exac
 reviewed snapshot in addition to the canonical model ID; arbitrary model paths
 and other revisions remain rejected. Ratio 2/4 did not execute. Historical
 zero-cache reports remain observation-only unless current measurements reproduce them.
+
+Retry 33945632554 again passed the control, then failed during ratio-1 API startup:
+`Chunked MM input disabled but max_tokens_per_mm_item (16384) is larger than
+max_num_batched_tokens (2048)`. This is multimodal admission/encoder budgeting,
+not a KV-usage or kernel failure. Interleaving v1 is deliberately text-only but
+the launcher had left image/video limits at their defaults. All interleaving
+arms, including the control, now set image/video limits to zero and disable MM
+embedding inputs. The 2048-token chunk budget and numerical gates are unchanged.
+The prior baseline/profile suites retain their original settings.

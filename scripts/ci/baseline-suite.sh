@@ -44,13 +44,9 @@ if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
 fi
 extra_args=()
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
+    source /experiment-scripts/ci/interleave-args.sh
     python3 /experiment-optimisation/sim/stage-continuation.py /opt/tt-metal --apply > /experiment/results/continuation-stage.json
     python3 /experiment-optimisation/sim/stage-plugin.py /opt/vllm-tt-plugin --apply > /experiment/results/plugin-stage.json
-    if [ "$QWEN_INTERLEAVE_RATIO" != 0 ]; then
-        export QWEN_PREFILL_CONTINUATION=1 TT_PREFILL_DECODE_INTERLEAVE=1
-        export TT_DECODE_STEPS_PER_PREFILL_CHUNK="$QWEN_INTERLEAVE_RATIO"
-        extra_args=(--enable-chunked-prefill --max-num-batched-tokens 2048)
-    fi
 fi
 printf 'mode=%s\nratio=%s\ncontinuation=%s\ninterleave=%s\n' "${QWEN_RUN_MODE:-baseline}" \
     "${QWEN_INTERLEAVE_RATIO:-0}" "$QWEN_PREFILL_CONTINUATION" "$TT_PREFILL_DECODE_INTERLEAVE" > /experiment/results/arm.txt
