@@ -27,6 +27,23 @@ class Fused1DTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fused_compute("no matching native kernel")
 
+    def test_reviewed_grids_cover_each_pair_once(self):
+        for pairs_per_worker, count in ((3, 91), (4, 68), (5, 55), (7, 39)):
+            workers = mapping(pairs_per_worker)
+            self.assertEqual(len(workers), count)
+            self.assertEqual([pair for _, _, begin, valid in workers for pair in range(begin, begin + valid)], list(range(272)))
+            self.assertTrue(all(core_x < 11 and core_y < 10 for core_x, core_y, _, _ in workers))
+        for invalid in (0, 1, 2, 6, 8):
+            with self.assertRaises(ValueError):
+                mapping(invalid)
+
+    def test_generated_epilogue_matches_worker_capacity(self):
+        source = "                            if (last_out) {old pack" + "                            } else {\n                                tile_regs_commit();\n}"
+        for pairs in (3, 4, 5, 7):
+            result = fused_compute(source, pairs_per_worker=pairs)
+            self.assertIn(f"cb_wait_front(rounded_cb, {2 * pairs});", result)
+            self.assertIn(f"pair < {pairs};", result)
+
     def test_intermediate_variant_preserves_both_rounded_tiles(self):
         source = "                            if (last_out) {old pack" + "                            } else {\n                                tile_regs_commit();\n}"
         result = fused_compute(source, intermediates=True)

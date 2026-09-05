@@ -10,7 +10,8 @@ BF16_PRODUCT = """MATH((SFPU_BINARY_CALL(
             (APPROX, ckernel::BinaryOp::MUL, 8, false), 0, 1, 0, VectorMode::RC)));"""
 
 
-def fused_compute(source, intermediates=False):
+def fused_compute(source, intermediates=False, pairs_per_worker=7):
+    mapping(pairs_per_worker)
     start = source.index("                            if (last_out) {")
     end = source.index("                            } else {\n                                tile_regs_commit();", start)
     if source.count("                            if (last_out) {") != 1:
@@ -61,25 +62,34 @@ def fused_compute(source, intermediates=False):
         result = result.replace("cb_push_back(out_dfb_id, 1);", "cb_push_back(out_dfb_id, 2);")
     else:
         result = result.replace("mul_binary_tile(0, 1, 0);", BF16_PRODUCT)
+    result = result.replace("cb_wait_front(rounded_cb, 14);", f"cb_wait_front(rounded_cb, {2 * pairs_per_worker});")
+    result = result.replace("pair < 7;", f"pair < {pairs_per_worker};")
     return result.replace('"bmm_fused_activation.hpp"',
         '"ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp"')
 
 
-def mapping():
-    return [(index % 11, index // 11, index * 7, min(7, 272 - index * 7)) for index in range(39)]
+def mapping(pairs_per_worker=7):
+    if pairs_per_worker not in (3, 4, 5, 7):
+        raise ValueError("Only reviewed 39/55/68/91-worker mappings are supported")
+    return [(index % 11, index // 11, index * pairs_per_worker,
+             min(pairs_per_worker, 272 - index * pairs_per_worker))
+            for index in range((272 + pairs_per_worker - 1) // pairs_per_worker)]
 
 
 class FusedProjection:
-    def __init__(self, mesh, weights, intermediates=False):
+    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7):
         self.mesh = mesh
         self.weights = weights
         self.source = Path("/opt/tt-metal") / COMPUTE
         original = self.source.read_text()
         self.intermediates = intermediates
-        self.compute = fused_compute(original, intermediates=intermediates)
+        self.pairs_per_worker = pairs_per_worker
+        self.workers = mapping(pairs_per_worker)
+        self.rows = (len(self.workers) + 10) // 11
+        self.compute = fused_compute(original, intermediates=intermediates, pairs_per_worker=pairs_per_worker)
         self.manifest = dict(native_compute_sha256=hashlib.sha256(original.encode()).hexdigest(),
                              fused_compute_sha256=hashlib.sha256(self.compute.encode()).hexdigest(),
-                             workers=39, grid=[11, 4], pairs_per_worker=7, k_block=8,
+                             workers=len(self.workers), grid=[11, self.rows], pairs_per_worker=pairs_per_worker, k_block=8,
                              intermediates=intermediates, input_noc=1, weight_noc=0,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")
 
@@ -92,34 +102,35 @@ class FusedProjection:
         output_tiles = 2 if self.intermediates else 1
         output = ttnn.empty((1, 1, 1, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                             device=self.mesh, memory_config=ttnn.L1_MEMORY_CONFIG)
-        all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, 3))])
-        workers = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, 2)),
-                                    ttnn.CoreRange(ttnn.CoreCoord(0, 3), ttnn.CoreCoord(5, 3))])
+        pairs_per_worker = self.pairs_per_worker
+        all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, self.rows - 1))])
+        workers = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(core_x, core_y), ttnn.CoreCoord(core_x, core_y))
+                                    for core_x, core_y, _, _ in self.workers])
         def cb(index, dtype, page, count, cores):
             return ttnn.CBDescriptor(total_size=page * count, core_ranges=cores,
                 format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype,
                     page_size=page, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
         buffers = [cb(0, ttnn.bfloat16, 2048, 16, all_cores),
-                   cb(1, ttnn.bfloat4_b, 576, 224, workers),
-                   cb(4, ttnn.bfloat16, 2048, 7 * output_tiles, workers),
-                   cb(5, ttnn.float32, 4096, 14, workers),
-                   cb(30, ttnn.bfloat16, 2048, 14, workers)]
+                   cb(1, ttnn.bfloat4_b, 576, 32 * pairs_per_worker, workers),
+                   cb(4, ttnn.bfloat16, 2048, pairs_per_worker * output_tiles, workers),
+                   cb(5, ttnn.float32, 4096, 2 * pairs_per_worker, workers),
+                   cb(30, ttnn.bfloat16, 2048, 2 * pairs_per_worker, workers)]
         mesh_program = ttnn.MeshProgramDescriptor()
         shards = zip(ttnn.get_device_tensors(value), ttnn.get_device_tensors(self.weights),
                      ttnn.get_device_tensors(output))
         for chip, (local_input, local_weight, local_output) in enumerate(shards):
             device = local_input.device()
             first = device.worker_core_from_logical_core(ttnn.CoreCoord(0, 0))
-            last = device.worker_core_from_logical_core(ttnn.CoreCoord(10, 3))
+            last = device.worker_core_from_logical_core(ttnn.CoreCoord(10, self.rows - 1))
             input_kernel = ttnn.KernelDescriptor(
                 kernel_source=str(Path(__file__).with_name("fused_1d_input.cpp")), core_ranges=all_cores,
                 compile_time_args=ttnn.TensorAccessorArgs(local_input).get_compile_time_args(),
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_1,
                                                          noc=ttnn.NOC.RISCV_1_default))
             input_args = ttnn.RuntimeArgs()
-            for index in range(44):
+            for index in range(11 * self.rows):
                 input_args[index % 11][index // 11] = [local_input.buffer_address(), index,
-                                                       first.x, first.y, last.x, last.y]
+                                                       first.x, first.y, last.x, last.y, len(self.workers), 11 * self.rows]
             input_kernel.runtime_args = input_args
             writer = ttnn.KernelDescriptor(
                 kernel_source=str(Path(__file__).with_name("fused_1d_weights.cpp")), core_ranges=workers,
@@ -128,8 +139,8 @@ class FusedProjection:
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                          noc=ttnn.NOC.RISCV_0_default))
             writer_args = ttnn.RuntimeArgs()
-            for core_x, core_y, begin, count in mapping():
-                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles]
+            for core_x, core_y, begin, count in self.workers:
+                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles, pairs_per_worker]
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
                 fp32_dest_acc_en=True, math_approx_mode=False)
@@ -138,7 +149,8 @@ class FusedProjection:
             compute_config.unpack_to_dest_mode.extend(unpack_modes)
             compute = ttnn.KernelDescriptor(kernel_source=self.compute,
                 source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=workers,
-                compile_time_args=[8, 1, 8, 8, 7, 112, 14, 20, 1, 1, 1, 2, 2, 1, 14, 0, 0, 0],
+                compile_time_args=[8, 1, 8, 8, pairs_per_worker, 16 * pairs_per_worker, 2 * pairs_per_worker,
+                                   20, 1, 1, 1, 2, 2, 1, 2 * pairs_per_worker, 0, 0, 0],
                 named_compile_time_args=[("cb_in0", 0), ("cb_in1", 1), ("cb_out", 4),
                     ("cb_intermed0", 5), ("cb_in0_transposed", 10), ("activation_type", 4),
                     ("activation_param0", 0), ("activation_param1", 0), ("activation_param2", 0)],

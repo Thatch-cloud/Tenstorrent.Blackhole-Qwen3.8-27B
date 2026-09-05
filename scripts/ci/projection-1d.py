@@ -50,6 +50,12 @@ def main():
             report["checks"].append(dict(chip=chip, packed_weight_exact=True))
         del tiles, combined, packed
         fused = FusedProjection(mesh, weight)
+        candidates = {"fused": fused}
+        candidates.update({f"fused-{count}": FusedProjection(mesh, weight, pairs_per_worker=pairs)
+                           for pairs, count in ((5, 55), (4, 68), (3, 91))})
+        candidate_reports = {name: dict(kernel=operation.manifest, exact_control=True, blocks=[])
+                             for name, operation in candidates.items()}
+        report["candidates"] = candidate_reports
         diagnostic = FusedProjection(mesh, weight, intermediates=True)
         report["kernel"] = fused.manifest
         report["extra_packed_weight_bytes_per_chip"] = weight.buffer_num_pages() * weight.buffer_aligned_page_size()
@@ -90,7 +96,6 @@ def main():
             if not numerical:
                 raise AssertionError("Projection numerical gate failed")
             return exact
-        exact = True
         for seed, host in zip(report["seeds"], inputs):
             ttnn.copy_host_to_device_tensor(host, value)
             gate, up = control(value, intermediates=True)
@@ -105,23 +110,26 @@ def main():
             baseline = control(value)
             expected.append(read(baseline))
             ttnn.deallocate(baseline)
-            candidate = fused(value)
-            exact &= check(read(candidate), expected[-1], seed, "eager")
-            ttnn.deallocate(candidate)
-            print(json.dumps(dict(seed=seed, eager_exact=exact)), flush=True)
-        for name, operation in (("control", control), ("fused", fused)):
+            for name, operation in candidates.items():
+                candidate = operation(value)
+                matches = check(read(candidate), expected[-1], seed, "eager-" + name)
+                candidate_reports[name]["exact_control"] &= matches
+                ttnn.deallocate(candidate)
+                print(json.dumps(dict(seed=seed, candidate=name, eager_exact=matches)), flush=True)
+        for name, operation in [("control", control), *candidates.items()]:
             trace = ttnn.begin_trace_capture(mesh, cq_id=0)
             outputs[name] = operation(value)
             ttnn.end_trace_capture(mesh, trace, cq_id=0)
             traces[name] = trace
         for seed, host, reference in zip(report["seeds"], inputs, expected):
             ttnn.copy_host_to_device_tensor(host, value)
-            for name in ("control", "fused"):
+            for name in ("control", *candidates):
                 ttnn.execute_trace(mesh, traces[name], cq_id=0, blocking=False)
                 matches = check(read(outputs[name]), reference, seed, "trace-" + name)
                 if name == "control" and not matches:
                     raise AssertionError("Control trace differs from eager")
-                exact &= matches
+                if name != "control":
+                    candidate_reports[name]["exact_control"] &= matches
         def timed(name):
             ttnn.execute_trace(mesh, traces[name], cq_id=0, blocking=False)
             ttnn.synchronize_device(mesh)
@@ -132,13 +140,18 @@ def main():
             return (time.perf_counter() - started) * 1000 / 40
         ttnn.copy_host_to_device_tensor(inputs[0], value)
         for block in range(3):
-            samples = [timed(name) for name in ("control", "fused", "fused", "control")]
-            control_ms = statistics.mean((samples[0], samples[3]))
-            fused_ms = statistics.mean(samples[1:3])
-            report["blocks"].append(dict(samples_ms=samples, control_ms=control_ms, fused_ms=fused_ms,
-                                          latency_change=fused_ms / control_ms - 1))
-        report.update(passed=True, exact_control=exact,
-            eligible_for_mlp_gate=exact and all(block["latency_change"] < -.02 for block in report["blocks"]))
+            for name in candidates:
+                samples = [timed(arm) for arm in ("control", name, name, "control")]
+                control_ms = statistics.mean((samples[0], samples[3]))
+                fused_ms = statistics.mean(samples[1:3])
+                candidate_reports[name]["blocks"].append(dict(samples_ms=samples, control_ms=control_ms,
+                    fused_ms=fused_ms, latency_change=fused_ms / control_ms - 1))
+        for candidate_report in candidate_reports.values():
+            candidate_report["eligible_for_mlp_gate"] = candidate_report["exact_control"] and all(
+                block["latency_change"] < -.02 for block in candidate_report["blocks"])
+        report.update(passed=True, blocks=candidate_reports["fused"]["blocks"],
+                      exact_control=candidate_reports["fused"]["exact_control"],
+                      eligible_for_mlp_gate=candidate_reports["fused"]["eligible_for_mlp_gate"])
         print(json.dumps(report, indent=2), flush=True)
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"

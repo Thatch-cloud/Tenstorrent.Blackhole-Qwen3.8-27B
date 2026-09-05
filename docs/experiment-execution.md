@@ -524,3 +524,15 @@ matmul kernel passes true and skips that narrowing. The next candidate keeps
 FP32 destination addressing/accumulation for the matmul but calls the same native
 multiply calculation with its BF16 narrowing branch enabled. No accumulation
 precision is lowered, and the existing exact-output gate remains mandatory.
+
+Run 33964555688 confirmed the correction: every rounded intermediate, eager
+product, and traced product comparison was exact on both chips for all three
+seeds. Projection latency remained 5.00–5.10% above control (0.20688–0.20733 ms
+versus 0.19695–0.19732 ms). Correctness is established only for this bounded gate;
+there is still no performance promotion or whole-model quality claim.
+
+The subsequent isolated grid sweep retains this arithmetic, K-block eight,
+two-tile subblocks and NoC routing. It compares 39/55/68/91 N-workers using
+7/5/4/3 pairs per worker respectively. Only the N partition, corresponding buffers
+and multicast receiver rectangle vary. All candidates compile before trace
+capture and each receives its own three ABBA timing blocks and exact-output gate.
