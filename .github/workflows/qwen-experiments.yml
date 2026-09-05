@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, baseline]
+        options: [inventory, hardware, model-inventory, baseline, interleave]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -52,6 +52,12 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 6600 bash scripts/ci/run-baseline.sh
+      - name: Interleaving correctness gates
+        if: inputs.suite == 'interleave'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+        run: timeout 6600 bash scripts/ci/run-interleave.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

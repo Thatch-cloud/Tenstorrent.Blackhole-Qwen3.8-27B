@@ -1,0 +1,60 @@
+"""Full-model boundary and cancellation observations before mixed-traffic adoption."""
+
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import time
+import urllib.request
+
+spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_name("baseline-client.py"))
+baseline = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(baseline)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tokenizer", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True, trust_remote_code=False)
+    args.output.mkdir(parents=True, exist_ok=True)
+    unit = tokenizer.encode("def stable_sort(records):\n    return sorted(records)\n", add_special_tokens=False)
+    report = dict(passed=False, scope="Raw token-prompt output/cancellation probe; not direct state snapshots or exact token-ID certification",
+                  results=[])
+    try:
+        for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193):
+            prompt = (unit * (length // len(unit) + 1))[:length]
+            result = baseline.request_stream(prompt, 32, f"boundary-{length}", args.output)
+            report["results"].append(result["label"])
+        prompt = (unit * (4096 // len(unit) + 1))[:4096]
+        request = urllib.request.Request("http://127.0.0.1:8000/v1/completions", json.dumps(dict(
+            model="qwen3.8-27b", prompt=prompt, max_tokens=1024, temperature=0, ignore_eos=True,
+            stream=True, logprobs=1)).encode(), {"Content-Type": "application/json"})
+        cancelled = False
+        with urllib.request.urlopen(request, timeout=1800) as response:
+            for line in response:
+                if line.startswith(b"data:") and b'"tokens"' in line:
+                    message = json.loads(line[5:])
+                    if any((choice.get("logprobs") or {}).get("tokens") for choice in message.get("choices", [])):
+                        cancelled = True
+                        break
+        if not cancelled:
+            raise AssertionError("Cancellation stream produced no token")
+        time.sleep(2)
+        reused = baseline.request_stream(prompt, 32, "after-cancel", args.output)
+        original = json.loads((args.output / "boundary-4096.json").read_text())
+        if any(reused[key] != original[key] for key in ("output_sha256", "token_strings_sha256")):
+            raise AssertionError("Greedy continuation changed after cancellation")
+        report["results"].append("after-cancel")
+        report["passed"] = True
+    except BaseException as error:
+        report["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        (args.output / "interleave-summary.json").write_text(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()

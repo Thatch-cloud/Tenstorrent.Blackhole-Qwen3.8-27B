@@ -46,6 +46,20 @@ class BaselineTests(unittest.TestCase):
         self.assertIsNone(baseline.quantile([], .99))
         self.assertEqual(baseline.quantile([3, 1, 2], .5), 2)
 
+    def test_template_mapping_uses_actual_token_length(self):
+        tokenizer = mock.Mock()
+        tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: {
+            "input_ids": list(range(20 + messages[-1]["content"].count("def lookup") * 10))}
+        prompt = baseline.make_prompt(tokenizer, 128, 0)
+        self.assertIsInstance(prompt, list)
+        self.assertEqual(len(prompt), 120)
+
+    def test_template_flat_list_remains_supported(self):
+        tokenizer = mock.Mock()
+        tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: list(
+            range(20 + messages[-1]["content"].count("def lookup") * 10))
+        self.assertEqual(len(baseline.make_prompt(tokenizer, 128, 0)), 120)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,6 +2,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 import hashlib
 import json
 import math
@@ -73,12 +74,18 @@ def request_stream(prompt, count, label, output):
 def make_prompt(tokenizer, target, variant):
     unit = "def lookup(records, key):\n    return next((row for row in records if row[0] == key), None)\n"
     def encode(repeats):
-        return tokenizer.apply_chat_template([
+        encoded = tokenizer.apply_chat_template([
             {"role": "system", "content": "You are a careful coding assistant."},
             {"role": "user", "content": unit * repeats +
              f"\nVariant {variant}. Refactor this code into a tested indexed lookup API. Explain edge cases and write tests."}],
-            tokenize=True, add_generation_prompt=True)
-    lower, upper = 0, target
+            tokenize=True, add_generation_prompt=True, return_dict=False)
+        tokens = encoded["input_ids"] if isinstance(encoded, Mapping) else encoded
+        if not isinstance(tokens, list) or any(type(token) is not int for token in tokens):
+            raise TypeError("Expected a flat list of template token IDs")
+        return tokens
+    lower, upper = 0, 1
+    while upper < target and len(encode(upper)) <= target:
+        upper = min(target, upper * 2)
     while lower < upper:
         middle = (lower + upper + 1) // 2
         if len(encode(middle)) <= target:
