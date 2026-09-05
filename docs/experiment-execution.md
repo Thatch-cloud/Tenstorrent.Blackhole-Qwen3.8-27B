@@ -353,3 +353,16 @@ time 20 replay submissions followed by synchronization per sample. Promotion to
 a full-model gate requires exact control equality and over 2% lower latency in
 every block; this is only a single-layer screen, with replicated DRAM input and
 both-card reduce-scatter, not a serving-throughput or coding-quality benchmark.
+
+Grid/block sweep [33958859849](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33958859849)
+passes at `50d63d7`: all 90 eager/traced seeded outputs match control exactly;
+Torch PCC ranges 0.999203-0.999417. No candidate clears the predeclared 2% latency
+gate in every block. The best, gate grid budget 110, reduces whole-layer latency
+only 1.691% (about 0.338 to 0.332 ms). Larger down grids are 0.48-2.43% slower;
+K blocks 4 and 16 are 3.96% and 5.72% slower. The frozen control remains unchanged.
+
+Follow-up `mlp-packing` keeps the control grid budgets but separately sets gate/up
+or down output tiles per core to 8, 12 or 16, permitting a four-tile FP32 subblock
+instead of the control's one-tile subblock. It retains the same precision, seeded
+exact-output and paired timing gates. This tests tile packing, not a promise that
+more active cores improve bandwidth.

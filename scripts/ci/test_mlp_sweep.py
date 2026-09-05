@@ -29,6 +29,15 @@ class SweepTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sweep.geometry(5120, 8704, 44, 3)
 
+    def test_explicit_packing_covers_output_and_preserves_subblock_limit(self):
+        self.assertEqual(len(sweep.candidates(packing=True)), 7)
+        for tiles in (8, 12, 16):
+            config = sweep.geometry(5120, 8704, 44, 8, tiles)
+            self.assertEqual(config["per_core_N"], tiles)
+            self.assertEqual(config["out_subblock_w"], 4)
+        with self.assertRaises(ValueError):
+            sweep.geometry(5120, 8704, 44, 8, 6)
+
     def test_paired_latency_sign(self):
         result = sweep.paired_summary([dict(control_ms=1, candidate_ms=.9), dict(control_ms=2, candidate_ms=1.8)])
         self.assertAlmostEqual(result["mean_latency_change"], -.1)

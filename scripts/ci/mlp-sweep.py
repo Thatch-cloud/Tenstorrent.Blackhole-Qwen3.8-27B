@@ -1,6 +1,7 @@
 """Real-weight TP2 MLP grid sweep; no serving defaults or precision changes."""
 
 import json
+import argparse
 import math
 import os
 from pathlib import Path
@@ -8,18 +9,25 @@ import statistics
 import time
 
 
-def candidates():
+def candidates(packing=False):
     result = [dict(name="control", gate=44, down=33, block=8)]
+    if packing:
+        result += [dict(name=f"gate-tiles-{tiles}", gate=44, down=33, block=8, gate_tiles=tiles) for tiles in (8, 12, 16)]
+        result += [dict(name=f"down-tiles-{tiles}", gate=44, down=33, block=8, down_tiles=tiles) for tiles in (8, 12, 16)]
+        return result
     result += [dict(name=f"gate-{cores}", gate=cores, down=33, block=8) for cores in (22, 33, 55, 66, 88, 110)]
     result += [dict(name=f"down-{cores}", gate=44, down=cores, block=8) for cores in (22, 44, 55, 66, 88, 110)]
     result += [dict(name=f"block-{block}", gate=44, down=33, block=block) for block in (4, 16)]
     return result
 
 
-def geometry(inner, output, cores, block):
+def geometry(inner, output, cores, block, per_core=None):
     if cores not in range(11, 111, 11) or inner % (32 * block):
         raise ValueError("Unreviewed grid or K blocking")
-    per_core = math.ceil(math.ceil(output / 32) / cores)
+    minimum = math.ceil(math.ceil(output / 32) / cores)
+    per_core = minimum if per_core is None else per_core
+    if per_core < minimum or type(per_core) is not int:
+        raise ValueError("Insufficient output tile coverage")
     subblock = max(value for value in range(1, 5) if per_core % value == 0)
     return dict(compute_with_storage_grid_size=(11, cores // 11), in0_block_w=block,
                 out_subblock_h=1, out_subblock_w=subblock, per_core_M=1, per_core_N=per_core,
@@ -33,6 +41,9 @@ def paired_summary(blocks):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--packing", action="store_true")
+    options = parser.parse_args()
     if os.environ.get("QWEN_HARDWARE_TESTS") != "1" or os.environ.get("QWEN_CARDS_ALLOCATED") != "1":
         raise RuntimeError("Explicit hardware allocation required")
     import torch
@@ -74,14 +85,15 @@ def main():
                                       mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)) for vector in vectors]
         device_input = ttnn.from_torch(vectors[0], device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
-        configurations = candidates()
+        configurations = candidates(options.packing)
+        report["packing_sweep"] = options.packing
         controls = []
         def configure(candidate):
             if candidate["name"] == "control":
                 args.mlp_w1_decode_1d_progcfg, args.mlp_w3_decode_1d_progcfg, args.mlp_w2_decode_1d_progcfg = frozen
                 return
-            gate = geometry(args.dim, args.hidden_dim // 2, candidate["gate"], candidate["block"])
-            down = geometry(args.hidden_dim // 2, args.dim, candidate["down"], candidate["block"])
+            gate = geometry(args.dim, args.hidden_dim // 2, candidate["gate"], candidate["block"], candidate.get("gate_tiles"))
+            down = geometry(args.hidden_dim // 2, args.dim, candidate["down"], candidate["block"], candidate.get("down_tiles"))
             args.mlp_w1_decode_1d_progcfg = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(**gate, fused_activation=ttnn.UnaryOpType.SILU)
             args.mlp_w3_decode_1d_progcfg = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(**gate, fused_activation=None)
             args.mlp_w2_decode_1d_progcfg = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(**down, fused_activation=None)
