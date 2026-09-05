@@ -461,3 +461,32 @@ keep complete gate/up tile pairs together, reproduce BF16 intermediate rounding
 and account for packed-weight allocation before repeating the same gates. Do not
 extend the negative prefill-oriented grid sweep or relax precision/exactness to
 claim a win. The 65 local CI-helper tests pass; production remains unchanged.
+
+## Decode-specialized 1D gate/up prototype
+
+`projection-1d` uses a separate `generic_op` program, not the prefill-oriented
+minimal matmul. The native 1D compute source is copied into a source-code kernel
+descriptor; only its final-output branch changes. The original K-block loop and
+FP32 packer-L1 partial accumulation remain. No installed source or binary is edited.
+Native and generated compute-source SHA256 values are recorded in the result.
+
+The program maps 272 output-tile pairs to the same 39 N-workers (seven pairs/core,
+six on the last), within an 11x4 rectangle. An activation-multicast reader includes
+the five non-compute receiver cores. Separate weight-reader/output-writer code
+streams pair-interleaved BF4 weights, including zero padding on the last worker,
+and writes compact BF16 output directly. These readers are new code, not a claim
+of byte-identical native reader scheduling. K-block size stays eight; paired
+subblocks have two tiles instead of control's single tile.
+
+The epilogue runs native pack-side SiLU on the gate tile only, packs gate and up
+to a private two-tile BF16 circular buffer, then multiplies those rounded values
+and packs BF16 output. Packed device weights must dequantize bit-identically to
+the original gate/up tensors on each chip. This establishes the intended rounding
+contract, not a correctness claim before silicon testing.
+
+First gate is projection-only (no down projection or CCL reduction): three real
+layer-0 input seeds, both chips, eager and traced exact comparisons, finite/PCC
+diagnostics, then three ABBA blocks with 40 trace replays/sample. Inputs already
+reside in L1 for both arms. Only exact output and >2% lower latency in every block
+permit a whole-MLP experiment. Preserve non-exact/negative results and do not
+replace the serving path on the strength of this prerequisite test.

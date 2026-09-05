@@ -47,6 +47,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
     timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = projection-1d ]; then
+    timeout -k 30 900 python3 /experiment-scripts/ci/projection-1d.py
+    exit 0
+fi
 if [[ "${QWEN_RUN_MODE:-baseline}" = mlp-sweep || "${QWEN_RUN_MODE:-baseline}" = mlp-packing || "${QWEN_RUN_MODE:-baseline}" = mlp-fusion ]]; then
     mlp_args=()
     if [ "$QWEN_RUN_MODE" = mlp-packing ]; then mlp_args=(--packing); fi
