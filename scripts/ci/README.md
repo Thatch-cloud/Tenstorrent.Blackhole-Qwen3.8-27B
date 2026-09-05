@@ -57,6 +57,14 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 
 ## Programme suites
 
+- `gdn-prefix`: E3a real-weight GDN prerequisite on both chips, B1 in Bmax8.
+  Compare native sequential decode with batched input projection plus the same
+  native fused per-token remainder. Test T=1/2/4/8/16, three seeds, eager/trace,
+  every prefix snapshot and two correction steps after restore. Stale recurrence
+  and stale convolution negative controls must fail exact state/output checks.
+  Uses unchanged K-image BF16 state/decode flags. Snapshot-heavy diagnostic layer
+  timing is not the full-model verifier cost curve or speculative throughput.
+
 - `baseline`: frozen model/tokenizer snapshot, unchanged K-image control, warmed
   context/concurrency matrix and passive 250 ms metrics capture. Client estimates
   are not engine-commit throughput. Weights are read-only; experimental caches are

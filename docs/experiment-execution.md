@@ -636,3 +636,25 @@ explicit commit, failures and isolation, alongside the existing eleven lookup te
 Callbacks are test doubles: no DFlash2, DSpark or EAGLE3 device adapter is claimed.
 The E5 plan now separates routing, adaptive selection, cascades and tree ensembles.
 The shared exact E3 verifier and device state lifecycle remain the next dependency.
+
+## E3a native GDN prefix gate (2026-09-06)
+
+Added the `gdn-prefix` hardware suite. The historical multi-token implementation
+used older composed conv/gate/norm operations, so it is not reused as the current
+control. The new candidate calls the audited native packed input projection once
+for T rows, then supplies independent row copies to the unchanged fused native
+decode remainder. Output projections and collectives remain per token in this
+first isolation test; it is not a complete batched verifier or optimal kernel.
+
+The gate loads one real GDN layer, retains the pinned K-image BF16 recurrence and
+decode settings, and uses B1 within an eight-slot state allocation on both chips.
+Nonzero priming precedes three seeds at T=1/2/4/8/16. Both eager and trace replay
+must match every native sequential output and recurrent/conv snapshot exactly.
+Each prefix 0..T is restored in place, followed by two correction-input steps,
+with exact outputs and final state required. Deliberately restoring stale
+recurrence or convolution separately must be detected in state and continuation.
+
+Device snapshots are preallocated outside trace capture and all live state
+addresses must stay fixed. Timings include snapshot copies and are diagnostic
+only. Attention KV, full-model logits, EOS/cancellation/slot epochs and all-layer
+verification remain later gates; no host test or layer pass certifies those.
