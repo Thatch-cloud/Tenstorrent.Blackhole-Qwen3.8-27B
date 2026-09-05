@@ -246,3 +246,28 @@ and 456, seeded non-greedy sampling, each penalty type separately, and a final
 greedy recovery request. Non-greedy and penalty cases must actually select host;
 seeded greedy and post-fallback greedy must engage device force-argmax. These
 checks change request parameters only, not eligibility or sampling mathematics.
+
+Extended [33952227890](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33952227890)
+passed at `9ca28d0`, following 47 passing local CI-helper tests. All seven
+fallback/seed pairs matched exact IDs and text, with the expected actual sampler
+selection; device greedy resumed correctly after penalty requests. Both long-context
+logprobs negative controls also selected host and matched greedy control tokens.
+All 24 long-context measured requests completed 512 tokens and matched their
+prompt-length control exactly across three ABBA blocks:
+
+| Actual prompt tokens | Host mean client tok/s | Device mean client tok/s | Mean paired gain | Three-block gain range |
+| --- | --- | --- | --- | --- |
+| 32752 | 19.231 | 20.522 | +6.709% | +6.553% to +6.828% |
+| 64504 | 18.724 | 19.968 | +6.642% | +6.464% to +6.831% |
+
+KV occupancy peaked at 12.3918%; zero active-zero observations across 2563 active
+samples out of 4581 scrapes, zero scrape errors and zero preemptions. This is
+exporter evidence, not direct certification of every attention/GDN state tensor.
+
+The sampling improvement now reproduces at all four tested context lengths.
+Explicit-seed checks establish correctness and path selection, not seeded throughput
+or internal sampler-trace reuse. Timings still exclude logprobs and use client
+stream events, not engine commit timestamps. Production defaults remain unchanged.
+The next performance investigation is full-model traced operation attribution:
+separate projection/GDN math, collectives, sampling and host dispatch before tuning
+core grids. Existing eager module profiles cannot establish that critical path.
