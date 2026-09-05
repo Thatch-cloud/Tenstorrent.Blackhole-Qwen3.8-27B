@@ -8,6 +8,13 @@ spec.loader.exec_module(sweep)
 
 
 class SweepTests(unittest.TestCase):
+    def test_fusion_candidates_are_separate(self):
+        candidates = sweep.candidates(fusion=True)
+        self.assertEqual(candidates[0]["name"], "control")
+        self.assertEqual([candidate["nblock"] for candidate in candidates[1:]], [8, 16, 32])
+        with self.assertRaises(ValueError):
+            sweep.candidates(packing=True, fusion=True)
+
     def test_candidates_and_frozen_geometry(self):
         candidates = sweep.candidates()
         self.assertEqual(len(candidates), 15)

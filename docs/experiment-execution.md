@@ -409,3 +409,22 @@ coverage, chain adjacency and BF16 state shapes are checked. Active-prefix state
 writeback remains a secondary candidate; combined gate/up projection work takes
 priority. The analyzer is added to future full-model profiles; eight regression
 tests pass. This is new analysis of old measurements, not a new speed benchmark.
+
+## Fused gate/up decode probe
+
+The `mlp-fusion` suite compares the frozen real-weight layer-0 MLP with native
+`minimal_matmul(fuse_swiglu=True)` using tile-pair-interleaved gate/up weights.
+It retains BF4 gate/up, BF8 down, LoFi FP32 destination and packer L1 accumulation;
+fusion can still alter rounding/order, so exact control output remains mandatory
+for promotion. Three candidates use M/K blocks 1/8, N blocks 8/16/32 and grid
+11x1. The existing minimal matmul partitions M across grid rows, so adding rows
+for B1 is not automatically useful N-parallel work. No custom kernel is added.
+
+The timed path includes the original input-to-L1 transfer, unchanged down
+projection and TP reduction. All candidates compile before traces; three seeds
+are checked eager and traced against Torch PCC >=0.97 and exact control output.
+Three ABBA blocks with 20 replays/sample require >2% lower latency in every block
+and exact outputs before any full-model gate. A non-exact result is not promoted.
+An additional packed layer weight is allocated only inside the experiment;
+host packing is checked reversible and no weight cache is written. Full-model
+duplicate-weight memory capacity remains unverified. This is not serving adoption.

@@ -9,8 +9,12 @@ import statistics
 import time
 
 
-def candidates(packing=False):
+def candidates(packing=False, fusion=False):
     result = [dict(name="control", gate=44, down=33, block=8)]
+    if packing and fusion:
+        raise ValueError("Select one experiment")
+    if fusion:
+        return result + [dict(name=f"fused-nblock-{block}", nblock=block) for block in (8, 16, 32)]
     if packing:
         result += [dict(name=f"gate-tiles-{tiles}", gate=44, down=33, block=8, gate_tiles=tiles) for tiles in (8, 12, 16)]
         result += [dict(name=f"down-tiles-{tiles}", gate=44, down=33, block=8, down_tiles=tiles) for tiles in (8, 12, 16)]
@@ -43,6 +47,7 @@ def paired_summary(blocks):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--packing", action="store_true")
+    parser.add_argument("--fusion", action="store_true")
     options = parser.parse_args()
     if os.environ.get("QWEN_HARDWARE_TESTS") != "1" or os.environ.get("QWEN_CARDS_ALLOCATED") != "1":
         raise RuntimeError("Explicit hardware allocation required")
@@ -85,12 +90,50 @@ def main():
                                       mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)) for vector in vectors]
         device_input = ttnn.from_torch(vectors[0], device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
-        configurations = candidates(options.packing)
+        configurations = candidates(options.packing, options.fusion)
         report["packing_sweep"] = options.packing
+        report["fusion_sweep"] = options.fusion
+        packed_weight = None
+        if options.fusion:
+            from models.tt_dit.utils.tensor import prepare_for_fused_swiglu
+            gate_up = torch.cat([state["gate_proj.weight"].bfloat16().T.contiguous(),
+                                 state["up_proj.weight"].bfloat16().T.contiguous()], dim=-1)
+            packed = prepare_for_fused_swiglu(gate_up, ndev=2, gate_is_first=True)
+            restored = packed.reshape(args.dim, 2, args.hidden_dim // 64, 2, 32).permute(0, 3, 1, 2, 4).reshape_as(gate_up)
+            if not torch.equal(restored, gate_up):
+                raise AssertionError("Gate/up tile packing changed host weights")
+            packed_weight = ttnn.from_torch(packed, device=mesh, dtype=ttnn.bfloat4_b,
+                layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=-1))
+            report["packed_weights"] = dict(extra_elements_per_chip=args.dim * args.hidden_dim,
+                raw_four_bit_bytes_per_chip=args.dim * args.hidden_dim // 2,
+                scope="Additional single-layer experiment allocation; raw bytes exclude tile metadata. No cache writes or full-model allocation claim")
         controls = []
+        forward = mlp.forward
         def configure(candidate):
+            nonlocal forward
+            forward = mlp.forward
             if candidate["name"] == "control":
                 args.mlp_w1_decode_1d_progcfg, args.mlp_w3_decode_1d_progcfg, args.mlp_w2_decode_1d_progcfg = frozen
+                return
+            if options.fusion:
+                from models.tt_transformers.tt.ccl import tt_all_reduce
+                config = ttnn.MinimalMatmulConfig(M_block_size=1, K_block_size=8,
+                    N_block_size=candidate["nblock"], subblock_h=1, subblock_w=4,
+                    compute_with_storage_grid_size=ttnn.CoreCoord(11, 1))
+                def fused_forward(value):
+                    local = ttnn.to_memory_config(value, ttnn.L1_MEMORY_CONFIG)
+                    hidden = ttnn.experimental.minimal_matmul(local, packed_weight, config=config,
+                        memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16,
+                        compute_kernel_config=mlp.compute_kernel_config_decode, fuse_swiglu=True)
+                    ttnn.deallocate(local)
+                    partial = ttnn.linear(hidden, mlp.weights.w2,
+                        compute_kernel_config=mlp.compute_kernel_config_decode,
+                        program_config=frozen[2], memory_config=ttnn.L1_MEMORY_CONFIG)
+                    ttnn.deallocate(hidden)
+                    return tt_all_reduce(partial, mesh, mlp.tt_ccl, cluster_axis=0, dim=3,
+                        topology=args.ccl_topology(), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                forward = fused_forward
                 return
             gate = geometry(args.dim, args.hidden_dim // 2, candidate["gate"], candidate["block"], candidate.get("gate_tiles"))
             down = geometry(args.hidden_dim // 2, args.dim, candidate["down"], candidate["block"], candidate.get("down_tiles"))
@@ -105,7 +148,7 @@ def main():
             report["results"].append(result)
             for index, host in enumerate(host_inputs):
                 ttnn.copy_host_to_device_tensor(host, device_input)
-                output = mlp.forward(device_input)
+                output = forward(device_input)
                 actual = read(output)
                 ttnn.deallocate(output)
                 pcc = compute_pcc(references[index], actual)
@@ -121,7 +164,7 @@ def main():
         for candidate in configurations:
             configure(candidate)
             trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-            outputs[candidate["name"]] = mlp.forward(device_input)
+            outputs[candidate["name"]] = forward(device_input)
             ttnn.end_trace_capture(mesh, trace, cq_id=0)
             traces[candidate["name"]] = trace
         for index, host in enumerate(host_inputs):
