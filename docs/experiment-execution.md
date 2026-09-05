@@ -400,3 +400,12 @@ See [source comparison and next experiment](gdn-source-audit-2026-09-05.md) for
 exact upstream heads, evidence limits, two failed audit attempts and the proposed
 active-prefix state-write experiment. B1/Bmax8 currently cannot use the existing
 in-place flag. No new throughput result or production change is claimed.
+
+Offline attribution of the existing 33957724963 hardware trace now isolates the
+three recurrent-state copy stages across all 48 GDN layers, 15 replays and both
+chips. Median summed copy time is 0.548383/0.548504 ms per step on chip 0/1,
+about 1.285%/1.286% of summed kernel time (not critical-path time). Native call
+coverage, chain adjacency and BF16 state shapes are checked. Active-prefix state
+writeback remains a secondary candidate; combined gate/up projection work takes
+priority. The analyzer is added to future full-model profiles; eight regression
+tests pass. This is new analysis of old measurements, not a new speed benchmark.

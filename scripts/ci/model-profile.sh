@@ -17,3 +17,4 @@ timeout -k 30 1200 python3 -m tracy -p -r --disable-device-data-dump-to-files --
     /experiment-scripts/ci/model-profile.py 2>&1 | tee "$output/console.log"
 python3 /experiment-scripts/ci/check-model-profile.py "$output"
 python3 /experiment-scripts/ci/summarize-model-shapes.py "$output"
+python3 /experiment-scripts/ci/summarize-gdn-state.py "$output"

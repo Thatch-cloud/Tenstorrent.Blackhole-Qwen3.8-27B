@@ -73,6 +73,47 @@ state and writes the result back through `_write_recurrent_state_prefix`.
 This is a proposed experiment, not implemented or measured. It is separate from
 gate/up projection fusion and does not establish a path to 200 committed tok/s.
 
+### Attribution completed: modest kernel-time opportunity
+
+The new `scripts/ci/summarize-gdn-state.py` reprocessed the existing hardware trace
+33957724963. No new hardware run was needed. It matches native C++ profiler call
+identities and operation counts, requires both chips and all 15 measured replays,
+and checks all 48 recurrent layers per replay for this exact adjacent chain:
+
+`Slice -> DecodeGatedDeltaRule -> InterleavedToSharded -> SliceWrite`
+
+Input/output dimensions must match the BF16 eight-slot `[8,24,128,128]` pool and
+active `[1,24,128,128]` state. This excludes unrelated attention/activation slices.
+The source audit identifies the corresponding prefix read/write code; CSV
+adjacency and shapes are not a tensor-address or dependency-graph proof.
+
+| Summed kernel time per decode step | Chip 0 ms | Chip 1 ms |
+| --- | --- | --- |
+| Active-state slice | 0.247174 | 0.247169 |
+| State interleaved-to-sharded conversion | 0.074954 | 0.075306 |
+| Active-state slice-write | 0.225857 | 0.226190 |
+| All three copy stages, median of per-replay sums | 0.548383 | 0.548504 |
+| Recurrent fused kernel, separately | 2.256321 | 2.255412 |
+
+Copy-stage sums range 0.546013-0.551619 ms on chip 0 and
+0.547719-0.551608 ms on chip 1. Their median share of each replay's total summed
+kernel duration is 1.285% and 1.286%, respectively. There are 144 copy-stage
+operations per replay per chip, approximately 11.4 microseconds per GDN layer.
+The sum of stage medians need not equal the median of their sum.
+
+These are instrumented kernel totals, not critical-path wall time or a projected
+speedup. Eliminating these stages still requires reading and writing persistent
+state; dispatch/overlap effects and any added kernel cost need fresh measurement.
+Never add the two chips' durations to estimate one stream's latency.
+
+Decision: retain active-prefix writeback as a secondary experiment; do not spend
+the next native build replacing an already-fused kernel solely on this evidence.
+Resume combined gate/up projection and input-transfer investigation first, given
+the much larger measured matmul budget. No precision or promotion gates change.
+The full-model profile suite now runs this attribution check automatically for
+the frozen B1/eight-slot shape. Eight analyzer regression tests cover missing
+calls/chips/layers, altered adjacency, shape, precision and invalid timing.
+
 ## Audit validation
 
 Initial run 33960060823 failed on artifact-directory permissions; 33960122517
