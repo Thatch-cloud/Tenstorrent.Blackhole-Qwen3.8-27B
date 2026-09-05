@@ -174,6 +174,13 @@ tokens. Smaller chunks require separate trace/state support and are not a flag-o
 
 ### E3: verification cost curve before investing in a drafter
 
+Current bounded evidence: `gdn-prefix` and `gdn-block` CI runs validate one real
+GDN layer with batched input/output projections and exact every-prefix state plus
+two-step rollback continuation on both chips. Each arm passed 216 cases and 30
+stale-state negative controls. This does not certify full-model attention KV or
+logits. Keep the old multi-token harness diagnostic-only; its composed operations
+are not the current native fused control. See the execution ledger for run IDs.
+
 Use the existing multi-token GDN harness and latest fused control. Define T as target
 verification rows, including the seed row; K=T-1 draft proposals. Sweep T=1/2/4/8/16.
 Existing code already batches projections across rows; investigate remaining serial

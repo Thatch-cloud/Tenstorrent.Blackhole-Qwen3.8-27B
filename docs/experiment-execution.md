@@ -22,7 +22,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
+| E3 verifier | GDN layer-0 batched input/output projections pass exact prefix/rollback gates, runs 33997659654/33997961604 | Extend to attention KV and full-model logits, then measure uninstrumented T=1/2/4/8/16 verification and commit cost |
 | E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
@@ -676,3 +676,29 @@ the target correction/bonus is emitted but remains the next unconsumed input.
 Accepted EOS suppresses later rows; correction EOS terminates without consuming
 it. Six tests cover all rejection positions, bonus/off-by-one cases and EOS.
 This selector neither calculates target predictions nor commits device state.
+
+Run [33997961604](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33997961604),
+code `82b9e3b`, passed the output-batched arm: all 216 exact prefix/continuation
+cases and all 30 stale-state negative controls again passed. The layer now reads
+input and output projection weights once per T-row block and performs one TP
+output reduction; convolution/recurrence/norm-gate still use the native fused
+per-token path, not a new time-fused recurrence kernel.
+
+Single synchronized traced diagnostic observations, three seeds:
+
+| T | Input-batched only, snapshot-inclusive ms | Input + output batched, snapshot-inclusive ms |
+| --- | --- | --- |
+| 1 | 0.411-0.468 | 0.409-0.414 |
+| 2 | 0.666-0.675 | 0.703-0.720 |
+| 4 | 1.195-1.222 | 1.195-1.199 |
+| 8 | 2.247-2.251 | 2.191-2.194 |
+| 16 | 4.354-4.389 | 4.176-4.193 |
+
+These are separate correctness runs, not paired ABBA performance trials. Each
+row snapshots the entire eight-slot recurrent/conv allocation even though only
+one slot is active. Do not use these costs as an optimized verifier curve,
+extrapolate them over 48 layers, or claim a serving speedup. Next isolate active-slot
+snapshot/restore cost, retain full-state comparisons for correctness, and test
+attention KV masks/positions plus all-layer target logits before drafter integration.
+Current local validation: 87 CI/helper tests and 26 drafting/selector tests passed;
+shell syntax and whitespace checks passed. No serving default or runner access changed.
