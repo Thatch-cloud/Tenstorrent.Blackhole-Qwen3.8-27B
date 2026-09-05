@@ -8,6 +8,10 @@ on:
         type: choice
         options: [inventory, hardware]
         default: inventory
+      cards_allocated:
+        description: Operator confirms both cards allocated exclusively for this run
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +39,8 @@ jobs:
       - name: Hardware correctness gates
         if: inputs.suite == 'hardware'
         shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 2400 bash scripts/ci/run-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
