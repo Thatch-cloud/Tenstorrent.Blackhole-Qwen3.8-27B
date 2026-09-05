@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Docker response fixture for test_qwen_inventory.py."""
+
+import json
+import os
+from pathlib import Path
+import sys
+
+if Path(sys.argv[0]).name == "git":
+    print("fixture-commit")
+    raise SystemExit(0)
+
+arguments = sys.argv[1:]
+input_text = sys.stdin.read() if arguments[0] == "start" else ""
+with open(os.environ["MOCK_DOCKER_LOG"], "a") as log:
+    log.write(json.dumps({"args": arguments, "stdin": input_text}) + "\n")
+image = "sha256:" + "a" * 64
+command = arguments[0]
+if command == "version":
+    print("fixture-docker")
+elif command == "ps":
+    if "-a" in arguments and not os.environ.get("MOCK_NO_IMAGE"):
+        print("production-qwen-id")
+elif command == "inspect":
+    print(image if arguments[2] == "{{.Image}}" else "fixture metadata")
+elif command == "images":
+    pass
+elif command == "image":
+    print(image)
+elif command == "create":
+    if os.environ.get("MOCK_CREATE_FAIL"):
+        raise SystemExit(1)
+    print("probe-owned-id")
+elif command == "start":
+    if os.environ.get("MOCK_PROBE_FAIL"):
+        raise SystemExit(1)
+    print("fixture host PCI metadata")
+elif command != "rm":
+    raise SystemExit(f"Unexpected Docker command: {arguments}")
