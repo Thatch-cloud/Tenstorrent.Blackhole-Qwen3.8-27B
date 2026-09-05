@@ -286,6 +286,41 @@ cycle, including rejected proposals and state/feature movement. As an arithmetic
 budget, 4–5 committed tokens per cycle requires a complete 20–25 ms cycle to reach
 200 tok/s. No GPU multiplier bypasses that measured requirement on these cards.
 
+#### Multiple drafters: staged comparisons
+
+Start with routing, not an unconditional ensemble. The host-only
+`speculative-decoding/harness/hybrid_draft.py` policy tries request-local lookup
+and, on a miss, calls only the selected neural adapter. Defaults disable drafting
+unless greedy mode and verifier readiness are explicitly asserted. All returned
+tokens are unverified proposals; only the target verifier may authorize emission.
+This is a tested proposal interface, not a TT neural port or a state rollback engine.
+Adapters receive a bounded committed-history suffix, not full prompt context or
+feature tensors. A future device adapter must own request-local synchronized state,
+track the full committed position and catch up after lookup-only cycles. Never
+rebuild a long-context neural cache from that truncated suffix alone. Device errors
+propagate: do not silently fall back while target/drafter state may be inconsistent.
+
+| Arm | Work per cycle | Entry gate |
+| --- | --- | --- |
+| Single controls | Lookup only, MTP only, then each compatible external drafter separately | E3 exact verifier and each adapter's conformance gate |
+| Lookup + selected neural | Lookup hit skips neural work; miss calls one neural drafter; target verifies either proposal | Request isolation, committed-only history and neural catch-up after skipped cycles |
+| Adaptive routing | Select one drafter and block length using measured committed tokens per total cycle time | Enough paired per-workload measurements; include switching, feature and cache costs |
+| Hierarchical cascade | Cheap draft proposes to a larger draft, then the target verifies | Intermediate verification semantics, compatible inputs, rollback and incremental memory budget |
+| Multi-branch ensemble | Several drafts propose branches for joint target verification | Explicit tree attention plus branch-local GDN recurrence/conv state; no assumed TT tree support |
+
+[Hierarchical speculative decoding](https://arxiv.org/abs/2510.19705) establishes
+the multi-model cascade approach, not a speed guarantee on Blackhole. Arbitrarily
+chaining EAGLE3, DFlash2 and DSpark is not plug-and-play: their feature interfaces
+and proposal mechanisms differ. Keep both cards serving the TP2 target initially.
+Spare compute cores do not provide independent DRAM bandwidth for extra drafts.
+
+Record lookup time/hit rate, selected drafter, proposal length, accepted prefix,
+target bonus/correction tokens, draft/verify/rollback/commit time, peak DRAM/L1,
+and total committed tok/s. Include zero-acceptance cycles and neural catch-up.
+Test every rejection position, EOS, cancellation, stale request IDs, slot reuse,
+lookup-to-neural transitions and a forced state-corruption negative control before
+hardware promotion. Host routing tests do not satisfy these E3 device-state gates.
+
 After E3 correctness, repair MTP trace/buffer integration and its documented eager/trace
 stall interaction. Compare speculation off, MTP, and exact token-sequence lookup proposals
 from the current request's supplied source/prompt and generated history. No other user's

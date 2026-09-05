@@ -23,7 +23,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
-| E4 fusion/pipeline | Exact 91-core B1 MLP fusion: 2.37–2.50% lower layer latency; full-model gate dispatched | Full-model output/memory/timing evidence; E3 state contract still required for multi-token fusion |
+| E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
 | E7 prefix reuse | Dependency-gated | E1/E2 lifecycle gate; hybrid KV plus recurrent/conv state identity and isolation |
@@ -608,3 +608,31 @@ than counting the prefill-produced first token as decode. Every request resets
 state through native prefill. Require exact outputs and >2% lower latency in every
 block before marking eligibility for a subsequent serving gate. Preserve failures
 and smaller/negative gains; none establishes 200 committed tok/s.
+
+### Completed run 33996306217
+
+[CI evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33996306217),
+code `84db0ab`: execution/correctness passed, `eligible_for_serving_gate=false`.
+All six eager/traced logit/token checks were exact, as were paired generation
+tokens and packed weights on all 64 layers/both chips. Weight addresses were
+unchanged and additional weight allocation was zero.
+
+| Context | Control host tok/s, three blocks | Fused host tok/s, three blocks | Decode latency change |
+| --- | --- | --- | --- |
+| Short (~109 input) | 19.576 / 19.652 / 19.713 | 19.789 / 20.245 / 20.067 | -1.076% / -2.931% / -1.766% |
+| Long (~64,504 input) | 18.410 / 18.626 / 18.201 | 18.406 / 18.705 / 18.746 | +0.018% / -0.421% / -2.907% |
+
+Only two of six blocks clear the predeclared >2% latency threshold. The exact
+kernel is viable but the full-path improvement is not repeatable enough for
+promotion. These are Generator timings with host sampling, not the separate
+device-argmax serving arm or engine-committed throughput. No serving change made.
+
+### Multi-drafter groundwork
+
+Added lookup-first routing to one explicitly selected neural callback, with native
+target fallback when mode/verifier readiness is unsupported or no proposal exists.
+Nine new host tests cover selection, skipped neural work, invalid proposals,
+explicit commit, failures and isolation, alongside the existing eleven lookup tests.
+Callbacks are test doubles: no DFlash2, DSpark or EAGLE3 device adapter is claimed.
+The E5 plan now separates routing, adaptive selection, cascades and tree ensembles.
+The shared exact E3 verifier and device state lifecycle remain the next dependency.
