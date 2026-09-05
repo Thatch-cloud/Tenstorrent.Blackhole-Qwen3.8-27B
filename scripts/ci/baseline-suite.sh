@@ -5,6 +5,21 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+python3 - <<'PY' > /experiment/results/token-protocol-fields.json
+import ast
+import importlib.util
+import json
+from pathlib import Path
+root = Path(importlib.util.find_spec('vllm').origin).parent / 'entrypoints' / 'openai'
+report = {}
+for path in root.rglob('*protocol*.py'):
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ClassDef) and 'Completion' in node.name:
+            fields = {field.target.id: ast.unparse(field.annotation) for field in node.body
+                      if isinstance(field, ast.AnnAssign) and isinstance(field.target, ast.Name)}
+            report[str(path.relative_to(root)) + ':' + node.name] = fields
+print(json.dumps(report, indent=2))
+PY
 revision=1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
 export MODEL_WEIGHTS_DIR="/models/hub/models--Qwen--Qwen3.8-27B/snapshots/$revision"
 export HF_MODEL="$MODEL_WEIGHTS_DIR"

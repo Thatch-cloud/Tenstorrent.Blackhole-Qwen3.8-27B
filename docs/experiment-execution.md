@@ -19,8 +19,8 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | Track | Current status | Required next evidence |
 | --- | --- | --- |
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |
-| E0 baseline | Harness ready, not benchmarked | Pinned weights, warmed B=1 context matrix, B=2/8 separately; engine commit timing still unavailable |
-| E1 cache | Passive capture in baseline | Investigate zero only if it recurs; full-model cache lifecycle gate remains required |
+| E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
+| E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Operator primitives passed; prototype host tests only | Whole/chunked model continuation, cancellation and slot reuse before mixed-traffic benchmark |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
 | E4 fusion/pipeline | Planned, needs implementation | E3 verified state contract, one native change per arm, full-path timing |
