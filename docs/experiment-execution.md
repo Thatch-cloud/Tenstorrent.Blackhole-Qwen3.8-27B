@@ -581,3 +581,30 @@ layer, trace-safe B1-only dispatch and native fallback elsewhere. Verify output
 tokens and memory headroom at short and long contexts before paired serving
 timings. Do not extrapolate the layer microbenchmark to end-to-end speed or
 claim coding-quality coverage from three layer-input seeds.
+
+## Full-model fusion gate (2026-09-06)
+
+Source inspection found an important allocation detail: the native TP model already
+loads a pair-packed `w_gate_up` tensor for its fused prefill path. The full-model
+experiment reuses that existing allocation instead of building another copy.
+Native `w1`/`w3` remain available for unmodified fallback, with no weight-memory
+increase relative to the current baseline. This replaces the preceding proposed
+weight-replacement approach; hardware must verify all 64 layers and both shards.
+
+`full-model-fusion` is an isolated Generator test, not a serving deployment.
+It checks pinned compute/reader hashes, BF4 gate/up and BF8 down precision,
+dequantized packed-weight equality for every layer/shard, and unchanged weight
+addresses. It records per-chip DRAM/L1/trace allocator snapshots. Both arms share
+the model and its KV pool but use separate decode trace stores. All decode kernels
+compile before trace capture; prefill always uses the native path. Only explicit
+B1 decode inputs select the fused path, with capture engagement checked on all
+64 layers. No installed source or serving default is patched.
+
+Predeclared work: short (~109 tokens) and long (~64,504 tokens) coding prompts,
+16-token eager/traced token and full-logit equality checks, then three ABBA blocks
+of 128-token generations per context. Timing includes host argmax and readback,
+excludes prefill and HTTP/scheduler overhead, and counts 127 decode steps rather
+than counting the prefill-produced first token as decode. Every request resets
+state through native prefill. Require exact outputs and >2% lower latency in every
+block before marking eligibility for a subsequent serving gate. Preserve failures
+and smaller/negative gains; none establishes 200 committed tok/s.

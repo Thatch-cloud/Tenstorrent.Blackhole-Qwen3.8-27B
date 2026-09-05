@@ -47,6 +47,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
     timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-model-fusion ]; then
+    timeout -k 30 3000 python3 /experiment-scripts/ci/full-model-fusion.py
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = projection-1d ]; then
     timeout -k 30 900 python3 /experiment-scripts/ci/projection-1d.py
     timeout -k 30 900 python3 /experiment-scripts/ci/mlp-sweep.py --projection-report /experiment/results/projection-1d.json
