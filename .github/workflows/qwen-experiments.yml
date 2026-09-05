@@ -1,0 +1,34 @@
+name: Qwen two-card experiments
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    runs-on: [self-hosted, Linux, X64, thatch-release]
+    timeout-minutes: 10
+    steps:
+      - name: Verify dedicated host
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Read-only inventory
+        shell: bash
+        run: bash scripts/ci/qwen-inventory.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-hardware-inventory-${{ github.run_id }}
+          path: experiment-results/
+          retention-days: 7
+          if-no-files-found: error
