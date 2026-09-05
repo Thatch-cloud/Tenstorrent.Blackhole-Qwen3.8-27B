@@ -219,6 +219,41 @@ repeatable gain; retain the negative result.
 
 ### E5: real coding draft proposals
 
+#### Drafter comparison update (2026-09-06)
+
+Do not restrict the experiment to MTP. Neither DFlash2 nor DSpark has a recorded
+P150A hardware result in this repository. Lookup proposal policy has host tests,
+not an integrated device-throughput result. The older EAGLE3 discussion is analysis,
+not evidence that an EAGLE3 drafter ran here.
+
+| Arm | Upstream implementation to audit | TT port work beyond the shared verifier |
+| --- | --- | --- |
+| DFlash2 (first external drafter candidate) | [Official checkpoint](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2), [code](https://github.com/z-lab/dflash), [configuration](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/raw/main/config.json) | Five-layer draft backbone, 2048-token sliding attention, two-tap dynamic convolutions, top-16 candidate path selector of rank 256; checkpoint uses target feature taps 5/19/33/47/61. |
+| DSpark | [RadixArk Qwen3.8-27B checkpoint](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark), [method paper](https://arxiv.org/abs/2607.05147) | Five full-attention layers, BF16 1.86B-parameter draft, VanillaMarkov rank-256 head; the card specifies the same target feature layer indices. Audit exact feature definitions, not just matching indices. |
+| MTP | Existing checkpoint and local speculative branch | Repair trace integration and compare on the same verified target path. |
+| Request-local lookup | Existing host-tested proposal policy | Device verification/commit integration; no model or cross-user cache. |
+
+The [DFlash2 authors' Qwen3.8 model-card comparison](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
+uses one H200, SGLang, default sampled xhigh reasoning and seven proposals per
+verification. At concurrency one, reported HumanEval end-to-end output rates are
+69.0 (ordinary), 151.9 (MTP), 159.9 (DSpark), and 214.6 (DFlash2) tok/s; MBPP gives
+69.0, 153.1, 163.3 and 226.9 respectively. These are publisher measurements, not our
+greedy control, not TT-Metal support and not speed forecasts for two P150As.
+
+Inference: DFlash2 is the stronger first external candidate for the coding workload,
+but port cost, acceptance against our BF4/BF8 target and draft/verify wall time must
+decide. Both external drafts need feature capture and extra device memory; neither
+is a flag-only extension of the current TT plugin. Keep the target TP2 across both
+cards. Audit checkpoint/runtime revisions and exact feature semantics before any
+port; never execute downloaded custom model code as part of a metadata audit.
+
+Sequence: E3 forced-prefix/rollback correctness and T=1/2/4/8/16 verification curve;
+then checkpoint conformance and native draft kernels; then matched MTP/lookup/
+DFlash2/DSpark coding runs. Report emitted tokens per entire draft+verify+commit
+cycle, including rejected proposals and state/feature movement. As an arithmetic
+budget, 4–5 committed tokens per cycle requires a complete 20–25 ms cycle to reach
+200 tok/s. No GPU multiplier bypasses that measured requirement on these cards.
+
 After E3 correctness, repair MTP trace/buffer integration and its documented eager/trace
 stall interaction. Compare speculation off, MTP, and exact token-sequence lookup proposals
 from the current request's supplied source/prompt and generated history. No other user's

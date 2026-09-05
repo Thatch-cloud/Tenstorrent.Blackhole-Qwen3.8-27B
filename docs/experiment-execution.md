@@ -1,6 +1,6 @@
 # Two-P150A execution ledger
 
-Updated 2026-09-05. Target: 200 committed tokens/s for one coding stream, not
+Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
 ## Verified control
@@ -23,8 +23,8 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
-| E4 fusion/pipeline | Planned, needs implementation | E3 verified state contract, one native change per arm, full-path timing |
-| E5 drafting | Lookup proposal policy passes 11 host tests; integration dependency-gated | Passing E3 before enabling lookup/MTP; no non-greedy semantic substitution |
+| E4 fusion/pipeline | Exact 91-core B1 MLP fusion: 2.37–2.50% lower layer latency; full-model gate dispatched | Full-model output/memory/timing evidence; E3 state contract still required for multi-token fusion |
+| E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
 | E7 prefix reuse | Dependency-gated | E1/E2 lifecycle gate; hybrid KV plus recurrent/conv state identity and isolation |
 | E8 precomputation | Planned audit | Bound removable cost before table prototypes; no unapproved arithmetic changes |
