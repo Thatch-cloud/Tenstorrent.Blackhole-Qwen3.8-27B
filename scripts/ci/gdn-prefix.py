@@ -19,7 +19,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-output", action="store_true")
     parser.add_argument("--active-snapshot", action="store_true")
+    parser.add_argument("--direct-snapshot", action="store_true")
     options = parser.parse_args()
+    if options.direct_snapshot and not options.active_snapshot:
+        raise ValueError("Direct snapshot requires active-slot mode")
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
@@ -32,7 +35,10 @@ def main():
     root = Path("/experiment/results")
     report["batched_output_projection"] = options.batch_output
     report["active_snapshot"] = options.active_snapshot
-    output_path = root / ("gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
+    report["direct_snapshot"] = options.direct_snapshot
+    if options.direct_snapshot:
+        report["copy_kernel_sha256"] = hashlib.sha256(Path(__file__).with_name("gdn_state_copy.cpp").read_bytes()).hexdigest()
+    output_path = root / ("gdn-direct.json" if options.direct_snapshot else "gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
     mesh = None
     traces = []
     try:
@@ -58,7 +64,7 @@ def main():
             raise ValueError("Expected fused projection and unchanged K-image BF16 persistent recurrence")
         live = [gdn.rec_state, *gdn.conv_states]
         addresses = [tensor.buffer_address() for tensor in live]
-        active = ActiveSnapshot(gdn, ttnn)
+        active = ActiveSnapshot(gdn, ttnn, direct=options.direct_snapshot)
         report.update(layer=layer, state_shapes=[list(tensor.shape) for tensor in live])
 
         def upload(host):

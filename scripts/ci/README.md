@@ -57,6 +57,10 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 
 ## Programme suites
 
+- `gdn-direct`: active-slot snapshots through a 48-worker copy-only DMA kernel,
+  retaining the full prefix, continuation and changed-idle-slot isolation gates.
+  Pinned BF16 tile geometry only; not a serving patch or a full-model verifier.
+
 - `gdn-active`: stores slot-zero recurrence/conv snapshots instead of all eight
   slots, restores in place with native state writers, and repeats every-prefix
   correctness. Adds changed-idle-slot canaries and paired three-block ABBA

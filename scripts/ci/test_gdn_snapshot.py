@@ -3,9 +3,18 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from gdn_snapshot import ActiveSnapshot
+from gdn_state_copy import page_counts
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_direct_copy_accepts_only_frozen_page_geometry(self):
+        shapes = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
+        self.assertEqual(page_counts(shapes), [384, 160, 160, 160, 160])
+        for changed in (shapes[:4], [(8, 24, 128, 128)] + shapes[1:],
+                        shapes[:4] + [(1, 1, 1024)]):
+            with self.assertRaises(ValueError):
+                page_counts(changed)
+
     def fixture(self):
         layer = SimpleNamespace(B=8, _stable_state=True, rec_state="rec", conv_states=["conv0", "conv1"],
                                 _slice_along=Mock(), _write_recurrent_state_prefix=Mock(), _write_index=Mock())

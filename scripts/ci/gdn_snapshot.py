@@ -2,9 +2,10 @@
 
 
 class ActiveSnapshot:
-    def __init__(self, gdn, operations):
+    def __init__(self, gdn, operations, direct=False):
         self.gdn = gdn
         self.operations = operations
+        self.direct = direct
         if gdn.B != 8 or not gdn._stable_state:
             raise ValueError("Expected stable eight-slot native GDN state")
         self.live = [gdn.rec_state, *gdn.conv_states]
@@ -22,6 +23,10 @@ class ActiveSnapshot:
     def save(self, destination):
         if len(destination) != len(self.live):
             raise ValueError("Incomplete active snapshot")
+        if self.direct:
+            from gdn_state_copy import copy_active
+            copy_active(self.live, destination)
+            return
         for tensor, dimension, target in zip(self.live, self.dimensions, destination, strict=True):
             sliced = self.gdn._slice_along(tensor, dimension, 0, 1)
             self.operations.copy(sliced, target)
@@ -30,6 +35,10 @@ class ActiveSnapshot:
     def restore(self, source):
         if len(source) != len(self.live):
             raise ValueError("Incomplete active snapshot")
+        if self.direct:
+            from gdn_state_copy import copy_active
+            copy_active(source, self.live)
+            return
         operations = self.operations
         self.gdn._write_recurrent_state_prefix(operations.clone(source[0]), 1)
         for target, saved in zip(self.gdn.conv_states, source[1:], strict=True):

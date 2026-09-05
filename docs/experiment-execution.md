@@ -717,3 +717,18 @@ change all eight slots, restore only zero and assert slots 1..7 stay unchanged o
 both chips. Compare full versus active save and restore separately with three ABBA
 blocks, 30 trace replays per sample, synchronized outside the measured loop.
 This is a snapshot-cost experiment, not full-model speculative throughput.
+
+Run [33998325637](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33998325637),
+code `da39648`: all 216 prefix cases, 30 stale-state controls and 15 changed-idle-slot
+checks passed. Padded snapshot allocation fell from 7,602,176 to 2,097,152 bytes per
+chip (72.4% smaller). However active save was 11.1-11.4% slower (~0.0593 vs 0.0533 ms),
+and restore was 13.61-13.66 times the full-copy cost (~0.732 vs 0.0537 ms).
+Do not promote this native-writer restore as a latency optimization.
+
+The native convolution slot writer reconstructs the whole buffer with slice/concat
+and copy. Next `gdn-direct` tests a 48-worker generic-op DMA kernel: full tiles for
+slot-zero recurrent state, but only the two 32-byte BF16 row-zero face segments per
+convolution tile. It uses no compute kernel or arithmetic, does not overwrite other
+rows, and avoids native restore's reconstruction. Both directions use preallocated
+snapshot/live addresses and the identical correctness/isolation and ABBA gates.
+Shapes, interleaved DRAM placement, dtype, both chips and non-aliasing are guarded.
