@@ -111,7 +111,7 @@ class FusedProjection:
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
                 fp32_dest_acc_en=True, math_approx_mode=False)
-            unpack_modes = [ttnn.UnpackToDestMode.Default] * 32
+            unpack_modes = [ttnn.UnpackToDestMode.Default] * 64
             unpack_modes[5] = ttnn.UnpackToDestMode.UnpackToDestFp32
             compute_config.unpack_to_dest_mode.extend(unpack_modes)
             compute = ttnn.KernelDescriptor(kernel_source=self.compute,
