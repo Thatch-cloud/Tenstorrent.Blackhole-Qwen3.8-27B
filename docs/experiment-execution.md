@@ -433,3 +433,31 @@ Attempt 33962274337 passed the three eager control seeds but rejected the first
 fused candidate before execution: the operator requires grid dimensions >=2x2.
 Retry uses 11x2 rather than 11x1, without relaxing the native validation. No fused
 correctness or timing result is claimed from the rejected attempt.
+
+Retry [33962376720](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33962376720)
+completed at `460959c`. All three seeds passed Torch PCC >=0.97 eagerly and under
+trace for control and every candidate (24 checks total). All 18 candidate
+seed/mode comparisons failed bit-exact equality against control. Candidate PCC
+was 0.999201477-0.999417543, close to control's 0.999202549-0.999416769;
+this is not evidence of coding-quality equivalence or degradation.
+
+| Fused N block | Mean layer latency increase | Three-block range | Approximate candidate ms |
+| --- | --- | --- | --- |
+| 8 | +70.565% | +70.481% to +70.674% | 0.576 |
+| 16 | +68.031% | +67.801% to +68.285% | 0.568 |
+| 32 | +57.923% | +57.889% to +57.942% | 0.535 |
+
+Control was approximately 0.338 ms. No candidate qualifies on either exactness
+or speed; no full-model arm is warranted for these configurations. Execution
+success is not an optimization pass. This does not rule out a decode-specialized
+fused kernel: the existing implementation uses a 2D M/N partition instead of the
+control's 1D N-parallel map. Its SwiGLU stage multiplies gate/up in destination
+registers before the final pack, unlike control's separately rounded BF16 gate
+and up intermediates. These source differences are hypotheses for the result,
+not experimentally isolated causes.
+
+Next native candidate must preserve the control's 1D N-parallel distribution,
+keep complete gate/up tile pairs together, reproduce BF16 intermediate rounding
+and account for packed-weight allocation before repeating the same gates. Do not
+extend the negative prefill-oriented grid sweep or relax precision/exactness to
+claim a win. The 65 local CI-helper tests pass; production remains unchanged.
