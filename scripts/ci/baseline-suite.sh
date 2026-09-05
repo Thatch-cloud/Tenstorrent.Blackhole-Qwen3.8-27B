@@ -23,6 +23,10 @@ print(json.dumps(dict(snapshot=root.name, files={name: hashlib.sha256((root / na
     for name in files}, config=json.loads((root / 'config.json').read_text()),
     flags={name: value for name, value in os.environ.items() if name.startswith(('QWEN', 'TT_', 'MESH_DEVICE'))}), indent=2))
 PY
+if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
+    bash /experiment-scripts/ci/module-profile.sh
+    exit 0
+fi
 extra_args=()
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
     python3 /experiment-optimisation/sim/stage-continuation.py /opt/tt-metal --apply > /experiment/results/continuation-stage.json
@@ -50,6 +54,15 @@ for attempt in $(seq 1 180); do
     sleep 5
 done
 if [ "$ready" != 1 ]; then tail -80 /experiment/results/server.log; exit 1; fi
+python3 - <<'PY' > /experiment/results/api-capabilities.json
+import json
+import urllib.request
+with urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=30) as response:
+    schema = json.load(response)
+schemas = schema.get('components', {}).get('schemas', {})
+print(json.dumps({name: list(value.get('properties', {})) for name, value in schemas.items()
+                  if 'Completion' in name}, indent=2))
+PY
 printf 'Endpoint ready; starting warmed baseline matrix\n'
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
     timeout 2400 python3 /experiment-scripts/ci/interleave-client.py --tokenizer "$MODEL_WEIGHTS_DIR" --output /experiment/results

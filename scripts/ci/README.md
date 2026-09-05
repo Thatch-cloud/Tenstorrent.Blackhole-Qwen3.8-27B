@@ -54,3 +54,22 @@ unreadable process scan. Neither mode resets cards or changes serving services.
 
 Hardware entry-point guard tests require Python 3.10 or newer:
 `python3 scripts/ci/test_hardware_guards.py`.
+
+## Programme suites
+
+- `baseline`: frozen model/tokenizer snapshot, unchanged K-image control, warmed
+  context/concurrency matrix and passive 250 ms metrics capture. Client estimates
+  are not engine-commit throughput. Weights are read-only; experimental caches are
+  isolated in a labeled Docker volume retained between runs.
+- `interleave`: opt-in model/plugin patches staged only in disposable containers;
+  whole-prefill versus 1/2/4 decode-credit arms, boundary outputs and cancellation
+  checks. Stop on missing or divergent evidence. This initial gate does not yet
+  certify direct state snapshots, exact output token IDs or mixed-traffic fairness.
+- `profile`: separate eager GDN/MLP/paged-attention layer profiles and their reference
+  tests. Reject dropped markers, missing device timings, skipped tests or a missing
+  chip. Never score these instrumented runs as full-model decode throughput.
+
+Run card-backed suites serially under an explicit operator allocation. See the
+[execution ledger](../../docs/experiment-execution.md) for dependencies and results.
+The planned research tracks are not all implemented tests; a passed prerequisite
+must not be reported as completion of the whole programme.
