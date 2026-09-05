@@ -417,7 +417,7 @@ The `mlp-fusion` suite compares the frozen real-weight layer-0 MLP with native
 It retains BF4 gate/up, BF8 down, LoFi FP32 destination and packer L1 accumulation;
 fusion can still alter rounding/order, so exact control output remains mandatory
 for promotion. Three candidates use M/K blocks 1/8, N blocks 8/16/32 and grid
-11x1. The existing minimal matmul partitions M across grid rows, so adding rows
+11x2. The existing minimal matmul partitions M across grid rows, so adding rows
 for B1 is not automatically useful N-parallel work. No custom kernel is added.
 
 The timed path includes the original input-to-L1 transfer, unchanged down
@@ -428,3 +428,8 @@ and exact outputs before any full-model gate. A non-exact result is not promoted
 An additional packed layer weight is allocated only inside the experiment;
 host packing is checked reversible and no weight cache is written. Full-model
 duplicate-weight memory capacity remains unverified. This is not serving adoption.
+
+Attempt 33962274337 passed the three eager control seeds but rejected the first
+fused candidate before execution: the operator requires grid dimensions >=2x2.
+Retry uses 11x2 rather than 11x1, without relaxing the native validation. No fused
+correctness or timing result is claimed from the rejected attempt.

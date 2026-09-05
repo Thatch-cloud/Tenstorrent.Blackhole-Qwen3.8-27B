@@ -120,7 +120,7 @@ def main():
                 from models.tt_transformers.tt.ccl import tt_all_reduce
                 config = ttnn.MinimalMatmulConfig(M_block_size=1, K_block_size=8,
                     N_block_size=candidate["nblock"], subblock_h=1, subblock_w=4,
-                    compute_with_storage_grid_size=ttnn.CoreCoord(11, 1))
+                    compute_with_storage_grid_size=ttnn.CoreCoord(11, 2))
                 def fused_forward(value):
                     local = ttnn.to_memory_config(value, ttnn.L1_MEMORY_CONFIG)
                     hidden = ttnn.experimental.minimal_matmul(local, packed_weight, config=config,
