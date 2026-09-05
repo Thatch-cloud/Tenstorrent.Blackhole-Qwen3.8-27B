@@ -1,6 +1,6 @@
 import unittest
 
-from fused_1d import fused_compute, mapping
+from fused_1d import BF16_PRODUCT, fused_compute, mapping
 
 
 class Fused1DTests(unittest.TestCase):
@@ -19,7 +19,9 @@ class Fused1DTests(unittest.TestCase):
         self.assertIn(end + "native partial loop", result)
         self.assertLess(result.index("native partial loop"), result.index("mul_binary_tile_init"))
         self.assertIn("apply_activation_from_pack<KernelActivation::SILU>(1)", result)
-        self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index("mul_binary_tile(0, 1, 0)"))
+        self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index(BF16_PRODUCT))
+        self.assertIn("DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul", result)
+        self.assertIn("(APPROX, ckernel::BinaryOp::MUL, 8, false)", result)
 
     def test_changed_source_fails_closed(self):
         with self.assertRaises(ValueError):
@@ -30,6 +32,7 @@ class Fused1DTests(unittest.TestCase):
         result = fused_compute(source, intermediates=True)
         self.assertNotIn("mul_binary_tile_init();", result)
         self.assertNotIn("mul_binary_tile(0, 1, 0);", result)
+        self.assertNotIn(BF16_PRODUCT, result)
         self.assertIn("pack_tile(1, out_dfb_id);", result)
         self.assertIn("cb_reserve_back(out_dfb_id, 2);", result)
         self.assertIn("cb_push_back(out_dfb_id, 2);", result)

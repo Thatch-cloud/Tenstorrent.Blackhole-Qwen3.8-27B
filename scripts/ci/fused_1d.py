@@ -5,6 +5,9 @@ from pathlib import Path
 
 
 COMPUTE = "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp"
+BF16_PRODUCT = """MATH((SFPU_BINARY_CALL(
+            DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul,
+            (APPROX, ckernel::BinaryOp::MUL, 8, false), 0, 1, 0, VectorMode::RC)));"""
 
 
 def fused_compute(source, intermediates=False):
@@ -56,6 +59,8 @@ def fused_compute(source, intermediates=False):
         result = result.replace("cb_reserve_back(out_dfb_id, 1);", "cb_reserve_back(out_dfb_id, 2);")
         result = result.replace("pack_tile(0, out_dfb_id);", "pack_tile(0, out_dfb_id);\n        pack_tile(1, out_dfb_id);")
         result = result.replace("cb_push_back(out_dfb_id, 1);", "cb_push_back(out_dfb_id, 2);")
+    else:
+        result = result.replace("mul_binary_tile(0, 1, 0);", BF16_PRODUCT)
     return result.replace('"bmm_fused_activation.hpp"',
         '"ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp"')
 

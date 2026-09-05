@@ -466,7 +466,7 @@ claim a win. The 65 local CI-helper tests pass; production remains unchanged.
 
 `projection-1d` uses a separate `generic_op` program, not the prefill-oriented
 minimal matmul. The native 1D compute source is copied into a source-code kernel
-descriptor; only its final-output branch changes. The original K-block loop and
+descriptor; its final-output branch and a post-loop epilogue change. The original K-block loop and
 FP32 packer-L1 partial accumulation remain. No installed source or binary is edited.
 Native and generated compute-source SHA256 values are recorded in the result.
 
@@ -479,7 +479,7 @@ of byte-identical native reader scheduling. K-block size stays eight; paired
 subblocks have two tiles instead of control's single tile.
 
 The epilogue runs native pack-side SiLU on the gate tile only, packs gate and up
-to a private two-tile BF16 circular buffer, then multiplies those rounded values
+to a private fourteen-tile BF16 circular buffer (seven pairs per worker), then multiplies those rounded values
 and packs BF16 output. Packed device weights must dequantize bit-identically to
 the original gate/up tensors on each chip. This establishes the intended rounding
 contract, not a correctness claim before silicon testing.
@@ -490,3 +490,37 @@ diagnostics, then three ABBA blocks with 40 trace replays/sample. Inputs already
 reside in L1 for both arms. Only exact output and >2% lower latency in every block
 permit a whole-MLP experiment. Preserve non-exact/negative results and do not
 replace the serving path on the strength of this prerequisite test.
+
+### Initial 1D silicon attempts
+
+All runs below are isolated projection probes, not full-MLP or serving results.
+Execution/PCC success is separate from the exact-output promotion gate.
+
+| Run | Outcome |
+| --- | --- |
+| 33963133460 | Descriptor setup failed: unpack-mode vector constructor not exported; use the exposed property instead. |
+| 33963238683 | Descriptor validation required 64 unpack-mode entries rather than 32. |
+| 33963346556 | Inline per-pair product interfered with subsequent native matmul state; first comparison PCC 0.95914, stopped before timing. |
+| 33963532517 | Deferring product until after all matmul work restored PCC above 0.99988, but LoFi FPU multiply left 8,040–8,121 mismatches per 8,704-element shard. Projection latency increased 83.89–85.39%. |
+| 33963794203 | SFPU product JIT failed because its binary API header was missing. |
+| 33963923741 | Explicit SFPU API plus waiting for all rounded tiles reduced discrepancies to 52–83 elements per shard, maximum absolute error 0.015625. Still not exact. Control 0.19695–0.19733 ms versus candidate 0.36276–0.36490 ms, 83.83–85.29% slower. Not eligible for whole-MLP testing. |
+
+The next probe isolates rounded gate and up outputs independently before checking
+their product. It also corrects the new readers to the native 1D NoC assignments:
+input multicast on NoC 1, weight reads on NoC 0. NoC 1 multicast endpoints reverse,
+but receiver acknowledgements still target the original sender. Compare only the
+ordinary product arm in timing; diagnostic intermediates compile before traces.
+
+Run 33964284985 confirmed all twelve rounded gate/up comparisons exact across
+three seeds and both chips. Product mismatches were unchanged. With corrected NoC
+routing, candidate projection latency was 0.20523–0.20580 ms versus control
+0.19672–0.19693 ms: only 4.33–4.50% slower, rather than approximately 85% slower.
+This remains a rejected candidate, but identifies a substantial reader defect.
+
+The native Blackhole `calculate_sfpu_binary_mul` explicitly applies BF16
+round-to-nearest-even and zero-input handling when its arithmetic template flag
+`is_fp32_dest_acc_en` is false. Calling the ordinary SFPU API inside our FP32
+matmul kernel passes true and skips that narrowing. The next candidate keeps
+FP32 destination addressing/accumulation for the matmul but calls the same native
+multiply calculation with its BF16 narrowing branch enabled. No accumulation
+precision is lowered, and the existing exact-output gate remains mandatory.
