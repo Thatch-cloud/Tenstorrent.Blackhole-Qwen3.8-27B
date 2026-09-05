@@ -2,6 +2,12 @@ name: Qwen two-card experiments
 
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Test selection (hardware opens both cards; serving must be stopped)
+        type: choice
+        options: [inventory, hardware]
+        default: inventory
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ concurrency:
 jobs:
   inventory:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Verify dedicated host
         shell: bash
@@ -23,8 +29,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Read-only inventory
+        if: inputs.suite == 'inventory'
         shell: bash
         run: bash scripts/ci/qwen-inventory.sh
+      - name: Hardware correctness gates
+        if: inputs.suite == 'hardware'
+        shell: bash
+        run: timeout 2400 bash scripts/ci/run-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
