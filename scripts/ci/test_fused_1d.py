@@ -17,9 +17,9 @@ class Fused1DTests(unittest.TestCase):
         result = fused_compute(source)
         self.assertTrue(result.startswith("prefix"))
         self.assertIn(end + "native partial loop", result)
-        self.assertLess(result.index("native partial loop"), result.index("mul_init(rounded_cb"))
+        self.assertLess(result.index("native partial loop"), result.index("mul_binary_tile_init"))
         self.assertIn("apply_activation_from_pack<KernelActivation::SILU>(1)", result)
-        self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index("mul_tiles(rounded_cb"))
+        self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index("mul_binary_tile(0, 1, 0)"))
 
     def test_changed_source_fails_closed(self):
         with self.assertRaises(ValueError):

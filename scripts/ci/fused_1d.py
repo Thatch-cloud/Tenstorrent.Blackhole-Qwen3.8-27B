@@ -29,12 +29,15 @@ def fused_compute(source):
     finish = result.rfind("}")
     result = result[:finish] + """
     constexpr uint32_t rounded_cb = 30;
-    reconfig_data_format(rounded_cb, rounded_cb);
-    mul_init(rounded_cb, rounded_cb);
+    reconfig_data_format_srca(rounded_cb);
+    copy_tile_to_dst_init_short(rounded_cb);
+    mul_binary_tile_init();
     for (uint32_t pair = 0; pair < 7; ++pair) {
         cb_wait_front(rounded_cb, 2);
         tile_regs_acquire();
-        mul_tiles(rounded_cb, rounded_cb, 0, 1, 0);
+        copy_tile(rounded_cb, 0, 0);
+        copy_tile(rounded_cb, 1, 1);
+        mul_binary_tile(0, 1, 0);
         tile_regs_commit();
         cb_reserve_back(out_dfb_id, 1);
         tile_regs_wait();
