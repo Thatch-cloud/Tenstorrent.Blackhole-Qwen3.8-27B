@@ -89,6 +89,10 @@ its aggregate operation totals must not be called a single decode latency.
 
 Local validation at commit 35a0d3f: 84 host tests passed (31 CI, 38 continuation/
 interleaving, four stream rig, 11 lookup policy). These are not 84 silicon tests.
-Interleaving run 33945305689 is executing separately with exact token-ID gates and
-live KV metrics. Historical zero-cache reports remain observation-only unless
-the current measurements reproduce them.
+Interleaving run 33945305689 passed the control's eight boundary prompts and
+post-cancellation output-ID check without requesting logprobs. The ratio-1 arm
+failed before model execution because vLLM offline mode rewrote the canonical
+model ID to the pinned local snapshot path. The guard now accepts only that exact
+reviewed snapshot in addition to the canonical model ID; arbitrary model paths
+and other revisions remain rejected. Ratio 2/4 did not execute. Historical
+zero-cache reports remain observation-only unless current measurements reproduce them.

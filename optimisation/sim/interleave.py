@@ -3,6 +3,9 @@
 import os
 from contextlib import contextmanager
 
+REVIEWED_MODEL = "Qwen/Qwen3.8-27B"
+REVIEWED_SNAPSHOT = "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+
 
 def enabled():
     flags = [os.environ.get(name, "0") for name in
@@ -21,7 +24,7 @@ def validate_config(config):
 
     if parallel.data_parallel_size != 1 or get_tt_data_parallel_size(config) != 1:
         raise ValueError("Continuation v1 requires a single TP2 model, no DP lanes")
-    if config.model_config.model != "Qwen/Qwen3.8-27B":
+    if config.model_config.model not in (REVIEWED_MODEL, REVIEWED_SNAPSHOT):
         raise ValueError("Continuation is restricted to the reviewed Qwen/Qwen3.8-27B model")
     if config.speculative_config or config.cache_config.enable_prefix_caching:
         raise ValueError("Continuation v1 requires speculation and prefix reuse disabled")

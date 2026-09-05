@@ -189,6 +189,12 @@ class InterleaveTests(unittest.TestCase):
             cache_config=SimpleNamespace(enable_prefix_caching=False))
         method("platform.py", "_apply_chunked_prefill_policy")(config)
         self.assertTrue(config.scheduler_config.disable_chunked_mm_input)
+        with patch.object(config.model_config, "model", interleave.REVIEWED_SNAPSHOT):
+            self.assertTrue(interleave.validate_config(config))
+        for model in ("Qwen/Qwen3.6-27B", interleave.REVIEWED_SNAPSHOT + "-unreviewed", "/tmp/Qwen3.8-27B"):
+            with self.subTest(model=model), patch.object(config.model_config, "model", model):
+                with self.assertRaises(ValueError):
+                    interleave.validate_config(config)
         for target, attribute, value in ((config.scheduler_config, "max_num_batched_tokens", 1024),
                                           (config.cache_config, "enable_prefix_caching", True),
                                           (config.parallel_config, "data_parallel_size", 2)):
