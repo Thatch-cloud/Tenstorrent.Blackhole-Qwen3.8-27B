@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p experiment-results
-image=sha256:e0ce0246ae98ab105fcd4918ad0b40dbd5c7eb5bdf360d44060712704849a283
+image=$(docker image inspect --format '{{.Id}}' zot.thatch.local:5000/tt-vllm:qwen38-k)
+[[ "$image" == sha256:f1e9b1a64b4f* ]] || { echo 'Qwen K image changed; review required' >&2; exit 1; }
 docker image inspect --format 'tested_image={{.Id}}' "$image" | tee experiment-results/hardware-image.log
 probe_id=''
 test_id=''
