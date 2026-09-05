@@ -93,6 +93,19 @@ def main():
         def state_exact(left, right):
             return len(left) == len(right) and all(exact(first, second) for first, second in zip(left, right))
 
+        def state_difference(actual, expected, label):
+            differences = []
+            for index, (actual_shards, expected_shards) in enumerate(zip(actual, expected, strict=True)):
+                for chip, (value, reference_value) in enumerate(zip(actual_shards, expected_shards, strict=True)):
+                    mismatch = value != reference_value
+                    if mismatch.any():
+                        coordinates = mismatch.nonzero()[:8]
+                        differences.append(dict(state=index, chip=chip, shape=list(value.shape),
+                            unequal=int(mismatch.sum()), coordinates=coordinates.tolist(),
+                            actual=[float(value[tuple(coordinate)]) for coordinate in coordinates],
+                            expected=[float(reference_value[tuple(coordinate)]) for coordinate in coordinates]))
+            report.setdefault("state_differences", []).append(dict(label=label, differences=differences))
+
         def release(tensors):
             for tensor in tensors:
                 ttnn.deallocate(tensor)
@@ -200,6 +213,14 @@ def main():
                     return [[shard[:, :, index:index + 1, :] for shard in shards] for index in range(rows)]
 
                 copy(initial, live)
+                if options.direct_snapshot:
+                    active.save(staging[0])
+                    expected_first = [[shard[:1] if index == 0 else shard[:, :1] for shard in shards]
+                                      for index, shards in enumerate(expected_states[0])]
+                    actual_first = state_host(staging[0])
+                    if not state_exact(actual_first, expected_first):
+                        state_difference(actual_first, expected_first, "standalone-save")
+                        raise AssertionError("Standalone direct save differs before trace capture")
                 release(operation())
                 ttnn.synchronize_device(mesh)
                 trace = ttnn.begin_trace_capture(mesh, cq_id=0)
@@ -225,7 +246,9 @@ def main():
                         if options.active_snapshot:
                             expected_snapshot = [[shard[:1] if index == 0 else shard[:, :1]
                                                   for shard in shards] for index, shards in enumerate(expected_snapshot)]
-                        if not state_exact(state_host(staging[prefix]), expected_snapshot):
+                        actual_snapshot = state_host(staging[prefix])
+                        if not state_exact(actual_snapshot, expected_snapshot):
+                            state_difference(actual_snapshot, expected_snapshot, f"{seed=}/{rows=}/{mode=}/{prefix=}")
                             raise AssertionError(f"Prefix state divergence: {seed=} {rows=} {mode=} {prefix=}")
                         if options.active_snapshot:
                             active.restore(staging[prefix])
