@@ -15,11 +15,11 @@ def compare(control, arm):
         reports = [json.loads((root / f"{name}.json").read_text()) for root in (control, arm)]
         if not all(report.get("passed") for report in reports):
             raise AssertionError(f"Failed request: {name}")
-        for key in ("prompt_tokens", "requested_tokens", "output_sha256", "token_strings_sha256"):
+        for key in ("prompt_tokens", "requested_tokens", "output_sha256", "token_ids_sha256"):
             if reports[0][key] != reports[1][key]:
                 raise AssertionError(f"Continuation divergence: {name}, {key}")
     result = dict(passed=True, checks=len(expected), arm=arm.name,
-                  scope="Output hashes and logprob token strings; not exact token IDs or full state certification")
+                  scope="Exact output token-ID hashes; not full state certification")
     (arm / "whole-chunked-comparison.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 

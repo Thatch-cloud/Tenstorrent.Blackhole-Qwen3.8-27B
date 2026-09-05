@@ -4,6 +4,7 @@ cd /opt/tt-metal
 export TT_METAL_DEVICE_PROFILER=1
 root=models/demos/blackhole/qwen36/tests
 mkdir -p /experiment/results/profiles
+python3 /experiment-scripts/ci/stage-profile.py /opt/tt-metal > /experiment/results/profiles/fixture-stage.json
 for module in gdn mlp attention; do
     output="/experiment/results/profiles/$module"
     mkdir -p "$output"

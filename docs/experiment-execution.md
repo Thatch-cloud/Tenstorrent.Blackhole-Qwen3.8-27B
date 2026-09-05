@@ -46,9 +46,11 @@ Warm every workload, then three alternating-order repetitions at concurrency 1 w
 target prompt lengths 128/4096/32768/65536, capped below the 65536 context limit to
 reserve 1024 output tokens. Actual templated lengths are recorded. Concurrency 2 and
 8 at 4096 tokens are separate aggregate controls. Ignore-EOS is verified by output
-counts, logprob token counts cross-checked against usage, metrics scraped every 250 ms.
+counts, exact streamed token IDs cross-checked against usage, metrics scraped every 250 ms.
 Client timing is labeled an estimate; no engine-token timestamps means this cannot
-certify 200 committed tokens/s. Raw logprob token strings are not exact token IDs.
+certify 200 committed tokens/s. Historical run 33943034757 used logprobs and token
+strings; new runs request exact token IDs without logprobs by default. The old
+results remain valid only for that original host-sampling workload.
 Coding quality and greedy token-ID equivalence require their separate gates.
 
 Initial full-model run 33942471680 reached readiness and logged K/M engagement,
@@ -61,3 +63,14 @@ The [payload feasibility estimate](decode-payload-bound.md) gives approximately
 19.92 GB of dense projection value payload per ordinary decode step under current
 mixed bfloat4/bfloat8 layouts. It is not measured traffic, but establishes the
 approximately 3.98 TB/s payload requirement of a non-amortised 200-step/s path.
+
+## Layer profile gate
+
+Run 33944471561 passed GDN and MLP numerical checks with two-chip device timing
+and no dropped markers. Some operations use all 110 available workers; this is
+not a uniform 36-core workload. These eager fixture timings are not full-model
+traced decode timings. Attention failed before completing its numerical check:
+the stock fixture allocated BF16 KV while the shipped BF8 flag casts fill inputs
+to BF8. The retry stages only the fixture cache allocation dtype to match that
+flag, recording original/staged hashes. Model precision and PCC thresholds are
+unchanged. The failed attention profile is not accepted as performance evidence.

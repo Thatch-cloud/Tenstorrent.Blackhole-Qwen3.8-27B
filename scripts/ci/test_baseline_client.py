@@ -13,10 +13,10 @@ spec.loader.exec_module(baseline)
 
 
 class BaselineTests(unittest.TestCase):
-    def stream(self, usage=3, done=True):
-        events = [dict(choices=[dict(index=0, text="ab", logprobs=dict(tokens=["a", "b"]))]),
-                  dict(choices=[dict(index=0, text="c", logprobs=dict(tokens=["c"]), finish_reason="length")]),
-                  dict(choices=[], usage=dict(completion_tokens=usage))]
+    def stream(self, usage=3, done=True, ids=True):
+        events = [dict(choices=[dict(index=0, text="ab", token_ids=[11, 12] if ids else None, logprobs=dict(tokens=["a", "b"]))]),
+                  dict(choices=[dict(index=0, text="c", token_ids=[13] if ids else None, logprobs=dict(tokens=["c"]), finish_reason="length")]),
+                  dict(choices=[], usage=dict(completion_tokens=usage, prompt_tokens=2))]
         response = mock.MagicMock()
         response.__enter__.return_value = [f"data: {json.dumps(event)}\n".encode() for event in events]
         if done:
@@ -33,6 +33,12 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(report["coalesced_events"], 1)
         self.assertIsNone(report["engine_committed_tok_s"])
         self.assertEqual(report["ttft_s"], 1.)
+        self.assertEqual(report["token_ids"], [11, 12, 13])
+        self.assertFalse(report["logprobs_requested"])
+
+    def test_missing_ids_cannot_fall_back_to_token_strings(self):
+        with self.assertRaises(AssertionError):
+            self.stream(ids=False)
 
     def test_usage_disagreement_fails(self):
         with self.assertRaises(AssertionError):

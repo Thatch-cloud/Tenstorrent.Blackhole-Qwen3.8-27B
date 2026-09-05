@@ -26,7 +26,10 @@ def summarize(root):
         gaps = [result["event_gap_p99_s"] for result in results if result["event_gap_p99_s"] is not None]
         users = defaultdict(set)
         for result in results:
-            users[result["label"].split("-")[-1]].add(result["token_strings_sha256"])
+            fingerprint = result.get("token_ids_sha256", result.get("token_strings_sha256"))
+            if fingerprint is None:
+                raise AssertionError("Missing output fingerprint")
+            users[result["label"].split("-")[-1]].add(fingerprint)
         groups.append(dict(target_prompt_tokens=length, batch=batch, requests=len(results),
             actual_prompt_tokens=sorted({result["prompt_tokens"] for result in results}),
             client_decode_median_tok_s=statistics.median(rates) if rates else None,

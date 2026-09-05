@@ -17,15 +17,18 @@ def quantile(values, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)] if ordered else None
 
 
-def request_stream(prompt, count, label, output):
+def request_stream(prompt, count, label, output, *, logprobs=False):
     payload = dict(model="qwen3.8-27b", prompt=prompt, max_tokens=count, temperature=0,
                    ignore_eos=True, stream=True, stream_options={"include_usage": True},
-                   logprobs=1, seed=123)
+                   return_token_ids=True, seed=123)
+    if logprobs:
+        payload["logprobs"] = 1
     request = urllib.request.Request("http://127.0.0.1:8000/v1/completions",
                                      json.dumps(payload).encode(), {"Content-Type": "application/json"})
     started = time.perf_counter()
     events, tokens, fragments = [], [], []
     usage, finish, done = None, None, False
+    logprob_count = 0
     with urllib.request.urlopen(request, timeout=1800) as response:
         for raw in response:
             line = raw.decode("utf-8").strip()
@@ -43,7 +46,10 @@ def request_stream(prompt, count, label, output):
             for choice in message.get("choices", []):
                 if choice.get("index", 0) != 0:
                     raise RuntimeError("Expected one completion per request")
-                emitted = (choice.get("logprobs") or {}).get("tokens") or []
+                emitted = choice.get("token_ids") or []
+                if any(type(token) is not int or token < 0 for token in emitted):
+                    raise ValueError("Invalid streamed token IDs")
+                logprob_count += len((choice.get("logprobs") or {}).get("tokens") or [])
                 if emitted:
                     events.append([time.perf_counter(), len(emitted)])
                     tokens.extend(emitted)
@@ -52,7 +58,8 @@ def request_stream(prompt, count, label, output):
     ended = time.perf_counter()
     gaps = [later[0] - earlier[0] for earlier, later in zip(events, events[1:])]
     duration = events[-1][0] - events[0][0] if len(events) > 1 else 0
-    passed = done and len(tokens) == count and usage is not None and usage.get("completion_tokens") == count
+    passed = (done and len(tokens) == count and usage is not None and usage.get("completion_tokens") == count
+              and usage.get("prompt_tokens") == len(prompt) and (not logprobs or logprob_count == count))
     report = dict(label=label, passed=passed, prompt_tokens=len(prompt), requested_tokens=count,
                   usage=usage, finish_reason=finish, started=started, ended=ended,
                   total_s=ended - started, ttft_s=events[0][0] - started if events else None,
@@ -62,10 +69,11 @@ def request_stream(prompt, count, label, output):
                   event_gap_p99_s=quantile(gaps, .99), event_gap_max_s=max(gaps) if gaps else None,
                   coalesced_events=sum(size > 1 for _, size in events), events=events,
                   output_sha256=hashlib.sha256("".join(fragments).encode()).hexdigest(),
-                  token_strings_sha256=hashlib.sha256(json.dumps(tokens).encode()).hexdigest(),
-                  reasoning_answer_counts="unavailable for raw completion logprobs")
+                  token_ids_sha256=hashlib.sha256(json.dumps(tokens).encode()).hexdigest(),
+                  token_ids=tokens, token_count_source="streamed token IDs", logprobs_requested=logprobs,
+                  reasoning_answer_counts="unavailable for raw completion stream")
     (output / f"{label}.json").write_text(json.dumps(report, indent=2))
-    print(json.dumps({key: value for key, value in report.items() if key != "events"}), flush=True)
+    print(json.dumps({key: value for key, value in report.items() if key not in ("events", "token_ids")}), flush=True)
     if not passed:
         raise AssertionError(f"Incomplete generation/token accounting: {label}")
     return report
@@ -119,6 +127,7 @@ def main():
     parser.add_argument("--context", type=int, default=65536)
     parser.add_argument("--tokens", type=int, default=1024)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--logprobs", action="store_true")
     args = parser.parse_args()
     if args.tokens < 2 or args.repeats < 1 or args.context <= args.tokens + 128:
         parser.error("Invalid generation, repetition or context budget")
@@ -138,14 +147,14 @@ def main():
             prompts = [make_prompt(tokenizer, length, index) for index in range(batch)]
             with ThreadPoolExecutor(max_workers=batch) as pool:
                 list(pool.map(lambda item: request_stream(item[1], 8,
-                     f"warm-length-{length}-batch-{batch}-user-{item[0]}", args.output), enumerate(prompts)))
+                     f"warm-length-{length}-batch-{batch}-user-{item[0]}", args.output, logprobs=args.logprobs), enumerate(prompts)))
         for repeat in range(args.repeats):
             for length, batch in (workloads if repeat % 2 == 0 else list(reversed(workloads))):
                 prompts = [make_prompt(tokenizer, length, index) for index in range(batch)]
                 started = time.perf_counter()
                 with ThreadPoolExecutor(max_workers=batch) as pool:
                     results = list(pool.map(lambda item: request_stream(item[1], args.tokens,
-                        f"run-{repeat}-length-{length}-batch-{batch}-user-{item[0]}", args.output), enumerate(prompts)))
+                        f"run-{repeat}-length-{length}-batch-{batch}-user-{item[0]}", args.output, logprobs=args.logprobs), enumerate(prompts)))
                 report["results"].append(dict(repeat=repeat, target_prompt=length, batch=batch,
                     end_to_end_aggregate_tok_s=sum(result["usage"]["completion_tokens"] for result in results) /
                     (time.perf_counter() - started), requests=[result["label"] for result in results]))

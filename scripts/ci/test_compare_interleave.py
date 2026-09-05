@@ -22,7 +22,7 @@ class CompareTests(unittest.TestCase):
                 (root / "interleave-summary.json").write_text(json.dumps(dict(passed=True, results=expected)))
                 for name in expected:
                     (root / f"{name}.json").write_text(json.dumps(dict(passed=True, prompt_tokens=100,
-                        requested_tokens=32, output_sha256="output", token_strings_sha256="tokens")))
+                        requested_tokens=32, output_sha256="output", token_ids_sha256="tokens")))
             if mutation:
                 mutation(arm)
             comparison.compare(control, arm)

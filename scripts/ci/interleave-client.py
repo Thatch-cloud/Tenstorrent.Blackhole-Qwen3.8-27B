@@ -21,7 +21,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True, trust_remote_code=False)
     args.output.mkdir(parents=True, exist_ok=True)
     unit = tokenizer.encode("def stable_sort(records):\n    return sorted(records)\n", add_special_tokens=False)
-    report = dict(passed=False, scope="Raw token-prompt output/cancellation probe; not direct state snapshots or exact token-ID certification",
+    report = dict(passed=False, scope="Raw token-prompt exact output-ID/cancellation probe; not direct state snapshots",
                   results=[])
     try:
         for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193):
@@ -31,13 +31,13 @@ def main():
         prompt = (unit * (4096 // len(unit) + 1))[:4096]
         request = urllib.request.Request("http://127.0.0.1:8000/v1/completions", json.dumps(dict(
             model="qwen3.8-27b", prompt=prompt, max_tokens=1024, temperature=0, ignore_eos=True,
-            stream=True, logprobs=1)).encode(), {"Content-Type": "application/json"})
+            stream=True, return_token_ids=True)).encode(), {"Content-Type": "application/json"})
         cancelled = False
         with urllib.request.urlopen(request, timeout=1800) as response:
             for line in response:
-                if line.startswith(b"data:") and b'"tokens"' in line:
+                if line.startswith(b"data:") and b'"token_ids"' in line:
                     message = json.loads(line[5:])
-                    if any((choice.get("logprobs") or {}).get("tokens") for choice in message.get("choices", [])):
+                    if any(choice.get("token_ids") for choice in message.get("choices", [])):
                         cancelled = True
                         break
         if not cancelled:
@@ -45,7 +45,7 @@ def main():
         time.sleep(2)
         reused = baseline.request_stream(prompt, 32, "after-cancel", args.output)
         original = json.loads((args.output / "boundary-4096.json").read_text())
-        if any(reused[key] != original[key] for key in ("output_sha256", "token_strings_sha256")):
+        if any(reused[key] != original[key] for key in ("output_sha256", "token_ids_sha256")):
             raise AssertionError("Greedy continuation changed after cancellation")
         report["results"].append("after-cancel")
         report["passed"] = True
