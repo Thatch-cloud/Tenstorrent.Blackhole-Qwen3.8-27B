@@ -6,6 +6,13 @@ The manual workflow targets the existing organization runner
 label on shared ARC runners. It was added through the GitHub API without removing
 existing labels or restarting the runner. Re-registration must preserve this label.
 
+Access gate discovered on 2026-09-05: this repository is public, but the runner's
+Default organization group has `allows_public_repositories=false`. The first manual
+run stayed queued and was cancelled before any host steps executed. The dedicated
+label does not override repository access policy. Before hardware execution, use an
+approved private-repository workflow or obtain explicit approval for narrowly scoped
+runner access; do not enable public repositories across the shared Default group.
+
 Thatch.Server owns runner provisioning and isolation. Its runner template enables
 `PrivateDevices`, `ProtectHome` and an isolated HOME. This workflow does not change
 those settings or assume operator weights/caches reside in the runner's HOME.
