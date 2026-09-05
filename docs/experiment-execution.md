@@ -299,3 +299,46 @@ operation assertions remain active for every selected operation; the final check
 also retains both-chip, replay-count, per-replay coverage and measured-overflow gates.
 Profiler CSV sidecars are preserved explicitly even on failure, rather than relying
 on hidden-directory artifact upload. No model/kernel arithmetic is modified.
+
+Full-model trace [33957724963](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33957724963)
+passes at `f62c298`: all 64 layers, exact first-16 endpoint tokens, 15 measured
+replays on each chip, and 1433 operations per replay. Native C++ operation counts
+also match the joined report by chip, replay and operation name. No marker drops
+occur in measured decode; 1100 excluded warmup warnings remain explicitly recorded.
+This certifies the selected decode evidence, not the discarded warmup profile.
+
+| Operation group | Chip 0 summed kernel ms/step | Chip 1 summed kernel ms/step |
+| --- | --- | --- |
+| Matrix multiplications | 32.069 | 32.051 |
+| GDN recurrent kernel | 2.256 | 2.255 |
+| GDN convolution/gates | 1.699 | 1.699 |
+| All-gather | 1.999 | 1.770 |
+| Reduce-scatter | 1.413 | 1.606 |
+| All operation groups | 42.670 | 42.657 |
+
+Each entry is the median of per-replay summed durations; the last row sums those
+group medians. Matmul accounts for approximately 75% of this attribution budget,
+GDN recurrence plus convolution/gates for 9.3%, and the two collectives for 8%.
+Do not sum chips or equate these sums to non-overlapping critical-path latency.
+
+Largest matrix shapes, chip 0 (chip 1 agrees closely):
+
+| Weight dimensions (padded) | Calls/step | Weight dtype | Cores | Summed kernel ms/step |
+| --- | --- | --- | --- | --- |
+| 5120 x 8704 | 128 | BFLOAT4_B | 39 | 11.803 |
+| 8704 x 5120 | 64 | BFLOAT8_B | 32 | 7.819 |
+| 5120 x 8256 (8240 logical) | 48 | BFLOAT8_B | 43 | 5.754 |
+| 3072 x 5120 | 64 | BFLOAT8_B | 32 | 2.984 |
+| 5120 x 7168 | 16 | BFLOAT8_B | 56 | 1.939 |
+| 5120 x 124160 | 1 | BFLOAT8_B | 108 | 1.769 |
+
+Decision: prioritize MLP gate/up and down projection grid/blocking experiments,
+then the GDN input projection. Preserve the existing BF4/BF8 weight dtypes and
+accumulation fidelity; extra cores are not automatically a bandwidth improvement.
+The vocabulary projection already uses 108 cores, disproving a universal 36-core
+limit. Next gates are real-shape numerical checks and synchronized traced kernel
+A/B timing before any full-model adoption. No speedup beyond the earlier sampling
+result is claimed from profiling. The host scheduler and device-sampling path
+remain outside this probe. The enormous raw host-times CSV is not preserved in
+future runs; final operation reports, native C++ data and host operation metadata
+remain available. Local CI-helper validation now includes shape/coverage checks.

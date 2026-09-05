@@ -5,7 +5,7 @@ output=/experiment/results/model-profile
 mkdir -p "$output"
 preserve_metadata() {
     mkdir -p "$output/metadata"
-    for name in tracy_ops_data.csv tracy_ops_times.csv cpp_device_perf_report.csv; do
+    for name in tracy_ops_data.csv cpp_device_perf_report.csv; do
         if [ -f "$output/.logs/$name" ]; then cp "$output/.logs/$name" "$output/metadata/$name"; fi
     done
 }
@@ -16,3 +16,4 @@ unset TT_METAL_PROFILER_MID_RUN_DUMP
 timeout -k 30 1200 python3 -m tracy -p -r --disable-device-data-dump-to-files --op-support-count 10000 -o "$output" \
     /experiment-scripts/ci/model-profile.py 2>&1 | tee "$output/console.log"
 python3 /experiment-scripts/ci/check-model-profile.py "$output"
+python3 /experiment-scripts/ci/summarize-model-shapes.py "$output"
