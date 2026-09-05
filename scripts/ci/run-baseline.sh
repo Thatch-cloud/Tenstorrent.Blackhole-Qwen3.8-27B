@@ -48,6 +48,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \
+    -e "QWEN_BOUNDARY_DIAGNOSTICS=${QWEN_BOUNDARY_DIAGNOSTICS:-0}" \
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"

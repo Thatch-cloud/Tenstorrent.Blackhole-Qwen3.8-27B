@@ -53,6 +53,16 @@ def transform(name, source):
             raise ValueError("Ambiguous TTModelInput anchor")
         return source.replace(anchor, anchor + "    prefill_request_identity: list[tuple[str, int]] | None = None\n")
     if name == "model_runner.py":
+        source = stage.patch_method(source, "_forward_with_model_input", ((
+            "        sampling_params = model_input.tt_sampling_params\n",
+            "        from qwen_boundary_diagnostics import record_input, record_output\n"
+            "        record_input(model_input, self.input_batch.req_ids)\n"
+            "        sampling_params = model_input.tt_sampling_params\n",
+        ), (
+            "        return _SyncForward(\n",
+            "        record_output(tt_out)\n"
+            "        return _SyncForward(\n",
+        )))
         source = stage.patch_method(source, "_release_dead_state_slots", ((
             "        for req_id in scheduler_output.finished_req_ids:\n",
             "        from vllm_tt_plugin.qwen_interleave import release_requests\n"

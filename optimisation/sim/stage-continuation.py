@@ -27,6 +27,12 @@ def patch_method(source, name, changes):
 
 def transform(name, source):
     if name == "model.py":
+        source = patch_method(source, "_write_gdn_slot", ((
+            "        mapper = ttnn.ShardTensorToMesh(self.mesh_device, dim=0)\n",
+            "        from qwen_boundary_diagnostics import record_slot\n"
+            "        record_slot(slot, rec_snap, conv_snap)\n"
+            "        mapper = ttnn.ShardTensorToMesh(self.mesh_device, dim=0)\n",
+        ),))
         updated = patch_method(source, "_prefill_traced_chunked_tp", (
             ("tail_real, vision_tokens=None\n", "tail_real, vision_tokens=None, *, start_pos=0, is_last=True\n"),
             ("        self._reset_gdn_state_for_new_sequence()\n",
@@ -84,6 +90,11 @@ def main():
     if helper.exists() and helper.read_text() != contents:
         raise SystemExit(f"Existing helper differs; review before restaging: {helper}")
     pending[helper] = contents
+    diagnostics = root / "qwen_boundary_diagnostics.py"
+    contents = Path(__file__).with_name("boundary_diagnostics.py").read_text()
+    if diagnostics.exists() and diagnostics.read_text() != contents:
+        raise SystemExit("Refusing unrelated diagnostic helper changes")
+    pending[diagnostics] = contents
     if args.apply:
         for path, contents in pending.items():
             if not path.exists() or path.read_text() != contents:

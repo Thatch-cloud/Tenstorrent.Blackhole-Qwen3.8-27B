@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -28,6 +29,10 @@ def main():
     collector = threading.Thread(target=baseline.scrape, args=(stop, args.output), daemon=True)
     collector.start()
     try:
+        if os.environ.get("QWEN_BOUNDARY_DIAGNOSTICS") == "1":
+            prompt = (unit * (2049 // len(unit) + 1))[:2049]
+            for repeat in range(3):
+                baseline.request_stream(prompt, 32, f"isolated-2049-{repeat}", args.output)
         for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193):
             prompt = (unit * (length // len(unit) + 1))[:length]
             result = baseline.request_stream(prompt, 32, f"boundary-{length}", args.output)

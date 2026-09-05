@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, baseline, interleave, profile]
+        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, profile]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -53,10 +53,11 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 6600 bash scripts/ci/run-baseline.sh
       - name: Interleaving correctness gates
-        if: inputs.suite == 'interleave'
+        if: inputs.suite == 'interleave' || inputs.suite == 'interleave-diagnostic'
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_BOUNDARY_DIAGNOSTICS: ${{ inputs.suite == 'interleave-diagnostic' && '1' || '0' }}
         run: timeout 6600 bash scripts/ci/run-interleave.sh
       - name: Layer attribution profiles
         if: inputs.suite == 'profile'
