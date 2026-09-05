@@ -21,7 +21,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
-| E2 interleaving | Operator primitives passed; prototype host tests only | Whole/chunked model continuation, cancellation and slot reuse before mixed-traffic benchmark |
+| E2 interleaving | Full-model ratio-1 ran; exact-output gate failed at 2049 tokens | Isolate chunk-boundary state/logit divergence before ratios 2/4 or mixed-traffic benchmarks |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
 | E4 fusion/pipeline | Planned, needs implementation | E3 verified state contract, one native change per arm, full-path timing |
 | E5 drafting | Lookup proposal policy passes 11 host tests; integration dependency-gated | Passing E3 before enabling lookup/MTP; no non-greedy semantic substitution |
@@ -121,3 +121,17 @@ integer scalars. It now accepts `numbers.Integral`, normalizes to Python int,
 and still rejects floating-point, Boolean and array-valued positions. The
 integration regression now feeds the actual plugin visual-metadata gatherer
 and NumPy position/prompt-length representations through `submit_prefill`.
+
+Run [33946645240](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33946645240)
+cleared all three runtime/configuration errors. Control and ratio-1 each completed
+eight boundary requests and the post-cancellation check. Cross-arm comparison
+correctly failed: the 2049-token prompt differs at generated token index 1
+(the second output token). First four control IDs: `[74830,8,198,727]`;
+ratio-1 IDs: `[74830,1590,198,262]`. All 32 IDs match for the other seven lengths
+(63/64/65/2047/2048/4096/8193) and after cancellation. This is now a genuine
+full-model equivalence failure, not a launcher error. Its cause is not yet
+established; the matching first output token does not prove equal logits or state.
+Do not relax the exact-output gate or adopt interleaving. Ratios 2/4 did not run.
+Next diagnostic: repeat the isolated 2049 case and compare recurrent/conv/KV state
+and logits around positions 2048/2049 and the first decode step. The previous
+raw startup errors remain preserved in their original artifacts.
