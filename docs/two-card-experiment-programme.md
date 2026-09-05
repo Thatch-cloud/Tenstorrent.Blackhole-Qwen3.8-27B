@@ -177,8 +177,12 @@ tokens. Smaller chunks require separate trace/state support and are not a flag-o
 Current bounded evidence: `gdn-prefix` and `gdn-block` CI runs validate one real
 GDN layer with batched input/output projections and exact every-prefix state plus
 two-step rollback continuation on both chips. Each arm passed 216 cases and 30
-stale-state negative controls. This does not certify full-model attention KV or
-logits. Keep the old multi-token harness diagnostic-only; its composed operations
+stale-state negative controls. Separately, `full-prefix` run 33999532634 passed 102
+full-model serial rollback cases across the 64-token page boundary, six eager/trace
+baseline comparisons and both stale-GDN/wrong-page controls in six configurations.
+It verifies full logits, active GDN states and valid KV values, not batched target
+execution or safe concurrent writes to shared KV pages. Keep the old multi-token
+harness diagnostic-only; its composed operations
 are not the current native fused control. See the execution ledger for run IDs.
 
 Use the existing multi-token GDN harness and latest fused control. Define T as target

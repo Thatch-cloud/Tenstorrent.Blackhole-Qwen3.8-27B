@@ -22,7 +22,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | GDN layer-0 batched input/output projections pass exact prefix/rollback gates, runs 33997659654/33997961604 | Extend to attention KV and full-model logits, then measure uninstrumented T=1/2/4/8/16 verification and commit cost |
+| E3 verifier | Full-model serial rollback/logit/KV oracle passed, run 33999532634; layer GDN batching and compact DMA separately validated | Build alias-safe batched attention/target verification; compare to the oracle, then measure T=1/2/4/8/16 verification and commit cost |
 | E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
@@ -776,3 +776,22 @@ Initial full-model run 33999230778 loaded and warmed native decode, then failed 
 the harness's KV reader: native `ttnn.Shape` supports integer indexing, not Python
 slice indexing. No full-model correctness case ran. Convert the shape to a tuple
 before extracting dimensions, add a native-like shape regression fixture and retry.
+
+Run [33999532634](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33999532634),
+code `d203018`, completed successfully. Artifact evidence confirms:
+
+- All six eager/trace baseline comparisons matched full logits exactly.
+- All 102 rollback cases passed: lengths 63/64/65, eager and trace, every retained
+  prefix 0..16. Both correction steps matched full logits, all 48 GDN active states
+  and logically valid KV values in all 16 attention layers, on both chips.
+- All six negative-control configurations detected both stale GDN state and wrong
+  page mapping (12 checks), rather than merely exiting successfully.
+- Two reusable all-layer compact snapshot sets occupied 201,326,592 bytes per chip.
+
+This establishes full-model serial rollback correctness for the tested page-boundary
+fixtures. Rejected KV entries need not be physically erased in this path: rewinding
+the decode position and restoring GDN state kept the rejected suffix from affecting
+the checked continuation. It does not establish that concurrent multi-row KV writes
+to shared pages are safe. The next gate is batched attention/target verification
+against this oracle, including shared-page write hazards, then its measured cost
+curve. No speculative serving flag, precision setting or deployment changed.
