@@ -13,6 +13,13 @@ spec.loader.exec_module(stage)
 
 
 def transform(name, source):
+    if name == "qwen36_vllm.py":
+        return stage.patch_method(source, "warmup_model_decode", ((
+            '        kwargs.pop("non_greedy_decoding_on_device", None)\n',
+            '        kwargs.pop("non_greedy_decoding_on_device", None)\n'
+            '        if getattr(self.model[0], "_qwen_tp2_greedy_only", False):\n'
+            '            kwargs["greedy_only"] = True\n',
+        ),))
     if name == "model.py":
         return stage.patch_method(source, "__init__", ((
             "        self._supports_on_device_sampling = (\n",
@@ -54,7 +61,7 @@ def main():
     pending = {}
     revisions = {}
     for root, revision, paths in (
-        (Path("/opt/tt-metal"), stage.REVISION, ("models/demos/blackhole/qwen36/tt/model.py", "models/common/sampling/tt_sampling.py")),
+        (Path("/opt/tt-metal"), stage.REVISION, ("models/demos/blackhole/qwen36/tt/model.py", "models/common/sampling/tt_sampling.py", "models/demos/blackhole/qwen36/tt/qwen36_vllm.py")),
         (Path("/opt/vllm-tt-plugin"), "bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c", ("src/vllm_tt_plugin/model_runner.py",)),
     ):
         actual = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()

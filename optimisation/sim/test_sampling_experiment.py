@@ -62,11 +62,20 @@ class SamplingExperimentTests(unittest.TestCase):
         spec.loader.exec_module(stager)
         root = Path(os.environ.get("SIM_ROOT", "/opt/ttsim"))
         for checkout, path in (("tt-metal", "models/demos/blackhole/qwen36/tt/model.py"),
+                               ("tt-metal", "models/demos/blackhole/qwen36/tt/qwen36_vllm.py"),
                                ("tt-metal", "models/common/sampling/tt_sampling.py"),
                                ("vllm-tt-plugin", "src/vllm_tt_plugin/model_runner.py")):
             source = subprocess.check_output(["git", "-C", str(root / checkout), "show", f"HEAD:{path}"], text=True)
             transformed = stager.transform(Path(path).name, source)
             tree = ast.parse(transformed)
+            if path.endswith("qwen36_vllm.py"):
+                method = next(node for node in ast.walk(tree)
+                              if isinstance(node, ast.FunctionDef) and node.name == "warmup_model_decode")
+                assignment = next(node for node in method.body if isinstance(node, ast.If))
+                for enabled in (False, True):
+                    namespace = dict(self=SimpleNamespace(model=[SimpleNamespace(_qwen_tp2_greedy_only=enabled)]), kwargs={})
+                    exec(compile(ast.Module(body=[assignment], type_ignores=[]), "warmup", "exec"), namespace)
+                    self.assertEqual(namespace["kwargs"], {"greedy_only": True} if enabled else {})
             if path.endswith("model_runner.py"):
                 original = next(node for node in ast.walk(ast.parse(source))
                                 if isinstance(node, ast.FunctionDef) and node.name == "check_perform_device_sampling")

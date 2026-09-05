@@ -210,3 +210,8 @@ Every output must match exact token IDs and text; device-path engagement is
 recorded per request. A device-labelled logprobs request must fall back to host.
 This is separate from the historical logprobs-enabled baseline. KV metrics are
 collected throughout; experiment flags and production defaults remain unchanged.
+
+Full-model attempt 33950052748 stopped safely during startup: the shared warmup
+sweep requested non-greedy TopK. The experiment now passes the existing
+`greedy_only=True` warmup option only for its TP2 model. Host/no-sampler warmup
+remains included, and the runtime TopK guard is retained.
