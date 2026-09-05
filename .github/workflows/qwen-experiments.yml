@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware]
+        options: [inventory, hardware, model-inventory]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -42,6 +42,10 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 2400 bash scripts/ci/run-hardware.sh
+      - name: Model runtime discovery
+        if: inputs.suite == 'model-inventory'
+        shell: bash
+        run: timeout 180 bash scripts/ci/model-inventory.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
