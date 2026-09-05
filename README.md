@@ -192,12 +192,14 @@ docker run -d --name ttserve -p 127.0.0.1:8000:8000 -w /opt/vllm-tt-plugin \
   -e HF_MODEL=Qwen/Qwen3.8-27B -e MESH_DEVICE=P300 \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
   -e VLLM_PLUGINS=tt,tt_model_registry -e VLLM_RPC_TIMEOUT=100000 \
-  -e QWEN36_BATCHED_DECODE_MODE=host \
+  -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN_SDPA_BF8=1 \
   $REGISTRY/tt-vllm:v0.77.0-rc1-prstack-plugin \
   python3 -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
-    --max_model_len 4096 --max-num-seqs 8 --no-enable-prefix-caching \
-    --block-size 64 --reasoning-parser qwen3 --port 8000 --host 0.0.0.0 \
+    --max_model_len 65536 --max-num-seqs 8 --no-enable-prefix-caching \
+    --block-size 64 --reasoning-parser qwen3 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --port 8000 --host 0.0.0.0 \
     --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
 ```
 
@@ -220,6 +222,21 @@ dedicated cache directory keeps the token out of the container while still
 letting weights download and persist. Stricter still: mount only the model
 snapshot, read-only.
 
+**`--max_model_len 65536` is sized for agentic clients, and it costs a flag.**
+A terminal harness's opening request is 10–20k tokens of system prompt and tool
+schemas before any code arrives; a 4k window rejects request one with a
+misleading `maximum context length` 400. 64k is the measured comfort zone
+(27 s TTFT at full fill, decode barely moves) — but at B=8 it needs
+`QWEN_SDPA_BF8=1` or the allocator OOMs, and that flag carries upstream's
+"validate PCC at long context" caveat. If you serve smaller, drop the env var
+and the caveat together.
+
+Two measurements elsewhere in this README predate this sizing: the GSM8K score
+and the ~510 s readiness figure were both taken with the earlier
+`--max_model_len 4096`, no-`QWEN_SDPA_BF8` command. Treat them as approximate
+for this configuration until re-run — GSM8K in particular, since
+`QWEN_SDPA_BF8=1` is the flag the accuracy caveat attaches to.
+
 **Readiness takes ~510 s** — weights, warmup, and prefill trace capture. Budget
 at least 600 s. A default 30 s initial delay will restart-loop forever, and the
 symptom reads as a broken image rather than an impatient probe.
@@ -237,11 +254,75 @@ each one prevents. The short version:
 | `l1_small_size: 24576` | `ttnn.conv1d` cannot allocate; error misleadingly reads as OOM |
 | `--max-num-seqs 8` | B=32 hits a matmul divisibility assert at TP=2 |
 | `--reasoning-parser qwen3` | users receive raw chain-of-thought in `content` |
+| `--tool-call-parser qwen3_coder` + `--enable-auto-tool-choice` | tool calls arrive as raw `<tool_call><function=...>` markup in `content`, `tool_calls` stays null, and `tool_choice: "auto"` is rejected |
+| `QWEN_SDPA_BF8=1` | at 64k × B=8 the paged-KV allocator OOMs — required at this `max_model_len`, with an accuracy caveat ([gotchas](docs/gotchas.md)) |
 | `MESH_DEVICE=P300` | the demo path defaults to `(1,4)` and asks for four cards |
 
 Two Blackhole devices are a **`P300`** as far as tt-metal is concerned —
 `determine_device_name` keys purely off device count, regardless of whether
 they're two dies on one board or two boards on a cable.
+
+---
+
+## Driving it from a terminal harness
+
+The endpoint is stock OpenAI chat-completions, so terminal coding agents can
+use it directly. Config shapes for Grok Build and Kimi CLI below — field names
+are taken from each harness's current docs, not from runs against installed
+versions, so if a config is rejected, compare against the docs for the version
+you have first. Anything that takes an OpenAI-compatible `base_url` follows
+the same pattern.
+
+**Reach it through a tunnel, not a re-published port.** The server is bound to
+loopback on the serving host on purpose — it has no authentication. From a
+workstation:
+
+```bash
+ssh -N -L 8000:127.0.0.1:8000 <user>@<serving-host>
+```
+
+Both configs then point at `http://127.0.0.1:8000/v1` locally.
+
+**Grok Build** — `~/.grok/config.toml`, then `/model qwen38-tt` in-session:
+
+```toml
+[model.qwen38-tt]
+model = "qwen3.8-27b"            # must match --served-model-name exactly
+name = "Qwen3.8-27B (Blackhole)"
+base_url = "http://127.0.0.1:8000/v1"
+api_backend = "chat_completions"
+context_window = 65536           # match --max_model_len; drives compaction
+```
+
+**Kimi CLI** — `~/.kimi/config.toml`:
+
+```toml
+[providers.tt-local]
+type = "openai"
+base_url = "http://127.0.0.1:8000/v1"
+api_key = "none"                 # server is keyless; the field wants a value
+
+[models.qwen38-tt]
+provider = "tt-local"
+model = "qwen3.8-27b"
+max_context_size = 65536
+capabilities = ["tool_use", "reasoning"]   # Kimi gates agent features on this
+```
+
+**Raise the harness request timeout.** TTFT at a full 64k window is ~27 s and
+superlinear beyond ~100k; a client with a 30–60 s default aborts mid-prefill,
+which presents as a flaky server rather than a slow one.
+
+**Expect a re-prefill per turn.** `--no-enable-prefix-caching` is mandatory on
+GDN models, and an agent loop replays the whole conversation every tool call —
+~5 s at 20k context, ~15–20 s at 50k, before any generation. With ~16–18 tok/s
+single-stream decode the cadence is real but unhurried; keep harness context
+modest rather than maxed.
+
+**Verify streaming tool calls once before trusting them.** Harnesses stream,
+and vLLM parses `delta.tool_calls` on a separate code path from the
+non-streaming case — a curl smoke test with `"stream": true` through the
+tunnel covers what the harness will actually exercise.
 
 ---
 
