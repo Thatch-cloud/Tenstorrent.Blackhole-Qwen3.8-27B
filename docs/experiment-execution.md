@@ -366,3 +366,26 @@ or down output tiles per core to 8, 12 or 16, permitting a four-tile FP32 subblo
 instead of the control's one-tile subblock. It retains the same precision, seeded
 exact-output and paired timing gates. This tests tile packing, not a promise that
 more active cores improve bandwidth.
+
+Packing [33959155664](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33959155664)
+passes at `86b9d83`, with all 42 seeded eager/traced outputs exactly equal to control.
+No candidate meets the promotion gate:
+
+| Change from frozen control | Mean whole-layer latency change |
+| --- | --- |
+| Gate/up 8 output tiles/core | -0.062% (one block slower) |
+| Gate/up 12 output tiles/core | +2.300% |
+| Gate/up 16 output tiles/core | +4.204% |
+| Down 8 output tiles/core | +1.686% |
+| Down 12 output tiles/core | +4.354% |
+| Down 16 output tiles/core | +8.817% |
+
+Across the two runs, 20 non-control configurations were screened without changing
+weight or accumulation precision. None qualifies for full-model adoption under
+the existing rule; the 44/33 control remains the default. These single-layer
+results do not prove DRAM saturation, but they do rule out a large gain from the
+tested grid/K-block/output-packing changes. They are not a full-model speedup.
+Next investigation: combine gate/up work or reduce surrounding memory transfers,
+with weight-layout/extra-allocation accounting and exact-output gates before
+serving tests. Do not extrapolate a one-layer gain to the 200 tok/s objective.
+Local CI-helper suite: 56 tests pass; hardware access and serving remain unchanged.
