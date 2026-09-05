@@ -17,6 +17,10 @@ def main():
     paths += [source / name for name in (
         'models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py',
         'models/demos/blackhole/qwen36/tt/gdn/tp.py',
+        'models/demos/blackhole/qwen36/tt/attention/tp.py',
+        'models/demos/blackhole/qwen36/tt/model.py',
+        'models/demos/blackhole/qwen36/tt/qwen36_vllm.py',
+        'ttnn/cpp/ttnn/operations/experimental/paged_cache/device/update_cache/paged_update_cache_device_operation.cpp',
     )]
     manifest = dict(scope='Source parity only, not binary equivalence or performance', files=[])
     manifest['revision'] = subprocess.check_output(
