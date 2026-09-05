@@ -215,3 +215,26 @@ Full-model attempt 33950052748 stopped safely during startup: the shared warmup
 sweep requested non-greedy TopK. The experiment now passes the existing
 `greedy_only=True` warmup option only for its TP2 model. Host/no-sampler warmup
 remains included, and the runtime TopK guard is retained.
+
+Full-model [33950377324](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33950377324)
+passed at `dd42e2e`. All 24 measured requests completed 512 tokens and matched
+their prompt-length control exactly (token IDs and text). All 14 device requests
+(12 measured, two warmup) recorded force-argmax engagement with model trace mode
+`all`; both logprobs negative controls correctly selected host sampling.
+
+| Actual prompt tokens | Host mean client tok/s | Device mean client tok/s | Mean paired gain | Three-block gain range |
+| --- | --- | --- | --- | --- |
+| 109 | 19.850 | 21.317 | +7.389% | +7.334% to +7.455% |
+| 4078 | 19.800 | 21.113 | +6.629% | +6.278% to +6.975% |
+
+Means weight the three ABBA blocks equally. These are B=1 client estimates,
+not engine-committed timing or evidence of 200 tok/s. Exact equality on these two
+coding prompts is not a general coding-quality benchmark. KV occupancy peaked
+at 0.8782%; no active-zero occupancy occurred across 2364 active samples out of
+2454 scrapes, with zero scrape errors and zero preemptions.
+
+Decision: retain guarded device force-argmax as a promising experimental candidate,
+not a production default. Next gates are longer-context paired runs, explicit-seed
+and non-greedy/penalty fallback checks on hardware, and full-model traced operation
+attribution before changing projection grids or low-level GDN kernels. Multi-request
+device sampling and composition with prefill interleaving are not certified here.
