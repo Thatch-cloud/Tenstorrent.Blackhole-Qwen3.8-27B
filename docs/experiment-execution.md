@@ -536,3 +536,11 @@ two-tile subblocks and NoC routing. It compares 39/55/68/91 N-workers using
 7/5/4/3 pairs per worker respectively. Only the N partition, corresponding buffers
 and multicast receiver rectangle vary. All candidates compile before trace
 capture and each receives its own three ABBA timing blocks and exact-output gate.
+
+Run 33964688595 retained exact outputs for every grid but promoted none:
+39 cores +13.22–13.30%, 55 cores +96.00–96.54%, 68 cores +11.38–11.70%,
+91 cores +14.29–14.56% projection latency versus control. The 39-core arm itself
+regressed relative to the preceding single-candidate probe. Generalizing the
+reader had inadvertently changed its inner tile-loop bound from compile-time
+to runtime; the retry restores compile-time specialization and compact core
+ranges before drawing conclusions about the additional cores.

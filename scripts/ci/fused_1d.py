@@ -104,8 +104,11 @@ class FusedProjection:
                             device=self.mesh, memory_config=ttnn.L1_MEMORY_CONFIG)
         pairs_per_worker = self.pairs_per_worker
         all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, self.rows - 1))])
-        workers = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(core_x, core_y), ttnn.CoreCoord(core_x, core_y))
-                                    for core_x, core_y, _, _ in self.workers])
+        full_rows, remainder = divmod(len(self.workers), 11)
+        ranges = [ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, full_rows - 1))]
+        if remainder:
+            ranges.append(ttnn.CoreRange(ttnn.CoreCoord(0, full_rows), ttnn.CoreCoord(remainder - 1, full_rows)))
+        workers = ttnn.CoreRangeSet(ranges)
         def cb(index, dtype, page, count, cores):
             return ttnn.CBDescriptor(total_size=page * count, core_ranges=cores,
                 format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype,
@@ -136,11 +139,12 @@ class FusedProjection:
                 kernel_source=str(Path(__file__).with_name("fused_1d_weights.cpp")), core_ranges=workers,
                 compile_time_args=ttnn.TensorAccessorArgs(local_weight).get_compile_time_args()
                                   + ttnn.TensorAccessorArgs(local_output).get_compile_time_args(),
+                named_compile_time_args=[("pairs_per_worker", pairs_per_worker)],
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                          noc=ttnn.NOC.RISCV_0_default))
             writer_args = ttnn.RuntimeArgs()
             for core_x, core_y, begin, count in self.workers:
-                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles, pairs_per_worker]
+                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles]
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
                 fp32_dest_acc_en=True, math_approx_mode=False)

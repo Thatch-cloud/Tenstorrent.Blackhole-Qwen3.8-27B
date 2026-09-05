@@ -21,7 +21,7 @@ def main():
     from models.tt_dit.utils.tensor import prepare_for_fused_swiglu
 
     report = dict(passed=False, checks=[], blocks=[], seeds=[123, 456, 789],
-                  scope="Projection-only B1 TP2; same 39 N-workers, 7 gate/up pairs each, multicast input, K-block 8; not full MLP or serving throughput")
+                  scope="Projection-only B1 TP2; 39/55/68/91 N-worker sweep, multicast input, K-block 8; not full MLP or serving throughput")
     root = Path("/experiment/results")
     mesh = None
     traces = {}

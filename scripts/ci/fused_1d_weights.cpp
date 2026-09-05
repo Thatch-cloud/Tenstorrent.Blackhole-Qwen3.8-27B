@@ -6,7 +6,7 @@ void kernel_main() {
     const uint32_t first_pair = get_arg_val<uint32_t>(2);
     const uint32_t valid_pairs = get_arg_val<uint32_t>(3);
     const uint32_t output_tiles = get_arg_val<uint32_t>(4);
-    const uint32_t pairs_per_worker = get_arg_val<uint32_t>(5);
+    constexpr uint32_t pairs_per_worker = get_named_compile_time_arg_val("pairs_per_worker");
     constexpr auto weight_args = TensorAccessorArgs<0>();
     constexpr auto output_args = TensorAccessorArgs<weight_args.next_compile_time_args_offset()>();
     const auto weights = TensorAccessor(weight_args, weight_address, 576);
