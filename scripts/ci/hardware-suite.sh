@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p /experiment/results /experiment/optimisation /experiment/scripts
-cp -a /experiment-scripts/. /experiment/scripts/
-cp -a /experiment-optimisation/. /experiment/optimisation/
+cp -R /experiment-scripts/. /experiment/scripts/
+cp -R /experiment-optimisation/. /experiment/optimisation/
 unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_PATH TT_MESH_GRAPH_DESC_PATH
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 export OMP_NUM_THREADS=2
