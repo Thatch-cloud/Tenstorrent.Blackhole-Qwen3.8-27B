@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -7,6 +8,12 @@ from gdn_state_copy import page_counts
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_face_transfers_preserve_noc_address_alignment(self):
+        source = Path(__file__).with_name("gdn_state_copy.cpp").read_text()
+        self.assertIn("source.get_noc_addr(page, 512), scratch + 512, 32", source)
+        self.assertIn("scratch + 512, destination.get_noc_addr(page, 512), 32", source)
+        self.assertNotIn("scratch + 32", source)
+
     def test_direct_copy_accepts_only_frozen_page_geometry(self):
         shapes = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
         self.assertEqual(page_counts(shapes), [384, 160, 160, 160, 160])

@@ -10,10 +10,10 @@ void transfer(uint32_t argument_offset, uint32_t worker, uint32_t scratch) {
     for (uint32_t page = worker; page < pages; page += 48) {
         if constexpr (row_only) {
             noc_async_read(source.get_noc_addr(page, 0), scratch, 32);
-            noc_async_read(source.get_noc_addr(page, 512), scratch + 32, 32);
+            noc_async_read(source.get_noc_addr(page, 512), scratch + 512, 32);
             noc_async_read_barrier();
             noc_async_write(scratch, destination.get_noc_addr(page, 0), 32);
-            noc_async_write(scratch + 32, destination.get_noc_addr(page, 512), 32);
+            noc_async_write(scratch + 512, destination.get_noc_addr(page, 512), 32);
         } else {
             noc_async_read_tile(page, source, scratch);
             noc_async_read_barrier();
