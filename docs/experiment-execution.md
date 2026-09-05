@@ -290,3 +290,12 @@ before Tracy imports, uses partial Python tracing and runtime C++ analysis witho
 the large raw CSV dump, and adds a hard kill-after timeout. Warmup overflow warnings
 are reported separately: any overflow during the explicitly bounded decode region
 still fails, as do missing or inconsistent replay rows on either chip.
+
+Retry 33957235279 again passes exact generation and now captures host operation
+metadata, but the all-operations report correctly rejects missing warmup data
+(operation 11738113, device 1). The next revision scopes the pinned report join to
+the recorded decode trace before joining device measurements. Its existing missing
+operation assertions remain active for every selected operation; the final checker
+also retains both-chip, replay-count, per-replay coverage and measured-overflow gates.
+Profiler CSV sidecars are preserved explicitly even on failure, rather than relying
+on hidden-directory artifact upload. No model/kernel arithmetic is modified.

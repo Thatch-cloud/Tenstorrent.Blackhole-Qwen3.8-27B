@@ -1,8 +1,12 @@
 """Profiler attribution rejects eager rows and incomplete replay evidence."""
 
 import importlib.util
+import ast
+import os
 from pathlib import Path
+import subprocess
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("profile_check", Path(__file__).with_name("check-model-profile.py"))
 checker = importlib.util.module_from_spec(spec)
@@ -33,6 +37,22 @@ class ProfileTests(unittest.TestCase):
         for log in ("", clean.replace("step", "markers were dropped"), clean + clean):
             with self.assertRaises(AssertionError):
                 checker.measured_log(log)
+
+    def test_report_staging_only_selects_measured_trace(self):
+        spec = importlib.util.spec_from_file_location("stage_profile", Path(__file__).with_name("stage-model-profile.py"))
+        stager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(stager)
+        source = subprocess.check_output(["git", "-C", "/opt/ttsim/tt-metal", "show",
+                                          "HEAD:tools/tracy/process_ops_logs.py"], text=True)
+        helper = Path(__file__).resolve().parents[2] / "optimisation/sim/stage-continuation.py"
+        with patch.dict(os.environ, QWEN_PROFILE_STAGE_HELPER=str(helper)):
+            tree = ast.parse(stager.transform(source))
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "process_ops")
+        selected = next(node for node in function.body if isinstance(node, ast.Assign) and isinstance(node.value, ast.DictComp))
+        namespace = dict(generation={"decode_trace_id": 7}, ops={
+            1: {"metal_trace_id": None}, 2: {"metal_trace_id": 6}, 3: {"metal_trace_id": 7}, 4: {"metal_trace_id": "7"}})
+        exec(compile(ast.Module(body=[selected], type_ignores=[]), "select", "exec"), namespace)
+        self.assertEqual(set(namespace["ops"]), {3, 4})
 
 
 if __name__ == "__main__":
