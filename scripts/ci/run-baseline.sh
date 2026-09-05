@@ -36,7 +36,7 @@ test_id=$(docker create --network none --cap-drop ALL --cap-add SYS_NICE \
     --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \
     --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
     --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
-    --mount "type=bind,src=$cache,dst=/models,readonly" \
+    --mount "type=bind,src=$cache/hub/models--Qwen--Qwen3.8-27B,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
     --mount "type=volume,src=$volume,dst=/experiment-cache" \
     --label thatch.qwen.baseline=true --workdir /opt/vllm-tt-plugin \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
