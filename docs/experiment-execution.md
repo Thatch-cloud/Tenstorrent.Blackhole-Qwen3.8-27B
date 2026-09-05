@@ -389,3 +389,14 @@ Next investigation: combine gate/up work or reduce surrounding memory transfers,
 with weight-layout/extra-allocation accounting and exact-output gates before
 serving tests. Do not extrapolate a one-layer gain to the 200 tok/s objective.
 Local CI-helper suite: 56 tests pass; hardware access and serving remain unchanged.
+
+## GDN upstream parity audit
+
+Read-only source audit [33960203974](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33960203974)
+passed. The image includes ctxbot's fused recurrent kernel hardening plus packed
+QKV, native norm/gate folding and broadcast rank-one updates. No missing listed
+core fusion fix was identified; do not overwrite these extensions with the PR.
+See [source comparison and next experiment](gdn-source-audit-2026-09-05.md) for
+exact upstream heads, evidence limits, two failed audit attempts and the proposed
+active-prefix state-write experiment. B1/Bmax8 currently cannot use the existing
+in-place flag. No new throughput result or production change is claimed.
