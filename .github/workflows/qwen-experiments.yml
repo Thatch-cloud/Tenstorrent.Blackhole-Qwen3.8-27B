@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -61,11 +61,11 @@ jobs:
           QWEN_INTERLEAVE_MIXED: ${{ inputs.suite == 'interleave-mixed' && '1' || '0' }}
         run: timeout 6600 bash scripts/ci/run-interleave.sh
       - name: Layer attribution profiles
-        if: inputs.suite == 'profile'
+        if: inputs.suite == 'profile' || inputs.suite == 'model-profile'
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
-          QWEN_RUN_MODE: profile
+          QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 3600 bash scripts/ci/run-baseline.sh
       - name: TP2 force-argmax prerequisite
         if: inputs.suite == 'sampling-kernel'

@@ -271,3 +271,12 @@ stream events, not engine commit timestamps. Production defaults remain unchange
 The next performance investigation is full-model traced operation attribution:
 separate projection/GDN math, collectives, sampling and host dispatch before tuning
 core grids. Existing eager module profiles cannot establish that critical path.
+
+The `model-profile` probe loads every model layer through the served Qwen Generator,
+retaining max-batch 8, 64K context and the observed 8200-block KV pool. Only the B=1
+host-sampling decode bucket is warmed/captured; HTTP, scheduling and other resident
+batch traces are excluded. It checks the first 16 tokens against endpoint run
+33950377324, flushes device profiler buffers between decode steps, and requires
+15 complete trace replay sessions on both chips. Attribution filters by the actual
+decode trace ID, excluding eager compilation and prefill. Summed kernel durations
+are attribution evidence, not non-overlapping critical-path time or tok/s.

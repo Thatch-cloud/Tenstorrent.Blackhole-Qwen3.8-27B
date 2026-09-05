@@ -51,6 +51,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
     bash /experiment-scripts/ci/module-profile.sh
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = model-profile ]; then
+    bash /experiment-scripts/ci/model-profile.sh
+    exit 0
+fi
 extra_args=()
 tt_config='{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824}}'
 if [[ "${QWEN_RUN_MODE:-baseline}" = sampling || "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]]; then
