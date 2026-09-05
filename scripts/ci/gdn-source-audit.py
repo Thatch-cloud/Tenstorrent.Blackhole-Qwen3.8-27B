@@ -19,7 +19,8 @@ def main():
         'models/demos/blackhole/qwen36/tt/gdn/tp.py',
     )]
     manifest = dict(scope='Source parity only, not binary equivalence or performance', files=[])
-    manifest['revision'] = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+    manifest['revision'] = subprocess.check_output(
+        ['git', '-c', 'safe.directory=/opt/tt-metal', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     for path in paths:
         relative = path.relative_to(source)
         target = destination / relative
