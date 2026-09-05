@@ -32,7 +32,12 @@ class ContinuationController:
             raise ValueError("Continuation expects host token IDs and page table")
         if tokens.dtype not in (torch.int32, torch.int64) or page_table.dtype not in (torch.int32, torch.int64):
             raise ValueError("Token IDs and page table must be integer tensors")
-        if any(metadata.get(name) is not None for name in ("pixel_values", "pixel_values_videos", "vision_tokens")):
+        for name in ("pixel_values", "pixel_values_videos"):
+            value = metadata.get(name)
+            absent_row = isinstance(value, list) and len(value) == 1 and value[0] is None
+            if value is not None and not absent_row:
+                raise ValueError("Continuation v1 is text-only")
+        if metadata.get("vision_tokens") is not None:
             raise ValueError("Continuation v1 is text-only")
         def integer(value):
             if isinstance(value, torch.Tensor):

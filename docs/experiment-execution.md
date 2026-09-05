@@ -105,3 +105,11 @@ the launcher had left image/video limits at their defaults. All interleaving
 arms, including the control, now set image/video limits to zero and disable MM
 embedding inputs. The 2048-token chunk budget and numerical gates are unchanged.
 The prior baseline/profile suites retain their original settings.
+
+Run 33945913888 confirmed the encoder-budget fix: the ratio-1 endpoint loaded and
+became ready. Its first text request then hit `Continuation v1 is text-only`.
+The pinned plugin represents an absent per-request image as `pixel_values=[None]`,
+not only `None`. The continuation guard now accepts exactly one absent visual
+row, while rejecting tensors, populated/nested rows, malformed row counts and
+vision tokens. Regression cases cover both acceptance and rejection. This is
+still a failing integration result, not a passed interleaving correctness gate.

@@ -68,6 +68,19 @@ class ContractTests(unittest.TestCase):
         self.call(0, 32, True)
         self.assertIsNone(self.controller.active)
 
+    def test_plugin_absent_visual_rows_are_text_only(self):
+        self.call(0, 15, True, pixel_values=[None], pixel_values_videos=[None])
+        self.assertEqual(self.backend.calls, [(0, 15, True, 2)])
+
+    def test_visual_payloads_and_malformed_rows_rejected(self):
+        for name in ("pixel_values", "pixel_values_videos"):
+            for value in ([], [None, None], [torch.zeros(1)], [[torch.zeros(1)]], torch.empty(0), [False]):
+                with self.subTest(name=name, value=type(value)), self.assertRaises(ValueError):
+                    self.call(0, 15, True, **{name: value})
+        with self.assertRaises(ValueError):
+            self.call(0, 15, True, vision_tokens=[None])
+        self.assertFalse(self.backend.calls)
+
     def test_explicit_final_marker_not_token_width(self):
         self.call()
         self.assertEqual(self.controller.active["end"], 32)
