@@ -57,6 +57,14 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 
 ## Programme suites
 
+- `full-prefix`: full 64-layer native sequential rollback oracle at prompt lengths
+  63/64/65, every retained prefix 0..16, eager and trace. Checks all target logits,
+  active states in all 48 GDN layers and logically valid KV values in all 16
+  attention layers, followed by two correction-input steps. Keeps rejected KV
+  bytes physically present and relies on explicit target positions/masks to hide
+  them; wrong-page and stale-GDN negative controls must be detected. This is not
+  batched full-model verification, cancellation certification or throughput.
+
 - `gdn-direct`: active-slot snapshots through a 48-worker copy-only DMA kernel,
   retaining the full prefix, continuation and changed-idle-slot isolation gates.
   Pinned BF16 tile geometry only; not a serving patch or a full-model verifier.

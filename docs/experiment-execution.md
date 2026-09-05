@@ -732,3 +732,42 @@ convolution tile. It uses no compute kernel or arithmetic, does not overwrite ot
 rows, and avoids native restore's reconstruction. Both directions use preallocated
 snapshot/live addresses and the identical correctness/isolation and ABBA gates.
 Shapes, interleaved DRAM placement, dtype, both chips and non-aliasing are guarded.
+
+Direct-copy runs 33998799270 and 33998989061 failed exactness; preserve their timings
+as invalid-for-promotion. Diagnostics isolated 2,560 wrong values per convolution
+tap/shard, starting at channel 16, before trace capture; recurrence matched. The
+second face-row used a scratch offset of 32 against a DRAM face offset of 512.
+The retry preserves the same NoC address alignment with scratch offset 512;
+do not confuse this with changing the BF16 face layout or arithmetic.
+
+Run [33999114362](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33999114362),
+code `2b38da1`, passed 216 exact prefix/continuation cases, 30 stale-state controls
+and 15 changed-idle-slot checks. The alignment fix retained exact recurrence and
+all convolution channels on both chips. Copy kernel SHA256:
+`4f921500b63817a5f26f288725a9da1fee9223841a68d058d96fac0f67a23428`.
+In three paired ABBA blocks, save took 0.02266-0.02282 ms versus full-copy
+0.05319-0.05346 ms (57.16-57.48% less); restore took 0.02265-0.02272 ms versus
+0.05320-0.05336 ms (57.35-57.55% less). Padded allocation remains 72.4% smaller.
+This is a validated per-layer snapshot microbenchmark, not a decode-speed claim.
+The full-model oracle pins this kernel hash as its prerequisite.
+
+## Full-model rollback oracle
+
+Added `full-prefix`, gated behind the direct-copy layer test. It retains native
+sequential target decode, not the experimental multi-row GDN forward. Compare
+eager and trace logits, then freshly prefill each branch at lengths 63/64/65.
+For retained prefixes 0..16, advance through a deliberately wrong rejected tail,
+restore all 48 GDN slot-zero snapshots, rewind the explicit decode position and
+compare two corrected steps against an uninterrupted native reference.
+
+Attention KV rollback is logical: future rejected entries remain physically present,
+but only positions below the current valid length may affect attention. Compare
+dequantized valid KV tensor values on both chips for all 16 attention layers,
+including the 64-token page transition, and all active GDN states/full logits.
+Wrong logical-to-physical page mapping and omitted GDN restore are negative controls.
+Fresh prefill per branch prevents one branch's correction writes contaminating the
+next branch's valid prefix. Snapshot buffers are preallocated before trace capture.
+
+This oracle is a prerequisite for the batched target verifier. It does not validate
+tree branches, stochastic acceptance, request cancellation/epoch reuse, long contexts,
+or a serving speedup. It must not turn the policy's `verifier_ready` on in serving.
