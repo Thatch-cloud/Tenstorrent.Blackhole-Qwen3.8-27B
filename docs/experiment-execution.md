@@ -28,7 +28,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
 | E7 prefix reuse | Dependency-gated | E1/E2 lifecycle gate; hybrid KV plus recurrent/conv state identity and isolation |
 | E8 precomputation | Planned audit | Bound removable cost before table prototypes; no unapproved arithmetic changes |
-| E9 spare-core work | Planned profile | Actual bottleneck attribution before reader/core-map/L1 changes |
+| E9 spare-core work | Three eager layer profiles passed, run 33945221856 | Full-model traced attribution before reader/core-map/L1 changes |
 | E10 disaggregation | Eight-slot TP1 pool fails analytical capacity bound | Smaller-pool TP1 and hybrid-state handoff remain unverified; E2 mixed-traffic control first |
 
 The queue is not a claim that all tracks already have runnable implementations.
@@ -74,3 +74,21 @@ the stock fixture allocated BF16 KV while the shipped BF8 flag casts fill inputs
 to BF8. The retry stages only the fixture cache allocation dtype to match that
 flag, recording original/staged hashes. Model precision and PCC thresholds are
 unchanged. The failed attention profile is not accepted as performance evidence.
+
+Retry [33945221856](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33945221856)
+passed all three fixtures on both chips with no dropped markers. Attention
+paged-versus-concat PCC: prefill 0.999696, decode 0.999757. GDN position-zero
+PCC 0.99985; MLP PCC 0.999230. No thresholds were relaxed.
+
+Device-0 eager attribution: the GDN fixture's two steps used 333.358 us in four
+matmuls (32/43 cores), 93.131 us in two recurrent kernels (24 cores), and 70.693 us
+in two fused conv/gate kernels (81 cores). The MLP fixture's single step used
+303.913 us in three matmuls (32/39 cores). Some copy/elementwise operations use
+110 cores. Attention includes both prefill and decode, reference and paged paths;
+its aggregate operation totals must not be called a single decode latency.
+
+Local validation at commit 35a0d3f: 84 host tests passed (31 CI, 38 continuation/
+interleaving, four stream rig, 11 lookup policy). These are not 84 silicon tests.
+Interleaving run 33945305689 is executing separately with exact token-ID gates and
+live KV metrics. Historical zero-cache reports remain observation-only unless
+the current measurements reproduce them.
