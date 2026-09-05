@@ -21,7 +21,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
-| E2 interleaving | Full-model ratio-1 ran; exact-output gate failed at 2049 tokens | Isolate chunk-boundary state/logit divergence before ratios 2/4 or mixed-traffic benchmarks |
+| E2 interleaving | One-token-tail bug fixed; all ratios pass boundary/output gates | Mixed-traffic isolation and latency gate running; full device KV lifecycle remains unverified |
 | E3 verifier | Historical harness not yet a correctness gate | Assert every accepted-prefix state and output, forced rejections; then measure T=1/2/4/8/16 |
 | E4 fusion/pipeline | Planned, needs implementation | E3 verified state contract, one native change per arm, full-path timing |
 | E5 drafting | Lookup proposal policy passes 11 host tests; integration dependency-gated | Passing E3 before enabling lookup/MTP; no non-greedy semantic substitution |
@@ -150,3 +150,19 @@ for a one-token tail, completed request, no remaining tokens, and flag-off mode.
 Diagnostic reruns also gate three isolated 2049-token repetitions against control,
 in addition to the original nine checks. Host fingerprint instrumentation performs
 no additional device operations; its timings must not be used as speed evidence.
+
+Fix verification [33947778844](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33947778844)
+passed: ratios 1/2/4 each match the control on all 12 exact-token checks (eight
+boundary prompts, three isolated 2049 repetitions, and post-cancellation output).
+Each arm also has 13 paired diagnostic request records, including the cancelled
+request. All host recurrent/conv snapshots supplied to the decode-slot writer
+match the control byte-for-byte, as do the recorded final-prefill and first-three
+decode logits. No missing final slot writes remain. This is not a complete direct
+device KV snapshot or multi-request isolation certification.
+
+Mixed-traffic run 33948332548 separately tests one 512-token decoder, an injected
+8193-token prefill and a short coding request. It requires exact token-ID equality
+against isolated requests and verifies actual request overlap. Boundary checks
+remain enabled in every arm. Diagnostic hashing is disabled for this run, and
+KV metrics continue to be collected. No production serving changes or automatic
+adoption follow from these tests.
