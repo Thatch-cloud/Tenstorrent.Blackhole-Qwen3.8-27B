@@ -280,3 +280,13 @@ batch traces are excluded. It checks the first 16 tokens against endpoint run
 15 complete trace replay sessions on both chips. Attribution filters by the actual
 decode trace ID, excluding eager compilation and prefill. Summed kernel durations
 are attribution evidence, not non-overlapping critical-path time or tok/s.
+
+Attempt 33954595293 completed all 16 exact-token checks on the full 64-layer
+Generator, but is not a passing profile. Warmup overflowed profiler buffers and
+the report fell into device-only Python analysis of an 11.5 GB raw log; it was
+cancelled after exceeding its inner timeout. No kernel bottleneck conclusion is
+drawn from that attempt. The retry explicitly enables host operation metadata
+before Tracy imports, uses partial Python tracing and runtime C++ analysis without
+the large raw CSV dump, and adds a hard kill-after timeout. Warmup overflow warnings
+are reported separately: any overflow during the explicitly bounded decode region
+still fails, as do missing or inconsistent replay rows on either chip.

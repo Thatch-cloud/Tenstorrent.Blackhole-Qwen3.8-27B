@@ -27,6 +27,13 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 checker.analyze(rows, 7, 3)
 
+    def test_drop_warning_scope_requires_explicit_boundaries(self):
+        clean = "QWEN_PROFILE_MEASURE_BEGIN\nstep\nQWEN_PROFILE_MEASURE_END"
+        self.assertEqual(checker.measured_log("markers were dropped\n" + clean), 1)
+        for log in ("", clean.replace("step", "markers were dropped"), clean + clean):
+            with self.assertRaises(AssertionError):
+                checker.measured_log(log)
+
 
 if __name__ == "__main__":
     unittest.main()

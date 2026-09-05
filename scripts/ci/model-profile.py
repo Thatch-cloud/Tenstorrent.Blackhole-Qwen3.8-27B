@@ -51,6 +51,7 @@ def main():
         generated = [int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax())]
         ttnn.ReadDeviceProfiler(mesh)
         report["steps"] = []
+        print("QWEN_PROFILE_MEASURE_BEGIN", flush=True)
         for step in range(15):
             signpost(f"qwen_profile_decode_{step}")
             started = time.perf_counter()
@@ -61,6 +62,7 @@ def main():
             generated.append(int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax()))
             report["steps"].append(dict(step=step, instrumented_host_seconds=time.perf_counter() - started))
             ttnn.ReadDeviceProfiler(mesh)
+        print("QWEN_PROFILE_MEASURE_END", flush=True)
         report["decode_trace_id"] = int(generator.trace_ids_decode[False][0])
         report["token_ids"] = generated
         expected = [1596, 1144, 4087, 1156, 25, 328, 727, 18054, 74830, 11, 1328, 1590, 198, 262, 460, 1727]

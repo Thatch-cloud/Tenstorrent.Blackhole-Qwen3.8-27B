@@ -50,18 +50,26 @@ def analyze(rows, trace_id, steps):
     return results
 
 
+def measured_log(log):
+    if log.count("QWEN_PROFILE_MEASURE_BEGIN") != 1 or log.count("QWEN_PROFILE_MEASURE_END") != 1:
+        raise AssertionError("Missing unambiguous profiling boundaries")
+    measured = log.split("QWEN_PROFILE_MEASURE_BEGIN", 1)[1].split("QWEN_PROFILE_MEASURE_END", 1)[0]
+    if "markers were dropped" in measured:
+        raise AssertionError("Profiler dropped markers during measured decode")
+    return log.split("QWEN_PROFILE_MEASURE_BEGIN", 1)[0].count("markers were dropped")
+
+
 def main(root):
     generation = json.loads((root / "generation.json").read_text())
     if not generation["passed"]:
         raise AssertionError("Profile generation correctness failed")
-    if "markers were dropped" in (root / "console.log").read_text(errors="replace"):
-        raise AssertionError("Profiler dropped device markers")
+    warmup_warnings = measured_log((root / "console.log").read_text(errors="replace"))
     reports = list(root.rglob("*ops_perf_results*.csv"))
     if len(reports) != 1:
         raise AssertionError("Expected exactly one operation report")
     with reports[0].open(newline="") as stream:
         devices = analyze(csv.DictReader(stream), generation["decode_trace_id"], len(generation["steps"]))
-    result = dict(passed=True, devices=devices,
+    result = dict(passed=True, devices=devices, excluded_warmup_drop_warnings=warmup_warnings,
         scope="Last 15 host-sampling decode trace replays; summed kernel durations are not critical-path wall time or serving throughput")
     (root / "attribution.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
