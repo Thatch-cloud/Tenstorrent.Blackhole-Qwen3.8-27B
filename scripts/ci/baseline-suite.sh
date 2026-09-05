@@ -47,6 +47,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
     timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = mlp-sweep ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/mlp-sweep.py
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
     bash /experiment-scripts/ci/module-profile.sh
     exit 0

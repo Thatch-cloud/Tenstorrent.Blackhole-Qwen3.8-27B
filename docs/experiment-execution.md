@@ -342,3 +342,14 @@ result is claimed from profiling. The host scheduler and device-sampling path
 remain outside this probe. The enormous raw host-times CSV is not preserved in
 future runs; final operation reports, native C++ data and host operation metadata
 remain available. Local CI-helper validation now includes shape/coverage checks.
+
+The `mlp-sweep` gate loads real layer-0 weights and compares the frozen production
+44/33 gate/down grid budgets against separate larger/smaller grids and K-block
+sizes 4/16 (control 8). It preserves BF4 gate/up, BF8 down, LoFi, FP32 destination
+and packer L1 accumulation. Fifteen configurations run three seeded B=1 vectors
+against the existing Torch PCC threshold (0.97) and exact baseline outputs, eager
+and traced. All compilation precedes trace capture. Three ABBA blocks per candidate
+time 20 replay submissions followed by synchronization per sample. Promotion to
+a full-model gate requires exact control equality and over 2% lower latency in
+every block; this is only a single-layer screen, with replicated DRAM input and
+both-card reduce-scatter, not a serving-throughput or coding-quality benchmark.

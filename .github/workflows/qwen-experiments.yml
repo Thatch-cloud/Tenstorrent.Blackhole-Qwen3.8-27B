@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -74,6 +74,13 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: sampling-kernel
         run: timeout 1200 bash scripts/ci/run-baseline.sh
+      - name: Real-weight TP2 MLP sweep
+        if: inputs.suite == 'mlp-sweep'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: mlp-sweep
+        run: timeout 2400 bash scripts/ci/run-baseline.sh
       - name: Full-model host versus device sampling
         if: inputs.suite == 'sampling' || inputs.suite == 'sampling-extended'
         shell: bash
