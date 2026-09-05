@@ -38,6 +38,10 @@ print(json.dumps(dict(snapshot=root.name, files={name: hashlib.sha256((root / na
     for name in files}, config=json.loads((root / 'config.json').read_text()),
     flags={name: value for name, value in os.environ.items() if name.startswith(('QWEN', 'TT_', 'MESH_DEVICE'))}), indent=2))
 PY
+if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
+    timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
     bash /experiment-scripts/ci/module-profile.sh
     exit 0
