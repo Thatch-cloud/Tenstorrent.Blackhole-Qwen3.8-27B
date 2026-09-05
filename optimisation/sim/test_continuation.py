@@ -9,6 +9,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import numpy as np
 
 from continuation import ContinuationController, TPPrefillBackend
 
@@ -71,6 +72,17 @@ class ContractTests(unittest.TestCase):
     def test_plugin_absent_visual_rows_are_text_only(self):
         self.call(0, 15, True, pixel_values=[None], pixel_values_videos=[None])
         self.assertEqual(self.backend.calls, [(0, 15, True, 2)])
+
+    def test_numpy_integer_positions_and_slots(self):
+        for dtype in (np.int32, np.int64):
+            self.call(dtype(0), dtype(15), True, slot=dtype(2))
+        self.assertEqual(self.backend.calls, [(0, 15, True, 2)] * 2)
+
+    def test_float_boolean_and_array_positions_are_not_integers(self):
+        for value in (0.0, np.float32(0), np.float64(0), False, np.bool_(False), np.array([0])):
+            with self.subTest(value=type(value)), self.assertRaises(ValueError):
+                self.call(start=value, end=15, final=True)
+        self.assertFalse(self.backend.calls)
 
     def test_visual_payloads_and_malformed_rows_rejected(self):
         for name in ("pixel_values", "pixel_values_videos"):

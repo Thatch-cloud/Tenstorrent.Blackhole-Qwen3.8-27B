@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import numpy as np
 
 import interleave
 from continuation import ContinuationController
@@ -231,6 +232,18 @@ class InterleaveTests(unittest.TestCase):
         self.assertEqual(controller.backend.calls, [(0, 32, False, 2), (32, 64, True, 2)])
         self.assertEqual(events, ["drain", "drain"])
         self.assertEqual(runner.requests["A"].mrope_position_delta, 0)
+
+    def test_real_plugin_text_metadata_reaches_continuation(self):
+        runner, controller, _ = self.runner()
+        runner.input_batch = SimpleNamespace(num_reqs=1, req_ids=["A"])
+        runner.requests["A"].mm_features = []
+        inputs = self.inputs(runner, end=15, final=True)
+        inputs.input_positions = np.array([0], dtype=np.int32)
+        inputs.prompt_lens = np.array([15], dtype=np.int32)
+        inputs.multi_modal_kwargs = method("model_runner.py", "_gather_multi_modal_inputs")(runner)
+        self.assertEqual(inputs.multi_modal_kwargs, {"pixel_values": [None], "image_grid_thw": [None]})
+        method("model_runner.py", "submit_prefill")(runner, inputs, [1])
+        self.assertEqual(controller.backend.calls, [(0, 15, True, 2)])
 
     def test_finished_request_cancels_and_stale_input_rejected(self):
         runner, controller, events = self.runner()

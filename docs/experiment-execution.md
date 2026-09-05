@@ -113,3 +113,11 @@ not only `None`. The continuation guard now accepts exactly one absent visual
 row, while rejecting tensors, populated/nested rows, malformed row counts and
 vision tokens. Regression cases cover both acceptance and rejection. This is
 still a failing integration result, not a passed interleaving correctness gate.
+
+Run 33946277920 progressed past the visual-row guard and failed on position
+validation. The pinned runner builds prefill positions and prompt lengths as
+NumPy integer arrays; our validator accepted only Python integers and torch
+integer scalars. It now accepts `numbers.Integral`, normalizes to Python int,
+and still rejects floating-point, Boolean and array-valued positions. The
+integration regression now feeds the actual plugin visual-metadata gatherer
+and NumPy position/prompt-length representations through `submit_prefill`.

@@ -1,6 +1,7 @@
 """Opt-in single-owner text prefill continuation; requires explicit scheduler metadata."""
 
 import math
+from numbers import Integral
 
 import torch
 
@@ -44,9 +45,9 @@ class ContinuationController:
                 if value.dtype not in (torch.int32, torch.int64) or value.numel() != 1:
                     raise ValueError("Positions and slots must be scalar integers")
                 value = value.item()
-            if not isinstance(value, int) or isinstance(value, bool):
+            if not isinstance(value, Integral) or isinstance(value, bool):
                 raise ValueError("Positions and slots must be integers")
-            return value
+            return int(value)
 
         start = integer(metadata["start_pos"][0])
         end = integer(prompt_lens[0])
