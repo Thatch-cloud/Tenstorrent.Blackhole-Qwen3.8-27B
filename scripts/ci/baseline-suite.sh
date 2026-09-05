@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p /experiment/results
+if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then export QWEN_TP2_SAMPLING_EXPERIMENT=1; fi
 unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_PATH
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
@@ -47,6 +48,12 @@ if [ "${QWEN_RUN_MODE:-baseline}" = profile ]; then
     exit 0
 fi
 extra_args=()
+tt_config='{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824}}'
+if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then
+    python3 /experiment-optimisation/sim/stage-sampling.py > /experiment/results/sampling-stage.json
+    tt_config='{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824,"sample_on_device_mode":"decode_only"}}'
+    extra_args=(--limit-mm-per-prompt '{"image":0,"video":0}' --no-enable-mm-embeds)
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
     source /experiment-scripts/ci/interleave-args.sh
     python3 /experiment-optimisation/sim/stage-continuation.py /opt/tt-metal --apply > /experiment/results/continuation-stage.json
@@ -57,7 +64,7 @@ printf 'mode=%s\nratio=%s\ncontinuation=%s\ninterleave=%s\n' "${QWEN_RUN_MODE:-b
 python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3.8-27B --revision "$revision" --served-model-name qwen3.8-27b \
     --max-model-len 65536 --max-num-seqs 8 --no-enable-prefix-caching --block-size 64 \
     --reasoning-parser qwen3 --port 8000 --host 127.0.0.1 \
-    --additional-config '{"tt":{"l1_small_size":24576,"fabric_config":"FABRIC_1D","trace_region_size":1073741824}}' "${extra_args[@]}" \
+    --additional-config "$tt_config" "${extra_args[@]}" \
     > /experiment/results/server.log 2>&1 &
 server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
@@ -79,6 +86,10 @@ print(json.dumps({name: list(value.get('properties', {})) for name, value in sch
                   if 'Completion' in name}, indent=2))
 PY
 printf 'Endpoint ready; starting warmed baseline matrix\n'
+if [ "${QWEN_RUN_MODE:-baseline}" = sampling ]; then
+    timeout 3600 python3 /experiment-scripts/ci/sampling-client.py --tokenizer "$MODEL_WEIGHTS_DIR" --output /experiment/results
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = interleave ]; then
     timeout 2400 python3 /experiment-scripts/ci/interleave-client.py --tokenizer "$MODEL_WEIGHTS_DIR" --output /experiment/results
     exit 0

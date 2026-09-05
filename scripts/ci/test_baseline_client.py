@@ -13,7 +13,7 @@ spec.loader.exec_module(baseline)
 
 
 class BaselineTests(unittest.TestCase):
-    def stream(self, usage=3, done=True, ids=True):
+    def stream(self, usage=3, done=True, ids=True, **kwargs):
         events = [dict(choices=[dict(index=0, text="ab", token_ids=[11, 12] if ids else None, logprobs=dict(tokens=["a", "b"]))]),
                   dict(choices=[dict(index=0, text="c", token_ids=[13] if ids else None, logprobs=dict(tokens=["c"]), finish_reason="length")]),
                   dict(choices=[], usage=dict(completion_tokens=usage, prompt_tokens=2))]
@@ -22,10 +22,19 @@ class BaselineTests(unittest.TestCase):
         if done:
             response.__enter__.return_value.append(b"data: [DONE]\n")
         with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(baseline.urllib.request, "urlopen", return_value=response), \
+                mock.patch.object(baseline.urllib.request, "urlopen", return_value=response) as open_request, \
                 mock.patch.object(baseline.time, "perf_counter", side_effect=[0., 1., 2., 3.]), \
                 mock.patch("builtins.print"):
-            return baseline.request_stream([1, 2], 3, "test", Path(directory))
+            result = baseline.request_stream([1, 2], 3, "test", Path(directory), **kwargs)
+            self.payload = json.loads(open_request.call_args.args[0].data)
+            return result
+
+    def test_sampling_probe_can_omit_seed_and_label_request(self):
+        result = self.stream(seed=None, request_id="qwen-sampling-device-test")
+        self.assertNotIn("seed", self.payload)
+        self.assertNotIn("logprobs", self.payload)
+        self.assertEqual(self.payload["request_id"], "qwen-sampling-device-test")
+        self.assertIsNone(result["seed"])
 
     def test_coalesced_events_use_token_counts(self):
         report = self.stream()

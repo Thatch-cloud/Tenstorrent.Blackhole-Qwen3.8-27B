@@ -3,7 +3,7 @@ set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
 ratio=${QWEN_INTERLEAVE_RATIO:-0}
-[[ "$mode" = baseline || "$mode" = interleave || "$mode" = profile || "$mode" = sampling-kernel ]]
+[[ "$mode" = baseline || "$mode" = interleave || "$mode" = profile || "$mode" = sampling-kernel || "$mode" = sampling ]]
 [[ "$ratio" = 0 || "$ratio" = 1 || "$ratio" = 2 || "$ratio" = 4 ]]
 output=experiment-results
 if [ "$mode" = interleave ]; then output="$output/interleave-$ratio"; fi

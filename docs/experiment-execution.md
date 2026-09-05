@@ -188,3 +188,25 @@ paired measurements, not an adopted default. Cache occupancy was nonzero
 (peak 1.60-1.61%), with zero active-zero-cache samples across 1230 active samples
 and zero scrape errors. Production serving and default-off experiment flags
 remain unchanged.
+
+## E9f: guarded TP2 greedy device sampling
+
+Native sampler prerequisite [33949480633](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33949480633)
+passed all 30 checks: real 248320-token vocabulary, random/boundary/tie/near-tie
+cases, eager and two trace replays, on both chips. Median synchronized sampler
+latency was 2.607 ms over 20 warm iterations. This is a 32-row sampler-only
+measurement, not B=1 full-model throughput.
+
+The pinned model disables generic device sampling on TP2 because each vocabulary
+shard exceeds its TopK limit. The opt-in experiment enables only force-argmax,
+with a runtime guard that fails before any generic TopK execution. Original
+sampling eligibility checks remain intact; non-greedy requests, penalties,
+multi-request batches and unsupported requests retain host sampling.
+
+The full-model test uses three ABBA blocks per prompt length (approximately 128
+and 4096 tokens), B=1 and 512 output tokens. Both arms omit explicit seeds to
+permit internal greedy sampler tracing, and omit logprobs in timed requests.
+Every output must match exact token IDs and text; device-path engagement is
+recorded per request. A device-labelled logprobs request must fall back to host.
+This is separate from the historical logprobs-enabled baseline. KV metrics are
+collected throughout; experiment flags and production defaults remain unchanged.
