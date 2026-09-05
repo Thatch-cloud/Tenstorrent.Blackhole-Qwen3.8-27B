@@ -21,11 +21,11 @@ void kernel_main() {
             noc_async_read_barrier();
             noc_semaphore_wait(ready, 43);
             noc_semaphore_set(ready, 0);
-            const uint64_t target = get_noc_multicast_addr(first_x, first_y, last_x, last_y, destination);
+            const uint64_t target = get_noc_multicast_addr(last_x, last_y, first_x, first_y, destination);
             noc_async_write_multicast(destination, target, 8 * 2048, 43);
             noc_async_write_barrier();
             noc_semaphore_set(received, 1);
-            const uint64_t signal = get_noc_multicast_addr(first_x, first_y, last_x, last_y, get_semaphore(1));
+            const uint64_t signal = get_noc_multicast_addr(last_x, last_y, first_x, first_y, get_semaphore(1));
             noc_semaphore_set_multicast(get_semaphore(1), signal, 43);
         } else {
             noc_semaphore_inc(get_noc_addr(first_x, first_y, get_semaphore(0)), 1);

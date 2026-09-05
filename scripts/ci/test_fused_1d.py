@@ -25,6 +25,15 @@ class Fused1DTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fused_compute("no matching native kernel")
 
+    def test_intermediate_variant_preserves_both_rounded_tiles(self):
+        source = "                            if (last_out) {old pack" + "                            } else {\n                                tile_regs_commit();\n}"
+        result = fused_compute(source, intermediates=True)
+        self.assertNotIn("mul_binary_tile_init();", result)
+        self.assertNotIn("mul_binary_tile(0, 1, 0);", result)
+        self.assertIn("pack_tile(1, out_dfb_id);", result)
+        self.assertIn("cb_reserve_back(out_dfb_id, 2);", result)
+        self.assertIn("cb_push_back(out_dfb_id, 2);", result)
+
 
 if __name__ == "__main__":
     unittest.main()

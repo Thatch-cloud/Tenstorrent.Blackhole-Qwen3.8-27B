@@ -5,6 +5,7 @@ void kernel_main() {
     const uint32_t output_address = get_arg_val<uint32_t>(1);
     const uint32_t first_pair = get_arg_val<uint32_t>(2);
     const uint32_t valid_pairs = get_arg_val<uint32_t>(3);
+    const uint32_t output_tiles = get_arg_val<uint32_t>(4);
     constexpr auto weight_args = TensorAccessorArgs<0>();
     constexpr auto output_args = TensorAccessorArgs<weight_args.next_compile_time_args_offset()>();
     const auto weights = TensorAccessor(weight_args, weight_address, 576);
@@ -30,11 +31,13 @@ void kernel_main() {
         cb_push_back(1, 112);
     }
     for (uint32_t pair = 0; pair < 7; ++pair) {
-        cb_wait_front(4, 1);
+        cb_wait_front(4, output_tiles);
         if (pair < valid_pairs) {
-            noc_async_write_tile(first_pair + pair, output, get_read_ptr(4));
+            for (uint32_t tile = 0; tile < output_tiles; ++tile) {
+                noc_async_write_tile((first_pair + pair) * output_tiles + tile, output, get_read_ptr(4) + tile * 2048);
+            }
             noc_async_write_barrier();
         }
-        cb_pop_front(4, 1);
+        cb_pop_front(4, output_tiles);
     }
 }

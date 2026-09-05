@@ -50,13 +50,16 @@ def main():
             report["checks"].append(dict(chip=chip, packed_weight_exact=True))
         del tiles, combined, packed
         fused = FusedProjection(mesh, weight)
+        diagnostic = FusedProjection(mesh, weight, intermediates=True)
         report["kernel"] = fused.manifest
         report["extra_packed_weight_bytes_per_chip"] = weight.buffer_num_pages() * weight.buffer_aligned_page_size()
-        def control(value):
+        def control(value, intermediates=False):
             gate = ttnn.linear(value, mlp.weights.w1, compute_kernel_config=mlp.compute_kernel_config_decode,
                 program_config=args.mlp_w1_decode_1d_progcfg, memory_config=ttnn.L1_MEMORY_CONFIG)
             up = ttnn.linear(value, mlp.weights.w3, compute_kernel_config=mlp.compute_kernel_config_decode,
                 program_config=args.mlp_w3_decode_1d_progcfg, memory_config=ttnn.L1_MEMORY_CONFIG)
+            if intermediates:
+                return gate, up
             hidden = ttnn.mul(gate, up, memory_config=ttnn.L1_MEMORY_CONFIG)
             ttnn.deallocate(gate)
             ttnn.deallocate(up)
@@ -71,6 +74,8 @@ def main():
         def read(tensor):
             return [ttnn.to_torch(shard).float() for shard in ttnn.get_device_tensors(tensor)]
         def check(actual, reference, seed, mode):
+            if len(actual) != 2 or len(reference) != 2:
+                raise AssertionError("Both TP2 shards must be checked")
             exact = True
             numerical = True
             for chip, (result, target) in enumerate(zip(actual, reference)):
@@ -88,6 +93,15 @@ def main():
         exact = True
         for seed, host in zip(report["seeds"], inputs):
             ttnn.copy_host_to_device_tensor(host, value)
+            gate, up = control(value, intermediates=True)
+            reference_gate, reference_up = read(gate), read(up)
+            ttnn.deallocate(gate)
+            ttnn.deallocate(up)
+            intermediate = diagnostic(value)
+            pairs = [shard.reshape(1, 1, 1, 272, 2, 32) for shard in read(intermediate)]
+            check([shard[..., 0, :].reshape(1, 1, 1, 8704) for shard in pairs], reference_gate, seed, "gate")
+            check([shard[..., 1, :].reshape(1, 1, 1, 8704) for shard in pairs], reference_up, seed, "up")
+            ttnn.deallocate(intermediate)
             baseline = control(value)
             expected.append(read(baseline))
             ttnn.deallocate(baseline)

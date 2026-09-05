@@ -7,7 +7,7 @@ from pathlib import Path
 COMPUTE = "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp"
 
 
-def fused_compute(source):
+def fused_compute(source, intermediates=False):
     start = source.index("                            if (last_out) {")
     end = source.index("                            } else {\n                                tile_regs_commit();", start)
     if source.count("                            if (last_out) {") != 1:
@@ -50,6 +50,12 @@ def fused_compute(source):
     }
 """ + result[finish:]
     result = '#include "api/compute/eltwise_binary_sfpu.h"\n' + result
+    if intermediates:
+        result = result.replace("    mul_binary_tile_init();\n", "")
+        result = result.replace("        mul_binary_tile(0, 1, 0);\n", "")
+        result = result.replace("cb_reserve_back(out_dfb_id, 1);", "cb_reserve_back(out_dfb_id, 2);")
+        result = result.replace("pack_tile(0, out_dfb_id);", "pack_tile(0, out_dfb_id);\n        pack_tile(1, out_dfb_id);")
+        result = result.replace("cb_push_back(out_dfb_id, 1);", "cb_push_back(out_dfb_id, 2);")
     return result.replace('"bmm_fused_activation.hpp"',
         '"ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp"')
 
@@ -59,15 +65,17 @@ def mapping():
 
 
 class FusedProjection:
-    def __init__(self, mesh, weights):
+    def __init__(self, mesh, weights, intermediates=False):
         self.mesh = mesh
         self.weights = weights
         self.source = Path("/opt/tt-metal") / COMPUTE
         original = self.source.read_text()
-        self.compute = fused_compute(original)
+        self.intermediates = intermediates
+        self.compute = fused_compute(original, intermediates=intermediates)
         self.manifest = dict(native_compute_sha256=hashlib.sha256(original.encode()).hexdigest(),
                              fused_compute_sha256=hashlib.sha256(self.compute.encode()).hexdigest(),
                              workers=39, grid=[11, 4], pairs_per_worker=7, k_block=8,
+                             intermediates=intermediates, input_noc=1, weight_noc=0,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")
 
     def __call__(self, value):
@@ -76,7 +84,8 @@ class FusedProjection:
             raise ValueError("Only frozen BF16 B1 projection input is supported")
         if self.weights.dtype != ttnn.bfloat4_b or list(self.weights.shape)[-2:] != [5120, 17408]:
             raise ValueError("Expected local TP2 pair-packed BF4 weights")
-        output = ttnn.empty((1, 1, 1, 8704), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+        output_tiles = 2 if self.intermediates else 1
+        output = ttnn.empty((1, 1, 1, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                             device=self.mesh, memory_config=ttnn.L1_MEMORY_CONFIG)
         all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, 3))])
         workers = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, 2)),
@@ -87,7 +96,7 @@ class FusedProjection:
                     page_size=page, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
         buffers = [cb(0, ttnn.bfloat16, 2048, 16, all_cores),
                    cb(1, ttnn.bfloat4_b, 576, 224, workers),
-                   cb(4, ttnn.bfloat16, 2048, 7, workers),
+                   cb(4, ttnn.bfloat16, 2048, 7 * output_tiles, workers),
                    cb(5, ttnn.float32, 4096, 14, workers),
                    cb(30, ttnn.bfloat16, 2048, 14, workers)]
         mesh_program = ttnn.MeshProgramDescriptor()
@@ -101,7 +110,7 @@ class FusedProjection:
                 kernel_source=str(Path(__file__).with_name("fused_1d_input.cpp")), core_ranges=all_cores,
                 compile_time_args=ttnn.TensorAccessorArgs(local_input).get_compile_time_args(),
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_1,
-                                                         noc=ttnn.NOC.RISCV_0_default))
+                                                         noc=ttnn.NOC.RISCV_1_default))
             input_args = ttnn.RuntimeArgs()
             for index in range(44):
                 input_args[index % 11][index // 11] = [local_input.buffer_address(), index,
@@ -112,10 +121,10 @@ class FusedProjection:
                 compile_time_args=ttnn.TensorAccessorArgs(local_weight).get_compile_time_args()
                                   + ttnn.TensorAccessorArgs(local_output).get_compile_time_args(),
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
-                                                         noc=ttnn.NOC.RISCV_1_default))
+                                                         noc=ttnn.NOC.RISCV_0_default))
             writer_args = ttnn.RuntimeArgs()
             for core_x, core_y, begin, count in mapping():
-                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count]
+                writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles]
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
                 fp32_dest_acc_en=True, math_approx_mode=False)
