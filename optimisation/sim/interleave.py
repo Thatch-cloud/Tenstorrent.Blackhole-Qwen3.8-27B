@@ -105,6 +105,13 @@ def identities(runner, request_ids):
     return result
 
 
+def continuation_pending(runner, request_id):
+    if not enabled():
+        return False
+    generation = ledger(runner).get(request_id)
+    return generation is not None and not generation[1]
+
+
 def release_requests(runner, scheduler_output):
     if not enabled():
         return

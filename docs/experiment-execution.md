@@ -135,3 +135,18 @@ Do not relax the exact-output gate or adopt interleaving. Ratios 2/4 did not run
 Next diagnostic: repeat the isolated 2049 case and compare recurrent/conv/KV state
 and logits around positions 2048/2049 and the first decode step. The previous
 raw startup errors remain preserved in their original artifacts.
+
+Diagnostic run 33947341479 localized the failure: for 2049-token prompts, ratio-1
+records one 2048-token intermediate prefill, then enters decode at position 2048.
+There is **no final GDN slot write**. The 8193-token case likewise has no final
+slot write, despite previously matching output tokens by coincidence. The pinned
+runner's `_is_still_prefilling` assumes one remaining token means decode. That
+assumption is invalid for this prototype's separate B=1 prefill scratch: even a
+one-token final prefill must execute and commit the request's GDN state to its
+decode slot. The fix uses the existing request/epoch completion ledger only when
+continuation is enabled; ordinary decode and the flag-off path keep their original
+classification. A regression executes the transformed nested runner classifier
+for a one-token tail, completed request, no remaining tokens, and flag-off mode.
+Diagnostic reruns also gate three isolated 2049-token repetitions against control,
+in addition to the original nine checks. Host fingerprint instrumentation performs
+no additional device operations; its timings must not be used as speed evidence.

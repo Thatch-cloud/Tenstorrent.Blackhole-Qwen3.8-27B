@@ -1,8 +1,10 @@
 """Host-only scheduling and lifecycle tests using staged plugin method bodies."""
 
 import ast
+import importlib.util
 import os
 import sys
+import subprocess
 import unittest
 from enum import Enum
 from pathlib import Path
@@ -244,6 +246,31 @@ class InterleaveTests(unittest.TestCase):
         self.assertEqual(inputs.multi_modal_kwargs, {"pixel_values": [None], "image_grid_thw": [None]})
         method("model_runner.py", "submit_prefill")(runner, inputs, [1])
         self.assertEqual(controller.backend.calls, [(0, 15, True, 2)])
+
+    def test_one_token_prefill_tail_is_not_decode(self):
+        spec = importlib.util.spec_from_file_location("stage_plugin", Path(__file__).with_name("stage-plugin.py"))
+        stager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(stager)
+        original = subprocess.check_output(["git", "-C", str(SOURCE.parents[1]), "show",
+                                            "HEAD:src/vllm_tt_plugin/model_runner.py"], text=True)
+        source = stager.transform("model_runner.py", original)
+        node = next(node for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.FunctionDef) and node.name == "_is_still_prefilling")
+        runner = SimpleNamespace()
+        batch = SimpleNamespace(req_id_to_index={"A": 0}, num_computed_tokens_cpu=np.array([2048]),
+                                num_tokens=np.array([2049]))
+        namespace = dict(self=runner, input_batch=batch)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "runner-prefill-classification", "exec"), namespace)
+        classify = namespace["_is_still_prefilling"]
+        interleave.identities(runner, ["A"])
+        self.assertTrue(classify("A"))
+        runner._qwen_generations["A"][1] = True
+        self.assertFalse(classify("A"))
+        runner._qwen_generations["A"][1] = False
+        with patch.dict(os.environ, QWEN_PREFILL_CONTINUATION="0", TT_PREFILL_DECODE_INTERLEAVE="0"):
+            self.assertFalse(classify("A"))
+        batch.num_computed_tokens_cpu[0] = 2049
+        self.assertFalse(classify("A"))
 
     def test_finished_request_cancels_and_stale_input_rejected(self):
         runner, controller, events = self.runner()

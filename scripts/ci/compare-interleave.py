@@ -7,6 +7,8 @@ import sys
 
 def compare(control, arm):
     expected = [f"boundary-{length}" for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193)] + ["after-cancel"]
+    if any(list(root.glob("isolated-2049-*.json")) for root in (control, arm)):
+        expected = [f"isolated-2049-{repeat}" for repeat in range(3)] + expected
     for root in (control, arm):
         summary = json.loads((root / "interleave-summary.json").read_text())
         if not summary.get("passed") or summary.get("results") != expected:

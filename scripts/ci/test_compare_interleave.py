@@ -13,10 +13,12 @@ spec.loader.exec_module(comparison)
 
 
 class CompareTests(unittest.TestCase):
-    def compare(self, mutation=None):
+    def compare(self, mutation=None, isolated=False):
         with tempfile.TemporaryDirectory() as directory, mock.patch("builtins.print"):
             control, arm = Path(directory) / "control", Path(directory) / "arm"
             expected = [f"boundary-{length}" for length in (63, 64, 65, 2047, 2048, 2049, 4096, 8193)] + ["after-cancel"]
+            if isolated:
+                expected = [f"isolated-2049-{repeat}" for repeat in range(3)] + expected
             for root in (control, arm):
                 root.mkdir()
                 (root / "interleave-summary.json").write_text(json.dumps(dict(passed=True, results=expected)))
@@ -30,6 +32,11 @@ class CompareTests(unittest.TestCase):
 
     def test_all_nine_checks_required(self):
         self.assertEqual(self.compare()["checks"], 9)
+
+    def test_diagnostic_repeats_are_also_equivalence_gated(self):
+        self.assertEqual(self.compare(isolated=True)["checks"], 12)
+        with self.assertRaises(FileNotFoundError):
+            self.compare(lambda arm: (arm / "isolated-2049-2.json").unlink(), isolated=True)
 
     def test_missing_request_fails(self):
         with self.assertRaises(FileNotFoundError):
