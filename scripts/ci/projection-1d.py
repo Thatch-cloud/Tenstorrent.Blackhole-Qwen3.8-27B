@@ -72,14 +72,18 @@ def main():
             return [ttnn.to_torch(shard).float() for shard in ttnn.get_device_tensors(tensor)]
         def check(actual, reference, seed, mode):
             exact = True
+            numerical = True
             for chip, (result, target) in enumerate(zip(actual, reference)):
                 equal = torch.equal(result, target)
                 pcc = compute_pcc(target, result)
                 report["checks"].append(dict(mode=mode, seed=seed, chip=chip, exact=equal, control_pcc=pcc,
                     mismatches=int(torch.count_nonzero(result != target)), max_abs=float((result - target).abs().max())))
-                if not torch.isfinite(result).all() or pcc < .97:
-                    raise AssertionError("Projection numerical gate failed")
+                numerical &= bool(torch.isfinite(result).all()) and pcc >= .97
                 exact &= equal
+            if not exact:
+                torch.save(dict(actual=actual, expected=reference), root / f"projection-{mode}-{seed}.pt")
+            if not numerical:
+                raise AssertionError("Projection numerical gate failed")
             return exact
         exact = True
         for seed, host in zip(report["seeds"], inputs):

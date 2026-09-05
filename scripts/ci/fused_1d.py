@@ -24,24 +24,27 @@ def fused_compute(source):
                                 pack_block(start_dst_index, rounded_cb, 2);
                                 tile_regs_release();
                                 cb_push_back(rounded_cb, 2);
-                                cb_wait_front(rounded_cb, 2);
-                                reconfig_data_format(rounded_cb, rounded_cb);
-                                mul_init(rounded_cb, rounded_cb);
-                                tile_regs_acquire();
-                                mul_tiles(rounded_cb, rounded_cb, 0, 1, 0);
-                                tile_regs_commit();
-                                cb_reserve_back(mm_out_dfb_id, 1);
-                                tile_regs_wait();
-                                PACK((pack_reconfig_data_format(mm_out_dfb_id)));
-                                pack_tile(0, mm_out_dfb_id);
-                                tile_regs_release();
-                                cb_push_back(mm_out_dfb_id, 1);
-                                cb_pop_front(rounded_cb, 2);
-                                reconfig_data_format(in0_dfb_id, in1_dfb_id);
-                                matmul_block_init(in0_dfb_id, in1_dfb_id, in1_transpose_tile,
-                                    out_subblock_w, out_subblock_h, in0_block_w);
 """
     result = source[:start] + epilogue + source[end:]
+    finish = result.rfind("}")
+    result = result[:finish] + """
+    constexpr uint32_t rounded_cb = 30;
+    reconfig_data_format(rounded_cb, rounded_cb);
+    mul_init(rounded_cb, rounded_cb);
+    for (uint32_t pair = 0; pair < 7; ++pair) {
+        cb_wait_front(rounded_cb, 2);
+        tile_regs_acquire();
+        mul_tiles(rounded_cb, rounded_cb, 0, 1, 0);
+        tile_regs_commit();
+        cb_reserve_back(out_dfb_id, 1);
+        tile_regs_wait();
+        PACK((pack_reconfig_data_format(out_dfb_id)));
+        pack_tile(0, out_dfb_id);
+        tile_regs_release();
+        cb_push_back(out_dfb_id, 1);
+        cb_pop_front(rounded_cb, 2);
+    }
+""" + result[finish:]
     return result.replace('"bmm_fused_activation.hpp"',
         '"ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp"')
 
@@ -81,7 +84,7 @@ class FusedProjection:
                    cb(1, ttnn.bfloat4_b, 576, 224, workers),
                    cb(4, ttnn.bfloat16, 2048, 7, workers),
                    cb(5, ttnn.float32, 4096, 14, workers),
-                   cb(30, ttnn.bfloat16, 2048, 2, workers)]
+                   cb(30, ttnn.bfloat16, 2048, 14, workers)]
         mesh_program = ttnn.MeshProgramDescriptor()
         shards = zip(ttnn.get_device_tensors(value), ttnn.get_device_tensors(self.weights),
                      ttnn.get_device_tensors(output))

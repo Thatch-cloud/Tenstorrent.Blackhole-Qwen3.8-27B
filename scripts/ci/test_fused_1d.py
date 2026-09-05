@@ -13,10 +13,11 @@ class Fused1DTests(unittest.TestCase):
     def test_only_final_pack_is_replaced(self):
         start = "                            if (last_out) {"
         end = "                            } else {\n                                tile_regs_commit();"
-        source = "prefix" + start + "old pack" + end + "native partial loop"
+        source = "prefix" + start + "old pack" + end + "native partial loop\n}"
         result = fused_compute(source)
         self.assertTrue(result.startswith("prefix"))
-        self.assertTrue(result.endswith(end + "native partial loop"))
+        self.assertIn(end + "native partial loop", result)
+        self.assertLess(result.index("native partial loop"), result.index("mul_init(rounded_cb"))
         self.assertIn("apply_activation_from_pack<KernelActivation::SILU>(1)", result)
         self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index("mul_tiles(rounded_cb"))
 
