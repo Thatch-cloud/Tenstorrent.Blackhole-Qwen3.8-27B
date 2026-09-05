@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   inventory:
-    runs-on: [self-hosted, Linux, X64, thatch-release]
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 10
     steps:
       - name: Verify dedicated host
