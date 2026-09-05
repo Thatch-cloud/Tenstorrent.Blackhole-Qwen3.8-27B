@@ -113,7 +113,7 @@ class FusedProjection:
                 fp32_dest_acc_en=True, math_approx_mode=False)
             unpack_modes = [ttnn.UnpackToDestMode.Default] * 32
             unpack_modes[5] = ttnn.UnpackToDestMode.UnpackToDestFp32
-            compute_config.unpack_to_dest_mode = ttnn.VectorUnpackToDestMode(unpack_modes)
+            compute_config.unpack_to_dest_mode.extend(unpack_modes)
             compute = ttnn.KernelDescriptor(kernel_source=self.compute,
                 source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=workers,
                 compile_time_args=[8, 1, 8, 8, 7, 112, 14, 20, 1, 1, 1, 2, 2, 1, 14, 0, 0, 0],
