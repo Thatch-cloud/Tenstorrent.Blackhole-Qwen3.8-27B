@@ -702,3 +702,18 @@ snapshot/restore cost, retain full-state comparisons for correctness, and test
 attention KV masks/positions plus all-layer target logits before drafter integration.
 Current local validation: 87 CI/helper tests and 26 drafting/selector tests passed;
 shell syntax and whitespace checks passed. No serving default or runner access changed.
+
+## E3 active-slot storage (2026-09-06)
+
+The `gdn-active` arm snapshots only logical slot zero: recurrent axis 0,
+convolution axis 1. It retains BF16 dtype and padded tile storage, so convolution
+snapshots do not necessarily shrink physically. Restore clones the saved tensors
+before the native consuming writers and changes only slot zero, preserving live
+buffer addresses. No installed source or arithmetic changes.
+
+Repeat the 216 prefix/continuation and 30 stale-state gates, now comparing complete
+live state against the full-state reference after each active restore. Additionally
+change all eight slots, restore only zero and assert slots 1..7 stay unchanged on
+both chips. Compare full versus active save and restore separately with three ABBA
+blocks, 30 trace replays per sample, synchronized outside the measured loop.
+This is a snapshot-cost experiment, not full-model speculative throughput.

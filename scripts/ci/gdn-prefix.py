@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 
 from gdn_prefix import decode_projected, gated_decode
+from gdn_snapshot import ActiveSnapshot
 
 
 def main():
@@ -17,6 +18,7 @@ def main():
         raise RuntimeError("Fast-dispatch hardware required")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-output", action="store_true")
+    parser.add_argument("--active-snapshot", action="store_true")
     options = parser.parse_args()
     import torch
     import ttnn
@@ -29,7 +31,8 @@ def main():
                   scope="One real-weight GDN layer, B1 in Bmax8, TP2; no attention KV, logits, drafter or serving throughput")
     root = Path("/experiment/results")
     report["batched_output_projection"] = options.batch_output
-    output_path = root / ("gdn-block.json" if options.batch_output else "gdn-prefix.json")
+    report["active_snapshot"] = options.active_snapshot
+    output_path = root / ("gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
     mesh = None
     traces = []
     try:
@@ -55,6 +58,7 @@ def main():
             raise ValueError("Expected fused projection and unchanged K-image BF16 persistent recurrence")
         live = [gdn.rec_state, *gdn.conv_states]
         addresses = [tensor.buffer_address() for tensor in live]
+        active = ActiveSnapshot(gdn, ttnn)
         report.update(layer=layer, state_shapes=[list(tensor.shape) for tensor in live])
 
         def upload(host):
@@ -87,6 +91,41 @@ def main():
             for tensor in tensors:
                 ttnn.deallocate(tensor)
 
+        if options.active_snapshot:
+            full_buffer, active_buffer = snapshot(), active.allocate()
+            snapshot_operations = {
+                "save-full": lambda: copy(live, full_buffer),
+                "save-active": lambda: active.save(active_buffer),
+                "restore-full": lambda: copy(full_buffer, live),
+                "restore-active": lambda: active.restore(active_buffer),
+            }
+            for operation in snapshot_operations.values():
+                operation()
+            ttnn.synchronize_device(mesh)
+            snapshot_traces = {}
+            for name, operation in snapshot_operations.items():
+                captured = ttnn.begin_trace_capture(mesh, cq_id=0)
+                operation()
+                ttnn.end_trace_capture(mesh, captured, cq_id=0)
+                snapshot_traces[name] = captured
+                traces.append(captured)
+            report["snapshot_abba"] = []
+            for phase in ("save", "restore"):
+                for block in range(3):
+                    samples = []
+                    for arm in ("full", "active", "active", "full"):
+                        ttnn.synchronize_device(mesh)
+                        started = time.perf_counter()
+                        for _ in range(30):
+                            ttnn.execute_trace(mesh, snapshot_traces[f"{phase}-{arm}"], cq_id=0, blocking=False)
+                        ttnn.synchronize_device(mesh)
+                        samples.append(dict(arm=arm, mean_ms=1000 * (time.perf_counter() - started) / 30))
+                    report["snapshot_abba"].append(dict(phase=phase, block=block, replays=30, samples=samples))
+            for captured in snapshot_traces.values():
+                ttnn.release_trace(mesh, captured)
+                traces.remove(captured)
+            release(full_buffer + active_buffer)
+
         for seed in (0, 1, 2):
             torch.manual_seed(seed)
             gdn.reset_state_inplace()
@@ -102,7 +141,12 @@ def main():
                 tokens = [upload(values[:, index:index + 1]) for index in range(rows)]
                 correction = [upload(torch.randn(1, 1, args.dim).bfloat16()) for _ in range(2)]
                 reference = [snapshot() for _ in range(rows + 1)]
-                staging = [snapshot() for _ in range(rows + 1)]
+                staging = [(active.allocate() if options.active_snapshot else snapshot()) for _ in range(rows + 1)]
+                if "snapshot_padded_bytes_per_chip" not in report:
+                    def padded_bytes(state):
+                        import math
+                        return sum(math.prod(tensor.padded_shape) * 2 for tensor in state)
+                    report["snapshot_padded_bytes_per_chip"] = dict(full=padded_bytes(live), staged=padded_bytes(staging[0]))
                 copy(initial, live)
                 copy(live, reference[0])
                 expected_outputs = []
@@ -123,8 +167,13 @@ def main():
                     continuations.append((continuation, state_host(live)))
 
                 def operation():
-                    copy(live, staging[0])
-                    outputs = decode_projected(gdn, packed, tokens, lambda prefix: copy(live, staging[prefix]),
+                    def save(prefix):
+                        if options.active_snapshot:
+                            active.save(staging[prefix])
+                        else:
+                            copy(live, staging[prefix])
+                    save(0)
+                    outputs = decode_projected(gdn, packed, tokens, save,
                                                ttnn, forward=native_gated)
                     if not options.batch_output:
                         return outputs
@@ -166,9 +215,16 @@ def main():
                     if not all(exact(output, expected) for output, expected in zip(read_outputs(outputs), expected_outputs, strict=True)):
                         raise AssertionError(f"GDN output divergence: {seed=} {rows=} {mode=}")
                     for prefix in range(rows + 1):
-                        if not state_exact(state_host(staging[prefix]), expected_states[prefix]):
+                        expected_snapshot = expected_states[prefix]
+                        if options.active_snapshot:
+                            expected_snapshot = [[shard[:1] if index == 0 else shard[:, :1]
+                                                  for shard in shards] for index, shards in enumerate(expected_snapshot)]
+                        if not state_exact(state_host(staging[prefix]), expected_snapshot):
                             raise AssertionError(f"Prefix state divergence: {seed=} {rows=} {mode=} {prefix=}")
-                        copy(staging[prefix], live)
+                        if options.active_snapshot:
+                            active.restore(staging[prefix])
+                        else:
+                            copy(staging[prefix], live)
                         if not state_exact(state_host(live), expected_states[prefix]):
                             raise AssertionError("Restore did not reproduce every state tensor on both chips")
                         expected_continuation, expected_final = continuations[prefix]
@@ -184,6 +240,20 @@ def main():
                                                      both_chips_exact=True, correction_steps=2))
                     if mode == "eager":
                         release(outputs)
+                if options.active_snapshot:
+                    sentinel = upload(torch.randn(1, 8, args.dim).bfloat16())
+                    release([gdn.forward_decode(sentinel), sentinel])
+                    before = state_host(live)
+                    active.restore(staging[1])
+                    after = state_host(live)
+                    expected_active = expected_states[1]
+                    for index, (old_shards, new_shards, expected_shards) in enumerate(zip(before, after, expected_active, strict=True)):
+                        for old, new, expected in zip(old_shards, new_shards, expected_shards, strict=True):
+                            old_idle, new_idle = (old[1:], new[1:]) if index == 0 else (old[:, 1:], new[:, 1:])
+                            new_slot, expected_slot = (new[:1], expected[:1]) if index == 0 else (new[:, :1], expected[:, :1])
+                            if not torch.equal(old_idle, new_idle) or not torch.equal(new_slot, expected_slot):
+                                raise AssertionError("Active restore damaged another slot or missed slot zero")
+                    report.setdefault("isolation_checks", []).append(dict(seed=seed, rows=rows, both_chips_exact=True))
                 for family, indices in (("recurrence", [0]), ("convolution", list(range(1, len(live))))):
                     copy(reference[rows], live)
                     for index in indices:

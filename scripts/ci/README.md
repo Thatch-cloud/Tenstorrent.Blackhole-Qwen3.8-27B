@@ -57,6 +57,11 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 
 ## Programme suites
 
+- `gdn-active`: stores slot-zero recurrence/conv snapshots instead of all eight
+  slots, restores in place with native state writers, and repeats every-prefix
+  correctness. Adds changed-idle-slot canaries and paired three-block ABBA
+  save/restore microbenchmarks. Tile padding is included in reported snapshot bytes.
+
 - `gdn-block`: extends `gdn-prefix` by batching output projection and TP reduction;
   the fused recurrent/conv/norm/gate body is taken from the SHA-pinned native source.
   Uses the same every-prefix and stale-state gates, without changing installed code.

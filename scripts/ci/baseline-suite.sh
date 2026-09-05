@@ -59,6 +59,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-block ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-active ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = projection-1d ]; then
     timeout -k 30 900 python3 /experiment-scripts/ci/projection-1d.py
     timeout -k 30 900 python3 /experiment-scripts/ci/mlp-sweep.py --projection-report /experiment/results/projection-1d.json
