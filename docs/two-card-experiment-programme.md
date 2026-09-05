@@ -232,6 +232,30 @@ not evidence that an EAGLE3 drafter ran here.
 | DSpark | [RadixArk Qwen3.8-27B checkpoint](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark), [method paper](https://arxiv.org/abs/2607.05147) | Five full-attention layers, BF16 1.86B-parameter draft, VanillaMarkov rank-256 head; the card specifies the same target feature layer indices. Audit exact feature definitions, not just matching indices. |
 | MTP | Existing checkpoint and local speculative branch | Repair trace integration and compare on the same verified target path. |
 | Request-local lookup | Existing host-tested proposal policy | Device verification/commit integration; no model or cross-user cache. |
+| EAGLE3 (compatibility-gated) | [Official implementation/checkpoint list](https://github.com/SafeAILab/EAGLE), [related Qwen3.6 PRISM head](https://huggingface.co/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3) | No Qwen3.8-27B-specific public head verified in this audit. The related 3.6 head uses feature taps 1/31/60 and offers full/compressed vocabulary variants. Transfer requires explicit feature/tokenizer/map compatibility and measured acceptance, or retraining; it is not established 3.8 support. |
+
+Additional candidate families, not runnable Qwen3.8 TT implementations:
+
+- Request-local suffix/retrieval drafting extends lookup without draft weights.
+  Keep any global cross-request suffix cache disabled for this experiment. It is
+  a low-cost candidate for edits/refactors, not an assumed fresh-code speedup.
+- A small independent autoregressive draft model avoids target-feature capture
+  but adds its own weights/KV and sequential drafting. Require token alignment;
+  cross-vocabulary adapters are additional port work, not implicit compatibility.
+  [vLLM method and vocabulary documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
+- PARD is another parallel-draft family. The documented AMD checkpoint targets
+  Qwen3-4B/8B, not a verified Qwen3.8-27B setup. Treat it as an adaptation/training
+  track. [PARD documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/parallel_draft_model/).
+- Medusa/Hydra-style trained heads are another architecture option, not ready
+  Qwen3.8 checkpoints verified here. [Hydra implementation](https://github.com/zankner/Hydra).
+
+EAGLE3 remains a meaningful comparison: a smaller/compressed draft may save memory
+traffic, while sequential draft calls can cost latency. That tradeoff must be
+measured against parallel block drafting, not decided by paper headline speedups.
+Prioritize the published 3.8 DFlash2/DSpark checkpoints and lookup/MTP controls;
+keep EAGLE3 as a compatibility/transfer candidate rather than silently substituting
+a 3.6 head. Engine support for an `EAGLE`/MTP flag is not evidence of an external
+EAGLE3 checkpoint or a TT backend port.
 
 The [DFlash2 authors' Qwen3.8 model-card comparison](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
 uses one H200, SGLang, default sampled xhigh reasoning and seven proposals per
