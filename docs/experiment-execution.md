@@ -16,6 +16,37 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Matched actual norm-batch requests passed, modest decode gain only
+
+Run34055684657 (`c98f401`) passed eight actual requests in5m1s, one ABBA block
+per context. Every arm matched native emitted tokens, active GDN, valid KV and
+inactive slots; paired arms also matched proposal inputs, routing and acceptance.
+Each arm aggregates two requests and256 post-seed committed tokens:
+
+| Context | Control decode tok/s | Candidate decode tok/s | Control setup-inclusive tok/s | Candidate setup-inclusive tok/s |
+| --- | ---: | ---: | ---: | ---: |
+|4078|21.485812|22.461923|13.506870|13.237129|
+|16363|17.781404|18.668689|12.005900|11.713965|
+
+Decode gains are1.045430x/1.049900x. Candidate capture/setup totals were
+7942.475/8141.457ms across two requests, versus7038.479/6925.786ms control.
+Consequently the setup-inclusive post-seed result regressed; do not adopt this
+as an unconditional short-request latency win. Prefill is excluded from both
+rates in the table and recorded separately. The200tok/s target remains unmet.
+
+The new native-tape report passed the48-policy offline scorer for all eight
+request records. In the first candidate request per context, one-token matches
+accounted for30/38 blocks and32/30 accepted proposals. The4K case had four
+two-token matches and one six-token match; the16K case had two two-token matches.
+
+Using observed per-width mean cycle costs only as an in-sample cost estimate,
+width8/minimum-match2 predicted5073.490/5649.485ms for128 committed tokens.
+The best16K estimate among these policies was width32/minimum-match4 at
+5598.317ms. These are offline estimates, not measured speedups or held-out
+selection, and remain far from200tok/s. The scorer preserves the native tape
+but does not certify runtime rollback. Evidence is in the run artifact and
+`hardware-evidence.local/34055684657/lookup-acceptance.json`.
+
 ### Norm-batch force-argmax passed; matched request gate enabled
 
 Run34054076401 (`1882a31`) passed all12 width/context fixtures and1440 paired
