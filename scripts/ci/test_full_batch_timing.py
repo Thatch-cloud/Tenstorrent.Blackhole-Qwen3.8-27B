@@ -4,6 +4,13 @@ from full_batch_timing import paired_control_flags, summarize
 
 
 class TimingTests(unittest.TestCase):
+    def test_parallel_control_changes_only_group_scheduling(self):
+        flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                     hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
+                     batch_conv=True, packed_checkpoints=True, ordered_cache=True, norm_batch=True,
+                     grouped_attention=True, attention_dma=True)
+        self.assertEqual(paired_control_flags(**flags, attention_parallel=True), dict(flags, attention_parallel=False))
+
     def test_dma_control_keeps_grouping_and_norm(self):
         flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
                      hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,

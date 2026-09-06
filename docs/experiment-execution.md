@@ -15,6 +15,10 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 - Allocation-only native tree scratch34064917232 timed out during compilation,
   at976/1091 build steps after600s, before hardware testing. Retry allows1800s
   for the disposable-container build; this is not evidence of a device hang.
+  Retry34066556771 completed compilation but failed importing ttnn: rebuilt
+  `_ttnncpp.so` lacked the existing `ttnn::transformer::attn_decode_prep` symbol.
+  No device was opened. Audit native graft registrations and ABI before retrying;
+  do not replace or modify the serving runtime.
 - Parallel group scheduling passed hardware34065899606:36 exact fixtures,
   4320 timed replays and72 changed-query checks. T32 attention microbenchmarks
   improve0.853514->0.640465ms at4K and1.268948->1.026474ms at16K, including DMA
@@ -28,6 +32,16 @@ lifetime. The `attention-parallel-groups` suite now runs its matched real-weight
 layer gate after the microbenchmark; both layer arms use identical DMA layouts,
 ordered K/V writes and projections. Only group scheduling differs. Native scratch
 cold-build retry `34066556771` runs separately with no serving-image changes.
+
+Real-weight parallel layer `34067099712` passed48 exact checks,24 negative-control
+pairs and72 timing blocks. Both arms use DMA, ordered cache and the same batched
+projections. Mean paired layer times: T16/T32 at4K0.827588/1.350228ms control
+versus0.720095/1.135140ms candidate; at16K1.054529/1.763848ms versus
+0.932434/1.519554ms. T1/2/4 native fallback and T8 boundary plan are unchanged.
+The next `full-attention-parallel` gate retains the same six widths, native full
+logits, GDN prefix/rollback and K/V checks, with DMA in both timing arms. Dynamic
+request replay remains disabled. A read-only native registration/symbol audit
+also accompanies this run to diagnose the separate scratch-library build issue.
 
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and

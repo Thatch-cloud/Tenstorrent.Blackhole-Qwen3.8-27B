@@ -84,7 +84,10 @@ def main():
     parser.add_argument('--norm-batch', action='store_true')
     parser.add_argument('--grouped-attention', action='store_true')
     parser.add_argument('--attention-dma', action='store_true')
+    parser.add_argument('--attention-parallel', action='store_true')
     options = parser.parse_args()
+    if options.attention_parallel and not options.attention_dma:
+        raise ValueError('Parallel attention requires DMA layout')
     if options.attention_dma and not options.grouped_attention:
         raise ValueError('Attention DMA requires grouped attention')
     if options.grouped_attention and (not options.norm_batch or options.deferred_commit or options.replay_inputs
@@ -155,6 +158,13 @@ def main():
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
+    report['attention_parallel'] = options.attention_parallel
+    if options.attention_parallel:
+        from sdpa_tree_scratch import audit
+        report['attention_parallel_layer_prerequisite'] = 34067099712
+        report['attention_parallel_native_sources'] = audit('/opt/tt-metal')
+        report['attention_parallel_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('attention_parallel.py', 'attention_grouped.py', 'attention_head_fold.py')}
     if options.attention_dma:
         report.update(attention_dma_layer_prerequisite=34064053339,
             attention_dma_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -398,7 +408,7 @@ def main():
                                  compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                                  packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
                                  norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
-                                 attention_dma=options.attention_dma,
+                                 attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
@@ -714,7 +724,7 @@ def main():
                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
                         norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
-                        attention_dma=options.attention_dma)
+                        attention_dma=options.attention_dma, attention_parallel=options.attention_parallel)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

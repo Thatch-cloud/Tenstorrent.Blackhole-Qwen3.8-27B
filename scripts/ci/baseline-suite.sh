@@ -173,6 +173,12 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-dma ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-parallel ]; then
+    timeout -k 15 90 python3 /experiment-scripts/ci/sdpa-tree-audit.py
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-device-loop ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --max-rows 32 --continuation --full-layer --batch-conv --dma-windows --packed-checkpoints

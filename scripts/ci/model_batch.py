@@ -47,13 +47,16 @@ class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
-                 retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False):
+                 retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if attention_parallel and not attention_dma:
+            raise ValueError('Parallel attention requires DMA layout')
+        self.attention_parallel = bool(attention_parallel and self.rows >= 8)
         if attention_dma and not grouped_attention:
             raise ValueError('Attention DMA requires grouped attention')
         self.attention_dma = bool(attention_dma and self.rows >= 8)
@@ -148,7 +151,7 @@ class ModelBatch:
                             memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
 
                     reader = GroupedAttentionReader(ttnn, model.mesh_device, start, self.rows, pages,
-                        singleton_positions, singleton_pages, upload_group, dma_layout=self.attention_dma)
+                        singleton_positions, singleton_pages, upload_group, dma_layout=self.attention_dma, parallel=self.attention_parallel)
                     self.grouped_readers.append(reader)
                 if reader is not None:
                     self.readers.append(reader)

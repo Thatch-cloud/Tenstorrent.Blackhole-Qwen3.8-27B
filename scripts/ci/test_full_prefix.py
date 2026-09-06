@@ -12,6 +12,12 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_parallel_attention_requires_dma_before_hardware(self):
+        with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                'sys.argv', ['full-prefix.py', '--attention-parallel']):
+            with self.assertRaisesRegex(ValueError, 'requires DMA'):
+                full_prefix.main()
+
     def test_grouped_attention_rejects_dynamic_modes_before_hardware(self):
         for flag in ('--deferred-commit', '--replay-inputs', '--device-selection', '--request-pilot', '--attribution'):
             with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
