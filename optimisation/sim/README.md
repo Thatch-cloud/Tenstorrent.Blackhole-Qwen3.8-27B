@@ -6,8 +6,13 @@
   readback stalled until timeout. Generated hashes match the failing hardware case.
 - Recurrence-only T2 (`20260906T064957Z-301`): exact output and every prefix state
   on both simulated chips, initial state unchanged, clean close; passed.
-- The norm/gate bug is reproducible locally; its internal cause is not yet proved.
-  Do not dispatch another hardware kernel run until the simulator gate passes.
+- Counter-handoff fix T2 (`20260906T070713Z-307`): passed all output/prefix-state
+  comparisons and clean close. The packer's private CB5 received count must include
+  the reader's initial full-ring push; otherwise feedback republishes16 rather
+  than32 and the next token waits. All15 fixtures in the three-seed T1/2/4/8/16
+  matrix subsequently passed exact outputs/prefix states, unchanged initial states,
+  clean close and exit0. See the [execution ledger](../../docs/experiment-execution.md)
+  for run IDs. Native-oracle and fast-dispatch hardware validation is still required.
 
 ## Running
 
@@ -28,6 +33,8 @@ sources; the simulator runs the same generated source strings and program builde
 as hardware, without installing native custom-op registrations. Do not substitute
 an upstream kernel with a different hash. Reports record generated hashes and the
 local TTNN extension hash; runtime builds may differ from the hardware image.
+Norm/gate also verifies the two runtime headers used by the CB5 counter handoff.
+Use `--seed 0`, `--seed 1` or `--seed 2` to vary the deterministic fixture.
 
 Each process builds a synthetic sequence and compares all token outputs and prefix
 states on both simulated chips against serial T1 calls of the same kernel. This

@@ -58,6 +58,12 @@ after native reference success on recovered cards. The operator requested anothe
 CI reset; run34017283126 reset/reinitialized both cards and passed all12 transfer
 checks. Cards remain idle while the same generated kernels are tested locally in
 TT-Sim. See [simulator entry point and limits](../optimisation/sim/README.md).
+Local debugging identified a missing packer-private CB5 tile-count handoff after
+the reader's initial-state push. Seeding that count fixed T2 liveness and preserved
+exact output/prefix states in simulation. Runtime-header hashes now guard that
+dependency; all15 fixtures in the three-seed T1/2/4/8/16 simulator matrix passed
+exact output/prefix-state comparisons on both chips and clean close. Hardware
+native-oracle/trace validation and any performance benefit remain unverified.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
 tests or oracle verification as real coding throughput.
 

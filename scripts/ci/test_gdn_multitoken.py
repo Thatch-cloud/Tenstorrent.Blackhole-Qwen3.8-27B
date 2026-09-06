@@ -1,15 +1,28 @@
 import unittest
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 
-from gdn_multitoken import cb_plan, replace_once, replace_section, transform, validate_geometry
+from gdn_multitoken import cb_plan, replace_once, replace_section, transform, validate_geometry, validate_handoff_runtime
 
 
 class MultiTokenTests(unittest.TestCase):
+    def test_handoff_runtime_hash_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'header').write_bytes(b'changed')
+            with patch('gdn_multitoken.HANDOFF_HASHES', {'header': '0' * 64}):
+                with self.assertRaisesRegex(ValueError, 'CB handoff runtime changed'):
+                    validate_handoff_runtime(root)
+
     def test_norm_gate_feedback_reuses_initial_ring_not_norm_scratch(self):
-        source = 'WAIT(cb_state, kv);\nPOP(cb_state, kv);\ncopy_tiles(cb_snew, cb_sout, kv);'
+        source = '    for (uint32_t it = 0; it < n_inst; ++it) {\nWAIT(cb_state, kv);\nPOP(cb_state, kv);\ncopy_tiles(cb_snew, cb_sout, kv);'
         result = transform('compute', source, True)
         self.assertIn('if (it + 1 < n_inst) { copy_tiles(cb_snew, cb_state, kv); }', result)
         self.assertNotIn('30', result)
         self.assertIn('copy_tiles(cb_snew, cb_sout, kv);', result)
+        self.assertEqual(result.count('PACK((get_local_cb_interface(cb_state).tiles_received = kv));'), 1)
+        self.assertLess(result.index('tiles_received = kv'), result.index('for (uint32_t it'))
         io, fp32 = cb_plan(True)
         self.assertEqual(io[5], 16)
         self.assertEqual(io[30], 8)

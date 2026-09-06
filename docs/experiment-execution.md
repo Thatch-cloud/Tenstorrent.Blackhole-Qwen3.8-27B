@@ -16,6 +16,43 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### CB5 producer-counter handoff fix (15 simulator fixtures passed)
+
+The local Blackhole LLK pack implementation caches `tiles_received` in the packer
+thread and publishes that cached value on push. The dataflow reader increments
+the shared received counter instead. Our one-time full-ring CB5 reader push left
+the packer's private count at zero. After the initial16 tiles were acknowledged,
+the first feedback push published16 rather than32; the next token therefore saw
+zero available tiles and waited. Full-ring pointer alignment alone was insufficient.
+
+The candidate seeds CB5's packer-local `tiles_received` to `kv` once before the
+token loop, using `PACK(...)` so only the producer thread updates its private
+counter. It does not publish shared availability early. The reader remains the
+only producer until its initial full-ring push; initial-state consumption and the
+normal math dependencies precede compute's first feedback push. All subsequent
+CB5 production is compute-only. Math, BF16 rounding, buffers and writer are unchanged.
+
+Because this touches runtime internals, norm/gate execution now checks the SHA256
+of `llk_io_pack.h` and `dataflow_api.h` (recorded in `HANDOFF_HASHES`) and fails
+closed on drift. The fixed local T2 run `20260906T070713Z-307` passed exact output
+and every prefix state on both simulated chips, unchanged initial state and clean
+close. All15 three-seed T1/2/4/8/16 fixtures subsequently passed with exit0 and
+`last_stage=complete`, exact outputs/every prefix state on both simulated chips,
+unchanged initial states and clean close. Generated compute SHA256 is
+`9512188a20fd63f2853f1ac427f1b7dfaf96bab18f9bfb32e73c2d647283a9e0`;
+reader/writer hashes and the recurrence-only kernels remain unchanged.
+This is simulator evidence against
+serial T1 of the same kernel, not hardware/native-oracle certification or speedup.
+No physical-card kernel job or reset was dispatched for this fix.
+
+Reports/logs/zero exit-status files are in `/opt/ttsim/results`, with these run IDs:
+
+| Seed | T1 | T2 | T4 | T8 | T16 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 20260906T070857Z-312 | 20260906T070911Z-451 | 20260906T070929Z-500 | 20260906T071004Z-591 | 20260906T071105Z-682 |
+| 1 | 20260906T071300Z-784 | 20260906T071312Z-830 | 20260906T071330Z-876 | 20260906T071403Z-932 | 20260906T071458Z-978 |
+| 2 | 20260906T071651Z-1138 | 20260906T071703Z-1188 | 20260906T071721Z-1234 | 20260906T071751Z-1280 | 20260906T071847Z-1326 |
+
 ### Simulator-first kernel debugging and second authorized recovery
 
 Recovered-device run 34016749007 (`ae5b71b`) timed out at seed0/T2

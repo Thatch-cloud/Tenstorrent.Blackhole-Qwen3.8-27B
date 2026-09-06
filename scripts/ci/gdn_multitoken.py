@@ -1,6 +1,8 @@
 """Recurrence-only T-token prototype derived from hash-pinned native kernels."""
 
 import hashlib
+from functools import lru_cache
+import os
 from pathlib import Path
 import struct
 
@@ -11,6 +13,17 @@ HASHES = {
     'dataflow/reader_decode_gated_delta_rule.cpp': 'fb2d44f415567ef2bb1e6210f30ac731018443bbc372f3d3a4b54ca44476b6fe',
     'dataflow/writer_decode_gated_delta_rule.cpp': '3dd507f77f9932c6cf3f171530ff4fba48a437436aa1b2ab3408d79e242d798a',
 }
+HANDOFF_HASHES = {
+    'tt_metal/hw/ckernels/blackhole/metal/llk_io/llk_io_pack.h': 'ed351e7c47fbd5b5ecca43af7fc87a38e80b63a20032d806dc16916388b587c7',
+    'tt_metal/hw/inc/api/dataflow/dataflow_api.h': '0288b90d5f179ad4db02e3a6a48c31010f74f56b4fec8a1c15ea9cfaaa0025ee',
+}
+
+
+@lru_cache(maxsize=4)
+def validate_handoff_runtime(root):
+    for relative, expected in HANDOFF_HASHES.items():
+        if hashlib.sha256((root / relative).read_bytes()).hexdigest() != expected:
+            raise ValueError(f'CB handoff runtime changed: {relative}')
 
 
 def replace_once(source, before, after):
@@ -63,6 +76,8 @@ def local_norm_writer(source):
 def transform(kind, source, fuse_norm_gate=False):
     if kind == 'compute':
         if fuse_norm_gate:
+            source = replace_once(source, '    for (uint32_t it = 0; it < n_inst; ++it) {',
+                '    PACK((get_local_cb_interface(cb_state).tiles_received = kv));\n\n    for (uint32_t it = 0; it < n_inst; ++it) {')
             return replace_once(source, 'copy_tiles(cb_snew, cb_sout, kv);',
                 'copy_tiles(cb_snew, cb_sout, kv);\n        if (it + 1 < n_inst) { copy_tiles(cb_snew, cb_state, kv); }')
         for before, after in (
@@ -127,6 +142,7 @@ def execute(mesh, qkv, beta, gate, initial, kernels, *, z=None, norm_w=None):
     if fuse_norm_gate != (norm_w is not None):
         raise ValueError('Both z and norm_w required')
     if fuse_norm_gate:
+        validate_handoff_runtime(Path(os.environ.get('TT_METAL_HOME', '/opt/tt-metal')))
         if tuple(z.shape) != (1, rows, 3072) or tuple(norm_w.shape) != (1, 1, 128):
             raise ValueError('Expected z [1,T,3072] and norm_w [1,1,128]')
         inputs += [z, norm_w]

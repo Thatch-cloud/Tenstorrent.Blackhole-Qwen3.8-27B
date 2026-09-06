@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
-from gdn_multitoken import HASHES, execute, load_kernels
+from gdn_multitoken import HANDOFF_HASHES, HASHES, execute, load_kernels
 
 
 def require_simulator(environment):
@@ -25,11 +25,13 @@ def main():
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16), default=2)
     parser.add_argument('--norm-gate', action='store_true')
+    parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     args = parser.parse_args()
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
     report = dict(passed=False, backend='ttsim', rows=args.rows, norm_gate=args.norm_gate,
+                  seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
                   native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(source.encode()).hexdigest() for name, source in kernels.items()},
                   scope='Slow-dispatch functional liveness/exactness against serial T1 of same kernel; not native oracle certification or performance')
@@ -63,7 +65,7 @@ def main():
                     raise AssertionError('Two simulated chips required')
                 return [ttnn.to_torch(shard).clone() for shard in shards]
 
-            torch.manual_seed(0)
+            torch.manual_seed(args.seed)
             values = [torch.randn(1, args.rows, 5120).bfloat16(), torch.rand(1, args.rows, 24).bfloat16(),
                       (-torch.rand(1, args.rows, 24)).bfloat16()]
             if args.norm_gate:

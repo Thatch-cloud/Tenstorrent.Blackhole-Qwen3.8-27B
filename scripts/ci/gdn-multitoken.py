@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from gdn_multitoken import HASHES, cb_plan, execute as execute_kernel, load_kernels
+from gdn_multitoken import HANDOFF_HASHES, HASHES, cb_plan, execute as execute_kernel, load_kernels
 from gdn_multitoken_timing import measure
 
 
@@ -31,6 +31,7 @@ def main():
                   cb_bytes_per_core=sum(cb_plan(args.norm_gate)[0].values()) * 2048 + sum(cb_plan(args.norm_gate)[1].values()) * 4096)
     if args.norm_gate:
         report.update(scope='Synthetic recurrence plus native fused norm/gate; no conv, real weights, model or timing',
+                      handoff_runtime_hashes=HANDOFF_HASHES,
                       feedback_ring='CB5 initial-state ring; one full-ring reader push then compute-only feedback',
                       output_layout='[1,T,3072] TILE L1; head-local assembly, zero padded rows',
                       state_placement='Candidate all-prefix DRAM; native oracle state L1; correctness only')
