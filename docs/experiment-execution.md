@@ -89,7 +89,7 @@ geometry change, not full-model integration. T16 single-sample trace times were
 3.750/3.749/3.746 ms across three seeds, including all-prefix staging. These are
 diagnostics without a contemporaneous paired control; do not infer a speedup.
 
-Next `gdn-inplace-timing` (hardware pending) reruns the full correctness gate and
+`gdn-inplace-timing` (completed 34005485199, `94c5726`) reruns the full correctness gate and
 captures a control with the same batched input/output projections and all-prefix
 checkpoint semantics, but native B1-in-B8 state handling. Candidate traces include
 working-state entry/publication transfers. Each seed/width uses three ABBA blocks,
@@ -97,6 +97,34 @@ ten replays per arm sample, restoring identical initial live state outside every
 timed replay. Full outputs, final state including idle slots, and every prefix
 checkpoint must match the serial oracle after each sample. Fifteen fixtures and
 1800 timed replays are required; report paired block-cost ratios, not tok/s.
+
+All 15 timing fixtures and 1800 timed replays completed with exact validation.
+The gate again passed 216 prefix/continuation checks, 30 negative controls,
+15 isolation checks and 279 in-place request/alias checks. However, the performance
+result rejects promotion of this candidate: all 15 fixture median paired ratios
+were below 1.0. T16 was consistently slower across every ABBA block and seed.
+
+| T16 seed | Control mean ms | Candidate mean ms | Median paired control/candidate | Paired slowdown |
+| --- | --- | --- | --- | --- |
+| 0 | 3.607 | 3.764 | 0.956 | 4.61% |
+| 1 | 3.591 | 3.753 | 0.955 | 4.69% |
+| 2 | 3.564 | 3.758 | 0.944 | 5.89% |
+
+Means summarize six samples per arm; slowdown uses the median of the three paired
+ratios, not the ratio of the displayed means. Shorter widths are noisier but none
+has a winning median ratio. A green CI run certifies completion/exactness, not a
+performance improvement. Keep native B1-in-B8 state handling as the control; do
+not integrate this all-prefix working-state variant into the full model.
+
+The precise cause is not isolated. This comparison includes compact entry/exit
+transfers and different checkpoint implementations: five generic compact copies
+per prefix versus one direct active-slot DMA in the control. Next distinguish
+checkpoint overhead from recurrence savings using paired no-checkpoint and
+end-prefix-only diagnostic arms, with identical checkpoint semantics per pair.
+The end-prefix arm would match the current full-model timing fixture, but neither
+arm alone certifies dynamic rollback or a complete speculative commit pipeline.
+Retain the full all-prefix correctness gate; do not hide the failed all-prefix
+performance result or predict savings from fenced eager attribution.
 
 `gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
 compact B1 working set (recurrence and all four conv taps), copied from native B8
@@ -116,7 +144,8 @@ Trace replays execute captured device work, not Python counters. The existing
 15 active-restore isolation cases remain enabled. This changes working-state
 geometry, so local tests alone do not certify native-kernel compatibility or
 numerical equivalence. Reported single-sample layer times are diagnostic only;
-paired performance measurements and full-model integration remain subsequent gates.
+paired measurements above establish a performance regression. Full-model
+integration remains withheld pending a genuinely faster exact candidate.
 
 `full-batch-attribution` targets the remaining 235-244 ms T16 path with a bounded,
 JSON-only in-situ profiler, avoiding the historic multi-GB raw profiler exports.
