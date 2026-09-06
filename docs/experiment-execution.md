@@ -16,6 +16,22 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E3 full-model batch integration (hardware result pending)
+
+The `full-batch` suite reuses the serial oracle without changing its default path.
+The candidate invokes the native 64-layer `_forward_decode` with instance-local
+GDN and attention adapters. It retains native normalization, residuals, MLP and LM
+head. Each GDN layer batches input/output projection, runs the pinned fused native
+recurrence per token, and saves its own active state at the requested prefix;
+attention batches arithmetic with ordered B1 shared-page writes. A third reusable
+all-layer compact snapshot set holds candidate checkpoints separately from reference
+and scratch, so the reference snapshot cannot accidentally repair the candidate.
+
+Planned gate: 30 full-logit/state/KV comparisons (T=1/2/4/8/16, eager/trace, prompt
+lengths 63/64/65), then all 102 T=16 prefix rollback cases and existing negative
+controls. All candidate shapes are compiled before parking native prefill/decode
+traces. No runtime patch, serving eligibility, drafter or speed claim is introduced.
+
 ### E3 attention shared-page gate (passed 34000512864)
 
 Source-only run 34000023393 exported the actual K-image fused attention source

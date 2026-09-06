@@ -1,5 +1,6 @@
 """Full-model serial rollback oracle across attention page boundaries, not batched verification speed."""
 
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -31,6 +32,9 @@ def main():
         raise RuntimeError("Explicit hardware allocation required")
     if os.environ.get("TT_METAL_SIMULATOR") or os.environ.get("TT_METAL_SLOW_DISPATCH_MODE"):
         raise RuntimeError("Fast-dispatch hardware required")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--batch", action="store_true")
+    options = parser.parse_args()
     import torch
     import ttnn
     from transformers import AutoConfig, AutoTokenizer
@@ -39,6 +43,10 @@ def main():
     root = Path("/experiment/results")
     report = dict(passed=False, checks=[], negative_controls=[], rows=16,
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
+    report["batched_candidate"] = options.batch
+    output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
+    if options.batch:
+        report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
     mesh = None
     generator = None
     try:
@@ -48,6 +56,11 @@ def main():
             "models/demos/blackhole/qwen36/tt/qwen36_vllm.py": "cda38c3121b7a61417885469c224c0c69189fda899fbf8361565f4d93125c2fe",
             "models/tt_transformers/tt/generator.py": "4c2633ba8e5e6b0430550ef99409e9a6f0e0a901b4c6627540c579eb9b7d5a3e",
         }
+        if options.batch:
+            expected_source.update({
+                "models/demos/blackhole/qwen36/tt/attention/tp.py": "e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a",
+                "models/demos/blackhole/qwen36/tt/model.py": "c977f3808c39c9dacde5a62a1e30c09dbb55b27d272fecaa9ffea09991270391",
+            })
         report["source"] = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in expected_source}
         if report["source"] != expected_source:
             raise ValueError("Unreviewed native GDN/Generator source")
@@ -79,8 +92,9 @@ def main():
         helpers = [ActiveSnapshot(layer, ttnn, direct=True) for layer in layers]
         saved = [helper.allocate() for helper in helpers]
         scratch = [helper.allocate() for helper in helpers]
+        candidate_saved = [helper.allocate() for helper in helpers] if options.batch else []
         report["snapshot_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
-                                                 for state in saved + scratch for tensor in state)
+                                                 for state in saved + scratch + candidate_saved for tensor in state)
         report["kv_dtypes"] = [str(tensor.dtype) for tensor in caches]
 
         def addresses():
@@ -92,10 +106,10 @@ def main():
             for helper, state in zip(helpers, destination, strict=True):
                 helper.save(state)
 
-        def restore():
+        def restore(source_state=saved):
             if addresses() != original_addresses:
                 raise AssertionError("Native state addresses changed")
-            for helper, state in zip(helpers, saved, strict=True):
+            for helper, state in zip(helpers, source_state, strict=True):
                 helper.restore(state)
 
         def digest(tensor):
@@ -147,12 +161,41 @@ def main():
                 raise AssertionError("Prefill replaced persistent decode state")
             return argmax(logits)
 
+        def batched(tokens, length, prefix, trace, prompt):
+            from model_batch import ModelBatch
+
+            fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix)
+            captured = None
+            output = None
+            try:
+                if trace:
+                    captured = ttnn.begin_trace_capture(mesh, cq_id=0)
+                output = fixture.run()
+                if captured is not None:
+                    ttnn.end_trace_capture(mesh, captured, cq_id=0)
+                    prefill(prompt)
+                    ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True)
+                return [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
+            finally:
+                if captured is not None:
+                    ttnn.release_trace(mesh, captured)
+                if output is not None:
+                    ttnn.deallocate(output)
+                fixture.close()
+
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=False, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False)
         save(saved)
         save(scratch)
         restore()
         kv_digest(128)
+        if options.batch:
+            from model_batch import ModelBatch
+            for rows in (1, 2, 4, 8, 16):
+                fixture = ModelBatch(model, [1] * rows, 63, page_table, helpers, candidate_saved, rows)
+                output = fixture.run()
+                ttnn.deallocate(output)
+                fixture.close()
         generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=True)
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
@@ -173,6 +216,29 @@ def main():
                     if not torch.equal(decode(oracle[index], length + index, trace), expected):
                         raise AssertionError("Native eager/trace baseline differs")
                 report.setdefault("mode_checks", []).append(dict(length=length, trace=trace, logits_exact=True))
+                if options.batch:
+                    for rows in (1, 2, 4, 8, 16):
+                        prefill(prompt)
+                        reference_logits = [decode(oracle[index], length + index, trace) for index in range(rows)]
+                        expected = torch.cat([value.reshape(1, model.args.vocab_size) for value in reference_logits], dim=0)
+                        expected_state = live_digest()
+                        expected_kv = kv_digest(length + rows)
+                        prefill(prompt)
+                        actual = batched(oracle[:rows], length, rows, trace, prompt)
+                        if any(not torch.equal(value, expected) for value in actual):
+                            differences = [dict(chip=chip, unequal=int((value != expected).sum()),
+                                                max_abs=float((value.float() - expected.float()).abs().max()))
+                                           for chip, value in enumerate(actual)]
+                            report["logit_difference"] = dict(length=length, rows=rows, trace=trace, differences=differences)
+                            raise AssertionError("Full-model batched logits differ from native B1")
+                        if live_digest() != expected_state or kv_digest(length + rows) != expected_kv:
+                            raise AssertionError("Full-model batched final state/KV differs")
+                        if state_digest(candidate_saved) != expected_state:
+                            raise AssertionError("Per-layer end checkpoint differs from global end state")
+                        report.setdefault("batch_checks", []).append(dict(length=length, rows=rows, trace=trace,
+                            logits_exact=True, all_gdn_states_exact=True, valid_kv_exact=True))
+                        output_path.write_text(json.dumps(report, indent=2))
+                        print(json.dumps(dict(length=length, rows=rows, trace=trace, batched_exact=True)), flush=True)
                 for prefix in range(17):
                     if prefill(prompt) != oracle[0]:
                         raise AssertionError("Reference prefill seed changed")
@@ -187,11 +253,20 @@ def main():
 
                     if prefill(prompt) != oracle[0]:
                         raise AssertionError("Candidate prefill seed changed")
-                    for index in range(prefix):
-                        decode(oracle[index], length + index, trace)
-                    for index in range(prefix, 16):
-                        decode((oracle[index] + 137) % model.args.vocab_size, length + index, trace)
-                    restore()
+                    if options.batch:
+                        proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
+                        actual = batched(proposals, length, prefix, trace, prompt)
+                        if prefix:
+                            expected = torch.cat([value.reshape(1, model.args.vocab_size) for value in oracle_logits[:prefix]], dim=0)
+                            if any(not torch.equal(value[:prefix], expected) for value in actual):
+                                raise AssertionError("Rejected future rows changed accepted-prefix logits")
+                        restore(candidate_saved)
+                    else:
+                        for index in range(prefix):
+                            decode(oracle[index], length + index, trace)
+                        for index in range(prefix, 16):
+                            decode((oracle[index] + 137) % model.args.vocab_size, length + index, trace)
+                        restore()
                     if live_digest() != expected_state or kv_digest(length + prefix) != expected_kv:
                         raise AssertionError(f"Rollback state/KV prefix mismatch: {length=} {prefix=} {trace=}")
                     for index, expected in zip(range(prefix, prefix + 2), expected_logits, strict=True):
@@ -217,16 +292,18 @@ def main():
                             stale_gdn_detected=stale_detected, wrong_page_detected=page_detected))
                         if not stale_detected or not page_detected:
                             raise AssertionError("Full-model negative control was not detected")
-                    (root / "full-prefix.json").write_text(json.dumps(report, indent=2))
+                    output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")
+        if options.batch and len(report.get("batch_checks", [])) != 30:
+            raise AssertionError("Missing batched width/mode checks")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        (root / "full-prefix.json").write_text(json.dumps(report, indent=2))
+        output_path.write_text(json.dumps(report, indent=2))
         if mesh is not None:
             if generator is not None:
                 for store in getattr(generator, "_bucket_trace_store", {}).values():

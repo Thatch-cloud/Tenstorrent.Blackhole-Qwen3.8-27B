@@ -110,6 +110,13 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   Validate outputs and all KV values before and after timing. Cache reset and host
   validation are outside the timing interval; serial KV write overhead remains
   inside the candidate. This short-context layer cost is not full-model tok/s.
+- `full-batch`: extend the passing `full-prefix` oracle with the integrated native
+  64-layer batched target. GDN projections batch across tokens, while fused GDN
+  recurrence remains sequential; attention uses ordered shared-page writes.
+  Check T=1/2/4/8/16 full logits/state/KV in eager/trace, then every T=16 prefix
+  checkpoint and two correction steps at prompt lengths 63/64/65. Snapshots are
+  captured per GDN layer at the selected prefix, not by a global mid-layer save.
+  This is a static-fixture correctness gate; it does not enable a serving verifier.
 
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.
