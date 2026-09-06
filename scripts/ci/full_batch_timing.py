@@ -3,6 +3,7 @@
 import time
 
 from model_batch import ModelBatch
+from attention_batch import capture_operation
 
 
 def summarize(samples):
@@ -139,10 +140,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             warm = operation()
             for value in warm:
                 ttnn.deallocate(value)
+        for arm, operation in operations:
             restore_initial()
-            trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-            outputs[arm] = operation()
-            ttnn.end_trace_capture(mesh, trace, cq_id=0)
+            trace, outputs[arm] = capture_operation(ttnn, mesh, operation)
             traces[arm] = trace
             restore_initial()
             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
@@ -184,11 +184,11 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                     report['compact_comparison']['scope'] = 'Full-model parallel causal convolution with DMA windows versus compact-prologue serial convolution; same recurrence, width routing and selected checkpoint; no committed tok/s'
                 if packed_checkpoints:
                     report['compact_comparison']['scope'] = 'Full-model packed convolution histories versus previous DMA-window candidate at T8/T16 and previous compact path below T8; same selected external checkpoint; no committed tok/s'
+            if ordered_cache:
+                report['compact_comparison']['scope'] = 'Full-model ordered versus serial shared-page cache writer; identical packed GDN histories, B1 SDPA and selected external checkpoint; no committed tok/s'
 
         restore_initial()
-        trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-        restore_initial()
-        ttnn.end_trace_capture(mesh, trace, cq_id=0)
+        trace, unused = capture_operation(ttnn, mesh, restore_initial)
         traces["restore"] = trace
         for _ in range(3):
             ttnn.execute_trace(mesh, traces["batch"], cq_id=0, blocking=True)

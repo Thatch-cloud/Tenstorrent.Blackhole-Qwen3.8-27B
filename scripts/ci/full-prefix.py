@@ -11,6 +11,7 @@ import sys
 import time
 
 from gdn_snapshot import ActiveSnapshot
+from attention_batch import capture_operation
 
 
 def active_serial_logits(logits, vocab_size):
@@ -328,10 +329,10 @@ def main():
             try:
                 if trace:
                     save(replay_initial)
-                    captured = ttnn.begin_trace_capture(mesh, cq_id=0)
-                output = fixture.run()
+                    captured, output = capture_operation(ttnn, mesh, fixture.run)
+                else:
+                    output = fixture.run()
                 if captured is not None:
-                    ttnn.end_trace_capture(mesh, captured, cq_id=0)
                     restore(replay_initial)
                     ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True)
                 if deferred:

@@ -28,7 +28,8 @@ The existing multi-operation commit remains the default until certification.
 The simulator fixture checks every prefix against exact BF16 host slices, all
 native inactive-slot canaries, external checkpoints and immutable sources. T2,
 two synthetic layers, seed0 passed `20260906T120611Z-321`; T16 seed1 passed all17
-prefixes in `20260906T120814Z-316`, with clean close and exit0.
+prefixes in `20260906T120814Z-316`, with clean close and exit0. T4 seed2 passed
+all5 prefixes in `20260906T121953Z-315`.
 This does not validate96-worker hardware scheduling or commit performance.
 The future full-model gate records readback, selection and commit separately,
 so host logit transfer cannot be mistaken for kernel execution time.
@@ -64,7 +65,26 @@ host selection and eager commit cost25.45-41.57ms in these fixtures; those
 component timings exclude verification and drafting and are not committed TPS.
 No serving settings change.
 
-### Ordered shared-page cache write (simulator passed; hardware harness retry)
+### Ordered shared-page cache write (hardware passed 34033619168)
+
+The corrected layer gate at51aebda passed60 exact eager/trace cases,30 complete
+KV negative-control pairs and90 ABBA timing blocks (10800 timed replays).
+Paired controls use identical batched projections and B1 SDPA; only the writer
+changes. Means below combine both seeds and starts31/63/65; ratios are medians
+of the18 paired blocks per width.
+
+| T | Serial writer control ms | Ordered writer ms | Paired ratio |
+| --- | ---: | ---: | ---: |
+| 1 | 0.282626 | 0.291087 | 0.971070 |
+| 2 | 0.320980 | 0.310411 | 1.034293 |
+| 4 | 0.377824 | 0.346379 | 1.090584 |
+| 8 | 0.495695 | 0.429324 | 1.153374 |
+| 16 | 0.721910 | 0.592336 | 1.214686 |
+
+T1 regressed and remains native in the full-model candidate. Multirow widths
+advance to full-model long-context correctness and paired timing; these are
+layer timings, not committed TPS. All native cache kernel hashes match the
+simulator-certified sources. No serving defaults change.
 
 Run34031827886 passed T1 eager/trace output and complete KV equality, then
 failed before timing on an unwarmed `InterleavedToShardedDeviceOperation` in
@@ -76,7 +96,10 @@ or a multirow kernel pass. No timing was collected.
 The retry warms and validates both arms before either timing trace is captured,
 and closes/releases failed captures before propagating operation errors. Stage
 markers distinguish native reference, candidate warmup and each timing arm.
-A bounded transfer health check precedes retry; no reset is requested.
+Transfer health check34033532881 passed12 exact two-chip readbacks, clean close
+and0.226s inside the probe. No reset was needed or dispatched.212 CI,55 simulator
+and26 speculative host tests pass. The same failed-capture cleanup and all-arm
+warmup are also applied to the opt-in full-model timing path before its next run.
 
 The remaining attention adapter dispatches per-token slice, reshard and native
 paged-cache writes. A bounded candidate stages each prepared KV row on one worker,
