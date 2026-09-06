@@ -1,9 +1,54 @@
 import unittest
 
-from gdn_multitoken import cb_plan, replace_once, transform, validate_geometry
+from gdn_multitoken import cb_plan, replace_once, replace_section, transform, validate_geometry
 
 
 class MultiTokenTests(unittest.TestCase):
+    def test_norm_gate_feedback_reuses_initial_ring_not_norm_scratch(self):
+        source = 'WAIT(cb_state, kv);\nPOP(cb_state, kv);\ncopy_tiles(cb_snew, cb_sout, kv);'
+        result = transform('compute', source, True)
+        self.assertIn('if (it + 1 < n_inst) { copy_tiles(cb_snew, cb_state, kv); }', result)
+        self.assertNotIn('30', result)
+        self.assertIn('copy_tiles(cb_snew, cb_sout, kv);', result)
+        io, fp32 = cb_plan(True)
+        self.assertEqual(io[5], 16)
+        self.assertEqual(io[30], 8)
+        self.assertEqual(fp32[31], 4)
+        self.assertEqual(io[2], 8)
+        self.assertEqual(io[27], 4)
+        self.assertFalse(set(io) & set(fp32))
+
+    def test_section_replacement_fails_closed(self):
+        self.assertEqual(replace_section('aSTARToldENDz', 'START', 'END', 'new'), 'anewENDz')
+        for source in ('STARTSTARTEND', 'ENDSTART', 'STARTmissing'):
+            with self.assertRaises(ValueError):
+                replace_section(source, 'START', 'END', 'new')
+
+    def test_norm_writer_local_assembly_has_no_remote_semaphores(self):
+        source = '''    if constexpr (FNG) {
+        // Rows at or beyond B old
+    // Per-instance loop:
+    for (uint32_t bh = bh_start; bh < bh_start + n_inst; ++bh) {
+        if constexpr (FNG) {
+            // gated row old
+            noc_semaphore_inc();
+        } else {
+        // o: stage unchanged
+        }
+    }
+    if constexpr (FNG) {
+        // Assembler duty: old
+        noc_semaphore_wait();
+    }
+}
+'''
+        result = transform('writer', source, True)
+        self.assertNotIn('noc_semaphore', result)
+        self.assertIn('const uint32_t row = token;', result)
+        self.assertIn('zero(asm_base, Vt * tb_io / 4)', result)
+        self.assertIn('.page_id = bh_start * Vt + tile', result)
+        self.assertIn('noc.async_write_barrier();', result)
+
     def test_frozen_geometry_is_a_single_sequence_not_independent_batch(self):
         for rows in (1, 2, 4, 8, 16):
             self.assertEqual(validate_geometry((1, rows, 5120), (1, rows, 24), (1, rows, 24), (1, 24, 128, 128)), rows)

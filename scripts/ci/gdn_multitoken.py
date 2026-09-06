@@ -19,8 +19,52 @@ def replace_once(source, before, after):
     return source.replace(before, after, 1)
 
 
-def transform(kind, source):
+def replace_section(source, start, end, replacement):
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise ValueError('Native section anchors changed')
+    begin, finish = source.index(start), source.index(end)
+    if finish <= begin:
+        raise ValueError('Native section order changed')
+    return source[:begin] + replacement + source[finish:]
+
+
+def local_norm_writer(source):
+    source = replace_section(source, '    if constexpr (FNG) {\n        // Rows at or beyond B',
+        '    // Per-instance loop:',
+        '    if constexpr (FNG) { zero(asm_base, Vt * tb_io / 4); }\n\n')
+    source = replace_section(source, '        if constexpr (FNG) {\n            // gated row',
+        '        } else {\n        // o: stage', '''        if constexpr (FNG) {
+            CircularBuffer cb(cb_out);
+            cb.wait_front(Vt);
+            const uint32_t src = cb.get_read_ptr();
+            const uint32_t row = token;
+            const uint32_t offset = ((row / 16) * 2) * 256 + (row % 16) * 16;
+            for (uint32_t tile = 0; tile < Vt; tile++) {
+                const uint32_t dst = asm_base + tile * tb_io;
+                copy_words(src + tile * tb_io, dst + offset * elem, 16 * elem / 4);
+                copy_words(src + tile * tb_io + 256 * elem, dst + (offset + 256) * elem, 16 * elem / 4);
+            }
+            cb.pop_front(Vt);
+''')
+    start = '    if constexpr (FNG) {\n        // Assembler duty:'
+    if source.count(start) != 1 or not source.endswith('    }\n}\n'):
+        raise ValueError('Native writer tail changed')
+    return source[:source.index(start)] + '''    if constexpr (FNG) {
+        for (uint32_t tile = 0; tile < Vt; tile++) {
+            noc.async_write(CoreLocalMem<uint32_t>(asm_base + tile * tb_io), o_acc, o_page,
+                {}, {.page_id = bh_start * Vt + tile});
+        }
+        noc.async_write_barrier();
+    }
+}
+'''
+
+
+def transform(kind, source, fuse_norm_gate=False):
     if kind == 'compute':
+        if fuse_norm_gate:
+            return replace_once(source, 'copy_tiles(cb_snew, cb_sout, kv);',
+                'copy_tiles(cb_snew, cb_sout, kv);\n        if (it + 1 < n_inst) { copy_tiles(cb_snew, cb_state, kv); }')
         for before, after in (
             ('WAIT(cb_state, kv);', 'WAIT(it == 0 ? cb_state : 30, kv);'),
             ('copy_tiles(cb_state, cb_sf, kv);', 'copy_tiles(it == 0 ? cb_state : 30, cb_sf, kv);'),
@@ -36,19 +80,21 @@ def transform(kind, source):
         if kind == 'reader':
             source = replace_once(source, 'CircularBuffer cbs(cb_state);', 'if (token == 0) {\n        CircularBuffer cbs(cb_state);')
             source = replace_once(source, 'cbs.push_back(kv);', 'cbs.push_back(kv);\n        }')
+        elif fuse_norm_gate:
+            source = local_norm_writer(source)
     else:
         raise ValueError('Unknown kernel role')
     return source
 
 
-def load_kernels(root=Path('/opt/tt-metal')):
+def load_kernels(root=Path('/opt/tt-metal'), fuse_norm_gate=False):
     result = {}
     for relative, expected in HASHES.items():
         data = (root / KERNEL_ROOT / relative).read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
             raise ValueError(f'Native kernel hash changed: {relative}')
         kind = 'compute' if relative.startswith('compute/') else 'reader' if '/reader_' in relative else 'writer'
-        result[kind] = transform(kind, data.decode())
+        result[kind] = transform(kind, data.decode(), fuse_norm_gate)
     return result
 
 
@@ -61,27 +107,38 @@ def validate_geometry(qkv, beta, gate, initial):
     return rows
 
 
-def cb_plan():
+def cb_plan(fuse_norm_gate=False):
     io = {0: 4, 1: 4, 2: 4, 3: 1, 4: 1, 5: 16, 18: 16, 19: 8, 27: 2, 30: 16}
     fp32 = {6: 1, 7: 4, 8: 4, 9: 1, 10: 4, 11: 4, 12: 4, 13: 1, 14: 16,
             15: 4, 16: 8, 17: 16, 20: 4, 21: 4, 22: 4, 23: 1, 24: 1, 25: 16,
             26: 16, 28: 1, 29: 1}
+    if fuse_norm_gate:
+        io.update({2: 8, 27: 4, 30: 8})
+        fp32[31] = 4
     return io, fp32
 
 
-def execute(mesh, qkv, beta, gate, initial, kernels):
+def execute(mesh, qkv, beta, gate, initial, kernels, *, z=None, norm_w=None):
     import ttnn
 
     inputs = [qkv, beta, gate, initial]
     rows = validate_geometry(*(tuple(value.shape) for value in inputs))
+    fuse_norm_gate = z is not None
+    if fuse_norm_gate != (norm_w is not None):
+        raise ValueError('Both z and norm_w required')
+    if fuse_norm_gate:
+        if tuple(z.shape) != (1, rows, 3072) or tuple(norm_w.shape) != (1, 1, 128):
+            raise ValueError('Expected z [1,T,3072] and norm_w [1,1,128]')
+        inputs += [z, norm_w]
     if any(value.dtype != ttnn.bfloat16 or value.layout != ttnn.TILE_LAYOUT or
            value.memory_config() != ttnn.DRAM_MEMORY_CONFIG for value in inputs):
         raise ValueError('First prototype requires interleaved DRAM BF16 TILE inputs')
-    output = ttnn.empty((rows, 1, 24, 128), device=mesh, dtype=ttnn.bfloat16,
-                        layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    output = ttnn.empty((1, rows, 3072) if fuse_norm_gate else (rows, 1, 24, 128), device=mesh, dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT if fuse_norm_gate else ttnn.ROW_MAJOR_LAYOUT,
+                        memory_config=ttnn.L1_MEMORY_CONFIG if fuse_norm_gate else ttnn.DRAM_MEMORY_CONFIG)
     states = ttnn.empty((rows, 24, 128, 128), device=mesh, dtype=ttnn.bfloat16,
                         layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    tensors = inputs + [output, states]
+    tensors = inputs[:4] + [output, states] + inputs[4:]
     shards = [ttnn.get_device_tensors(value) for value in tensors]
     if any(len(value) != 2 for value in shards):
         raise ValueError('Both chips required')
@@ -91,13 +148,14 @@ def execute(mesh, qkv, beta, gate, initial, kernels):
         raise ValueError('At least 24 cores required')
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(*point), ttnn.CoreCoord(*point)) for point in coordinates])
     buffers = []
-    for counts, dtype, page in ((cb_plan()[0], ttnn.bfloat16, 2048), (cb_plan()[1], ttnn.float32, 4096)):
+    for counts, dtype, page in ((cb_plan(fuse_norm_gate)[0], ttnn.bfloat16, 2048), (cb_plan(fuse_norm_gate)[1], ttnn.float32, 4096)):
         for index, count in counts.items():
             buffers.append(ttnn.CBDescriptor(total_size=count * page, core_ranges=cores,
                 format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype,
                     page_size=page, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32]))) ]))
     bits = lambda value: struct.unpack('<I', struct.pack('<f', value))[0]
-    compute_args = [4, 4, 1, bits(1e-6), bits(128 ** -0.5), 0, 0, 0]
+    compute_args = [4, 4, 1, bits(1e-6), bits(128 ** -0.5), int(fuse_norm_gate),
+                    bits(128e-6) if fuse_norm_gate else 0, bits(128 ** 0.5) if fuse_norm_gate else 0]
     program = ttnn.MeshProgramDescriptor()
     for chip in range(2):
         local = [value[chip] for value in shards]
@@ -105,9 +163,11 @@ def execute(mesh, qkv, beta, gate, initial, kernels):
         if len(set(addresses)) != len(addresses):
             raise ValueError('Inputs, initial state and prefix outputs must not alias')
         reader_args = [4, 4, 1, bits(1e-6), bits(128 ** -0.5), 24, 1, 160, 0, 32, 64, 3, 1, 0, 0, 0]
-        for index in (0, 0, 0, 1, 2, 3, 3, 3):
+        if fuse_norm_gate:
+            reader_args[13:16] = [1, 96, 0]
+        for index in (0, 0, 0, 1, 2, 3, 6 if fuse_norm_gate else 3, 7 if fuse_norm_gate else 3):
             reader_args.extend(ttnn.TensorAccessorArgs(local[index]).get_compile_time_args())
-        writer_args = [4, 4, 0, 1, 24, rows]
+        writer_args = [4, 4, int(fuse_norm_gate), 1, 24, rows]
         for index in (4, 5):
             writer_args.extend(ttnn.TensorAccessorArgs(local[index]).get_compile_time_args())
         descriptors = []
@@ -122,8 +182,8 @@ def execute(mesh, qkv, beta, gate, initial, kernels):
             runtime = ttnn.RuntimeArgs()
             for head, (horizontal, vertical) in enumerate(coordinates):
                 runtime[horizontal][vertical] = ([head, rows, addresses[0], addresses[0], addresses[0],
-                                                  addresses[1], addresses[2], addresses[3]] if role == 'reader' else
-                                                 [head, rows, addresses[4], 256, addresses[5]] if role == 'writer' else [rows])
+                                                  addresses[1], addresses[2], addresses[3]] + (addresses[6:8] if fuse_norm_gate else []) if role == 'reader' else
+                                                 [head, rows, addresses[4], 2048 if fuse_norm_gate else 256, addresses[5]] if role == 'writer' else [rows])
             descriptor = ttnn.KernelDescriptor(kernel_source=kernels[role],
                 source_type=ttnn.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=cores,
                 compile_time_args=args, config=config)

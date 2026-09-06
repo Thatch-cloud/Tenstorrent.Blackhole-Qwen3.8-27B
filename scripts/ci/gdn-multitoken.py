@@ -1,15 +1,19 @@
 """Hardware recurrence-only exactness and paired cost; no model throughput claim."""
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 
-from gdn_multitoken import HASHES, cb_plan, execute, load_kernels
+from gdn_multitoken import HASHES, cb_plan, execute as execute_kernel, load_kernels
 from gdn_multitoken_timing import measure
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--norm-gate', action='store_true')
+    args = parser.parse_args()
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -18,13 +22,18 @@ def main():
     import ttnn
     from models.experimental.gated_attention_gated_deltanet.tt.ttnn_delta_rule_ops import recurrent_gated_delta_rule_decode_packed_ttnn
 
-    kernels = load_kernels()
+    kernels = load_kernels(fuse_norm_gate=args.norm_gate)
     report = dict(passed=False, checks=[], continuations=[], negative_controls=[], timings=[], native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
                   scope='Synthetic packed recurrence only: no conv, norm/gate, real weights or model throughput claim',
                   cores_per_chip=24, feedback_dtype='BF16', feedback_bytes_per_core=32768,
-                  cb_bytes_per_core=sum(cb_plan()[0].values()) * 2048 + sum(cb_plan()[1].values()) * 4096)
-    path = Path('/experiment/results/gdn-multitoken.json')
+                  cb_bytes_per_core=sum(cb_plan(args.norm_gate)[0].values()) * 2048 + sum(cb_plan(args.norm_gate)[1].values()) * 4096)
+    if args.norm_gate:
+        report.update(scope='Synthetic recurrence plus native fused norm/gate; no conv, real weights, model or timing',
+                      feedback_ring='CB5 initial-state ring; one full-ring reader push then compute-only feedback',
+                      output_layout='[1,T,3072] TILE L1; head-local assembly, zero padded rows',
+                      state_placement='Candidate all-prefix DRAM; native oracle state L1; correctness only')
+    path = Path('/experiment/results/gdn-multitoken-norm.json' if args.norm_gate else '/experiment/results/gdn-multitoken.json')
     mesh = None
     trace = None
     try:
@@ -51,26 +60,40 @@ def main():
                 ttnn.deallocate(value)
 
         def native(values, state):
-            return recurrent_gated_delta_rule_decode_packed_ttnn(*values, 8, 24, 128, 128,
-                initial_state=state, device=mesh, high_precision=False, inplace_state=False, return_row_major=True)
+            return recurrent_gated_delta_rule_decode_packed_ttnn(*values[:3], 8, 24, 128, 128,
+                initial_state=state, device=mesh, high_precision=False, inplace_state=False, return_row_major=True,
+                **(dict(z=values[3], norm_w=norm_w) if args.norm_gate else {}))
+
+        def execute(values, state):
+            return execute_kernel(mesh, *values[:3], state, kernels,
+                                  **(dict(z=values[3], norm_w=norm_w) if args.norm_gate else {}))
+
+        def host_output(value):
+            return [shard.reshape(-1, 1, 24, 128) for shard in host(value)]
 
         for seed in (0, 1, 2):
             torch.manual_seed(seed)
             for rows in (1, 2, 4, 8, 16):
                 values = [torch.randn(1, rows, 5120).bfloat16(), torch.rand(1, rows, 24).bfloat16(),
                           (-torch.rand(1, rows, 24)).bfloat16()]
+                norm_w = None
+                if args.norm_gate:
+                    values.append(torch.randn(1, rows, 3072).bfloat16())
+                    norm_w = upload((1 + torch.randn(1, 1, 128) * 0.1).bfloat16())
                 initial_host = (torch.randn(1, 24, 128, 128) * 0.05).bfloat16()
                 initial = upload(initial_host)
                 packed = [upload(value) for value in values]
                 tokens = [[upload(value[:, index:index + 1]) for value in values] for index in range(rows)]
                 correction = [upload(torch.randn(1, 1, 5120).bfloat16()), upload(torch.rand(1, 1, 24).bfloat16()),
                               upload((-torch.rand(1, 1, 24)).bfloat16())]
+                if args.norm_gate:
+                    correction.append(upload(torch.randn(1, 1, 3072).bfloat16()))
                 reference = [initial]
                 expected_output = []
                 expected_state = [host(initial)]
                 for token in tokens:
                     output, state = native(token, reference[-1])
-                    expected_output.append(host(output))
+                    expected_output.append(host_output(output))
                     expected_state.append(host(state))
                     reference.append(state)
                     release([output])
@@ -79,19 +102,19 @@ def main():
                     output, after = native(correction, state)
                     expected_continuations.append((host(output), host(after)))
                     release([output, after])
-                warm = execute(mesh, *packed, initial, kernels)
+                warm = execute(packed, initial)
                 release(warm)
                 ttnn.synchronize_device(mesh)
                 trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-                captured = execute(mesh, *packed, initial, kernels)
+                captured = execute(packed, initial)
                 ttnn.end_trace_capture(mesh, trace, cq_id=0)
                 for mode in ('eager', 'trace'):
                     if mode == 'trace':
                         ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                         actual = captured
                     else:
-                        actual = execute(mesh, *packed, initial, kernels)
-                    output_host, states_host = host(actual[0]), host(actual[1])
+                        actual = execute(packed, initial)
+                    output_host, states_host = host_output(actual[0]), host(actual[1])
                     if not exact(host(initial), expected_state[0]):
                         raise AssertionError('Kernel modified initial state')
                     for index in range(rows):
@@ -118,6 +141,14 @@ def main():
                 if not detected:
                     raise AssertionError('Stale state failed to change continuation')
                 report['negative_controls'].append(dict(seed=seed, rows=rows, stale_state_detected=True))
+                if args.norm_gate:
+                    ttnn.release_trace(mesh, trace)
+                    trace = None
+                    release([*captured, *packed, *reference, *correction, norm_w,
+                             *[value for token in tokens for value in token]])
+                    path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(dict(seed=seed, rows=rows, norm_gate=True, exact=True)), flush=True)
+                    continue
                 serial_trace = None
                 serial_values = []
                 try:
@@ -159,7 +190,7 @@ def main():
                 print(json.dumps(dict(seed=seed, rows=rows, exact=True)), flush=True)
         if len(report['checks']) != 30 or len(report['continuations']) != 216 or len(report['negative_controls']) != 15:
             raise AssertionError('Incomplete recurrence gate')
-        if len(report['timings']) != 15 or sum(timing['timed_replays'] for timing in report['timings']) != 1800:
+        if not args.norm_gate and (len(report['timings']) != 15 or sum(timing['timed_replays'] for timing in report['timings']) != 1800):
             raise AssertionError('Incomplete paired recurrence timing')
         report['passed'] = True
     except BaseException as error:

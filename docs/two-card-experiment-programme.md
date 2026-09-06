@@ -34,10 +34,13 @@ rather than continuing an open-ended sequence of copy tweaks.
 The first recurrence-only prototype retains BF16 state between tokens in L1 and
 passed hardware compilation/exactness in run 34012883902 (`855f8de`): 30 eager/trace
 cases, 216 restored-prefix continuations and 15 stale-state controls. No timing was
-measured in that run. Paired recurrence timing is now implemented and pending hardware:
-three ABBA blocks per seed/width, 1800 replays, both arms exporting all prefix states.
-Then integrate norm/gate and real-weight convolution; this is not yet a complete
-multi-token GDN layer or speculative serving.
+measured in that run. Paired recurrence timing passed in run 34013199242: 1800
+replays, T16 medians about 0.532 ms serial versus 0.340 ms device loop. All nine T16
+paired blocks favored the candidate, with timing spikes; no full-model speedup is
+established. The norm/gate extension is now implemented and pending hardware
+exactness, retaining BF16 feedback via CB5 and assembling output tiles per head.
+Real-weight convolution and full-model integration remain; this is not yet a
+complete multi-token GDN layer or speculative serving.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
 tests or oracle verification as real coding throughput.
 

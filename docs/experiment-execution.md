@@ -16,7 +16,34 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E4 paired recurrence latency (hardware pending)
+### E4 multi-token norm/gate prerequisite (hardware pending)
+
+`gdn-multitoken-norm` extends the token loop with the native fused output math,
+including BF16 rounding of norm-times-weight, SiLU and final multiply. CB30/31
+retain their native norm-weight/scratch roles. Recurrent feedback moves to CB5:
+the reader pushes exactly one complete 16-tile initial-state ring, compute consumes
+it, then compute alone produces/consumes full-ring BF16 feedback blocks. No reader
+state pushes occur for subsequent tokens. CB storage is 630784 bytes/core.
+
+Each of 24 head-owning cores assembles its T rows into four local output tiles,
+zeroing padding and writing full pages to `[1,T,3072]` TILE L1 after the loop.
+No cross-core assembly semaphore is needed for this fixed T<=16 geometry. Every
+prefix state is still exported to DRAM. The native oracle uses L1 state, so this
+first gate measures correctness only, not comparative speed. Required coverage:
+30 eager/trace cases, 216 exact restored-prefix continuations, 15 stale-state controls.
+Synthetic QKV/beta/g/z and norm weights only; convolution, real model weights,
+device rollback integration and full-model performance remain subsequent gates.
+
+### E4 paired recurrence latency (passed 34013199242)
+
+Run [34013199242](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34013199242)
+(`2272b91`) passed 30 exact cases, 216 continuations, 15 negative controls and all
+1800 timed replays. Across three seeds, T16 serial medians were 0.531716-0.532623 ms
+versus 0.339825-0.340785 ms for the device loop (about 36% lower median latency).
+All nine T16 paired blocks favored the candidate, but spikes affected both arms:
+per-seed median paired ratios ranged 1.169-1.620. Do not hide those spikes or treat
+the ratio of marginal medians as the paired estimator. The 14710-byte artifact is
+recurrence-only evidence, not a full-model or committed-token speedup.
 
 The `gdn-multitoken` suite now retains the passing correctness matrix and adds
 native serial B1 versus device-token-loop captured traces. Both arms export every
@@ -27,7 +54,7 @@ sample is followed by exact output/all-prefix/initial-state checks on both chips
 Capture, compilation, input packing/upload, host reads and continuation checks are
 outside timing. Report raw samples and paired block ratios; these are fenced host
 trace latencies, not device-only kernel time or committed-token/model throughput.
-No speedup is established until the hardware artifact passes and is reviewed.
+The verified result above is bounded to this synthetic recurrence fixture.
 
 ### E4 multi-token recurrent kernel prerequisite (passed 34012883902)
 

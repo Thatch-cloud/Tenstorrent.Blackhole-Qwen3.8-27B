@@ -107,6 +107,10 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   restored continuations against native serial B1. Adds three paired ABBA timing
   blocks per seed/width, with all-prefix exports and exact post-sample checks on
   both arms. Excludes conv/norm-gate, input packing and full-model throughput.
+- `gdn-multitoken-norm`: adds unchanged native fused RMS norm/weight/SiLU math,
+  BF16 state feedback through the initial-state ring and head-local TILE assembly.
+  Repeats exact prefix/continuation gates without timing; synthetic inputs only,
+  no convolution or full-model integration. Native state is L1, candidate prefixes DRAM.
 - `gdn-inplace-timing`: repeats that gate and measures three ABBA blocks per
   seed/width against captured projection-batched native state handling. Restores
   initial state outside every timed replay and checks every staged prefix afterward.
