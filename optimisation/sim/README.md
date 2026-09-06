@@ -12,7 +12,10 @@
   than32 and the next token waits. All15 fixtures in the three-seed T1/2/4/8/16
   matrix subsequently passed exact outputs/prefix states, unchanged initial states,
   clean close and exit0. See the [execution ledger](../../docs/experiment-execution.md)
-  for run IDs. Native-oracle and fast-dispatch hardware validation is still required.
+  for run IDs. Hardware follow-up34019033933 (`36b9eed`) then passed30 exact
+  eager/trace cases,216 restored-prefix continuations and15 negative controls
+  against the native implementation. No hardware speedup or full-model result
+  follows from these synthetic functional gates.
 
 ## Running
 

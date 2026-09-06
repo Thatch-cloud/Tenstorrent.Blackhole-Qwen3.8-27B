@@ -16,6 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Multi-token norm/gate hardware exactness (passed 34019033933)
+
+Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)
+(`36b9eed`) passed after the full15-fixture simulator matrix, without another reset.
+All30 three-seed T1/2/4/8/16 eager/trace cases matched native output and every prefix
+state exactly on both cards. All216 restored-prefix native continuations matched;
+all15 stale-state controls were detected. No errors or failed exactness checks.
+The 18065-byte artifact records the same generated kernel hashes as simulation,
+and both runtime-header hash guards passed on the hardware image.
+
+This validates the CB5 producer-counter fix and synthetic recurrence plus fused
+norm/gate against the native implementation. No timing was collected. Native oracle
+state is L1, candidate prefix exports DRAM; do not infer a matched speedup. Real-weight
+convolution, full-model integration, device rollback plumbing and committed-token
+throughput remain subsequent gates. Next validate real-weight GDN integration in
+simulation before returning to hardware native-oracle and matched timing checks.
+
 ### CB5 producer-counter handoff fix (15 simulator fixtures passed)
 
 The local Blackhole LLK pack implementation caches `tiles_received` in the packer

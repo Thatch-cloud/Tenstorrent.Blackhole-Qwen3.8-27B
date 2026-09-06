@@ -2,6 +2,13 @@
 
 ## Programme checkpoint — 2026-09-06
 
+Latest kernel checkpoint: run34019033933 (`36b9eed`) passed synthetic multi-token
+recurrence plus fused norm/gate on both cards after simulator-first debugging:
+30 exact eager/trace cases, 216 restored-prefix continuations and 15 negative
+controls. The CB5 counter handoff fix is hardware-validated. No timing was measured;
+real-weight convolution and full-model integration remain next. Historical entries
+below explain the earlier stalls and recovery, not the current kernel status.
+
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
 of this programme. The [execution ledger](experiment-execution.md) records individual
