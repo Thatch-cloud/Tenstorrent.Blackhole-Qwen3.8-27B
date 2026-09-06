@@ -18,6 +18,14 @@ Dynamic-position request trace reuse remains uncertified. The latest actual
 request rates remain 22.46/18.67 committed decode tokens/s, far below 200.
 Prepared-reader simulator pass `20260906T214204Z-304`: T8/start4095/seed2,
 groups 1/4/3, exact on both chips after scratch cleanup, borrowed query intact.
+Real-weight attention run `34061952468` (`a84002e`) passed all48 eager/trace
+checks,24 pairs of negative controls and72 paired timing blocks. Both arms use
+ordered cache writes and batched projections. Mean paired T32 layer latency:
+4K1.974771->1.599829ms;16K3.073475->2.013567ms. T16:1.110906->0.967897ms
+and1.660966->1.194989ms. Whole physical KV and outputs match native B1 exactly.
+The next `full-attention-groups` gate keeps row-parallel GDN norm in both arms,
+changes only attention grouping, and rejects request/replay modes until static
+full-model correctness and position-dependent mask ownership are certified.
 
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.

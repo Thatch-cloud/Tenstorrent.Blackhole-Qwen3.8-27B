@@ -47,13 +47,16 @@ class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
-                 retain_records=False, ordered_cache=False, norm_batch=False):
+                 retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if grouped_attention and (not ordered_cache or not serial_sdpa or profiler is not None or retain_records):
+            raise ValueError('Grouped attention requires static ordered-cache verification without retained replay')
+        self.grouped_attention = bool(grouped_attention and self.rows >= 8)
         if ordered_cache and (not serial_sdpa or profiler is not None):
             raise ValueError('Ordered cache requires the unprofiled exact B1 SDPA path')
         self.ordered_cache = ordered_cache and self.rows > 1
@@ -103,6 +106,7 @@ class ModelBatch:
         self.bindings = []
         self.writers = []
         self.readers = []
+        self.grouped_readers = []
         self.gdn_calls = 0
 
         def upload(value, dtype):
@@ -132,6 +136,17 @@ class ModelBatch:
                     writer = OrderedCacheWriter(model.mesh_device, ttnn, cache_kernels)
                 self.writers.append(writer)
                 reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
+                if self.grouped_attention:
+                    from attention_grouped import GroupedAttentionReader
+
+                    def upload_group(value, dtype=ttnn.bfloat16):
+                        return ttnn.from_torch(value, device=model.mesh_device, dtype=dtype,
+                            layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
+
+                    reader = GroupedAttentionReader(ttnn, model.mesh_device, start, self.rows, pages,
+                        singleton_positions, singleton_pages, upload_group)
+                    self.grouped_readers.append(reader)
                 if reader is not None:
                     self.readers.append(reader)
                 write = profiler.wrap("attention.kv_write", writer) if profiler else writer
@@ -277,6 +292,9 @@ class ModelBatch:
         for state in self.working_states:
             state.close()
         self.working_states.clear()
+        for reader in self.grouped_readers:
+            reader.close()
+        self.grouped_readers.clear()
         for value in self.buffers:
             self.operations.deallocate(value)
         self.buffers.clear()

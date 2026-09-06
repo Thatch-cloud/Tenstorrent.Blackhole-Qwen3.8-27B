@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -11,6 +12,13 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_grouped_attention_rejects_dynamic_modes_before_hardware(self):
+        for flag in ('--deferred-commit', '--replay-inputs', '--device-selection', '--request-pilot', '--attribution'):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                'sys.argv', ['full-prefix.py', '--grouped-attention', '--norm-batch', flag]):
+                with self.assertRaisesRegex(ValueError, 'limited to static'):
+                    full_prefix.main()
+
     def test_t32_requires_packed_history_control(self):
         flags = dict(packed_checkpoints=True, ordered_cache=True, deferred_commit=False, attribution=False)
         self.assertEqual(full_prefix.verification_widths(16, **flags), (1, 2, 4, 8, 16))
