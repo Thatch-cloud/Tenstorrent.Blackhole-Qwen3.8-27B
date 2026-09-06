@@ -1,5 +1,6 @@
 """Static TP2 attention groups versus serial SDPA; includes device layout costs."""
 
+import argparse
 import hashlib
 import json
 import math
@@ -30,6 +31,9 @@ def validate_matrix(fixtures):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dma-layout', action='store_true')
+    options = parser.parse_args()
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -42,6 +46,12 @@ def main():
         scope='Synthetic static attention with device packing/unpacking; masks and page views prepared outside timing; no model throughput',
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                  for name in ('attention-group-timing.py', 'attention_head_fold.py', 'attention_batch.py')})
+    report['dma_layout'] = options.dma_layout
+    if options.dma_layout:
+        report['simulator_prerequisites'] = ['20260906T215257Z-312', '20260906T215411Z-605', '20260906T220602Z-302']
+        report['scope'] = 'Matched grouped attention: stock layout chain versus direct tile DMA; synthetic static inputs, no model throughput'
+        report['sources'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                                 for name in ('attention_fold_dma.py', 'attention_fold_dma.cpp')})
     mesh = None
 
     def stage(name, **details):
@@ -114,7 +124,7 @@ def main():
                         reader = SerialAttentionReader(ttnn, positions, [pages] * rows)
 
                         def operation(arm, owned):
-                            if arm == 'control':
+                            if arm == 'control' and not options.dma_layout:
                                 if rows == 1:
                                     result = ttnn.transformer.paged_scaled_dot_product_attention_decode(query, keys, values,
                                         page_table_tensor=pages, cur_pos_tensor=positions[0], scale=0.0625,
@@ -125,16 +135,22 @@ def main():
                                 owned.append(result)
                                 return result
                             chunks = []
+                            def layout(tensor, count, *, inverse=False, offset=0):
+                                if options.dma_layout and arm == 'candidate':
+                                    from attention_fold_dma import device_layout_dma
+                                    return device_layout_dma(mesh, tensor, count, owned, inverse=inverse, offset=offset)
+                                return device_layout(ttnn, tensor, count, owned, inverse=inverse, offset=offset)
+
                             for group, group_pages, mask in metadata:
                                 count = group['rows']
-                                packed = device_layout(ttnn, query, count, owned, offset=group['offset'])
+                                packed = layout(query, count, offset=group['offset'])
                                 result = ttnn.transformer.paged_scaled_dot_product_attention_decode(packed, keys, values,
                                     page_table_tensor=group_pages, is_causal=False, attn_mask=mask, scale=0.0625,
                                     program_config=ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
                                         exp_approx_mode=False, q_chunk_size=0, k_chunk_size=group['signature'][0]),
                                     memory_config=ttnn.L1_MEMORY_CONFIG)
                                 owned.append(result)
-                                chunks.append(device_layout(ttnn, result, count, owned, inverse=True))
+                                chunks.append(layout(result, count, inverse=True))
                             result = ttnn.concat(chunks, dim=1, memory_config=ttnn.L1_MEMORY_CONFIG)
                             owned.append(result)
                             return result

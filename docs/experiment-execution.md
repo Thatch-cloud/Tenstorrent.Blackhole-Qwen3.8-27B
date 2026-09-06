@@ -26,6 +26,16 @@ and1.660966->1.194989ms. Whole physical KV and outputs match native B1 exactly.
 The next `full-attention-groups` gate keeps row-parallel GDN norm in both arms,
 changes only attention grouping, and rejects request/replay modes until static
 full-model correctness and position-dependent mask ownership are certified.
+Full-model static gate `34062230310` (`add2738`) is running. Separately, the
+direct tile-permutation DMA prototype passed TTsim `20260906T215257Z-312`:
+T8/start4095/seed0, forward packing versus Torch and grouped SDPA/unpacking
+versus native B1 are exact on both chips. It replaces the seven-operation
+stock layout chain with one dataflow launch per direction, without changing
+SDPA math. No DMA hardware speed result yet.
+Long-context DMA TTsim `20260906T215411Z-605` also passed: T32/start16383/seed2,
+all token outputs exact on both chips with groups1/4/4/4/4/4/4/4/3. Native
+query packing and inverse layouts preserve bits; no simulator speed claim.
+The two-row group also passed `20260906T220602Z-302` (T2/start4096/seed1).
 
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.

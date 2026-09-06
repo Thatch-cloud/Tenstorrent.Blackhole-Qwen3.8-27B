@@ -23,10 +23,13 @@ def main():
     parser.add_argument('--finite-mask', action='store_true')
     parser.add_argument('--grouped', action='store_true')
     parser.add_argument('--device-layout', action='store_true')
+    parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.dma_layout and not args.device_layout:
+        parser.error('DMA layout requires the device-layout oracle checks')
     if args.start + args.rows > args.capacity or args.capacity % args.chunk_size:
         parser.error('Candidate cache view must cover positions and contain complete chunks')
     if args.device_layout and not args.grouped and args.rows > 4:
@@ -37,8 +40,8 @@ def main():
     report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, finite_mask=args.finite_mask,
         capacity=args.capacity, chunk_size=args.chunk_size,
         grouped=args.grouped, seed=args.seed,
-        device_layout=args.device_layout,
-        scope='Host-folded query and explicit mask versus native causal B1; no device layout or speed certification')
+        device_layout=args.device_layout, dma_layout=args.dma_layout,
+        scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
     mesh = None
     owned = []
 
@@ -52,6 +55,12 @@ def main():
         import ttnn
         stage('mesh-open')
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+
+        def layout(tensor, rows, *, inverse=False, offset=0):
+            if args.dma_layout:
+                from attention_fold_dma import device_layout_dma
+                return device_layout_dma(mesh, tensor, rows, owned, inverse=inverse, offset=offset)
+            return device_layout(ttnn, tensor, rows, owned, inverse=inverse, offset=offset)
 
         def upload(value, dtype=ttnn.bfloat16):
             tensor = ttnn.from_torch(value, device=mesh, dtype=dtype,
@@ -100,7 +109,7 @@ def main():
             mask = causal_mask(rows, args.start + offset, capacity)
             if args.finite_mask:
                 mask.masked_fill_(torch.isneginf(mask), -1e9)
-            packed_query = device_layout(ttnn, device_query, rows, owned, offset=offset) if args.device_layout else upload(
+            packed_query = layout(device_query, rows, offset=offset) if args.device_layout else upload(
                 fold_query(query[:, offset:offset + rows].contiguous()))
             if args.device_layout and any(not torch.equal(value, fold_query(query[:, offset:offset + rows].contiguous()))
                                           for value in host(packed_query)):
@@ -113,7 +122,7 @@ def main():
                     exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk_size), memory_config=ttnn.L1_MEMORY_CONFIG)
             owned.append(folded)
             if args.device_layout:
-                unpacked = device_layout(ttnn, folded, rows, owned, inverse=True)
+                unpacked = layout(folded, rows, inverse=True)
                 grouped_outputs.append(host(unpacked))
             else:
                 grouped_outputs.append([unfold_output(value, rows) for value in host(folded)])
