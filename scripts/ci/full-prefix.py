@@ -11,6 +11,12 @@ from pathlib import Path
 from gdn_snapshot import ActiveSnapshot
 
 
+def active_serial_logits(logits, vocab_size):
+    if logits.shape[-1] != vocab_size or logits.numel() // vocab_size not in (1, 8):
+        raise ValueError("Expected native B1 logits with optional Bmax8 API padding")
+    return logits.reshape(-1, vocab_size)[:1]
+
+
 def cache_geometry(shape):
     dimensions = tuple(shape)
     if len(dimensions) != 4 or dimensions[0] < 2 or dimensions[2] != 64:
@@ -220,7 +226,7 @@ def main():
                     for rows in (1, 2, 4, 8, 16):
                         prefill(prompt)
                         reference_logits = [decode(oracle[index], length + index, trace) for index in range(rows)]
-                        expected = torch.cat([value.reshape(1, model.args.vocab_size) for value in reference_logits], dim=0)
+                        expected = torch.cat([active_serial_logits(value, model.args.vocab_size) for value in reference_logits], dim=0)
                         expected_state = live_digest()
                         expected_kv = kv_digest(length + rows)
                         prefill(prompt)
@@ -257,7 +263,7 @@ def main():
                         proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
                         actual = batched(proposals, length, prefix, trace, prompt)
                         if prefix:
-                            expected = torch.cat([value.reshape(1, model.args.vocab_size) for value in oracle_logits[:prefix]], dim=0)
+                            expected = torch.cat([active_serial_logits(value, model.args.vocab_size) for value in oracle_logits[:prefix]], dim=0)
                             if any(not torch.equal(value[:prefix], expected) for value in actual):
                                 raise AssertionError("Rejected future rows changed accepted-prefix logits")
                         restore(candidate_saved)

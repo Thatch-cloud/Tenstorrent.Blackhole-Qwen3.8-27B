@@ -11,6 +11,21 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_native_api_padding_is_not_an_active_token(self):
+        values = torch.arange(8 * 12).reshape(1, 8, 12)
+        expected = values[:, 0].clone()
+        self.assertTrue(torch.equal(full_prefix.active_serial_logits(values, 12), expected))
+        values[:, 1:] = -999
+        self.assertTrue(torch.equal(full_prefix.active_serial_logits(values, 12), expected))
+        values[:, 0] += 1
+        self.assertFalse(torch.equal(full_prefix.active_serial_logits(values, 12), expected))
+        self.assertTrue(torch.equal(full_prefix.active_serial_logits(expected, 12), expected))
+
+    def test_invalid_logit_geometry_is_not_silently_trimmed(self):
+        for shape in ((2, 12), (1, 24), (32, 12)):
+            with self.assertRaises(ValueError):
+                full_prefix.active_serial_logits(torch.zeros(shape), 12)
+
     def test_native_shape_requires_integer_indexing(self):
         class NativeShape:
             def __len__(self):

@@ -30,7 +30,14 @@ and scratch, so the reference snapshot cannot accidentally repair the candidate.
 Planned gate: 30 full-logit/state/KV comparisons (T=1/2/4/8/16, eager/trace, prompt
 lengths 63/64/65), then all 102 T=16 prefix rollback cases and existing negative
 controls. All candidate shapes are compiled before parking native prefill/decode
-traces. No runtime patch, serving eligibility, drafter or speed claim is introduced.
+traces. No installed-source patch, serving eligibility, drafter or speed claim is introduced.
+
+First attempt 34001190409 (`7423438`) compiled all candidate widths and passed the
+first native eager baseline comparison, but stopped before batched comparison:
+the serial Generator API returned Bmax8-padded host logits, not a single row.
+The comparator now explicitly accepts native one/eight-row API geometry and selects
+the active row, with padding-canary and invalid-geometry regression tests. No model
+arithmetic was changed and this harness failure is not evidence of numerical drift.
 
 ### E3 attention shared-page gate (passed 34000512864)
 
