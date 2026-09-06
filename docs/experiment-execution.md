@@ -32,6 +32,11 @@ preceding accepted tokens, but not the terminal EOS, matching native generation
 and correction-EOS semantics. All31 possible accepted terminal positions have
 an explicit state-row regression check; nonterminal decisions are unchanged.
 
+First pilot run34043059904 (`eb6e16b`) failed before request decoding because
+the top-level multimodal Qwen3_5Config has no eos_token_id. The retry reads and
+hashes the frozen generation_config.json, validates all terminal IDs, and fails
+closed on missing/invalid metadata. No performance result or reset is inferred.
+
 ### Full-verifier device selection (hardware gate passed)
 
 Run `34040918809` at `613a591` passed all12 width/context fixtures and1440

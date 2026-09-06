@@ -467,9 +467,10 @@ def main():
             if len(prompt) != length:
                 raise AssertionError("Insufficient fixed prompt tokens")
             if options.request_pilot:
-                from full_request import measure_request
-                eos_ids = config.eos_token_id
-                eos_ids = () if eos_ids is None else (eos_ids,) if isinstance(eos_ids, int) else tuple(eos_ids)
+                from full_request import measure_request, terminal_ids
+                eos_ids = terminal_ids(weights, model.args.vocab_size)
+                report['terminal_ids'] = eos_ids
+                report['generation_config_sha256'] = hashlib.sha256((Path(weights) / 'generation_config.json').read_bytes()).hexdigest()
                 result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
                     live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids)
                 report.update(scope='Actual lookup request pilot on synthetic repeated code; not a coding-quality benchmark')

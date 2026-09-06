@@ -2,10 +2,20 @@
 
 import hashlib
 import json
+from pathlib import Path
 import time
 
 from greedy_session import GreedySession
 from verifier_engine import VerifierEngine
+
+
+def terminal_ids(weights, vocab_size):
+    config = json.loads((Path(weights) / 'generation_config.json').read_text())
+    tokens = config.get('eos_token_id')
+    tokens = (tokens,) if type(tokens) is int else tuple(tokens) if isinstance(tokens, list) else ()
+    if not tokens or any(type(token) is not int or not 0 <= token < vocab_size for token in tokens):
+        raise ValueError('Frozen generation config must declare valid terminal IDs')
+    return tokens
 
 
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,

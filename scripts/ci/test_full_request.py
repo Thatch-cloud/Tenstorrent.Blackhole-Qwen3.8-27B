@@ -7,10 +7,19 @@ from unittest.mock import Mock, patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
-from full_request import measure_request
+from full_request import measure_request, terminal_ids
 
 
 class RequestPilotTests(unittest.TestCase):
+    def test_terminal_ids_come_from_generation_config(self):
+        for content, expected in (('{"eos_token_id": 2}', (2,)), ('{"eos_token_id": [2, 3]}', (2, 3))):
+            with patch('full_request.Path.read_text', return_value=content):
+                self.assertEqual(terminal_ids('/frozen-weights', 100), expected)
+        for content in ('{}', '{"eos_token_id": true}', '{"eos_token_id": [100]}', '{"eos_token_id": []}'):
+            with patch('full_request.Path.read_text', return_value=content):
+                with self.assertRaises(ValueError):
+                    terminal_ids('/frozen-weights', 100)
+
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
