@@ -82,3 +82,19 @@ class RecordTests(unittest.TestCase):
         result['packed_checkpoints'] = False
         with self.assertRaises(ValueError):
             block.append(state, result, checkpoint)
+
+    def test_bound_publication_still_requires_native_binding_and_single_decision(self):
+        block = self.fixture()
+        publication = Mock()
+        block.commit(2, dma=True, publication=publication)
+        publication.assert_called_once_with(2)
+        with self.assertRaises(ValueError):
+            block.commit(2, dma=True, publication=publication)
+        for invalid in ('binding', 'mode'):
+            block = self.fixture()
+            if invalid == 'binding':
+                block.records[-1][0].gdn.B = 1
+            publication = Mock()
+            with self.assertRaises(ValueError):
+                block.commit(2, dma=invalid != 'mode', publication=publication)
+            publication.assert_not_called()

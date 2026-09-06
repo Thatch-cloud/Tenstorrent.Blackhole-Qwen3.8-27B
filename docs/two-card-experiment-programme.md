@@ -37,11 +37,10 @@ every rollback prefix, and reduced T16 layer time3.006 to0.912ms. Its full-model
 integration is the next gate. This removes prefix materialization, not arithmetic;
 engine-level dynamic acceptance/commit and executable coding evaluation remain open.
 
-Packed-history full-model run34028729821 (`46ec864`) now passed all correctness
-and paired timing gates. T16 is91.547/100.336ms at4K/16K; T4 improved to60.740/62.958ms.
-All multirow widths improved against the previous best control; T1 stays native.
-The next gate retains all48 layer records until target-logit readback, then selects
-the accepted prefix and commits native GDN state. These are still forced-draft
+Packed histories passed34028729821 and ordered cache writes passed34034319922:
+T16 is now89.552/98.325ms at4K/16K. All multirow widths improved; T1 stays native.
+Post-verification greedy commit passed34029984214. Fused96-worker publication
+passed34034469074, including every inactive native slot. These are still forced-draft
 correctness fixtures, not a measured end-to-end speculative coding engine.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
@@ -55,19 +54,19 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Packed causal convolution histories passed full-model correctness; T16 costs91.547/100.336ms at4K/16K | Post-verification record lifecycle; attention/remaining-cost attribution; recurrent export and wider worker mappings |
-| E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
+| E4 fusion/pipeline | Packed histories, ordered cache writes and96-worker commit passed full-model gates; T16 costs89.552/98.325ms at4K/16K | Captured commit and device selection; remaining-cost attribution; FP32-preserving wider GDN worker mappings |
+| E5 drafting | Request-local lookup and greedy session/accounting host tests; historical MTP groundwork | Reusable card-backed verifier and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
 | E8 precomputation | Planning and cost investigation | Measured table/precomputation candidate; no LUT gain established |
 | E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
 | E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
 
-Latest verified full-model T16 block costs (run **34028729821**, `46ec864`) are
-**91.547 ms at 4095 tokens** and **100.336 ms at 16383 tokens**. Full logits,
+Latest verified full-model T16 block costs (run **34034319922**, `2391339`) are
+**89.552 ms at 4095 tokens** and **98.325 ms at 16383 tokens**. Full logits,
 active GDN state, valid KV and corrected rollback passed. These are static verifier
 costs, not committed-token throughput: even perfect acceptance with zero drafting
-and commit overhead gives only about174.77/159.46 tok/s for T16. The 200 committed
+and commit overhead gives only about178.67/162.73 tok/s for T16. The 200 committed
 token/s goal is not met; a sixteen-token cycle must fit within 80 ms including
 drafting and commit. T1 retains native handling.
 
@@ -77,13 +76,13 @@ abort and rejection corrections. Readback/selection/eager commit alone costs
 25.45-41.57ms; this is not an actual drafter or reusable serving engine.
 The ordered cache writer passed hardware layer gate34033619168:60 exact cases,
 30 negative-control pairs and90 paired timing blocks. T16 attention improved
-0.722 to0.592ms; T1 regressed and remains native. The full-model gate rejected
-its1024-column page table at an overly narrow adapter guard; widened metadata
-subsequently passed native-oracle simulator checks at4K/16K and is ready to retry.
+0.722 to0.592ms; T1 regressed and remains native. After correcting and simulator-
+certifying1024-column metadata, full-model run34034319922 passed all correctness
+and timing gates: the real full-model gain is about2%, not21%.
 Attention retains exact B1 SDPA; GDN recurrence remains sequential inside its
-device loop. Fused96-worker retained-state publication passed two-layer simulator
-checks but awaits full-model hardware certification. Target200 remains unachieved,
-and serving defaults remain unchanged.
+device loop. Fused96-worker publication passed full-model hardware certification;
+warm eager commit costs7.35-9.09ms, while full-logit readback remains about8ms.
+Target200 remains unachieved, and serving defaults remain unchanged.
 
 Historical recurrence-kernel development:
 The first recurrence-only prototype retains BF16 state between tokens in L1 and

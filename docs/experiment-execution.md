@@ -16,6 +16,20 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Captured prefix publication (hardware gate pending)
+
+Prebind and warm all prefix-specific DMA programs, then capture each publication
+outside the decision interval. Report this setup separately from readback,
+selection and synchronized selected-trace execution. This is a component gate,
+not a reusable request executor or committed-throughput result. All existing
+full-logit, rollback, valid-KV and inactive-slot checks remain required.
+
+The binding refactor passed simulator run `20260906T133129Z-324`, T2/seed2,
+all three prefixes, exact native/checkpoint values and untouched inactive slots.
+Kernel C++ remains `ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019`;
+Python binding is `257f7b13899737b4d507024c7a77281b6925528e9ecdf94f7fe1600667f62ecb`.
+Host suites pass: 219 CI, 55 simulator-support and 40 speculative tests.
+
 ### Request-scoped speculative accounting (host tests passed)
 
 `GreedySession` now coordinates actual lookup proposals, bucket selection, target
@@ -45,7 +59,21 @@ rounding after norm-weight multiplication, SiLU and the final multiplication.
 The extra synchronization/traffic must be timed, not assumed free. Simulator
 native-oracle output/state/continuation checks precede any hardware trial.
 
-### Fused retained-state publication (simulator first pass)
+### Fused retained-state publication (hardware passed 34034469074)
+
+Run34034469074 (`a6f64f1`) passed20 full-model width/mode cases,16 post-output
+decisions and corrected continuations,4 negative-control pairs, and exact
+before/after checks of all inactive slots in all48 native GDN layers. The gate
+used96 workers per chip and the previously certified serial cache writer.
+The preflight also passed12 two-chip transfer checks; no reset was needed.
+
+The first commit included cold compilation:344.17ms commit,352.37ms combined
+readback/selection/commit. Subsequent commits cost7.35-9.09ms, with total component
+times15.65-19.47ms. Full-logit readback still costs7.64-8.64ms and host selection
+0.35-1.95ms. These are unpaired component observations, not a speedup ratio or
+committed TPS. Verifier execution, drafting and input staging are excluded.
+Prebinding/capturing publication and certified device force-argmax are the next
+ways to remove descriptor construction and full-logit host transfer overhead.
 
 `gdn_commit_dma` publishes an arbitrary selected prefix for all48 GDN layers in
 one arithmetic-free launch:96 workers per chip, two disjoint page partitions per
@@ -67,8 +95,10 @@ all5 prefixes in `20260906T121953Z-315`.
 This does not validate96-worker hardware scheduling or commit performance.
 The future full-model gate records readback, selection and commit separately,
 so host logit transfer cannot be mistaken for kernel execution time.
-210 CI,55 simulator and26 speculative host tests pass. The new commit remains
-opt-in and is not included in the current attention hardware run34031827886.
+The new commit remains opt-in. Its source hashes are
+`2d1bc9e4267d2576dc4c699a41db1e8afeb2a4bec04ce867d831ffd92d0661b7`
+(Python) and`ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019`
+(kernel), matching the simulator first pass. No serving defaults changed.
 
 ### Post-verification GDN commit (hardware passed 34029984214)
 
@@ -100,6 +130,30 @@ component timings exclude verification and drafting and are not committed TPS.
 No serving settings change.
 
 ### Ordered shared-page cache write (hardware passed 34033619168)
+
+Full-model retry34034319922 (`2391339`) passed all20 width/mode cases,16 corrected
+rollbacks,4 negative-control pairs and10 paired timing fixtures (2400 replays).
+Full logits, active GDN state, valid KV and end checkpoints are exact on both
+chips. The comparison keeps all packed-history GDN flags and B1 SDPA identical.
+
+| Context | T | Serial writer control ms | Ordered writer ms | Paired ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 4095 | 1 | 45.027539 | 45.018834 | 0.999948 |
+| 4095 | 2 | 55.566669 | 55.396328 | 1.003080 |
+| 4095 | 4 | 60.751795 | 60.247484 | 1.008347 |
+| 4095 | 8 | 70.979604 | 70.029573 | 1.013586 |
+| 4095 | 16 | 91.592307 | 89.551743 | 1.022750 |
+| 16383 | 1 | 45.594663 | 45.616157 | 0.999953 |
+| 16383 | 2 | 56.687872 | 56.514909 | 1.003138 |
+| 16383 | 4 | 62.953030 | 62.455886 | 1.007989 |
+| 16383 | 8 | 75.380580 | 74.444874 | 1.012667 |
+| 16383 | 16 | 100.367964 | 98.324729 | 1.020734 |
+
+T1 remains native. The actual full-model improvement is about2%, not the21%
+layer ratio. Even perfect T16 acceptance with zero drafting/commit overhead
+would yield only178.67/162.73 tokens/s at4K/16K. Target200 is still unmet.
+The independent fused-commit run34034469074 (`a6f64f1`) uses the certified
+serial cache writer, so its state-publication test does not depend on this change.
 
 The first full-model attempt34033778987 (`ee90045`) cleanly rejected its1024-column
 page table at the adapter's512-column guard, before ordered kernel dispatch.

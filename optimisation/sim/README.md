@@ -1,5 +1,18 @@
 # Simulator-first device-loop GDN gate
 
+## Reusable verifier input staging
+
+`run-verifier-inputs.sh --rows 16` checks in-place host token, packed/singleton
+position and RoPE updates at31/4095/16383, without changing captured buffer
+addresses or page ownership. The RoPE output must exactly match the native
+`rot_mats_decode` helper on both simulated chips.
+
+T2 (`20260906T131724Z-315`) and T16 (`20260906T131732Z-436`) passed all three
+updates, native RoPE comparisons, unchanged pages and clean close/exit0. The first
+fixture failed on a Torch UInt32-versus-Int comparison, not on device data; its
+expected token dtype was corrected to native UInt32 before retry. This is input
+staging certification only, not full-model trace reuse or throughput.
+
 ## Ordered shared-page cache writes
 
 `run-ordered-cache.sh --rows 16 --start 31 --seed 1` compares a single ordered

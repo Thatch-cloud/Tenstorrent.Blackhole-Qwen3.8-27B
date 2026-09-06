@@ -21,16 +21,21 @@ class RetainedGDNBlock:
             raise ValueError('Duplicate GDN layer record')
         self.records.append((state, result, checkpoint))
 
-    def commit(self, prefix, *, dma=False):
+    def commit(self, prefix, *, dma=False, publication=None):
         if self.closed or self.selected_prefix is not None or len(self.records) != 48:
             raise ValueError('Exactly one decision on a complete live block required')
         if type(prefix) is not int or not 0 <= prefix <= self.rows:
             raise ValueError('Commit prefix outside verified rows')
+        if publication is not None and (not dma or not callable(publication)):
+            raise ValueError('A bound publication callback requires the DMA path')
         for state, result, checkpoint in self.records:
             native = [state.gdn.rec_state, *state.gdn.conv_states]
             if state.gdn.B != 8 or not state.gdn._stable_state or [addresses(self.operations, value) for value in native] != state.native_addresses:
                 raise ValueError('Native layer binding changed before commit')
         self.selected_prefix = prefix
+        if publication is not None:
+            publication(prefix)
+            return
         if dma:
             from gdn_commit_dma import publish
             mesh = self.records[0][0].gdn.mesh

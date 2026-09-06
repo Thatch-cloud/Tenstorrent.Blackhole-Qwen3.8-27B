@@ -19,7 +19,7 @@ def validate_shapes(layers, prefix):
     return rows
 
 
-def publish(mesh, layers, prefix):
+def prepare(mesh, layers, prefix):
     import ttnn
 
     validate_shapes([[tuple(value.shape) for value in layer] for layer in layers], prefix)
@@ -64,4 +64,11 @@ def publish(mesh, layers, prefix):
         kernel.runtime_args = runtime
         coordinate = ttnn.MeshCoordinate(0, chip)
         program[ttnn.MeshCoordinateRange(coordinate, coordinate)] = ttnn.ProgramDescriptor(kernels=[kernel], cbs=[buffer])
-    ttnn.generic_op(tensors, program)
+    def execute():
+        ttnn.generic_op(tensors, program)
+
+    return execute
+
+
+def publish(mesh, layers, prefix):
+    prepare(mesh, layers, prefix)()

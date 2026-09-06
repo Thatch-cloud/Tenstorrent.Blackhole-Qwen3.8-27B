@@ -68,6 +68,7 @@ def main():
     parser.add_argument('--deferred-commit', action='store_true')
     parser.add_argument('--ordered-cache', action='store_true')
     parser.add_argument('--commit-dma', action='store_true')
+    parser.add_argument('--captured-commit', action='store_true')
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -95,6 +96,8 @@ def main():
         raise ValueError('Deferred commit requires packed checkpoints')
     if options.commit_dma and not options.deferred_commit:
         raise ValueError('Fused commit requires post-verification retained records')
+    if options.captured_commit and not options.commit_dma:
+        raise ValueError('Captured commit requires simulator-certified fused publication')
     if options.ordered_cache and not (options.packed_checkpoints and options.serial_sdpa):
         raise ValueError('Ordered cache requires the packed-history B1 SDPA control')
     if options.ordered_cache:
@@ -123,6 +126,7 @@ def main():
     if options.commit_dma:
         report.update(commit_dma=True, commit_workers_per_chip=96,
             commit_dma_hashes={suffix: hashlib.sha256(Path(__file__).with_name(f'gdn_commit_dma.{suffix}').read_bytes()).hexdigest() for suffix in ('py', 'cpp')})
+    report['captured_commit'] = options.captured_commit
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
     if options.coding_cost:
         output_path = root / "full-coding-cost.json"
@@ -330,6 +334,8 @@ def main():
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
+            commit_traces = {}
+            setup_ms = None
             try:
                 if trace:
                     save(replay_initial)
@@ -340,6 +346,20 @@ def main():
                     restore(replay_initial)
                     ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True)
                 if deferred:
+                    if options.captured_commit:
+                        from gdn_commit_dma import prepare
+                        setup_started = time.perf_counter()
+                        layers = [[*state.entry, result['states'], *result['packed_conv_states'],
+                                   state.gdn.rec_state, *state.gdn.conv_states, *checkpoint]
+                                  for state, result, checkpoint in fixture.retained.records]
+                        publications = {index: prepare(mesh, layers, index) for index in range(len(tokens) + 1)}
+                        for publication in publications.values():
+                            publication()
+                        ttnn.synchronize_device(mesh)
+                        for index, publication in publications.items():
+                            commit_traces[index], unused = capture_operation(ttnn, mesh, publication)
+                        ttnn.synchronize_device(mesh)
+                        setup_ms = (time.perf_counter() - setup_started) * 1000
                     ttnn.synchronize_device(mesh)
                     started = time.perf_counter()
                 actual = [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
@@ -353,7 +373,8 @@ def main():
                                                                  vocab_size=model.args.vocab_size)
                     selected = 0 if abort else decision.state_rows
                     selection_finished = time.perf_counter()
-                    fixture.retained.commit(selected, dma=options.commit_dma)
+                    fixture.retained.commit(selected, dma=options.commit_dma,
+                        publication=(lambda index: ttnn.execute_trace(mesh, commit_traces[index], cq_id=0, blocking=True)) if commit_traces else None)
                     ttnn.synchronize_device(mesh)
                     commit_finished = time.perf_counter()
                     report['dynamic_commits'].append(dict(length=length, trace=trace, selected_state_rows=selected,
@@ -363,9 +384,12 @@ def main():
                         readback_ms=(readback_finished - started) * 1000,
                         selection_ms=(selection_finished - readback_finished) * 1000,
                         commit_ms=(commit_finished - selection_finished) * 1000,
+                        commit_setup_ms=setup_ms,
                         retained_layers=len(fixture.retained.records)))
                 return actual
             finally:
+                for commit_trace in commit_traces.values():
+                    ttnn.release_trace(mesh, commit_trace)
                 if captured is not None:
                     ttnn.release_trace(mesh, captured)
                 if output is not None:
