@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 
-from attention_batch import SerialCacheWriter, serial_tail
+from attention_batch import SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode
 
 
@@ -30,7 +30,7 @@ def validate_checkpoint(rows, prefix):
 
 
 class ModelBatch:
-    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix):
+    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -45,6 +45,7 @@ class ModelBatch:
         self.buffers = []
         self.bindings = []
         self.writers = []
+        self.readers = []
         self.gdn_calls = 0
 
         def upload(value, dtype):
@@ -70,7 +71,10 @@ class ModelBatch:
                 writer = SerialCacheWriter(ttnn, singleton_positions, [singleton_pages] * self.rows,
                                            attention._kv_shard_cfg(1))
                 self.writers.append(writer)
-                self.bindings.append((attention, "_decode_from_prep", serial_tail(attention, writer, ttnn)))
+                reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
+                if reader is not None:
+                    self.readers.append(reader)
+                self.bindings.append((attention, "_decode_from_prep", serial_tail(attention, writer, ttnn, reader)))
             else:
                 if helpers[gdn_index].gdn is not attention:
                     raise ValueError("GDN checkpoint layer order mismatch")
@@ -114,12 +118,15 @@ class ModelBatch:
     def run(self):
         before_gdn = self.gdn_calls
         before_writes = [writer.calls for writer in self.writers]
+        before_reads = [reader.calls for reader in self.readers]
         with instance_overrides(self.bindings):
             result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages)
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):
             raise AssertionError("All 48 GDN and 16 attention adapters must engage")
+        if any(reader.calls - before != 1 for reader, before in zip(self.readers, before_reads, strict=True)):
+            raise AssertionError("Every selected B1 SDPA adapter must engage")
         return result
 
     def close(self):

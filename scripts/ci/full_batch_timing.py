@@ -16,18 +16,18 @@ def summarize(samples):
 
 
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
-            restore_initial, state_digest, kv_digest, local_host):
+            restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False):
     import torch
     import ttnn
 
     rows = len(tokens)
     mesh = model.mesh_device
-    candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows)
+    candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa)
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
     outputs = {}
-    report = dict(length=length, rows=rows, blocks=[], restore_samples_ms=[], exact=False,
+    report = dict(length=length, rows=rows, blocks=[], restore_samples_ms=[], exact=False, serial_sdpa=serial_sdpa,
                   checkpoint_policy="One preselected end-prefix snapshot set, not all-prefix staging")
 
     def serial():

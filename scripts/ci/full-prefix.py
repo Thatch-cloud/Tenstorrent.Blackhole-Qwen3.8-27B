@@ -52,9 +52,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch", action="store_true")
     parser.add_argument("--coding-cost", action="store_true")
+    parser.add_argument("--serial-sdpa", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
+    if options.serial_sdpa and not options.batch:
+        raise ValueError("Serial SDPA requires the batched candidate")
     lengths = (4095, 16383) if options.coding_cost else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -66,6 +69,7 @@ def main():
     report = dict(passed=False, checks=[], negative_controls=[], rows=16,
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
     report["batched_candidate"] = options.batch
+    report["serial_sdpa"] = options.serial_sdpa
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
     if options.coding_cost:
         output_path = root / "full-coding-cost.json"
@@ -193,7 +197,7 @@ def main():
         def batched(tokens, length, prefix, trace, prompt):
             from model_batch import ModelBatch
 
-            fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix)
+            fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix, serial_sdpa=options.serial_sdpa)
             captured = None
             output = None
             try:
@@ -223,7 +227,7 @@ def main():
             for length in lengths:
                 kv_digest(length + 18)
                 for rows in (1, 2, 4, 8, 16):
-                    fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows)
+                    fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows, serial_sdpa=options.serial_sdpa)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -346,7 +350,7 @@ def main():
                 for rows in (1, 2, 4, 8, 16):
                     measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
-                        state_digest=live_digest, kv_digest=kv_digest, local_host=local_host)
+                        state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

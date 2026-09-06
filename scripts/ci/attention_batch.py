@@ -41,10 +41,43 @@ class SerialCacheWriter:
         self.calls += 1
 
 
-def serial_tail(attention, writer, operations):
+class SerialAttentionReader:
+    def __init__(self, operations, singleton_positions, singleton_pages):
+        if len(singleton_positions) not in (1, 2, 4, 8, 16) or len(singleton_pages) != len(singleton_positions):
+            raise ValueError("Expected paired singleton attention metadata")
+        self.operations = operations
+        self.positions = singleton_positions
+        self.pages = singleton_pages
+        self.calls = 0
+
+    def __call__(self, query, keys, values, *, page_table_tensor, cur_pos_tensor, **kwargs):
+        operations = self.operations
+        shape = tuple(query.shape)
+        if len(shape) != 4 or shape[:2] != (1, len(self.positions)) or not 0 < shape[2] <= 32 or shape[3] != 256:
+            raise ValueError(f"Unexpected native query geometry: {shape}")
+        outputs = []
+        for index, (position, pages) in enumerate(zip(self.positions, self.pages, strict=True)):
+            row = operations.slice(query, (0, index, 0, 0), (1, index + 1, shape[2], 256),
+                                   memory_config=operations.DRAM_MEMORY_CONFIG)
+            outputs.append(operations.transformer.paged_scaled_dot_product_attention_decode(
+                row, keys, values, page_table_tensor=pages, cur_pos_tensor=position, **kwargs))
+            operations.deallocate(row)
+        self.calls += 1
+        if len(outputs) == 1:
+            return outputs[0]
+        result = operations.concat(outputs, dim=1, memory_config=kwargs["memory_config"])
+        for output in outputs:
+            operations.deallocate(output)
+        return result
+
+
+def serial_tail(attention, writer, operations, reader=None):
     native = type(attention)._decode_from_prep
     namespace = dict(native.__globals__)
-    namespace["ttnn"] = Overlay(operations, experimental=Overlay(operations.experimental, paged_update_cache=writer))
+    overrides = dict(experimental=Overlay(operations.experimental, paged_update_cache=writer))
+    if reader is not None:
+        overrides["transformer"] = Overlay(operations.transformer, paged_scaled_dot_product_attention_decode=reader)
+    namespace["ttnn"] = Overlay(operations, **overrides)
     isolated = FunctionType(native.__code__, namespace, native.__name__, native.__defaults__, native.__closure__)
     isolated.__kwdefaults__ = native.__kwdefaults__
     return MethodType(isolated, attention)

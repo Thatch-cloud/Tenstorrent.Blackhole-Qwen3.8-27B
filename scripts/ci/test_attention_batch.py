@@ -2,10 +2,31 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from attention_batch import Overlay, SerialCacheWriter, serial_tail
+from attention_batch import Overlay, SerialAttentionReader, SerialCacheWriter, serial_tail
 
 
 class AttentionBatchTests(unittest.TestCase):
+    def test_sdpa_uses_b1_queries_and_matching_positions(self):
+        operations = SimpleNamespace(DRAM_MEMORY_CONFIG="DRAM", slice=Mock(), concat=Mock(), deallocate=Mock(),
+            transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock()))
+        reader = SerialAttentionReader(operations, [63, 64, 65, 66], ["pages"] * 4)
+        reader(SimpleNamespace(shape=(1, 4, 12, 256)), "keys", "values",
+               page_table_tensor="packed", cur_pos_tensor="packed", memory_config="L1", scale=0.0625)
+        calls = operations.transformer.paged_scaled_dot_product_attention_decode.call_args_list
+        self.assertEqual([call.kwargs["cur_pos_tensor"] for call in calls], [63, 64, 65, 66])
+        self.assertTrue(all(call.kwargs["page_table_tensor"] == "pages" for call in calls))
+        self.assertTrue(all(call.kwargs["scale"] == 0.0625 for call in calls))
+        self.assertEqual([call.args[2] for call in operations.slice.call_args_list],
+                         [(1, index + 1, 12, 256) for index in range(4)])
+        operations.concat.assert_called_once()
+        self.assertEqual(reader.calls, 1)
+
+    def test_sdpa_rejects_wrong_batch_geometry(self):
+        reader = SerialAttentionReader(None, [63], ["pages"])
+        with self.assertRaises(ValueError):
+            reader(SimpleNamespace(shape=(1, 2, 12, 256)), None, None,
+                   page_table_tensor=None, cur_pos_tensor=None)
+
     def fixture(self, rows=4):
         operations = SimpleNamespace(DRAM_MEMORY_CONFIG="DRAM", to_memory_config=Mock(), slice=Mock(),
                                      deallocate=Mock(), experimental=SimpleNamespace(paged_update_cache=Mock()))

@@ -126,6 +126,8 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   Measure active GDN restore separately. This omits draft generation, runtime
   acceptance selection, all-prefix staging and a complete commit pipeline; it
   is not end-to-end speculative throughput or a coding-quality benchmark.
+  Following the T4/4K divergence in run 34002210390, this suite selects B1 SDPA
+  reads while retaining batched projections, to test native reduction parity.
 
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.

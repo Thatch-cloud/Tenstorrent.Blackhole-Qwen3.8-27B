@@ -34,6 +34,19 @@ restore. These measurements exclude drafter generation, dynamic acceptance,
 all-prefix checkpoint staging/selection and a complete speculative commit pipeline.
 Report block milliseconds and paired ratios, not committed-token throughput.
 
+Attempt 34002210390 (`c31021a`) found a real long-context divergence: at length
+4095, eager T=1 and T=2 passed exact logits/state/KV, but T=4 differed in 921936
+logit values per chip (maximum absolute difference 0.59765625). Timing was not
+entered. The previous short-context pass therefore cannot justify long-context use.
+
+The next controlled arm changes only the SDPA read in the candidate: keep batched
+QKV preparation/output projection and serial cache writes, but run native B1 SDPA
+for each query before concatenating results. B1 query geometry preserves the native
+per-query grid/reduction path, unlike a larger batch that shares cores among rows.
+This is an isolation hypothesis until hardware passes; the exactness gate is not
+relaxed. `full-coding-cost` now explicitly selects `--serial-sdpa`; other suites
+retain their original batching policy.
+
 ### E3 full-model batch integration (passed 34001403540)
 
 The `full-batch` suite reuses the serial oracle without changing its default path.
