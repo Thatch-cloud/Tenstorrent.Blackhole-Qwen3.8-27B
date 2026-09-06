@@ -91,7 +91,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact T32 verification, dynamic commit and reused request pipeline | Substantially lower V(T), multi-request trace lifecycle and representative repeatability |
-| E4 fusion/pipeline | Plain split/prefetch rejected; row-parallel norm passed real-layer34051597269 and full-model34052200159. Exact T32 full-logit verification109.97/127.52ms at4K/16K versus128.82/146.35ms control | Recertify retained replay, selection and actual requests; preserve T1/2/4. Static cost is not committed tok/s |
+| E4 fusion/pipeline | Plain split/prefetch rejected; row-parallel norm passed real-layer34051597269, full-model34052200159 and36 retained-replay cases34053795475. Exact T32 full-logit verification109.97/127.52ms at4K/16K versus128.82/146.35ms control | Selection34054076401 running, then matched actual requests; preserve T1/2/4. Static cost is not committed tok/s |
 | E5 drafting | Actual lookup request pilot exact but only21.415/17.741 tok/s; historical MTP groundwork | Better acceptance/routing and matched evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

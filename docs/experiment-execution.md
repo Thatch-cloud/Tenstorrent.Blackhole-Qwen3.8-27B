@@ -16,6 +16,21 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Norm-batch retained replay passed
+
+Run34053795475 (`729c408`) passed in22m12s:24 eager/trace width fixtures,
+16 rollback checks,36 two-block changed-input replay cases and4 negative
+controls. Every replay case reports exact logits, refreshed prefix histories,
+valid KV, inactive slots and two corrected continuation steps. Cases cover
+T2/16/32 at4095/16383 tokens, first committed prefixes0/1/T and second
+prefixes1/T. This certifies the row-parallel norm path with retained histories
+and captured DMA publication for this matrix, not a real drafter or throughput.
+
+Run34054076401 (`1882a31`) is now executing the separate force-argmax selection
+cost gate. The next actual request run must include matched control/candidate
+requests with fresh prefills and all custom traces closed between requests,
+report setup separately, and retain the new proposal/native-tape telemetry.
+
 ### Lookup acceptance bottleneck and next-request telemetry
 
 Re-inspection of actual request run34045603132 separates accepted proposal
