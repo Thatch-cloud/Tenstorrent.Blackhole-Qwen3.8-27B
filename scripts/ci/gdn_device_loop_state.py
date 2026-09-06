@@ -6,10 +6,11 @@ from gdn_state_copy import copy_compact
 
 
 class DeviceLoopState:
-    def __init__(self, active, operations, kernels):
+    def __init__(self, active, operations, kernels, compact_prologue=False):
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError('Audited stable B8 active snapshots required')
         self.active, self.gdn, self.operations, self.kernels = active, active.gdn, operations, kernels
+        self.compact_prologue = compact_prologue
         self.entry = active.allocate()
         self.state = active.allocate()
         self.calls = self.checkpoint_calls = self.skipped_clones = 0
@@ -29,7 +30,8 @@ class DeviceLoopState:
         result = None
         try:
             result = run_projected(layer.mesh, projected, self.entry[0], self.state[1:],
-                list(layer.tw['conv_taps']), layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels)
+                list(layer.tw['conv_taps']), layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels,
+                **(dict(conv_checkpoints=tuple(sorted({prefix, rows} - {0})), hoist_input=True) if self.compact_prologue else {}))
             result['owned'].append(projected)
             restore_prefix(operations, result, self.entry, checkpoint, prefix)
             restore_prefix(operations, result, self.entry, self.state, rows)

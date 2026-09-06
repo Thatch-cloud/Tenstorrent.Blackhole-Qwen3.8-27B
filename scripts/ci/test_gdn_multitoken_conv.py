@@ -1,10 +1,27 @@
 from types import SimpleNamespace
 import unittest
 
-from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, validate_projected
+from gdn_multitoken_conv import addresses, convolution_checkpoints, finish_output, release_owned, restore_prefix, validate_projected
 
 
 class ConvIntegrationTests(unittest.TestCase):
+    def test_sparse_convolution_policy_keeps_final_and_rejects_invalid_prefixes(self):
+        self.assertEqual(convolution_checkpoints(4, None), (1, 2, 3, 4))
+        self.assertEqual(convolution_checkpoints(4, (4, 2)), (2, 4))
+        self.assertEqual(convolution_checkpoints(16, (16,)), (16,))
+        for selected in ((), (1,), (0, 4), (True, 4), (4, 4), (5, 4)):
+            with self.assertRaises(ValueError):
+                convolution_checkpoints(4, selected)
+
+    def test_unmaterialized_convolution_prefix_fails_before_writes(self):
+        operations, result, entry, destinations, copies, slices, freed = self.restore_fixture()
+        result['conv_prefixes'][0] = None
+        with self.assertRaisesRegex(ValueError, 'not materialized'):
+            restore_prefix(operations, result, entry, destinations, 1)
+        self.assertEqual(copies, [])
+        restore_prefix(operations, result, entry, destinations, 2)
+        self.assertEqual(len(copies), 5)
+
     def test_output_projection_preserves_rows_and_uses_native_reduce_contract(self):
         calls = []
         partial = SimpleNamespace(shape=(1, 4, 5120))

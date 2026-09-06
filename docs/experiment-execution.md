@@ -148,6 +148,38 @@ corrected rollback, valid-KV checks, stale-state/wrong-page controls, and paired
 full-model timing against the previous compact/input-reuse/selective-clone/row-layout
 candidate from run34011273093. No serving change or200 committed-tok/s claim.
 
+Run [34023117059](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34023117059)
+(`6a2ca23`) passed20 width/mode checks,16 corrected rollback cases, four negative
+control pairs and all10 timing fixtures. Full logits/GDN state/valid KV were exact.
+**Performance rejected:** all T>1 widths were slower than the previous optimized
+row-layout control. T1 remained native and unchanged within measurement noise.
+
+| Context | T | Control mean ms | Device-loop mean ms | Median paired ratio |
+| --- | --- | --- | --- | --- |
+| 4095 | 2 | 56.138 | 62.037 | 0.9051 |
+| 4095 | 4 | 72.858 | 83.246 | 0.8752 |
+| 4095 | 8 | 106.285 | 125.435 | 0.8473 |
+| 4095 | 16 | 173.072 | 210.138 | 0.8236 |
+| 16383 | 2 | 57.238 | 63.133 | 0.9067 |
+| 16383 | 4 | 75.109 | 85.456 | 0.8785 |
+| 16383 | 8 | 110.697 | 129.859 | 0.8524 |
+| 16383 | 16 | 181.859 | 218.918 | 0.8307 |
+
+Next bounded intervention: `--compact-prologue` restores the earlier hoisted
+projected-row layout strategy and removes unneeded convolution checkpoint clones.
+Only the selected/final convolution prefixes are materialized (four rather than64
+convolution clones at T16/end); all recurrent prefixes remain. Missing convolution
+prefix restores fail before any writes. Native T1 and kernel math are unchanged.
+This bundles two known overhead sources; a gain must not be attributed separately
+to either without ablation. The full-model comparison still uses the stronger
+previous row-layout baseline, not the slower device-loop candidate. No adoption.
+
+Compact-prologue simulator `20260906T092329Z-324` passed T2/seed0 at prefixes0/1/2,
+including selected checkpoints, final active state, all inactive slots, clean close
+and exit0. The standard all-prefix path is also exercised as its control. Local
+validation:75 GDN,184 CI and55 simulator unit tests pass; Python/shell syntax and
+diff checks pass. Full-model compact-prologue hardware results are pending.
+
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
 Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)

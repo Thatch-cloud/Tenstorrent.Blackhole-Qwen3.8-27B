@@ -6,6 +6,16 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_compact_prologue_selects_checkpoint_and_final_only(self):
+        adapter, active = self.fixture()
+        adapter.compact_prologue = True
+        for prefix, expected in ((0, (4,)), (2, (2, 4)), (4, (4,))):
+            with patch('gdn_device_loop_state.copy_compact'), \
+                    patch('gdn_device_loop_state.run_projected', return_value=dict(owned=[])) as run, \
+                    patch('gdn_device_loop_state.restore_prefix'):
+                adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], prefix)
+            self.assertEqual(run.call_args.kwargs, dict(conv_checkpoints=expected, hoist_input=True))
+
     def fixture(self):
         live = [object() for index in range(5)]
         entry = [object() for index in range(5)]

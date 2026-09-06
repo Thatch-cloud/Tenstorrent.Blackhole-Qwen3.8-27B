@@ -18,7 +18,7 @@ def summarize(samples):
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-            device_loop_gdn=False):
+            device_loop_gdn=False, compact_prologue=False):
     import torch
     import ttnn
 
@@ -30,7 +30,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
                            compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
-                           hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn)
+                           hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn, compact_prologue=compact_prologue)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False,
                          reuse_gdn_input=reuse_gdn_input if skip_row_clones else False,
@@ -54,10 +54,13 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     if device_loop_gdn:
         import math
         report.update(device_loop_gdn_enabled=candidate.device_loop_gdn,
+            compact_prologue_enabled=candidate.compact_prologue,
             paired_control='previous compact/input-reuse/selective-clone/row-layout full-model control',
             candidate_internal_checkpoints='all prefixes materialized; one selected prefix copied to external checkpoint',
             extra_initial_state_bytes_per_chip=sum(math.prod(tensor.padded_shape) * 2
                 for state in candidate.working_states for tensor in state.entry))
+        if compact_prologue:
+            report['candidate_internal_checkpoints'] = 'all recurrent prefixes; selected/final convolution prefixes only; hoisted projected-row layout'
     if compact_gdn:
         import math
         report["working_state_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
@@ -141,6 +144,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report["compact_comparison"]["scope"] = "Full-model hoisted layout versus selective-clone control; no committed tok/s"
             if device_loop_gdn:
                 report['compact_comparison']['scope'] = 'Full-model device-loop GDN versus previous compact/input-reuse/selective-clone/row-layout control; candidate materializes all internal prefixes; same selected external checkpoint; no committed tok/s'
+                if compact_prologue:
+                    report['compact_comparison']['scope'] = 'Full-model compact-prologue device-loop GDN versus previous optimized row-layout control; same selected external checkpoint; no committed tok/s'
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)

@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--output-projection', action='store_true')
     parser.add_argument('--model-adapter', action='store_true')
+    parser.add_argument('--compact-prologue', action='store_true')
     args = parser.parse_args()
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
@@ -41,6 +42,8 @@ def main():
         parser.error('--output-projection requires --conv')
     if args.model_adapter and not args.conv:
         parser.error('--model-adapter requires --conv')
+    if args.compact_prologue and not args.model_adapter:
+        parser.error('--compact-prologue requires --model-adapter')
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
@@ -50,6 +53,7 @@ def main():
                   continuation_enabled=args.continuation,
                   output_projection=args.output_projection,
                   model_adapter_checks=0,
+                  compact_prologue=args.compact_prologue,
                   model_adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_device_loop_state.py').read_bytes()).hexdigest() if args.model_adapter else None,
                   output_projection_scope='Synthetic 3072x128 local projection only; no real weights or inter-chip collective' if args.output_projection else None,
                   adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_multitoken_conv.py').read_bytes()).hexdigest() if args.conv else None,
@@ -148,7 +152,7 @@ def main():
                         _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
-                    adapter = DeviceLoopState(active, ttnn, kernels)
+                    adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue)
                     checkpoint = active.allocate()
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):

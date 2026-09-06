@@ -53,6 +53,11 @@ state transfers with synthetic projected inputs. T2/seed0 `20260906T084858Z-363`
 passed checkpoints0/1/2, final active state and preservation of all seven inactive
 slots on both chips. This does not simulate the64-layer model or attention.
 
+Add `--compact-prologue` to that adapter gate to test selected/final convolution
+checkpoints and hoisted projected-row layout. T2/seed0 `20260906T092329Z-324`
+passed all three checkpoint choices, final state and inactive-slot preservation.
+Recurrent prefixes are still all materialized; no kernel math changed.
+
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation
 flags, and has no hardware fallback. It uses the existing D-drive WSL distribution

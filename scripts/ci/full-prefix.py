@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--skip-row-clones", action="store_true")
     parser.add_argument("--hoist-row-layout", action="store_true")
     parser.add_argument("--device-loop-gdn", action="store_true")
+    parser.add_argument('--compact-prologue', action='store_true')
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -76,6 +77,8 @@ def main():
         raise ValueError("Layout hoisting requires selective clone removal")
     if options.device_loop_gdn and not options.hoist_row_layout:
         raise ValueError('Device loop requires the previous full row-layout control')
+    if options.compact_prologue and not options.device_loop_gdn:
+        raise ValueError('Compact prologue requires device-loop GDN')
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -111,6 +114,9 @@ def main():
         report.update(device_loop_gdn=True, native_t1_retained=True,
                       legacy_gdn_flags_describe_paired_control=True,
                       checkpoint_materialization='all internal prefixes; selected external checkpoint')
+        if options.compact_prologue:
+            report.update(compact_prologue=True, prior_device_loop_run=34023117059,
+                checkpoint_materialization='all recurrent prefixes; selected/final convolution prefixes; selected external checkpoint')
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -261,7 +267,8 @@ def main():
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                  reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                                 hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
+                                 hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
+                                 compact_prologue=options.compact_prologue)
             captured = None
             output = None
             try:
@@ -297,7 +304,8 @@ def main():
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
+                                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
+                                         compact_prologue=options.compact_prologue)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -437,7 +445,8 @@ def main():
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
                         compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                        hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
+                        hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
+                        compact_prologue=options.compact_prologue)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

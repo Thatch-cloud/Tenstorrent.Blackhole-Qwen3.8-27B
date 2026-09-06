@@ -1,6 +1,7 @@
 """Native serial convolution/gates feeding one device-loop recurrence/norm call."""
 
 from gdn_multitoken import execute
+from gdn_prefix import independent_row
 
 
 def validate_projected(shape, states):
@@ -32,15 +33,17 @@ def restore_prefix(operations, result, entry, destinations, accepted):
         raise ValueError('Accepted prefix must lie within the candidate block')
     if len(entry) != 5 or len(destinations) != 5 or len(result['conv_prefixes']) != rows:
         raise ValueError('Complete recurrent and four-convolution state required')
-    if any(len(prefix) != 4 or any(tuple(value.shape) != (1, 1, 5120) for value in prefix)
+    if any(prefix is not None and (len(prefix) != 4 or any(tuple(value.shape) != (1, 1, 5120) for value in prefix))
            for prefix in result['conv_prefixes']):
         raise ValueError('Complete compact convolution prefixes required')
+    if accepted and result['conv_prefixes'][accepted - 1] is None:
+        raise ValueError('Requested convolution prefix was not materialized')
     expected = [(1, 24, 128, 128), *[(1, 1, 5120)] * 4]
     if any(tuple(value.shape) != shape for values in (entry, destinations)
            for value, shape in zip(values, expected, strict=True)):
         raise ValueError('Compact B1 restore shapes required')
     destination_addresses = [addresses(operations, value) for value in destinations]
-    protected = [*entry, result['states'], *[value for prefix in result['conv_prefixes'] for value in prefix]]
+    protected = [*entry, result['states'], *[value for prefix in result['conv_prefixes'] if prefix is not None for value in prefix]]
     protected_addresses = {addresses(operations, value) for value in protected}
     def overlaps(left, right):
         return any(first == second for first, second in zip(left, right, strict=True))
@@ -80,10 +83,24 @@ def finish_output(gdn, result, operations, reduce):
     return result
 
 
-def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None):
+def convolution_checkpoints(rows, requested):
+    if requested is None:
+        return tuple(range(1, rows + 1))
+    if not requested or any(type(prefix) is not int or not 1 <= prefix <= rows for prefix in requested):
+        raise ValueError('Convolution checkpoints must be nonzero prefixes within the block')
+    if rows not in requested or len(set(requested)) != len(requested):
+        raise ValueError('Unique convolution checkpoints including the final prefix required')
+    return tuple(sorted(requested))
+
+
+def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None,
+                  *, conv_checkpoints=None, hoist_input=False):
     if operations is None:
         import ttnn as operations
     rows = validate_projected(tuple(projected.shape), conv_states)
+    selected = convolution_checkpoints(rows, conv_checkpoints)
+    if hoist_input and rows == 1:
+        raise ValueError('Hoisted input is a multirow-only experiment')
     if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, 5120) for tap in taps):
         raise ValueError('Four channel-wise convolution taps required')
     owned, conv_prefixes = [], []
@@ -91,12 +108,24 @@ def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_
     initial_addresses = [addresses(operations, state) for state in conv_states]
     source_address = addresses(operations, projected)
     try:
+        row_source = projected
+        if hoist_input:
+            row_source = operations.to_layout(projected, operations.ROW_MAJOR_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG)
+            independent_row(operations, projected, row_source)
+            owned.append(row_source)
+            source_address = addresses(operations, row_source)
         for token in range(rows):
-            view = operations.slice(projected, (0, token, 0), (1, token + 1, projected.shape[-1]),
+            view = operations.slice(row_source, (0, token, 0), (1, token + 1, projected.shape[-1]),
                                     memory_config=operations.DRAM_MEMORY_CONFIG)
             if addresses(operations, view) != source_address:
                 owned.append(view)
-            row = operations.clone(view, memory_config=operations.DRAM_MEMORY_CONFIG)
+            if hoist_input:
+                independent_row(operations, row_source, view)
+                row = operations.to_layout(view, operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG)
+                independent_row(operations, view, row)
+                independent_row(operations, projected, row)
+            else:
+                row = operations.clone(view, memory_config=operations.DRAM_MEMORY_CONFIG)
             owned.append(row)
             results = operations.transformer.gdn_decode_conv_gates(row, conv_states, taps, row, row,
                 dt_bias, neg_exp_A, batch=1, memory_config=operations.L1_MEMORY_CONFIG,
@@ -104,8 +133,9 @@ def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_
             owned.extend(results)
             for stream, result in zip(streams, results, strict=True):
                 stream.append(result)
-            prefix = [operations.clone(state, memory_config=operations.DRAM_MEMORY_CONFIG) for state in conv_states]
-            owned.extend(prefix)
+            prefix = [operations.clone(state, memory_config=operations.DRAM_MEMORY_CONFIG) for state in conv_states] if token + 1 in selected else None
+            if prefix is not None:
+                owned.extend(prefix)
             conv_prefixes.append(prefix)
         if [addresses(operations, state) for state in conv_states] != initial_addresses:
             raise AssertionError('Convolution state addresses changed')
@@ -118,7 +148,8 @@ def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_
             owned.append(weights)
         output, states = execute(mesh, *packed, initial, kernels, z=z, norm_w=weights)
         owned.extend([output, states])
-        return dict(output=output, states=states, conv_prefixes=conv_prefixes, owned=owned)
+        return dict(output=output, states=states, conv_prefixes=conv_prefixes, owned=owned,
+                    materialized_conv_prefixes=selected, hoisted_input=hoist_input)
     except BaseException:
         release_owned(operations, owned)
         raise

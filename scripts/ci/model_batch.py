@@ -46,7 +46,7 @@ def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout):
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-                 device_loop_gdn=False):
+                 device_loop_gdn=False, compact_prologue=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -64,6 +64,9 @@ class ModelBatch:
             raise ValueError("Layout hoisting requires the selective-clone control")
         self.hoist_row_layout = hoist_row_layout and self.rows > 1
         self.device_loop_gdn = device_loop_enabled(self.rows, device_loop_gdn, compact_gdn, hoist_row_layout)
+        if compact_prologue and not device_loop_gdn:
+            raise ValueError('Compact prologue requires device-loop GDN')
+        self.compact_prologue = compact_prologue and self.device_loop_gdn
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -138,7 +141,7 @@ class ModelBatch:
             from gdn_device_loop_state import DeviceLoopState
             from gdn_multitoken import load_kernels
             from gdn_multitoken_conv import finish_output, release_owned
-            state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True))
+            state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True), self.compact_prologue)
             self.working_states.append(state)
 
             def device_forward(value):
