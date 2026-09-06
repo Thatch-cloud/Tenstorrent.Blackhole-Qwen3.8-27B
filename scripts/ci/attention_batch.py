@@ -3,6 +3,22 @@
 from types import FunctionType, MethodType
 
 
+def capture_operation(operations, mesh, operation):
+    trace = operations.begin_trace_capture(mesh, cq_id=0)
+    ended = False
+    try:
+        try:
+            result = operation()
+        finally:
+            operations.end_trace_capture(mesh, trace, cq_id=0)
+            ended = True
+    except BaseException:
+        if ended:
+            operations.release_trace(mesh, trace)
+        raise
+    return trace, result
+
+
 class Overlay:
     def __init__(self, original, **overrides):
         self.original = original

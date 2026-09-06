@@ -64,7 +64,19 @@ host selection and eager commit cost25.45-41.57ms in these fixtures; those
 component timings exclude verification and drafting and are not committed TPS.
 No serving settings change.
 
-### Ordered shared-page cache write (simulator passed; hardware next)
+### Ordered shared-page cache write (simulator passed; hardware harness retry)
+
+Run34031827886 passed T1 eager/trace output and complete KV equality, then
+failed before timing on an unwarmed `InterleavedToShardedDeviceOperation` in
+the previous serial-writer control. The candidate was warmed, but the newly
+isolated control composition was not. An active capture then prevented clean
+teardown until the shell timeout. This is not evidence of a cache-kernel mismatch
+or a multirow kernel pass. No timing was collected.
+
+The retry warms and validates both arms before either timing trace is captured,
+and closes/releases failed captures before propagating operation errors. Stage
+markers distinguish native reference, candidate warmup and each timing arm.
+A bounded transfer health check precedes retry; no reset is requested.
 
 The remaining attention adapter dispatches per-token slice, reshard and native
 paged-cache writes. A bounded candidate stages each prepared KV row on one worker,

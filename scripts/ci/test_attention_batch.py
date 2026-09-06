@@ -2,10 +2,25 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from attention_batch import OrderedCacheWriter, Overlay, SerialAttentionReader, SerialCacheWriter, serial_tail
+from attention_batch import OrderedCacheWriter, Overlay, SerialAttentionReader, SerialCacheWriter, capture_operation, serial_tail
 
 
 class AttentionBatchTests(unittest.TestCase):
+    def test_capture_closes_and_releases_on_operation_failure(self):
+        events = []
+        operations = SimpleNamespace(begin_trace_capture=Mock(return_value=17),
+            end_trace_capture=Mock(side_effect=lambda *args, **kwargs: events.append('end')),
+            release_trace=Mock(side_effect=lambda *args, **kwargs: events.append('release')))
+        with self.assertRaisesRegex(RuntimeError, 'cold binary'):
+            capture_operation(operations, 'mesh', Mock(side_effect=RuntimeError('cold binary')))
+        self.assertEqual(events, ['end', 'release'])
+
+    def test_capture_keeps_successful_trace_owned_by_caller(self):
+        operations = SimpleNamespace(begin_trace_capture=Mock(return_value=17), end_trace_capture=Mock(), release_trace=Mock())
+        self.assertEqual(capture_operation(operations, 'mesh', lambda: 'output'), (17, 'output'))
+        operations.end_trace_capture.assert_called_once_with('mesh', 17, cq_id=0)
+        operations.release_trace.assert_not_called()
+
     def test_ordered_writer_owns_only_its_conversion(self):
         for memory in ('DRAM', 'sharded'):
             operations = SimpleNamespace(DRAM_MEMORY_CONFIG='DRAM', to_memory_config=Mock(), deallocate=Mock())

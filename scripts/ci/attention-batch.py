@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import time
 
-from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
+from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, capture_operation, serial_tail
 
 
 def main():
@@ -32,6 +32,12 @@ def main():
     report['ordered_cache'] = options.ordered_cache
     report['timing_control'] = 'Batched attention with serial cache writes and B1 SDPA' if options.ordered_cache else 'Native serial B1 attention'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
+
+    def stage(name, **details):
+        report['last_stage'] = dict(name=name, **details)
+        output_path.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report['last_stage']), flush=True)
+
     mesh = None
     traces = []
     try:
@@ -130,11 +136,13 @@ def main():
                         finally:
                             del attention._decode_from_prep
 
+                    stage('native-reference', seed=seed, start=start, rows=rows)
                     reset()
                     expected_device = reference()
                     expected_outputs = [torch.cat([host(value)[chip] for value in expected_device], dim=-2) for chip in range(2)]
                     expected_caches = [host(cache) for cache in caches]
                     release(expected_device)
+                    stage('candidate-warmup', seed=seed, start=start, rows=rows)
                     reset()
                     warm = candidate()
                     release(warm)
@@ -142,10 +150,10 @@ def main():
                         reset()
                         trace = None
                         if mode == "trace":
-                            trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-                        outputs = candidate()
+                            trace, outputs = capture_operation(ttnn, mesh, candidate)
+                        else:
+                            outputs = candidate()
                         if trace is not None:
-                            ttnn.end_trace_capture(mesh, trace, cq_id=0)
                             traces.append(trace)
                             reset()
                             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
@@ -164,11 +172,21 @@ def main():
                     if options.timing and all(check["exact"] for check in report["checks"][-2:]):
                         timed_traces = {}
                         timed_outputs = {}
-                        for arm, operation in (("serial", (lambda: candidate(control=True)) if options.ordered_cache else reference), ("batch", candidate)):
+                        arms = (("serial", (lambda: candidate(control=True)) if options.ordered_cache else reference), ("batch", candidate))
+                        for arm, operation in arms:
+                            stage('timing-arm-warmup', seed=seed, start=start, rows=rows, arm=arm)
                             reset()
-                            trace = ttnn.begin_trace_capture(mesh, cq_id=0)
                             outputs = operation()
-                            ttnn.end_trace_capture(mesh, trace, cq_id=0)
+                            warmed_outputs = [torch.cat([host(value)[chip] for value in outputs], dim=-2) for chip in range(2)]
+                            if not equal(difference(warmed_outputs, expected_outputs)) or any(
+                                not equal(difference(host(cache), expected)) for cache, expected in zip(caches, expected_caches, strict=True)
+                            ):
+                                raise AssertionError(f'Timing warmup {arm} differs from native B1 oracle')
+                            release(outputs)
+                        for arm, operation in arms:
+                            stage('timing-arm-capture', seed=seed, start=start, rows=rows, arm=arm)
+                            reset()
+                            trace, outputs = capture_operation(ttnn, mesh, operation)
                             traces.append(trace)
                             timed_traces[arm] = trace
                             timed_outputs[arm] = outputs
