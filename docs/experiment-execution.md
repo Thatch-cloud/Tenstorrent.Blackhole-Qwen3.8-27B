@@ -55,7 +55,12 @@ prefix copies, 33 restored two-token continuations and a stale-state control,
 with immutable entry/projected inputs and clean close. Ordered-cache T32 passed
 `20260906T140728Z-1111`, seed2/start16383 with 1024 page-table columns,
 complete native BF8 cache equality, immutable input and negative/replay checks.
-Hardware next runs the native full-layer prerequisite, then full-model T32.
+Hardware attempt34038257973 (`94a86f3`) completed36 exact native full-layer
+eager/trace cases,414 restored continuations and18 stale-state controls, then
+failed an obsolete hard-coded216/15 final counter assertion. Full-model testing
+did not start; mesh close succeeded. The retry derives every expected count from
+the selected width matrix and includes regression coverage for missing cases.
+This is a harness rejection, not a numerical or kernel-liveness failure.
 Serving and host
 proposal bucket limits remain at T16 until the required integration gates.
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from gdn_prefix import gated_decode
 from gdn_pair_timing import paired_replays
 from gdn_multitoken import HANDOFF_HASHES, load_kernels, validate_handoff_runtime
-from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, run_projected
+from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, run_projected, validate_matrix_counts
 from gdn_batched_conv import run_batched_projected
 
 
@@ -302,12 +302,7 @@ def main():
                                          *([packed_input] if packed_input is not None else []),
                                          *[state for prefix in oracle_prefixes for state in prefix]])
                     stage('fixture-complete')
-            if len(report['checks']) != 6 * len(widths) or report['projection_calls'] != 3 * sum(widths):
-                raise AssertionError('Incomplete real-weight integration gate')
-            if options.continuation and (len(report['continuation_checks']) != 216 or len(report['stale_controls']) != 15):
-                raise AssertionError('Incomplete composed-prefix continuation gate')
-            if options.paired_timing and len(report['paired_timing']) != 5:
-                raise AssertionError('Incomplete paired full-layer timing matrix')
+            validate_matrix_counts(report, widths, continuation=options.continuation, paired_timing=options.paired_timing)
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None

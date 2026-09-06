@@ -4,6 +4,18 @@ from gdn_multitoken import execute
 from gdn_prefix import independent_row
 
 
+def validate_matrix_counts(report, widths, *, continuation, paired_timing):
+    expected = dict(checks=6 * len(widths), projection_calls=3 * sum(widths))
+    if continuation:
+        expected.update(continuation_checks=6 * sum(rows + 1 for rows in widths), stale_controls=3 * len(widths))
+    if paired_timing:
+        expected['paired_timing'] = len(widths)
+    for name, count in expected.items():
+        actual = report[name] if name == 'projection_calls' else len(report[name])
+        if actual != count:
+            raise AssertionError(f'Incomplete real-weight matrix: {name}={actual}, expected {count}')
+
+
 def validate_projected(shape, states):
     if len(shape) != 3 or shape[0] != 1 or shape[1] not in (1, 2, 4, 8, 16, 32) or shape[2] not in (8240, 8256):
         raise ValueError('Expected projected TP2 rows [1,T,8240/8256]')

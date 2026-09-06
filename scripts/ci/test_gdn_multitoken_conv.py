@@ -2,10 +2,25 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from gdn_multitoken_conv import addresses, convolution_checkpoints, finish_output, release_owned, restore_prefix, validate_projected
+from gdn_multitoken_conv import addresses, convolution_checkpoints, finish_output, release_owned, restore_prefix, validate_matrix_counts, validate_projected
 
 
 class ConvIntegrationTests(unittest.TestCase):
+    def test_native_gate_counts_scale_with_widths_and_reject_missing_cases(self):
+        for widths, checks, projections, continuations, stale in (
+            ((1, 2, 4, 8, 16), 30, 93, 216, 15),
+            ((1, 2, 4, 8, 16, 32), 36, 189, 414, 18),
+        ):
+            report = dict(checks=[True] * checks, projection_calls=projections,
+                continuation_checks=[True] * continuations, stale_controls=[True] * stale,
+                paired_timing=[True] * len(widths))
+            validate_matrix_counts(report, widths, continuation=True, paired_timing=True)
+            for name, value in report.items():
+                incomplete = dict(report)
+                incomplete[name] = value - 1 if name == 'projection_calls' else value[:-1]
+                with self.assertRaisesRegex(AssertionError, name):
+                    validate_matrix_counts(incomplete, widths, continuation=True, paired_timing=True)
+
     def test_packed_history_accepts_every_prefix_after_verification(self):
         for accepted in range(5):
             operations, result, entry, destinations, copies, slices, freed = self.restore_fixture(4)
