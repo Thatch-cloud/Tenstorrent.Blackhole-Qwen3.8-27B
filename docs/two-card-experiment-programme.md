@@ -75,10 +75,15 @@ Post-verification record lifetime and greedy commit passed run34029984214:
 all48 layers retained,16 post-output decisions across4K/16K eager/trace, including
 abort and rejection corrections. Readback/selection/eager commit alone costs
 25.45-41.57ms; this is not an actual drafter or reusable serving engine.
-The next simulator-first experiment replaces per-token cache-write launches with
-one ordered device semaphore chain, preserving native BF8 RMW arithmetic.
+The ordered cache writer passed hardware layer gate34033619168:60 exact cases,
+30 negative-control pairs and90 paired timing blocks. T16 attention improved
+0.722 to0.592ms; T1 regressed and remains native. The full-model gate rejected
+its1024-column page table at an overly narrow adapter guard; widened metadata
+subsequently passed native-oracle simulator checks at4K/16K and is ready to retry.
 Attention retains exact B1 SDPA; GDN recurrence remains sequential inside its
-device loop. Target200 remains unachieved, and serving defaults remain unchanged.
+device loop. Fused96-worker retained-state publication passed two-layer simulator
+checks but awaits full-model hardware certification. Target200 remains unachieved,
+and serving defaults remain unchanged.
 
 Historical recurrence-kernel development:
 The first recurrence-only prototype retains BF16 state between tokens in L1 and

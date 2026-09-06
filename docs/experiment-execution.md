@@ -86,6 +86,20 @@ No serving settings change.
 
 ### Ordered shared-page cache write (hardware passed 34033619168)
 
+The first full-model attempt34033778987 (`ee90045`) cleanly rejected its1024-column
+page table at the adapter's512-column guard, before ordered kernel dispatch.
+The cap is now1024, also bounded by physical cache block count to match the native
+validator. The extended simulator fixture initially used only8 physical blocks
+and was correctly rejected by the native oracle (`20260906T124638Z-325`); this
+fixture was fixed rather than weakening the native capacity invariant.
+
+With1024 physical blocks and1024-column metadata, T16 at16383/seed1 passed
+`20260906T124725Z-316` and T2 at4095/seed2 passed `20260906T124834Z-318`.
+Both chips' complete physical caches match native ordered B1 writes, with repeat,
+immutable-input and omitted-write checks, clean close and exit0. The generated
+kernel math is unchanged; only metadata capacity/CB size changes. The full-model
+retry needs no reset because the rejected attempt closed cleanly.
+
 The corrected layer gate at51aebda passed60 exact eager/trace cases,30 complete
 KV negative-control pairs and90 ABBA timing blocks (10800 timed replays).
 Paired controls use identical batched projections and B1 SDPA; only the writer

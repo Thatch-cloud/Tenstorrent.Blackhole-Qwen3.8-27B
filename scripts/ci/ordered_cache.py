@@ -50,7 +50,7 @@ def validate_shapes(cache, packed, positions, pages):
         raise ValueError('Native prepared T=1/2/4/8/16 KV tiles required')
     if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (2, 64, 256):
         raise ValueError('Expected two-head 64-row BF8 paged cache')
-    if tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows or not 1 <= pages[1] <= 512:
+    if tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows or not 1 <= pages[1] <= min(1024, cache[0]):
         raise ValueError('Paired position vector and page-table rows required')
     return rows
 

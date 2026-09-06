@@ -8,6 +8,7 @@ class OrderedCacheTests(unittest.TestCase):
     def test_supported_geometry(self):
         for rows in (1, 2, 4, 8, 16):
             self.assertEqual(validate_shapes((8, 2, 64, 256), (1, rows, 32, 256), (rows,), (rows, 4)), rows)
+            self.assertEqual(validate_shapes((8200, 2, 64, 256), (1, rows, 32, 256), (rows,), (rows, 1024)), rows)
 
     def test_rejects_geometry_before_dispatch(self):
         cases = [((8, 1, 64, 256), (1, 2, 32, 256), (2,), (2, 4)),
@@ -15,7 +16,8 @@ class OrderedCacheTests(unittest.TestCase):
                  ((8, 2, 64, 256), (1, 2, 2, 256), (2,), (2, 4)),
                  ((8, 2, 64, 256), (1, 2, 32, 256), (1,), (2, 4)),
                  ((8, 2, 64, 256), (1, 2, 32, 256), (2,), (1, 4)),
-                 ((8, 2, 64, 256), (1, 2, 32, 256), (2,), (2, 513))]
+                 ((8, 2, 64, 256), (1, 2, 32, 256), (2,), (2, 16)),
+                 ((8, 2, 64, 256), (1, 2, 32, 256), (2,), (2, 1025))]
         for arguments in cases:
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 validate_shapes(*arguments)

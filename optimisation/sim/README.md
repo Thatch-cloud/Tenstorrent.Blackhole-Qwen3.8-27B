@@ -18,6 +18,12 @@ omitted-write detection, repeat-after-restore, clean mesh close and exit0:
 | 20260906T115904Z-308 | 4 | 15 | 0 |
 | 20260906T115916Z-538 | 1 | 65 | 2 |
 
+Wide metadata: add `--page-columns 1024`. T16 at16383/seed1
+(`20260906T124725Z-316`) and T2 at4095/seed2 (`20260906T124834Z-318`)
+passed the same exact checks with1024 physical blocks. The first wide-table
+fixture had only8 physical blocks and was rejected by the native capacity guard
+before candidate dispatch; it was corrected, not treated as a kernel failure.
+
 The hardware `attention-timing` suite now gates the ordered writer with real
 weights and exact B1 SDPA. Its paired control uses the same batched attention
 projections and B1 SDPA but retains serial cache-write dispatch, isolating the

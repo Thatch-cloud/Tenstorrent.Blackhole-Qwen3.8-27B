@@ -19,12 +19,15 @@ def main():
     guard.require_simulator(os.environ)
     parser = argparse.ArgumentParser()
     parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16), default=2)
-    parser.add_argument('--start', type=int, choices=(15, 31, 63, 65), default=63)
+    parser.add_argument('--start', type=int, choices=(15, 31, 63, 65, 4095, 16383), default=63)
+    parser.add_argument('--page-columns', type=int, choices=(4, 1024), default=4)
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     args = parser.parse_args()
+    if args.start + args.rows > args.page_columns * 64:
+        parser.error('Positions exceed logical page-table coverage')
     kernels = load_kernels(os.environ['TT_METAL_HOME'])
     path = Path(os.environ['QWEN_SIM_REPORT'])
-    report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, seed=args.seed,
+    report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, seed=args.seed, page_columns=args.page_columns,
         native_hashes=HASHES, generated_hashes={role: hashlib.sha256(source.encode()).hexdigest() for role, source in kernels.items()},
         scope='Complete physical BF8 cache equality against native ordered B1 writes; not performance or full-model certification')
 
@@ -52,13 +55,13 @@ def main():
             return [ttnn.to_torch(part).clone() for part in parts]
 
         torch.manual_seed(args.seed)
-        initial = upload(torch.randn(8, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
+        initial = upload(torch.randn(max(8, args.page_columns), 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
         serial = ttnn.clone(initial, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         candidate = ttnn.clone(initial, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         packed_host = torch.randn(1, args.rows, 32, 256).bfloat16()
         packed = upload(packed_host)
         positions = torch.arange(args.start, args.start + args.rows, dtype=torch.int32)
-        pages_host = torch.tensor([[3, 1, 6, 2]], dtype=torch.int32)
+        pages_host = torch.tensor([[3, 1, 6, 2]], dtype=torch.int32).repeat(1, args.page_columns // 4)
         packed_positions, packed_pages = upload(positions, ttnn.int32), upload(pages_host.repeat(args.rows, 1), ttnn.int32)
         single_pages = upload(pages_host, ttnn.int32)
         shard_config = ttnn.create_sharded_memory_config([32, 256], ttnn.CoreGrid(y=1, x=1),
