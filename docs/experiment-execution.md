@@ -186,7 +186,42 @@ warmup/capture/eager (trace replay does not increment Python counters). It also
 records the unchanged C++ kernel hash and new Python adapter hash. The old generic
 copy path remains selectable; no speedup or full-model integration is assumed.
 
-### E3 full-model compact GDN integration (hardware pending)
+### E3 full-model compact GDN integration (passed 34006233354)
+
+Run 34006233354 (`1be2572`) passed 20 width/mode full-model checks, 16 rollback
+cases with corrected continuations, four stale-GDN/wrong-page negative-control
+pairs, and ten exact timing fixtures with 2400 timed decode replays. Full active
+logits, active GDN state, selected end checkpoints and complete valid KV prefixes
+matched the native serial oracle. Both 4K/16K contexts passed eager and trace gates.
+
+| Context | T | Batched native-state control ms | Compact candidate ms | Median paired speedup |
+| --- | --- | --- | --- | --- |
+| 4095 | 1 | 45.025 | 45.023 | 1.000x |
+| 4095 | 2 | 58.764 | 57.930 | 1.014x |
+| 4095 | 4 | 84.246 | 82.031 | 1.027x |
+| 4095 | 8 | 134.541 | 130.705 | 1.029x |
+| 4095 | 16 | 235.197 | 227.075 | 1.036x |
+| 16383 | 1 | 45.629 | 45.594 | 1.001x |
+| 16383 | 2 | 59.900 | 59.065 | 1.015x |
+| 16383 | 4 | 86.480 | 84.227 | 1.026x |
+| 16383 | 8 | 138.942 | 135.106 | 1.028x |
+| 16383 | 16 | 243.981 | 235.797 | 1.035x |
+
+Times are means over six samples per arm; ratios are medians of three paired
+ABBA blocks. Every T>1 paired block favored compact state. T1 explicitly did not
+enable compact state; tiny timing differences there are not optimization gains.
+T16 saves about 8.1-8.2 ms per full-logit block against the existing batched control.
+This is a measured full-model verification gain, not committed-token throughput.
+With perfect acceptance and zero drafting/selection/commit overhead, 16 divided
+by these block times gives only 70.46/67.85 tok/s for this T16 implementation.
+Reaching 200 requires blocks below 80 ms even before that overhead; this improvement
+does not close the remaining gap or establish a hardware-wide speed ceiling.
+
+Retain the opt-in exact candidate for subsequent experiments; do not change serving
+defaults. Next investigate projected-row preparation/copy overhead and remaining
+per-token work using the new candidate as a contemporaneous control. Keep attention
+numerics and GDN precision unchanged, and require full-model paired gains rather
+than extrapolating layer timing or fenced attribution.
 
 `full-compact-gdn` opts the static verifier into compact state plus direct compact
 checkpoint DMA for T2/4/8/16 across all 48 GDN layers. T1 and the default path keep
