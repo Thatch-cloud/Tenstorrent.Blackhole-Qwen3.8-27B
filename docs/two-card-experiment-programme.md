@@ -180,7 +180,12 @@ two-step rollback continuation on both chips. Each arm passed 216 cases and 30
 stale-state negative controls. Separately, `full-prefix` run 33999532634 passed 102
 full-model serial rollback cases across the 64-token page boundary, six eager/trace
 baseline comparisons and both stale-GDN/wrong-page controls in six configurations.
-It verifies full logits, active GDN states and valid KV values, not batched target
+  Attention-layer runs 34000512864/34000694699 additionally passed 60 exact
+  eager/trace cases each with native QKV/SDPA/output batching and ordered B1
+  shared-page KV writes. Timing measured T=16 at 0.5218 ms versus 4.4063 ms serial
+  (8.451x median speedup), one real-weight layer at short context only. Static
+  position fixtures are not a full-model/device-dynamic verifier integration.
+  The full-model serial oracle verifies full logits, active GDN states and valid KV values, not batched target
 execution or safe concurrent writes to shared KV pages. Keep the old multi-token
 harness diagnostic-only; its composed operations
 are not the current native fused control. See the execution ledger for run IDs.

@@ -39,8 +39,29 @@ output/KV values on either chip, and 30 pairs of omitted-write/wrong-page contro
 This validates one real-weight attention layer (layer 3), not all 16 attention
 layers or a full-model batched verifier. `attention-timing` adds paired captured
 serial/batched layer timing: three ABBA blocks, 30 replays per sample, with exact
-output and complete KV revalidation before and after measurement. Timing results
-are pending; no device-dynamic page/position integration has been implemented.
+output and complete KV revalidation before and after measurement. No device-dynamic
+page/position integration has been implemented.
+
+Timing run 34000694699 (`9d9c6ec`) passed the same 60 correctness checks and 30
+negative-control pairs, plus all pre/post timing checks and 90 paired ABBA blocks.
+For each T, 18 blocks cover two seeds and three start positions, with three repeats
+of the ABBA sequence per fixture and 30 trace replays per sample:
+
+| T | Serial block mean (ms) | Batched block mean (ms) | Median speedup | Speedup range |
+| --- | --- | --- | --- | --- |
+| 1 | 0.2875 | 0.2826 | 1.017x | 1.015-1.018x |
+| 2 | 0.5610 | 0.3071 | 1.826x | 1.822-1.830x |
+| 4 | 1.1106 | 0.3388 | 3.278x | 3.272-3.285x |
+| 8 | 2.2090 | 0.3985 | 5.544x | 5.530-5.552x |
+| 16 | 4.4063 | 0.5218 | 8.451x | 8.425-8.460x |
+
+These are warmed host-wall timings of captured **one-layer** token blocks, not
+per-token full-model latency. Candidate timing includes the serialized shared-page
+KV writes; reset and host validation are excluded from both arms. Positions are
+31-80, not coding-length contexts. Neither this gain nor T=1's small difference
+establishes serving throughput. Next combine this attention path with the exact
+GDN batching/rollback path in a full-model verifier, then measure verification and
+commit cost at realistic contexts before introducing a drafter.
 
 | Track | Current status | Required next evidence |
 | --- | --- | --- |
@@ -48,7 +69,7 @@ are pending; no device-dynamic page/position integration has been implemented.
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Full-model serial rollback/logit/KV oracle passed, run 33999532634; layer GDN batching and compact DMA separately validated | Build alias-safe batched attention/target verification; compare to the oracle, then measure T=1/2/4/8/16 verification and commit cost |
+| E3 verifier | Full-model serial oracle passed 33999532634; GDN batching/compact DMA validated; shared-page attention gate and timing passed 34000512864/34000694699 | Integrate full-model batched verification against the oracle; measure T=1/2/4/8/16 verification and commit cost at realistic contexts |
 | E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
