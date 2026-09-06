@@ -43,6 +43,16 @@ logits, GDN prefix/rollback and K/V checks, with DMA in both timing arms. Dynami
 request replay remains disabled. A read-only native registration/symbol audit
 also accompanies this run to diagnose the separate scratch-library build issue.
 
+Dynamic-mask prerequisite: simulator `20260906T234825Z-409` and final harness
+`20260906T235115Z-512` pass48 exact same-address checks each. Six geometries cover
+4K/16K capacities, one/three/four query rows, one/two/three parallel groups and
+forward/backward position refresh. The dataflow kernel writes only the final256
+columns of a zero-initialized BF16 mask; preceding columns stay zero. A host ticket
+guard rejects crossing the captured256-token capacity family. No request engine
+uses this yet. The hardware `attention-mask-replay` gate will capture the same
+preallocated program and refresh its position input across24 trace replays; it
+does not claim attention correctness, cache-write correctness or request speed.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,
