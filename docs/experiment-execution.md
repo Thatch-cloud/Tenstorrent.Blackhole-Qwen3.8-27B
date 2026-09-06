@@ -5,6 +5,20 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Verified control
 
+Grouped attention hardware microbenchmark `34061073573` (`6f75984`) passed:
+36 fixtures, 4320 blocking timed replays, 72 changed-query checks, exact native
+outputs on both chips and unchanged KV. Including device packing/unpacking,
+T32 attention fell from about 1.48 to 1.11 ms at 4K and 2.59 to 1.52 ms at 16K.
+Small widths regress; the real-weight layer gate keeps T1/2/4 on native SDPA.
+This is synthetic read-only attention, not full-model throughput. Real-weight
+integration now has a separate `attention-group-layer` gate: identical ordered
+cache writes in both arms, whole physical cache checks, native output oracle,
+static long-context positions, and valid wrong-page negative controls.
+Dynamic-position request trace reuse remains uncertified. The latest actual
+request rates remain 22.46/18.67 committed decode tokens/s, far below 200.
+Prepared-reader simulator pass `20260906T214204Z-304`: T8/start4095/seed2,
+groups 1/4/3, exact on both chips after scratch cleanup, borrowed query intact.
+
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.
 - Plugin: `bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c`; vLLM `0.25.1+empty`.

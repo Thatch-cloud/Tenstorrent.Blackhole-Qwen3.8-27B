@@ -93,6 +93,10 @@ class SerialAttentionReader:
         shape = tuple(query.shape)
         if len(shape) != 4 or shape[:2] != (1, len(self.positions)) or not 0 < shape[2] <= 32 or shape[3] != 256:
             raise ValueError(f"Unexpected native query geometry: {shape}")
+        if len(self.positions) == 1:
+            self.calls += 1
+            return operations.transformer.paged_scaled_dot_product_attention_decode(
+                query, keys, values, page_table_tensor=self.pages[0], cur_pos_tensor=self.positions[0], **kwargs)
         outputs = []
         for index, (position, pages) in enumerate(zip(self.positions, self.pages, strict=True)):
             row = operations.slice(query, (0, index, 0, 0), (1, index + 1, shape[2], 256),

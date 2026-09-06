@@ -127,6 +127,21 @@ def main():
         stage('comparison')
         if any(not check['exact'] for check in report['checks']):
             raise AssertionError('Folded attention differs from native causal B1')
+        if args.device_layout and args.grouped and args.rows >= 8:
+            from attention_grouped import GroupedAttentionReader
+            stage('prepared-reader-lifetime')
+            positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)
+                         for offset in range(args.rows)]
+            reader = GroupedAttentionReader(ttnn, mesh, args.start, args.rows,
+                torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload)
+            result = reader(device_query, keys, values, page_table_tensor=pages, cur_pos_tensor=positions[0],
+                scale=0.0625, program_config=native_config, memory_config=ttnn.L1_MEMORY_CONFIG)
+            owned.append(result)
+            if any(not torch.equal(reference, actual) for reference, actual in zip(expected, host(result), strict=True)):
+                raise AssertionError('Prepared reader differs from native B1')
+            if any(not torch.equal(query, actual) for actual in host(device_query)):
+                raise AssertionError('Reader changed or released borrowed query')
+            report['prepared_reader_exact'] = True
         report['passed'] = True
     finally:
         if mesh is not None:

@@ -1,0 +1,44 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import torch
+
+from attention_grouped import GroupedAttentionReader
+
+
+class GroupedReaderTests(unittest.TestCase):
+    def fixture(self, rows, capacity=16640):
+        operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock(),
+            transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock()))
+        mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
+        upload = Mock(side_effect=lambda value, dtype=None: value)
+        reader = GroupedAttentionReader(operations, mesh, 16383, rows,
+            torch.arange(capacity // 64).reshape(1, -1), list(range(rows)), 'pages', upload)
+        return reader, operations, upload
+
+    def test_small_width_uses_native_without_masks(self):
+        for rows in (1, 2, 4):
+            reader, operations, upload = self.fixture(rows)
+            upload.assert_not_called()
+            self.assertFalse(reader.metadata)
+        reader, operations, _ = self.fixture(1)
+        query = SimpleNamespace(shape=(1, 1, 12, 256))
+        reader(query, None, None, page_table_tensor=None, cur_pos_tensor=None)
+        self.assertIs(operations.transformer.paged_scaled_dot_product_attention_decode.call_args.args[0], query)
+
+    def test_long_boundary_has_bounded_views_and_groups(self):
+        reader, operations, upload = self.fixture(32)
+        self.assertEqual([entry[0]['rows'] for entry in reader.metadata], [1, 4, 4, 4, 4, 4, 4, 4, 3])
+        self.assertEqual([entry[1].shape[1] for entry in reader.metadata], [256] + [260] * 8)
+        self.assertEqual(upload.call_count, 18)
+        self.assertEqual(len(reader.owned), 18)
+
+    def test_insufficient_cache_rejected(self):
+        with self.assertRaises(ValueError):
+            self.fixture(8, capacity=16384)
+
+    def test_changed_geometry_rejected(self):
+        reader, _, _ = self.fixture(8)
+        with self.assertRaises(ValueError):
+            reader(SimpleNamespace(shape=(1, 16, 12, 256)), None, None, page_table_tensor=None, cur_pos_tensor=None)

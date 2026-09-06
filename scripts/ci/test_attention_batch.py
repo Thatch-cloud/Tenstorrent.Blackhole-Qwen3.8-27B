@@ -6,6 +6,14 @@ from attention_batch import OrderedCacheWriter, Overlay, SerialAttentionReader, 
 
 
 class AttentionBatchTests(unittest.TestCase):
+    def test_single_query_never_frees_aliased_slice(self):
+        operations = SimpleNamespace(transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock()))
+        query = SimpleNamespace(shape=(1, 1, 12, 256))
+        reader = SerialAttentionReader(operations, [63], ['pages'])
+        reader(query, 'keys', 'values', page_table_tensor='unused', cur_pos_tensor='unused', memory_config='L1')
+        self.assertIs(operations.transformer.paged_scaled_dot_product_attention_decode.call_args.args[0], query)
+        self.assertEqual(reader.calls, 1)
+
     def test_t32_serial_control_keeps_all_singleton_positions(self):
         operations, writer = self.fixture(32)
         writer('cache', SimpleNamespace(shape=(1, 32, 32, 256)), update_idxs_tensor='packed', page_table='packed')

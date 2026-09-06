@@ -18,7 +18,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--ordered-cache", action="store_true")
+    parser.add_argument("--grouped", action="store_true")
     options = parser.parse_args()
+    if options.grouped and not options.ordered_cache:
+        parser.error('--grouped requires --ordered-cache')
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_attn_layer
@@ -30,7 +33,10 @@ def main():
     report = dict(passed=False, checks=[], negative_controls=[], timings=[], eligible_for_serving_gate=False,
                   scope="One real-weight attention layer, TP2, static positions, serialized shared-page writes; no full-model speed claim")
     report['ordered_cache'] = options.ordered_cache
+    report['grouped'] = options.grouped
     report['timing_control'] = 'Batched attention with serial cache writes and B1 SDPA' if options.ordered_cache else 'Native serial B1 attention'
+    if options.grouped:
+        report['timing_control'] = 'Identical ordered cache and batched projections; native B1 SDPA only'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
 
     def stage(name, **details):
@@ -57,7 +63,8 @@ def main():
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
         mesh.enable_program_cache()
-        args = Qwen36ModelArgs(mesh, max_batch_size=8, max_seq_len=256)
+        capacity = 16640 if options.grouped else 256
+        args = Qwen36ModelArgs(mesh, max_batch_size=8, max_seq_len=capacity)
         layer = next(index for index, kind in enumerate(args.attention_type_list) if kind == "full_attention")
         attention = TPAttention(mesh, args, load_attention_weights_tp(mesh, load_attn_layer(args.CKPT_DIR, layer), args), TT_CCL(mesh))
         if not attention._fused_qkv or (attention.NKV, attention.HD) != (2, 256):
@@ -92,19 +99,22 @@ def main():
 
         for seed in (17, 41):
             torch.manual_seed(seed)
-            initial = [upload(torch.randn(8, 2, 64, 256, dtype=torch.bfloat16) * 0.1, ttnn.bfloat8_b) for _ in range(2)]
+            blocks = capacity // 64 if options.grouped else 8
+            initial = [upload(torch.randn(blocks, 2, 64, 256, dtype=torch.bfloat16) * 0.1, ttnn.bfloat8_b) for _ in range(2)]
             caches = [ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG) for value in initial]
             attention.set_paged_kv_cache(*caches)
             addresses = [value.buffer_address() for value in caches]
-            pages_host = torch.tensor([[3, 1, 6, 2]], dtype=torch.int32)
+            pages_host = torch.arange(blocks, dtype=torch.int32).flip(0).reshape(1, blocks) if options.grouped else torch.tensor([[3, 1, 6, 2]], dtype=torch.int32)
             page_single = upload(pages_host, ttnn.int32)
 
             def reset():
                 for value, cache in zip(initial, caches, strict=True):
                     ttnn.copy(value, cache)
 
-            for start in (31, 63, 65):
-                for rows in (1, 2, 4, 8, 16):
+            starts = (4095, 16383) if options.grouped else (31, 63, 65)
+            widths = (1, 2, 4, 8, 16, 32) if options.grouped else (1, 2, 4, 8, 16)
+            for start in starts:
+                for rows in widths:
                     values = torch.randn(1, 1, rows, 5120, dtype=torch.bfloat16)
                     packed = upload(values)
                     tokens = [upload(values[:, :, index:index + 1].contiguous()) for index in range(rows)]
@@ -118,16 +128,21 @@ def main():
                     serial_writer = SerialCacheWriter(ttnn, singleton_positions, [page_single] * rows, attention._kv_shard_cfg(1))
                     writer = OrderedCacheWriter(mesh, ttnn, kernels) if options.ordered_cache else serial_writer
                     reader = SerialAttentionReader(ttnn, singleton_positions, [page_single] * rows) if options.ordered_cache else None
-                    tail = serial_tail(attention, writer, ttnn, reader)
+                    grouped_reader = None
+                    if options.grouped:
+                        from attention_grouped import GroupedAttentionReader
+                        grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
+                            singleton_positions, page_single, upload)
+                    tail = serial_tail(attention, writer, ttnn, grouped_reader or reader)
 
                     def reference():
                         return [attention.forward_decode(token, position, *rope, page_table=page_single)
                                 for token, position, rope in zip(tokens, singleton_positions, singleton_rope, strict=True)]
 
                     def candidate(control=False):
-                        selected_writer = serial_writer if control else writer
+                        selected_writer = serial_writer if control and not options.grouped else writer
                         before = selected_writer.calls
-                        attention._decode_from_prep = serial_tail(attention, serial_writer, ttnn, reader) if control else tail
+                        attention._decode_from_prep = serial_tail(attention, selected_writer, ttnn, reader) if control else tail
                         try:
                             result = attention.forward_decode(packed, packed_position, cos, sin, page_table=packed_pages)
                             if selected_writer.calls - before != 2:
@@ -229,7 +244,7 @@ def main():
                     reset()
                     missing_write_detected = any(not equal(difference(host(cache), expected))
                                                  for cache, expected in zip(caches, expected_caches, strict=True))
-                    wrong_pages = upload(torch.tensor([[7, 5, 4, 0]], dtype=torch.int32), ttnn.int32)
+                    wrong_pages = upload(pages_host.roll(1, dims=1) if options.grouped else torch.tensor([[7, 5, 4, 0]], dtype=torch.int32), ttnn.int32)
                     wrong_outputs = [attention.forward_decode(token, position, *rope, page_table=wrong_pages)
                                      for token, position, rope in zip(tokens, singleton_positions, singleton_rope, strict=True)]
                     wrong_page_detected = any(not equal(difference(host(cache), expected))
@@ -243,10 +258,12 @@ def main():
                         raise AssertionError("Persistent cache addresses changed")
                     release(wrong_outputs + [wrong_pages, packed, packed_position, packed_pages, cos, sin] + tokens + singleton_positions)
                     release([value for pair in singleton_rope for value in pair])
+                    if grouped_reader is not None:
+                        grouped_reader.close()
             release(initial + caches + [page_single])
-        if len(report["checks"]) != 60 or not all(check["exact"] for check in report["checks"]):
+        if len(report["checks"]) != (48 if options.grouped else 60) or not all(check["exact"] for check in report["checks"]):
             raise AssertionError("Batched attention does not satisfy the exact native B1 gate")
-        if options.timing and len(report["timings"]) != 90:
+        if options.timing and len(report["timings"]) != (72 if options.grouped else 90):
             raise AssertionError("Missing paired timing blocks")
         report["passed"] = True
     except BaseException as error:
