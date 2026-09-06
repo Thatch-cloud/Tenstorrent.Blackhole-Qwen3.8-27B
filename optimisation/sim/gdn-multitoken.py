@@ -41,7 +41,13 @@ def main():
     parser.add_argument('--retain-histories', action='store_true')
     parser.add_argument('--value-split', action='store_true')
     parser.add_argument('--prepared-value-split', action='store_true')
+    parser.add_argument('--prefetch-value-split', action='store_true')
+    parser.add_argument('--refresh-value-split-inputs', action='store_true')
     args = parser.parse_args()
+    if args.refresh_value_split_inputs and not args.prepared_value_split:
+        parser.error('--refresh-value-split-inputs requires --prepared-value-split')
+    if args.prefetch_value_split and not args.prepared_value_split:
+        parser.error('--prefetch-value-split requires --prepared-value-split')
     if args.prepared_value_split and not args.value_split:
         parser.error('--prepared-value-split requires --value-split')
     if args.value_split and (not args.norm_gate or args.conv):
@@ -315,8 +321,29 @@ def main():
                 if args.prepared_value_split:
                     from gdn_vsplit_prepared import PreparedVSplit
                     prepared = PreparedVSplit(mesh, *packed[:3], initial, z=packed[3], norm_w=norm_w,
-                        root=args.source_root, experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG)
+                        root=args.source_root, experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG,
+                        prefetch_inputs=args.prefetch_value_split)
+                    if args.prefetch_value_split:
+                        import gdn_vsplit_prefetch
+                        report['prefetch'] = gdn_vsplit_prefetch.audit(args.source_root)
                     for repeat in range(3):
+                        if repeat == 1 and args.refresh_value_split_inputs:
+                            stage('prepared-refresh-inputs')
+                            values = [-values[0], 1 - values[1], values[2] * .5, -values[3]]
+                            refreshed_inputs = [upload(value) for value in values]
+                            for source, destination in zip(refreshed_inputs, packed, strict=True):
+                                ttnn.copy(source, destination)
+                            ttnn.synchronize_device(mesh)
+                            release_owned(ttnn, refreshed_inputs)
+                            refresh_output, refresh_states = run(packed, initial)
+                            refreshed_outputs, refreshed_states = host(refresh_output), host(refresh_states)
+                            if all(torch.equal(refreshed_states[chip][-1:], expected_states[-1][chip]) for chip in range(2)):
+                                raise AssertionError('Refresh fixture failed to change recurrent state')
+                            expected_outputs = [[value.reshape(args.rows, 1, 24, 128)[token:token + 1]
+                                for value in refreshed_outputs] for token in range(args.rows)]
+                            expected_states = [[value[token:token + 1] for value in refreshed_states]
+                                for token in range(args.rows)]
+                            release_owned(ttnn, [refresh_output, refresh_states])
                         output, states, bridge = prepared.run()
                         ttnn.synchronize_device(mesh)
                         repeated_outputs, repeated_states = host(output), host(states)
@@ -326,6 +353,8 @@ def main():
                                         or not torch.equal(actual_state[token:token + 1], expected_states[token][chip])):
                                     raise AssertionError(f'Prepared replay mismatch {repeat=} {token=} {chip=}')
                     report['prepared_replays'] = 3
+                    report['refreshed_input_checks'] = 2 if args.refresh_value_split_inputs else 0
+                    report['refreshed_reference'] = 'Existing24-worker FNG full block' if args.refresh_value_split_inputs else None
                     report['prepared_output_memory'] = 'L1'
                     report['prepared_sha256'] = hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_vsplit_prepared.py').read_bytes()).hexdigest()
                 else:

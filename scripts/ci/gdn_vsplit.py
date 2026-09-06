@@ -62,7 +62,9 @@ def output_element(token, head, column):
             + (token % 16) * 16 + column % 16)
 
 
-def cb_plan(stage):
+def cb_plan(stage, *, prefetch_inputs=False):
+    if type(prefetch_inputs) is not bool:
+        raise ValueError('prefetch_inputs must be explicit bool')
     if stage == 'recurrence':
         io = {0: 4, 1: 4, 2: 1, 3: 1, 4: 1, 5: 4, 18: 4, 27: 1, 30: 4}
         fp32 = {6: 1, 7: 4, 8: 4, 9: 1, 10: 4, 11: 4, 12: 4, 13: 1,
@@ -74,6 +76,8 @@ def cb_plan(stage):
                 22: 4, 28: 1, 31: 4}
     else:
         raise ValueError('Unknown stage')
+    if prefetch_inputs and stage == 'recurrence':
+        io[31] = 11
     return io, fp32
 
 
@@ -216,14 +220,14 @@ def runtime_args(spec, role, worker, rows, addresses):
     raise ValueError('Unknown kernel role')
 
 
-def build_program(ttnn, mesh, shards, kernels, stage, rows):
+def build_program(ttnn, mesh, shards, kernels, stage, rows, *, prefetch_inputs=False):
     spec = stage_spec(stage, rows)
     grid = mesh.compute_with_storage_grid_size()
     coordinates = core_coordinates(grid.x, grid.y, spec['workers'])
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(*point), ttnn.CoreCoord(*point))
                                for point in coordinates])
     buffers = []
-    io, fp32 = cb_plan(stage)
+    io, fp32 = cb_plan(stage, prefetch_inputs=prefetch_inputs)
     for counts, dtype, page in ((io, ttnn.bfloat16, 2048), (fp32, ttnn.float32, 4096)):
         for index, count in counts.items():
             buffers.append(ttnn.CBDescriptor(total_size=count * page, core_ranges=cores,

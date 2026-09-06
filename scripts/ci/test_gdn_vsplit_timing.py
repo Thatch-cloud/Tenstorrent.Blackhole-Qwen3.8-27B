@@ -10,7 +10,7 @@ spec.loader.exec_module(gate)
 
 class TimingMatrixTests(unittest.TestCase):
     def fixture(self):
-        return [dict(seed=seed, rows=rows, timed_replays=120, exact=True)
+        return [dict(seed=seed, rows=rows, timed_replays=120, exact=True, refreshed_checks=2)
                 for seed in (0, 1, 2) for rows in (1, 2, 4, 8, 16, 32)]
 
     def test_complete_matrix_has_2160_replays(self):
@@ -28,7 +28,7 @@ class TimingMatrixTests(unittest.TestCase):
                 gate.validate_matrix(fixtures)
 
     def test_inexact_or_short_replay_count_rejected(self):
-        for key, value in (('exact', False), ('timed_replays', 119)):
+        for key, value in (('exact', False), ('timed_replays', 119), ('refreshed_checks', 0)):
             fixtures = self.fixture()
             fixtures[0][key] = value
             with self.assertRaises(AssertionError):

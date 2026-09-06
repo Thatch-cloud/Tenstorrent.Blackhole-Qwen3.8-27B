@@ -140,6 +140,32 @@ No drafting, projections, attention, collectives or model throughput is measured
 
 ## Validation requirements
 
+### Recurrence input-prefetch variant
+
+`PreparedVSplit(..., prefetch_inputs=True)` additionally opts into the isolated
+`gdn_vsplit_prefetch` reader. It reserves free BF16 CB31 for11 full pages:
+four Q, four K, one V partition, beta and g. Full-page aligned NOC reads occur
+once per invocation, followed by a barrier and one persistent reserve/push/wait
+lifetime spanning the token loop. No state page is cached or zeroed by this path.
+
+Each Q/K/V/scalar destination uses its entire CB capacity per token. The first
+reservation zeroes that full ring; subsequent reservations wrap to the same
+storage after compute acknowledges consumption. Only row zero is updated with
+the selected token's two face rows; scalar selection masks the other BF16 half.
+The cache is popped only after the final local copy. Compute and both writers,
+BF16 feedback and the whole-head norm/gate stage remain unchanged. Additional
+CircularBuffer and Blackhole unpacker headers are hash-pinned for this reuse.
+
+This adds22528 bytes/recurrence worker, raising its CB total to305152. At T32,
+issued recurrence input-read payload per chip falls from66 MiB to2.0625 MiB;
+this is an address-count estimate, not measured DRAM bandwidth or a speedup.
+Initial-state reads, every-prefix writes, norm/z traffic, FP32 bridge and math
+remain. T1 saves no input reads and adds initialization. Host tests cover all
+row/column face boundaries and NaN-bit neighbours in the copy model, not actual
+device-poisoned padding. New simulator and hardware exactness gates are required.
+
+### General gates
+
 1. Review the source audit and pins against the intended full tt-metal checkout.
    Confirm board identity, physical worker availability, 128-byte DRAM accessor
    pages and actual per-stage L1 placement when changing the implementation.

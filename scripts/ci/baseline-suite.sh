@@ -159,6 +159,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-timing ]; then
     timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-prefetch ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py --prefetch-inputs
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-norm ]; then
     timeout -k 30 420 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate
     exit 0

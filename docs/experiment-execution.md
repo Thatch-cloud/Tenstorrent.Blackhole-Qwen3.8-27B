@@ -16,6 +16,43 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Value-split captured timing: correct, no useful gain
+
+Run34048090329 (`1b70865`) passed all18 native-oracle fixtures and2160 paired
+ABBA timed replays. Median latencies below use the median of the three seed
+medians; both arms export every recurrent prefix and use BF16 TILE L1 output.
+
+| T |24-worker fused ms |96-worker plus norm ms |
+| --- | ---: | ---: |
+|1|0.070349|0.120509|
+|2|0.100335|0.152801|
+|4|0.160545|0.208492|
+|8|0.282692|0.322577|
+|16|0.522745|0.546246|
+|32|1.001499|0.991198|
+
+The candidate is slower through T16 and only about1% faster at T32. Do not
+integrate this variant into the model on those results. More active cores alone
+did not lower the critical path enough; these are synthetic component costs,
+not a model throughput improvement. The next isolated variant caches the11
+Q/K/V/beta/g input pages per recurrence worker once in L1, retaining existing
+compute, state feedback, norm stage and output layout. Its full-ring CB reuse
+and changed row padding require new simulator and independent hardware gates.
+
+The recurrence-prefetch reader (`70cc1e7f74672a26e047854a684258afe05b863dd506d780ce49b37f8410af53`)
+passed three prepared L1-output executions at T2/seed1 (`20260906T172336Z-323`)
+and T32/seed2 (`20260906T172513Z-313`), checking every output/prefix and immutable
+inputs against the existing generated24-worker serial-T1 FNG control. These are
+simulator functional results only. The hardware `gdn-value-split-prefetch` gate
+requires18 independent native fixtures,2160 paired replays and36 changed-input
+trace checks using the same tensor addresses. All refresh sources and native
+reference results are prepared before trace capture; no new device allocation
+is introduced while traces are live. Serving and model integration stay gated.
+T2/seed2 simulator refresh run `20260906T173517Z-318` also passed: after the
+first prepared execution, all four packed input streams changed in place;
+two further executions matched the existing24-worker full-block control at
+every output and state prefix. The fixture explicitly detected changed state.
+
 ### 96-worker recurrence: native hardware correctness passed
 
 The opt-in `gdn_vsplit` prototype splits each128-wide value head into four32-wide

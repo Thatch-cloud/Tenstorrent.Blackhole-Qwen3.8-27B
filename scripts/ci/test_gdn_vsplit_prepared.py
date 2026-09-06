@@ -193,6 +193,21 @@ class PreparedTests(unittest.TestCase):
             self.assert_inputs_live()
             prepared.close()
 
+    def test_prefetch_is_explicit_and_changes_only_recurrence_reader_and_cb(self):
+        import gdn_vsplit_prefetch as prefetch
+        with patch.object(prefetch, 'validate_runtime') as validate:
+            prepared = self.prepare(prefetch_inputs=True)
+        self.assertEqual(validate.call_count, 1)
+        prepared.run()
+        for event, stage in zip(self.backend.events[3:], ('recurrence', 'norm_gate')):
+            for descriptor in event[1].values():
+                for kernel, role in zip(descriptor.kernels, ('reader', 'writer', 'compute')):
+                    expected = prefetch.load_kernels(ROOT)[stage][role]
+                    self.assertEqual(kernel.kernel_source, expected)
+        prepared.close()
+        with self.assertRaises(ValueError):
+            self.prepare(prefetch_inputs=1)
+
     def test_kernel_strings_and_two_chip_descriptors_are_unchanged(self):
         prepared = self.prepare()
         prepared.run()
@@ -443,10 +458,10 @@ class PreparedTests(unittest.TestCase):
         original = RuntimeError('Second program build failed')
         build = split.build_program
 
-        def fail_second(*args):
+        def fail_second(*args, **kwargs):
             if args[4] == 'norm_gate':
                 raise original
-            return build(*args)
+            return build(*args, **kwargs)
 
         with patch.object(split, 'build_program', side_effect=fail_second):
             with self.assertRaises(RuntimeError) as caught:

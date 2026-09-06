@@ -55,9 +55,12 @@ class PreparedVSplit:
     """Prepare once outside capture; explicitly opt in with experimental=True."""
 
     def __init__(self, mesh, qkv, beta, gate, initial, *, z, norm_w,
-                 root=split.DEFAULT_ROOT, experimental=False, output_memory=None, operations=None):
+                 root=split.DEFAULT_ROOT, experimental=False, output_memory=None, operations=None,
+                 prefetch_inputs=False):
         if experimental is not True:
             raise ValueError('Prepared V-split requires explicit experimental=True')
+        if type(prefetch_inputs) is not bool:
+            raise ValueError('prefetch_inputs must be explicit bool')
         if operations is None:
             import ttnn as operations
 
@@ -75,6 +78,10 @@ class PreparedVSplit:
         try:
             split.validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(split.DEFAULT_ROOT))))
             kernels = split.load_kernels(Path(root))
+            if prefetch_inputs:
+                import gdn_vsplit_prefetch as prefetch
+                prefetch.validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(split.DEFAULT_ROOT))))
+                kernels = prefetch.load_kernels(Path(root))
             self._rows = split.native.validate_geometry(*(tuple(value.shape) for value in self._inputs[:4]))
             if tuple(z.shape) != (1, self.rows, 3072) or tuple(norm_w.shape) != (1, 1, 128):
                 raise ValueError('Expected z [1,T,3072] and norm_w [1,1,128]')
@@ -100,7 +107,8 @@ class PreparedVSplit:
             self._tensors = list(self._inputs[:4]) + [pre_norm, states] + list(self._inputs[4:]) + [output]
             self._tensor_ids = tuple(id(value) for value in self._tensors)
             self._signatures, self._shards = self._bindings(self._tensors)
-            self._programs = tuple(split.build_program(operations, mesh, self._shards, kernels, stage, self.rows)
+            self._programs = tuple(split.build_program(operations, mesh, self._shards, kernels, stage, self.rows,
+                                                       prefetch_inputs=prefetch_inputs)
                                    for stage in ('recurrence', 'norm_gate'))
             self._validate_bindings()
             self._result = (output, states, pre_norm)
