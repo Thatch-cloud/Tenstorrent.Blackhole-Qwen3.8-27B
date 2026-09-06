@@ -3,10 +3,24 @@ from types import SimpleNamespace
 
 import torch
 
-from attention_head_fold import causal_mask, chunk_groups, device_layout, fold_query, unfold_output
+from attention_head_fold import causal_mask, chunk_groups, device_layout, fold_query, parallel_groups, unfold_output
 
 
 class HeadFoldTests(unittest.TestCase):
+    def test_parallel_groups_preserve_order_and_workload_signature(self):
+        self.assertEqual([len(bundle) for bundle in parallel_groups(4096, 32)], [3, 3, 2])
+        self.assertEqual([len(bundle) for bundle in parallel_groups(4095, 32)], [1, 3, 3, 1, 1])
+        for rows in range(1, 33):
+            for start in (4095, 4096, 16383, 16384):
+                bundles = parallel_groups(start, rows)
+                self.assertEqual([group for bundle in bundles for group in bundle], chunk_groups(start, rows))
+                for bundle in bundles:
+                    self.assertLessEqual(len(bundle) * 2 * 16, 110)
+                    self.assertEqual(len({(group['rows'], group['signature']) for group in bundle}), 1)
+        for limit in (0, 4, True, 3.0):
+            with self.assertRaises(ValueError):
+                parallel_groups(4096, 16, max_batches=limit)
+
     def test_device_layout_operation_chain_matches_host_and_retains_temporaries(self):
         def tensor(value, layout='tile'):
             return SimpleNamespace(value=value, shape=value.shape, dtype='bf16', layout=layout)

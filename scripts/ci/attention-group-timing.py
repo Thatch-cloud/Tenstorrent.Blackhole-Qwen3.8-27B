@@ -10,11 +10,11 @@ import statistics
 import time
 
 from attention_batch import SerialAttentionReader, capture_operation
-from attention_head_fold import causal_mask, chunk_groups, device_layout
+from attention_head_fold import causal_mask, chunk_groups, device_layout, parallel_groups
 from gdn_multitoken_conv import addresses, release_owned
 
 
-def validate_matrix(fixtures, *, tree_scratch=False):
+def validate_matrix(fixtures, *, tree_scratch=False, parallel=False):
     expected = {(seed, rows, start) for seed in (0, 1, 2) for rows in (1, 2, 4, 8, 16, 32)
                 for start in (4095, 16383)}
     if len(fixtures) != len(expected) or {(value['seed'], value['rows'], value['start']) for value in fixtures} != expected:
@@ -22,6 +22,9 @@ def validate_matrix(fixtures, *, tree_scratch=False):
     if any(value['exact'] is not True or value['timed_replays'] != 120 or value['refreshed_checks'] != 2 for value in fixtures):
         raise AssertionError('Missing correctness, timing or changed-input checks')
     for value in fixtures:
+        if parallel and json.dumps(value.get('parallel_plan'), sort_keys=True) != json.dumps(
+                parallel_groups(value['start'], value['rows']), sort_keys=True):
+            raise AssertionError('Complete order-preserving parallel groups required')
         if tree_scratch:
             for key, limit in (('groups', 4), ('candidate_groups', 8)):
                 actual = [(group['offset'], group['rows'], tuple(group['signature'])) for group in value.get(key, [])]
@@ -41,9 +44,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--tree-scratch', action='store_true')
+    parser.add_argument('--parallel-groups', action='store_true')
     options = parser.parse_args()
-    if options.tree_scratch and options.dma_layout:
-        parser.error('Tree grouping and DMA are separate experiments')
+    if sum((options.tree_scratch, options.dma_layout, options.parallel_groups)) > 1:
+        parser.error('Tree, layout DMA and parallel grouping are separate experiments')
     if options.tree_scratch and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
         raise RuntimeError('Tree experiment requires the process-fixed native scratch override')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
@@ -60,6 +64,16 @@ def main():
                  for name in ('attention-group-timing.py', 'attention_head_fold.py', 'attention_batch.py')})
     report['dma_layout'] = options.dma_layout
     report['tree_scratch'] = options.tree_scratch
+    report['parallel_groups'] = options.parallel_groups
+    if options.parallel_groups:
+        from sdpa_tree_scratch import audit
+        report['native_sources'] = audit('/opt/tt-metal')
+        report['scope'] = 'Serial versus up to three parallel four-query groups, both with device DMA layout; one stream verification, no model throughput'
+        report['simulator_prerequisites'] = ['20260906T224631Z-303', '20260906T225115Z-307', '20260906T225312Z-461']
+        report['worker_cap_per_head'] = 16
+        report['maximum_sdpa_workers'] = 96
+        report['sources'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('attention_parallel.py', 'attention_fold_dma.py', 'attention_fold_dma.cpp')})
     if options.tree_scratch:
         from sdpa_tree_scratch import audit
         report['native_sources'] = audit('/opt/tt-metal', patched=True)
@@ -128,6 +142,19 @@ def main():
                         candidate_metadata = [(group, upload(page_ids[:, :group['signature'][1] // 64].contiguous(), ttnn.int32),
                             upload(causal_mask(group['rows'], start + group['offset'], group['signature'][1])))
                             for group in candidate_groups] if options.tree_scratch else metadata
+                        parallel_metadata, plans = {}, {}
+                        if options.parallel_groups:
+                            for arm, limit in (('control', 1), ('candidate', 3)):
+                                plans[arm] = parallel_groups(start, rows, max_batches=limit)
+                                parallel_metadata[arm] = []
+                                for bundle in plans[arm]:
+                                    chunk_size, extent = bundle[0]['signature']
+                                    group_pages = page_ids[:, :extent // 64].repeat(len(bundle), 1).contiguous()
+                                    mask = torch.cat([causal_mask(group['rows'], start + group['offset'], extent)
+                                                      for group in bundle], dim=0)
+                                    config_group = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                                        exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk_size)
+                                    parallel_metadata[arm].append((bundle, upload(group_pages, ttnn.int32), upload(mask), config_group))
 
                         def gold(source):
                             tokens = []
@@ -148,6 +175,10 @@ def main():
                         reader = SerialAttentionReader(ttnn, positions, [pages] * rows)
 
                         def operation(arm, owned):
+                            if options.parallel_groups:
+                                from attention_parallel import execute
+                                return execute(mesh, ttnn, query, keys, values, parallel_metadata[arm], owned,
+                                    scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)
                             if arm == 'control' and not (options.dma_layout or options.tree_scratch):
                                 if rows == 1:
                                     result = ttnn.transformer.paged_scaled_dot_product_attention_decode(query, keys, values,
@@ -217,6 +248,7 @@ def main():
                                for before, after in zip(saved, host(tensor), strict=True)):
                             raise AssertionError('Read-only attention changed KV data')
                         report['fixtures'].append(dict(start=start, rows=rows, seed=seed, groups=groups,
+                            parallel_plan=plans.get('candidate'),
                             candidate_groups=candidate_groups, exact=True,
                             timed_replays=120, refreshed_checks=2, samples=samples))
                         stage('fixture-passed', start=start, rows=rows, seed=seed)
@@ -225,7 +257,7 @@ def main():
                             ttnn.release_trace(mesh, trace)
                         release_scratch([tensor for owned in temporaries.values() for tensor in owned])
                         release_owned(ttnn, inputs)
-        validate_matrix(report['fixtures'], tree_scratch=options.tree_scratch)
+        validate_matrix(report['fixtures'], tree_scratch=options.tree_scratch, parallel=options.parallel_groups)
         report['passed'] = True
     finally:
         if mesh is not None:

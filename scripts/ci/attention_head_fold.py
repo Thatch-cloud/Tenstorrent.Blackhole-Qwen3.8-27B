@@ -48,6 +48,19 @@ def chunk_groups(start, rows, *, max_chunk_tiles=8, max_group_rows=4):
     return groups
 
 
+def parallel_groups(start, rows, *, max_batches=3):
+    if type(max_batches) is not int or not 1 <= max_batches <= 3:
+        raise ValueError('At most three TP2 groups preserve sixteen workers per KV head on110 cores')
+    bundles = []
+    for group in chunk_groups(start, rows):
+        signature = (group['rows'], group['signature'])
+        if bundles and len(bundles[-1]) < max_batches and (bundles[-1][0]['rows'], bundles[-1][0]['signature']) == signature:
+            bundles[-1].append(group)
+        else:
+            bundles.append([group])
+    return bundles
+
+
 def device_layout(operations, tensor, rows, owned, *, inverse=False, offset=0):
     if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 8:
         raise ValueError('Explicit direction and one to eight query rows required')

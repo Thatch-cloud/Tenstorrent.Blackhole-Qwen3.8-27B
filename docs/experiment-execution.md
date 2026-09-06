@@ -3,6 +3,29 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
+## Current frontier (2026-09-07)
+
+- Actual matched request decode remains22.46/18.67 committed tokens/s at4K/16K;
+  the200 target is not achieved. New attention changes are not in that request path.
+- Grouped attention full-model34062230310 passed: T32 verification103.31/109.92ms,
+  versus110.02/127.56ms with the same norm batching and serial B1 attention.
+- Direct attention DMA passed micro34063065156 and real-layer34064053339;
+  matched full-model DMA34064443450 is running on the original runtime.
+- Allocation-only native tree scratch34064917232 is queued after simulator
+  correctness at larger groups. This build is isolated to a disposable container.
+- Parallel group scheduling now passes TTsim: three groups preserve16 workers
+  per KV head and fit96 workers on the110-core grid, without changing the native
+  scratch allocation. Actual hardware latency/worker participation remain unmeasured.
+
+Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
+packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
+output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,
+device layouts and reusable adapter. All match native B1 exactly on both chips.
+The bundles are groups of queries from one speculative verification stream,
+not separate user requests or aggregate serving throughput. The hardware
+`attention-parallel-groups` screen compares serial and parallel groups with
+identical DMA layouts, native SDPA math and read-only KV.
+
 ## Verified control
 
 Grouped attention hardware microbenchmark `34061073573` (`6f75984`) passed:

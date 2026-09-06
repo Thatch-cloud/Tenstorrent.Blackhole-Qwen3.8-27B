@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
-from attention_head_fold import causal_mask, chunk_groups, device_layout, fold_query, unfold_output
+from attention_head_fold import causal_mask, chunk_groups, device_layout, fold_query, parallel_groups, unfold_output
 from gdn_multitoken_conv import release_owned
 
 
@@ -24,12 +24,15 @@ def main():
     parser.add_argument('--finite-mask', action='store_true')
     parser.add_argument('--grouped', action='store_true')
     parser.add_argument('--max-group-rows', type=int, choices=(4, 8, 16, 32), default=4)
+    parser.add_argument('--parallel-groups', type=int, choices=(1, 2, 3), default=1)
     parser.add_argument('--device-layout', action='store_true')
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.parallel_groups > 1 and (not args.grouped or args.max_group_rows != 4 or args.finite_mask):
+        parser.error('Parallel probe requires four-row groups with native masks')
     if args.dma_layout and not args.device_layout:
         parser.error('DMA layout requires the device-layout oracle checks')
     if args.device_layout and args.max_group_rows > (4 if args.dma_layout else 8):
@@ -45,6 +48,7 @@ def main():
         capacity=args.capacity, chunk_size=args.chunk_size,
         grouped=args.grouped, seed=args.seed,
         max_group_rows=args.max_group_rows, tree_scratch_rounds=os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') == '1',
+        parallel_groups=args.parallel_groups,
         device_layout=args.device_layout, dma_layout=args.dma_layout,
         scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
     report['runtime_library_sha256'] = hashlib.sha256((Path(os.environ['TT_METAL_HOME']) /
@@ -143,7 +147,64 @@ def main():
         stage('comparison')
         if any(not check['exact'] for check in report['checks']):
             raise AssertionError('Folded attention differs from native causal B1')
-        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4:
+        if args.parallel_groups > 1:
+            bundles = parallel_groups(args.start, args.rows, max_batches=args.parallel_groups)
+            report['parallel_plan'] = bundles
+            parallel_outputs = []
+            for bundle in bundles:
+                stage(f"parallel-{bundle[0]['offset']}-{len(bundle)}")
+                count = bundle[0]['rows']
+                chunk_size, capacity = bundle[0]['signature']
+                queries = torch.cat([fold_query(query[:, group['offset']:group['offset'] + count].contiguous())
+                                     for group in bundle], dim=1)
+                if args.device_layout:
+                    packed = [layout(device_query, count, offset=group['offset']) for group in bundle]
+                    stacked = ttnn.concat(packed, dim=1, memory_config=ttnn.DRAM_MEMORY_CONFIG) if len(bundle) > 1 else packed[0]
+                    owned.append(stacked)
+                    if any(not torch.equal(queries, actual) for actual in host(stacked)):
+                        raise AssertionError('Parallel device query packing differs from Torch')
+                else:
+                    stacked = upload(queries)
+                masks = torch.cat([causal_mask(count, args.start + group['offset'], capacity) for group in bundle], dim=0)
+                grouped_pages = torch.tensor([page_ids[:capacity // 64]], dtype=torch.int32).repeat(len(bundle), 1)
+                result = ttnn.transformer.paged_scaled_dot_product_attention_decode(stacked, keys, values,
+                    page_table_tensor=upload(grouped_pages, ttnn.int32), is_causal=False, attn_mask=upload(masks), scale=0.0625,
+                    program_config=ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                        exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk_size), memory_config=ttnn.L1_MEMORY_CONFIG)
+                owned.append(result)
+                for index in range(len(bundle)):
+                    if args.device_layout:
+                        selected = ttnn.slice(result, (0, index, 0, 0), (1, index + 1, count * 12, 256),
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG) if len(bundle) > 1 else result
+                        owned.append(selected)
+                        parallel_outputs.append(host(layout(selected, count, inverse=True)))
+                    else:
+                        parallel_outputs.append([unfold_output(part[:, index:index + 1], count) for part in host(result)])
+            actual_parallel = [torch.cat([output[chip] for output in parallel_outputs], dim=1) for chip in range(2)]
+            report['parallel_checks'] = [dict(chip=chip, exact=torch.equal(reference, actual),
+                differences=int((reference != actual).sum()), max_abs=float((reference.float() - actual.float()).abs().max()))
+                for chip, (reference, actual) in enumerate(zip(expected, actual_parallel, strict=True))]
+            stage('parallel-comparison')
+            if not all(check['exact'] for check in report['parallel_checks']):
+                raise AssertionError('Parallel groups differ from native B1')
+            if args.device_layout and args.dma_layout:
+                from attention_parallel import execute
+                metadata = []
+                for bundle in bundles:
+                    count = bundle[0]['rows']
+                    chunk_size, capacity = bundle[0]['signature']
+                    mask = torch.cat([causal_mask(count, args.start + group['offset'], capacity) for group in bundle], dim=0)
+                    group_pages = torch.tensor([page_ids[:capacity // 64]], dtype=torch.int32).repeat(len(bundle), 1)
+                    config = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                        exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk_size)
+                    metadata.append((bundle, upload(group_pages, ttnn.int32), upload(mask), config))
+                stage('parallel-adapter')
+                result = execute(mesh, ttnn, device_query, keys, values, metadata, owned,
+                    scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)
+                if any(not torch.equal(reference, actual) for reference, actual in zip(expected, host(result), strict=True)):
+                    raise AssertionError('Reusable parallel adapter differs from native B1')
+                report['parallel_adapter_exact'] = True
+        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and args.parallel_groups == 1:
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')
             positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)

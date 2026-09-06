@@ -9,6 +9,15 @@ spec.loader.exec_module(gate)
 
 
 class AttentionTimingTests(unittest.TestCase):
+    def test_parallel_matrix_requires_complete_bundles(self):
+        fixtures = self.fixtures()
+        for fixture in fixtures:
+            fixture['parallel_plan'] = gate.parallel_groups(fixture['start'], fixture['rows'])
+        gate.validate_matrix(fixtures, parallel=True)
+        fixtures[-1]['parallel_plan'] = []
+        with self.assertRaises(AssertionError):
+            gate.validate_matrix(fixtures, parallel=True)
+
     def test_tree_matrix_requires_distinct_bounded_group_plans(self):
         fixtures = self.fixtures()
         for fixture in fixtures:
