@@ -16,6 +16,38 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Row-parallel norm/gate: first useful split-kernel gain
+
+Run34050458771 (`7db0198`) passed18 independent native fixtures,2160 paired
+composition replays,2160 isolated-stage replays and36 same-address input-refresh
+checks. All output rows and recurrent prefixes remained exact on both chips.
+
+| T |24-worker fused ms |96-worker plus row-parallel norm ms | Median paired speedup |
+| --- | ---: | ---: | ---: |
+|1|0.071138|0.143933|0.493x|
+|2|0.100197|0.162794|0.615x|
+|4|0.160400|0.194820|0.825x|
+|8|0.282678|0.260968|1.084x|
+|16|0.521735|0.386469|1.350x|
+|32|1.000683|0.640081|1.565x|
+
+Values are medians across three seeds. At T32, isolated norm/gate time fell
+from about0.511 to0.160 ms; recurrence remained about0.505 ms. This is a
+synthetic component improvement, not measured model or committed-token speed.
+Keep native/control paths for T1/2/4. The next opt-in real-layer gate keeps
+batched projections, DMA convolution windows, packed histories and commit
+identical between arms, changing only recurrence/norm at T>=8. It must pass
+all-prefix native continuation and captured timing before full-model integration.
+
+Integrated synthetic convolution/recurrence/norm simulator gates passed with
+the no-inner-fence allocating factory and history pruning: T8/seed1
+`20260906T180913Z-325` checked every output/state/conv prefix plus9 restored
+two-token continuations and1 stale control; T32/seed2 `20260906T181653Z-410`
+checked every output/state/conv prefix. Both retained exactly5 checkpoint-history
+buffers and closed cleanly. T32 continuation was not requested in that simulator
+run; the real-weight hardware layer gate covers every prefix in eager and trace.
+Host validation passed330 CI,55 simulator-support and51 speculative tests.
+
 ### Row-parallel norm/gate: simulator gates passed
 
 Stage-attribution run34049504379 (`9a2633e`) passed18 exact fixtures,2160

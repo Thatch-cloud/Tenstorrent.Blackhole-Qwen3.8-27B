@@ -265,18 +265,31 @@ def build_program(ttnn, mesh, shards, kernels, stage, rows, *, prefetch_inputs=F
     return program
 
 
-def execute(mesh, qkv, beta, gate, initial, *, z, norm_w, root=DEFAULT_ROOT, experimental=False):
+def execute(mesh, qkv, beta, gate, initial, *, z, norm_w, root=DEFAULT_ROOT, experimental=False,
+            batch_norm=False, synchronize=True, output_memory=None):
     """Return (BF16 gated output, BF16 prefix states, FP32 pre-norm bridge).
 
-    Two fenced programs on an existing 1x2 mesh. No input state is modified.
-    Not a trace/performance harness and not evidence of device correctness.
+    Two programs on an existing 1x2 mesh. No input state is modified.
+    Fenced DRAM output is the default. Explicit synchronize=False allows outer
+    capture; the caller owns all three returned buffers and external fences.
+    batch_norm selects the separately gated row-parallel norm implementation.
     """
     if not experimental:
         raise ValueError('Uncertified prototype requires experimental=True')
+    if type(batch_norm) is not bool or type(synchronize) is not bool:
+        raise ValueError('Explicit bool kernel and synchronization options required')
     import ttnn
 
     validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(DEFAULT_ROOT))))
     kernels = load_kernels(root)
+    if batch_norm:
+        import gdn_vsplit_norm_batch as norm_batch
+        norm_batch.validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(DEFAULT_ROOT))))
+        kernels = norm_batch.load_kernels(root)
+    if output_memory is None:
+        output_memory = ttnn.DRAM_MEMORY_CONFIG
+    if output_memory not in (ttnn.DRAM_MEMORY_CONFIG, ttnn.L1_MEMORY_CONFIG):
+        raise ValueError('Output memory must be interleaved DRAM or L1')
     inputs = [qkv, beta, gate, initial, z, norm_w]
     rows = native.validate_geometry(*(tuple(value.shape) for value in inputs[:4]))
     if tuple(z.shape) != (1, rows, 3072) or tuple(norm_w.shape) != (1, 1, 128):
@@ -295,7 +308,7 @@ def execute(mesh, qkv, beta, gate, initial, *, z, norm_w, root=DEFAULT_ROOT, exp
     states = ttnn.empty((rows, 24, 128, 128), device=mesh, dtype=ttnn.bfloat16,
                         layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     output = ttnn.empty((1, rows, 3072), device=mesh, dtype=ttnn.bfloat16,
-                        layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                        layout=ttnn.TILE_LAYOUT, memory_config=output_memory)
     tensors = inputs[:4] + [pre_norm, states] + inputs[4:] + [output]
     shards = [ttnn.get_device_tensors(value) for value in tensors]
     if any(len(value) != 2 for value in shards):
@@ -304,7 +317,8 @@ def execute(mesh, qkv, beta, gate, initial, *, z, norm_w, root=DEFAULT_ROOT, exp
                 for stage in ('recurrence', 'norm_gate')]
     for program in programs:
         ttnn.generic_op(tensors, program)
-        ttnn.synchronize_device(mesh)
+        if synchronize:
+            ttnn.synchronize_device(mesh)
     return output, states, pre_norm
 
 

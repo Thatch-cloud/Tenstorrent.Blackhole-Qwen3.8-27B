@@ -169,6 +169,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-norm-batch ]; then
     timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py --batch-norm --stage-timing
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-norm-batch-layer ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --norm-batch --max-rows 32 --continuation --full-layer --paired-timing --batch-conv --dma-windows --packed-checkpoints
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-norm ]; then
     timeout -k 30 420 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate
     exit 0

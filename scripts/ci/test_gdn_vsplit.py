@@ -306,6 +306,7 @@ class FakeTTNN:
     TILE_LAYOUT = 'tile'
     ROW_MAJOR_LAYOUT = 'row_major'
     DRAM_MEMORY_CONFIG = 'dram'
+    L1_MEMORY_CONFIG = 'l1'
     DataMovementProcessor = SimpleNamespace(RISCV_0=0, RISCV_1=1)
     NOC = SimpleNamespace(RISCV_0_default=0, RISCV_1_default=1)
     MathFidelity = SimpleNamespace(HiFi4='HiFi4')
@@ -405,6 +406,22 @@ class OrchestrationTests(unittest.TestCase):
             self.execute(False)
         self.assertEqual(self.operations.allocations, [])
         self.assertEqual(self.operations.events, [])
+
+    def test_norm_batch_factory_enqueues_without_internal_fences(self):
+        import gdn_vsplit_norm_batch as batch
+        with patch.dict(sys.modules, {'ttnn': self.operations}), patch.object(split, 'validate_runtime'), \
+                patch.object(batch, 'validate_runtime'):
+            output, states, bridge = split.execute(self.mesh, *self.inputs[:4], z=self.inputs[4], norm_w=self.inputs[5],
+                root=ROOT, experimental=True, batch_norm=True, synchronize=False, output_memory='l1')
+        self.assertEqual([event[0] for event in self.operations.events], ['launch', 'launch'])
+        self.assertEqual(output.memory_config(), 'l1')
+        self.assertEqual(states.memory_config(), 'dram')
+        self.assertEqual(bridge.dtype, 'fp32')
+        expected = batch.load_kernels(ROOT)
+        for event, stage in zip(self.operations.events, ('recurrence', 'norm_gate')):
+            for descriptor in event[2].values():
+                for kernel, role in zip(descriptor.kernels, ('reader', 'writer', 'compute')):
+                    self.assertEqual(kernel.kernel_source, expected[stage][role])
 
     def test_active_runtime_is_checked_independently_of_source_root(self):
         with patch.dict(sys.modules, {'ttnn': self.operations}), patch.dict(os.environ,

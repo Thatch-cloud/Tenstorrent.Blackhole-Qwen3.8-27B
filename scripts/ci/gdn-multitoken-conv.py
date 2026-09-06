@@ -23,7 +23,10 @@ def main():
     parser.add_argument('--dma-windows', action='store_true')
     parser.add_argument('--packed-checkpoints', action='store_true')
     parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
+    parser.add_argument('--norm-batch', action='store_true')
     options = parser.parse_args()
+    if options.norm_batch and not (options.packed_checkpoints and options.full_layer):
+        parser.error('--norm-batch requires full layer and packed checkpoints')
     widths = (1, 2, 4, 8, 16, 32) if options.max_rows == 32 else (1, 2, 4, 8, 16)
     if options.dma_windows and not options.batch_conv:
         parser.error('--dma-windows requires --batch-conv')
@@ -52,7 +55,8 @@ def main():
         raise ValueError('Pinned native GDN flags required')
     validate_handoff_runtime(root)
     kernels = load_kernels(root, True)
-    path = Path('/experiment/results/gdn-multitoken-conv.json')
+    path = Path('/experiment/results/gdn-norm-batch-layer.json' if options.norm_batch
+                else '/experiment/results/gdn-multitoken-conv.json')
     report = dict(passed=False, checks=[], continuation_checks=[], stale_controls=[], projection_calls=0, handoff_runtime_hashes=HANDOFF_HASHES,
                   generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
                   adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_multitoken_conv.py').read_bytes()).hexdigest(),
@@ -66,6 +70,10 @@ def main():
                   batched_adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_batched_conv.py').read_bytes()).hexdigest() if options.batch_conv else None,
                   scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
     context = {}
+    if options.norm_batch:
+        import gdn_vsplit_norm_batch
+        report['norm_batch'] = gdn_vsplit_norm_batch.audit(root)
+        report['prerequisite_run'] = 34050458771
     if options.full_layer:
         report['scope'] = 'One full real-weight TP2 GDN layer with batched input/output projections, fabric reduce, every state prefix and final-state commit; excludes attention, full model and committed token throughput'
 
@@ -154,11 +162,13 @@ def main():
                                 ttnn.copy(initial, destination)
                         ttnn.synchronize_device(mesh)
 
-                    def candidate(use_batched=options.batch_conv, use_packed=options.packed_checkpoints):
+                    def candidate(use_batched=options.batch_conv, use_packed=options.packed_checkpoints,
+                                  use_norm_batch=options.norm_batch):
                         source = original(packed_input, rows, ttnn.L1_MEMORY_CONFIG) if options.full_layer else projected
                         operation = run_batched_projected if use_batched else run_projected
                         result = operation(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
                             gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels,
+                            **(dict(norm_batch=True) if use_batched and use_norm_batch else {}),
                             **(dict(packed_checkpoints=True) if use_batched and use_packed else {}),
                             **(dict(dma_windows=True) if use_batched and options.dma_windows else {}))
                         if options.full_layer:
@@ -189,7 +199,10 @@ def main():
                                     exact(host(value), saved) for value, saved in zip(gdn.conv_states, expected[-1][2], strict=True)):
                                 raise AssertionError('Final-state commit differs from native')
                         if record:
-                            report['checks'].append(dict(seed=seed, rows=rows, mode=mode, exact=True))
+                            if options.norm_batch and result.get('norm_batch', False) != (rows >= 8):
+                                raise AssertionError('Norm-batch layer routing mismatch')
+                            report['checks'].append(dict(seed=seed, rows=rows, mode=mode, exact=True,
+                                                        norm_batch=result.get('norm_batch', False)))
 
                     def continuation_values():
                         values = []
@@ -251,6 +264,8 @@ def main():
                     release_owned(ttnn, captured['owned'])
                     if options.paired_timing and seed == 0:
                         def control():
+                            if options.norm_batch:
+                                return candidate(True, True, False)
                             if options.packed_checkpoints:
                                 return candidate(True, False)
                             if options.batch_conv:
@@ -295,6 +310,10 @@ def main():
                             timing.update(scope='Paired full GDN layer: packed versus separately materialized convolution prefixes; both DMA-built causal windows, native batched convolution, device-loop recurrence and native final commit; every logical prefix available; not full-model throughput',
                                           checkpoint_policy='all logical prefixes; packed candidate and separate control tensors')
                         report['paired_timing'].append(timing)
+                        if options.norm_batch:
+                            timing.update(scope='Paired real GDN layer:24-worker recurrence/norm versus96-worker recurrence and row-parallel norm at T>=8; identical batched projections, DMA windows, packed histories and final-state commit; not full-model throughput',
+                                checkpoint_policy='all logical prefixes packed in both arms',
+                                norm_batch_enabled=rows >= 8)
                         for arm in arms:
                             ttnn.release_trace(mesh, timing_traces.pop(arm))
                             release_owned(ttnn, results[arm]['owned'])

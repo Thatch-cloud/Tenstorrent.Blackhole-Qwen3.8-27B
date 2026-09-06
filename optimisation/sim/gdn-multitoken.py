@@ -44,7 +44,10 @@ def main():
     parser.add_argument('--prefetch-value-split', action='store_true')
     parser.add_argument('--refresh-value-split-inputs', action='store_true')
     parser.add_argument('--batch-norm-value-split', action='store_true')
+    parser.add_argument('--norm-batch-layer', action='store_true')
     args = parser.parse_args()
+    if args.norm_batch_layer and not (args.conv and args.norm_gate and args.packed_checkpoints):
+        parser.error('--norm-batch-layer requires packed convolution and norm/gate')
     if args.batch_norm_value_split and (not args.prepared_value_split or args.prefetch_value_split):
         parser.error('--batch-norm-value-split requires prepared value split without input prefetch')
     if args.refresh_value_split_inputs and not args.prepared_value_split:
@@ -164,8 +167,13 @@ def main():
                 projected_scratch = ttnn.to_memory_config(candidate_projected, ttnn.L1_MEMORY_CONFIG) if args.retain_histories else candidate_projected
                 result = candidate(mesh, projected_scratch, initial, candidate_conv,
                                        taps, dt_bias, neg_exp_A, norm_w, kernels,
+                                       **(dict(norm_batch=True, norm_source_root=args.source_root) if args.norm_batch_layer else {}),
                                        **(dict(packed_checkpoints=True) if args.packed_checkpoints else {}),
                                        **(dict(dma_windows=True) if args.dma_windows else {}))
+                if args.norm_batch_layer:
+                    if result.get('norm_batch', False) != (args.rows >= 8):
+                        raise AssertionError('Norm-batch layer routing mismatch')
+                    report['norm_batch_layer'] = result.get('norm_batch', False)
                 if args.retain_histories:
                     from gdn_records import retain_checkpoint_histories
                     result['owned'].append(projected_scratch)
