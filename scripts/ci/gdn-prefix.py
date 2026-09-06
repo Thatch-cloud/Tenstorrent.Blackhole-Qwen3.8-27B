@@ -21,11 +21,14 @@ def main():
     parser.add_argument("--active-snapshot", action="store_true")
     parser.add_argument("--direct-snapshot", action="store_true")
     parser.add_argument("--working-state", action="store_true")
+    parser.add_argument("--paired-timing", action="store_true")
     options = parser.parse_args()
     if options.direct_snapshot and not options.active_snapshot:
         raise ValueError("Direct snapshot requires active-slot mode")
     if options.working_state and not (options.direct_snapshot and options.batch_output):
         raise ValueError("Working state requires direct active snapshots and batched output")
+    if options.paired_timing and not options.working_state:
+        raise ValueError("Paired timing requires the compact working-state gate")
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
@@ -45,6 +48,9 @@ def main():
     output_path = root / ("gdn-direct.json" if options.direct_snapshot else "gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
     if options.working_state:
         output_path = root / "gdn-inplace.json"
+    if options.paired_timing:
+        output_path = root / "gdn-inplace-timing.json"
+        report["paired_timing"] = []
     mesh = None
     working = None
     traces = []
@@ -196,16 +202,17 @@ def main():
                         release([output])
                     continuations.append((continuation, state_host(live)))
 
-                def operation():
+                def operation(use_working=True):
+                    selected = working if use_working else None
                     def save(prefix):
-                        if working:
-                            working.save(staging[prefix])
+                        if selected:
+                            selected.save(staging[prefix])
                         elif options.active_snapshot:
                             active.save(staging[prefix])
                         else:
                             copy(live, staging[prefix])
-                    if working:
-                        outputs = working.decode(packed, tokens, save)
+                    if selected:
+                        outputs = selected.decode(packed, tokens, save)
                     else:
                         save(0)
                         outputs = decode_projected(gdn, packed, tokens, save,
@@ -315,6 +322,41 @@ def main():
                         raise AssertionError("Stale-state negative control was not detected")
                 if addresses != [tensor.buffer_address() for tensor in [gdn.rec_state, *gdn.conv_states]]:
                     raise AssertionError("Persistent state addresses changed")
+                if options.paired_timing:
+                    from gdn_pair_timing import paired_replays
+
+                    def validate_timing(values):
+                        if not all(exact(value, expected) for value, expected in
+                                   zip(read_outputs(values), expected_outputs, strict=True)):
+                            raise AssertionError("Paired timing output differs from native serial B1")
+                        if not state_exact(state_host(live), expected_states[rows]):
+                            raise AssertionError("Paired timing final state or idle slots differ")
+                        for prefix in range(rows + 1):
+                            expected = [[shard[:1] if index == 0 else shard[:, :1] for shard in shards]
+                                        for index, shards in enumerate(expected_states[prefix])]
+                            if not state_exact(state_host(staging[prefix]), expected):
+                                raise AssertionError("Paired timing prefix checkpoint differs")
+
+                    copy(initial, live)
+                    warm_outputs = operation(False)
+                    validate_timing(warm_outputs)
+                    release(warm_outputs)
+                    copy(initial, live)
+                    control_trace = ttnn.begin_trace_capture(mesh, cq_id=0)
+                    control_outputs = operation(False)
+                    ttnn.end_trace_capture(mesh, control_trace, cq_id=0)
+                    traces.append(control_trace)
+                    arm_traces = dict(control=control_trace, candidate=trace)
+                    arm_outputs = dict(control=control_outputs, candidate=captured_outputs)
+                    timing = paired_replays(
+                        lambda: copy(initial, live), lambda: ttnn.synchronize_device(mesh),
+                        lambda arm: ttnn.execute_trace(mesh, arm_traces[arm], cq_id=0, blocking=True),
+                        lambda arm: validate_timing(arm_outputs[arm]))
+                    timing.update(seed=seed, rows=rows)
+                    report["paired_timing"].append(timing)
+                    ttnn.release_trace(mesh, control_trace)
+                    traces.remove(control_trace)
+                    release(control_outputs)
                 ttnn.release_trace(mesh, trace)
                 traces.remove(trace)
                 release(captured_outputs + tokens + correction + [packed])
@@ -327,6 +369,8 @@ def main():
             report["inplace_requested_and_aliased_calls"] = working.calls
             if working.calls != 279 or len(report["checks"]) != 216 or len(report["negative_controls"]) != 30:
                 raise AssertionError("Incomplete compact-state coverage")
+        if options.paired_timing and len(report["paired_timing"]) != 15:
+            raise AssertionError("Incomplete paired timing matrix")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"

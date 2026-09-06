@@ -80,7 +80,23 @@ full-model timing. Keep projected-row clone removal separate: ownership/aliasing
 must be established before deleting it. No arithmetic or precision changes are
 justified by this attribution pass, and no serving promotion has been made.
 
-### E3 isolated in-place working state (hardware pending)
+### E3 isolated in-place working state (passed 34005306635)
+
+Run 34005306635 (`7625f31`) passed 216 exact prefix/continuation checks, all 30
+stale-state negative controls, all 15 isolation checks, and 279 in-place request
+and both-chip buffer-alias checks. This certifies the tested single-layer state
+geometry change, not full-model integration. T16 single-sample trace times were
+3.750/3.749/3.746 ms across three seeds, including all-prefix staging. These are
+diagnostics without a contemporaneous paired control; do not infer a speedup.
+
+Next `gdn-inplace-timing` (hardware pending) reruns the full correctness gate and
+captures a control with the same batched input/output projections and all-prefix
+checkpoint semantics, but native B1-in-B8 state handling. Candidate traces include
+working-state entry/publication transfers. Each seed/width uses three ABBA blocks,
+ten replays per arm sample, restoring identical initial live state outside every
+timed replay. Full outputs, final state including idle slots, and every prefix
+checkpoint must match the serial oracle after each sample. Fifteen fixtures and
+1800 timed replays are required; report paired block-cost ratios, not tok/s.
 
 `gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
 compact B1 working set (recurrence and all four conv taps), copied from native B8

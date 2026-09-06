@@ -102,6 +102,9 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   prefix matrix. Verifies native in-place request and buffer aliasing on both chips,
   all rollback prefixes and corrected continuations, idle slots and trace-stable
   native B8 state. No full-model integration or serving promotion on this gate.
+- `gdn-inplace-timing`: repeats that gate and measures three ABBA blocks per
+  seed/width against captured projection-batched native state handling. Restores
+  initial state outside every timed replay and checks every staged prefix afterward.
 - `attention-batch`: real-weight attention layer gate, T=1/2/4/8/16 at positions
   31/63/65, two seeds, eager/trace, both chips. Batch native fused QKV preparation,
   SDPA and output projection, but serialize paged K/V writes using B1 shards.
