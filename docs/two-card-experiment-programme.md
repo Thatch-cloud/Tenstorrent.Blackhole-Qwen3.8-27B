@@ -8,6 +8,18 @@ uses actual lookup proposals, exact native token/state comparison, complete
 proposal-to-commit timing and separately reported per-request capture cost.
 Repeated-code pilot prompts cannot establish representative coding quality.
 
+External-drafter width audit (2026-09-07): the official
+[DFlash2 config](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/raw/main/config.json)
+declares block_size8. The [authors' Qwen comparison](https://inco.ai/blog/dflash2/)
+also uses width8 and reports mean acceptance4.39 on HumanEval and4.79 on MBPP
+under default sampling, not our greedy TT backend. Width32 verifier support
+does not certify a width32 neural draft. At our measured T8 verifier/selection
+cost72.660/77.054ms, even perfect8-token acceptance with zero draft/commit cost
+caps this configuration at about110/104 committed tokens/s. Reaching200 at
+width8 requires at most40ms for the ENTIRE cycle. Thus a drafter port alone
+cannot meet the target on the current verifier; further kernel acceleration
+or a separately validated wider high-acceptance strategy remains necessary.
+
 ## Programme checkpoint — 2026-09-06
 
 Latest kernel checkpoint: run34019033933 (`36b9eed`) passed synthetic multi-token
