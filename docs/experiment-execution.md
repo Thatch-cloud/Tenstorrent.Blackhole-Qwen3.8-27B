@@ -16,6 +16,24 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E3 attention shared-page gate (implementation, hardware result pending)
+
+Source-only run 34000023393 exported the actual K-image fused attention source
+(`attention/tp.py`, SHA256 `e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a`).
+Its decode batch means independent users, with one KV writer core per user.
+The paged update validator explicitly rejects `share_cache`. This is a shared-page
+write hazard to avoid, not evidence that production B1 cache writes are broken.
+
+The new `attention-batch` suite batches native fused QKV preparation, attention and
+output projection while replacing only the two paged writes with ordered B1 calls
+through an instance-local tail function. Installed source and global TTNN functions
+are untouched. Two seeds, T=1/2/4/8/16 and start positions 31/63/65 cover tile/page
+boundaries with nonzero BF8 caches and a nonidentity shared page map. Eager and trace
+outputs plus the entire physical K/V pool must match native sequential B1 exactly
+on both chips; omitted writes and wrong-page writes must be detected. Static host
+position/page fixtures are not a device-dynamic verifier or serving integration.
+This gate deliberately makes no throughput claim; numerical drift blocks promotion.
+
 | Track | Current status | Required next evidence |
 | --- | --- | --- |
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |

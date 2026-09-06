@@ -98,6 +98,14 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   tests. Reject dropped markers, missing device timings, skipped tests or a missing
   chip. Never score these instrumented runs as full-model decode throughput.
 
+- `attention-batch`: real-weight attention layer gate, T=1/2/4/8/16 at positions
+  31/63/65, two seeds, eager/trace, both chips. Batch native fused QKV preparation,
+  SDPA and output projection, but serialize paged K/V writes using B1 shards.
+  Compare every output and all physical KV values, including unused-page canaries,
+  exactly against native sequential B1. Positions/page views are preallocated static
+  fixtures, not a serving integration. Negative controls omit writes or map the
+  same token sequence to different pages. No speed claim or promotion on divergence.
+
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.
 The planned research tracks are not all implemented tests; a passed prerequisite

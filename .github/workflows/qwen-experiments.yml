@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, gdn-prefix, gdn-block, gdn-active, gdn-direct, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, attention-batch, gdn-prefix, gdn-block, gdn-active, gdn-direct, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -106,6 +106,13 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: full-prefix
         run: timeout 5100 bash scripts/ci/run-baseline.sh
+      - name: Attention shared-page batched decode prerequisite
+        if: inputs.suite == 'attention-batch'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: attention-batch
+        run: timeout 2100 bash scripts/ci/run-baseline.sh
       - name: GDN exact prefix and rollback prerequisite
         if: inputs.suite == 'gdn-prefix' || inputs.suite == 'gdn-block' || inputs.suite == 'gdn-active' || inputs.suite == 'gdn-direct'
         shell: bash
