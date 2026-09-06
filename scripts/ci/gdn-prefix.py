@@ -9,6 +9,7 @@ import time
 
 from gdn_prefix import decode_projected, gated_decode
 from gdn_snapshot import ActiveSnapshot
+from gdn_pair_timing import checkpoint_prefixes
 
 
 def main():
@@ -22,6 +23,7 @@ def main():
     parser.add_argument("--direct-snapshot", action="store_true")
     parser.add_argument("--working-state", action="store_true")
     parser.add_argument("--paired-timing", action="store_true")
+    parser.add_argument("--checkpoint-diagnostics", action="store_true")
     options = parser.parse_args()
     if options.direct_snapshot and not options.active_snapshot:
         raise ValueError("Direct snapshot requires active-slot mode")
@@ -29,6 +31,8 @@ def main():
         raise ValueError("Working state requires direct active snapshots and batched output")
     if options.paired_timing and not options.working_state:
         raise ValueError("Paired timing requires the compact working-state gate")
+    if options.checkpoint_diagnostics and not options.paired_timing:
+        raise ValueError("Checkpoint diagnostics require paired timing")
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
@@ -51,6 +55,8 @@ def main():
     if options.paired_timing:
         output_path = root / "gdn-inplace-timing.json"
         report["paired_timing"] = []
+    if options.checkpoint_diagnostics:
+        output_path = root / "gdn-checkpoint-cost.json"
     mesh = None
     working = None
     traces = []
@@ -202,9 +208,14 @@ def main():
                         release([output])
                     continuations.append((continuation, state_host(live)))
 
-                def operation(use_working=True):
+                def operation(use_working=True, checkpoint_policy="all"):
                     selected = working if use_working else None
+                    prefixes = checkpoint_prefixes(rows, checkpoint_policy)
+                    saved_prefixes = []
                     def save(prefix):
+                        if prefix not in prefixes:
+                            return
+                        saved_prefixes.append(prefix)
                         if selected:
                             selected.save(staging[prefix])
                         elif options.active_snapshot:
@@ -217,6 +228,8 @@ def main():
                         save(0)
                         outputs = decode_projected(gdn, packed, tokens, save,
                                                    ttnn, forward=native_gated)
+                    if tuple(saved_prefixes) != prefixes:
+                        raise AssertionError("Checkpoint policy did not engage exactly")
                     if not options.batch_output:
                         return outputs
                     gated = outputs[0] if rows == 1 else ttnn.concat(outputs, dim=1)
@@ -325,38 +338,60 @@ def main():
                 if options.paired_timing:
                     from gdn_pair_timing import paired_replays
 
-                    def validate_timing(values):
+                    def validate_timing(values, policy):
                         if not all(exact(value, expected) for value, expected in
                                    zip(read_outputs(values), expected_outputs, strict=True)):
                             raise AssertionError("Paired timing output differs from native serial B1")
                         if not state_exact(state_host(live), expected_states[rows]):
                             raise AssertionError("Paired timing final state or idle slots differ")
-                        for prefix in range(rows + 1):
+                        for prefix in checkpoint_prefixes(rows, policy):
                             expected = [[shard[:1] if index == 0 else shard[:, :1] for shard in shards]
                                         for index, shards in enumerate(expected_states[prefix])]
                             if not state_exact(state_host(staging[prefix]), expected):
                                 raise AssertionError("Paired timing prefix checkpoint differs")
 
-                    copy(initial, live)
-                    warm_outputs = operation(False)
-                    validate_timing(warm_outputs)
-                    release(warm_outputs)
-                    copy(initial, live)
-                    control_trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-                    control_outputs = operation(False)
-                    ttnn.end_trace_capture(mesh, control_trace, cq_id=0)
-                    traces.append(control_trace)
-                    arm_traces = dict(control=control_trace, candidate=trace)
-                    arm_outputs = dict(control=control_outputs, candidate=captured_outputs)
-                    timing = paired_replays(
-                        lambda: copy(initial, live), lambda: ttnn.synchronize_device(mesh),
-                        lambda arm: ttnn.execute_trace(mesh, arm_traces[arm], cq_id=0, blocking=True),
-                        lambda arm: validate_timing(arm_outputs[arm]))
-                    timing.update(seed=seed, rows=rows)
-                    report["paired_timing"].append(timing)
-                    ttnn.release_trace(mesh, control_trace)
-                    traces.remove(control_trace)
-                    release(control_outputs)
+                    policies = ("all", "none", "end") if options.checkpoint_diagnostics else ("all",)
+                    for policy in policies:
+                        if policy == "end":
+                            stale = [[shard[:1] if index == 0 else shard[:, :1] for shard in shards]
+                                     for index, shards in enumerate(expected_states[0])]
+                            expected_end = [[shard[:1] if index == 0 else shard[:, :1] for shard in shards]
+                                            for index, shards in enumerate(expected_states[rows])]
+                            if state_exact(stale, expected_end):
+                                raise AssertionError("End-checkpoint poison must differ from the expected state")
+                        def restore_timing():
+                            copy(initial, live)
+                            if policy == "end":
+                                active.save(staging[rows])
+
+                        arm_traces, arm_outputs = {}, {}
+                        owned = []
+                        for arm in ("control", "candidate"):
+                            if policy == "all" and arm == "candidate":
+                                arm_traces[arm], arm_outputs[arm] = trace, captured_outputs
+                                continue
+                            restore_timing()
+                            warm_outputs = operation(arm == "candidate", policy)
+                            validate_timing(warm_outputs, policy)
+                            release(warm_outputs)
+                            restore_timing()
+                            arm_trace = ttnn.begin_trace_capture(mesh, cq_id=0)
+                            arm_outputs[arm] = operation(arm == "candidate", policy)
+                            ttnn.end_trace_capture(mesh, arm_trace, cq_id=0)
+                            traces.append(arm_trace)
+                            arm_traces[arm] = arm_trace
+                            owned.append(arm)
+                        timing = paired_replays(
+                            restore_timing, lambda: ttnn.synchronize_device(mesh),
+                            lambda arm: ttnn.execute_trace(mesh, arm_traces[arm], cq_id=0, blocking=True),
+                            lambda arm: validate_timing(arm_outputs[arm], policy))
+                        timing.update(seed=seed, rows=rows, checkpoint_policy=policy,
+                                      checkpoints_per_block=len(checkpoint_prefixes(rows, policy)))
+                        report["paired_timing"].append(timing)
+                        for arm in owned:
+                            ttnn.release_trace(mesh, arm_traces[arm])
+                            traces.remove(arm_traces[arm])
+                            release(arm_outputs[arm])
                 ttnn.release_trace(mesh, trace)
                 traces.remove(trace)
                 release(captured_outputs + tokens + correction + [packed])
@@ -367,9 +402,11 @@ def main():
             release(initial)
         if working:
             report["inplace_requested_and_aliased_calls"] = working.calls
-            if working.calls != 279 or len(report["checks"]) != 216 or len(report["negative_controls"]) != 30:
+            expected_calls = 651 if options.checkpoint_diagnostics else 279
+            if working.calls != expected_calls or len(report["checks"]) != 216 or len(report["negative_controls"]) != 30:
                 raise AssertionError("Incomplete compact-state coverage")
-        if options.paired_timing and len(report["paired_timing"]) != 15:
+        expected_fixtures = 45 if options.checkpoint_diagnostics else 15
+        if options.paired_timing and len(report["paired_timing"]) != expected_fixtures:
             raise AssertionError("Incomplete paired timing matrix")
         report["passed"] = True
     except BaseException as error:

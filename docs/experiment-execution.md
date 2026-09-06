@@ -126,6 +126,24 @@ arm alone certifies dynamic rollback or a complete speculative commit pipeline.
 Retain the full all-prefix correctness gate; do not hide the failed all-prefix
 performance result or predict savings from fenced eager attribution.
 
+`gdn-checkpoint-cost` implements that diagnostic (hardware pending). It retains
+the all-prefix correctness/rollback/continuation/isolation matrix and reruns the
+all-prefix paired control alongside `none` and `end` checkpoint policies. Both
+arms use the same policy; compact entry/publication transfers remain timed even
+when checkpoints are disabled. Native fused arithmetic and precision are unchanged.
+Each warmup/capture asserts the exact checkpoint callback sequence. End-only
+staging is overwritten with the initial active state outside every timed replay,
+and that poison is required to differ from the expected end state, preventing a
+missing checkpoint write from passing on stale results. Every timing sample checks
+all outputs and full final live state, plus the selected checkpoints.
+
+The expanded matrix requires 45 seed/width/policy fixtures, 5400 timed replays and
+651 eager/capture in-place request/alias checks. Report policy-specific paired
+ratios rather than mixing samples or treating reduced-checkpoint diagnostics as
+a complete speculative verifier. This can separate checkpoint-related costs from
+the combined recurrence/working-state-transfer cost; it does not isolate recurrence
+kernel latency alone. No full-model integration or serving promotion is enabled.
+
 `gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
 compact B1 working set (recurrence and all four conv taps), copied from native B8
 slot zero once per block. Instance-local B/state bindings enable the native

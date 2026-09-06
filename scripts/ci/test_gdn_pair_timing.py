@@ -1,9 +1,18 @@
 import unittest
 
-from gdn_pair_timing import paired_replays
+from gdn_pair_timing import checkpoint_prefixes, paired_replays
 
 
 class PairTimingTests(unittest.TestCase):
+    def test_matched_checkpoint_policies(self):
+        for rows in (1, 2, 4, 8, 16):
+            self.assertEqual(checkpoint_prefixes(rows, "all"), tuple(range(rows + 1)))
+            self.assertEqual(checkpoint_prefixes(rows, "end"), (rows,))
+            self.assertEqual(checkpoint_prefixes(rows, "none"), ())
+        for rows, policy in ((3, "all"), (True, "end"), (16, "unknown")):
+            with self.assertRaises(ValueError):
+                checkpoint_prefixes(rows, policy)
+
     def test_restores_before_each_timer_and_uses_abba(self):
         events = []
         now = 0
