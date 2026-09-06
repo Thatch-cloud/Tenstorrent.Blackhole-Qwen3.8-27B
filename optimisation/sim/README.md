@@ -1,5 +1,28 @@
 # Simulator-first device-loop GDN gate
 
+## Ordered shared-page cache writes
+
+`run-ordered-cache.sh --rows 16 --start 31 --seed 1` compares a single ordered
+device launch against native serial B1 paged-cache updates. It keeps native BF8
+untilize/tilize and RMW ordering; only input staging and launch composition change.
+There is no hardware fallback and no simulator performance claim.
+
+Passed complete physical cache equality on both chips, immutable packed input,
+omitted-write detection, repeat-after-restore, clean mesh close and exit0:
+
+| Simulator fixture | T | Start | Seed |
+| --- | ---: | ---: | ---: |
+| 20260906T115610Z-325 | 2 | 63 | 0 |
+| 20260906T115708Z-319 | 16 | 31 | 1 |
+| 20260906T115722Z-460 | 8 | 63 | 2 |
+| 20260906T115904Z-308 | 4 | 15 | 0 |
+| 20260906T115916Z-538 | 1 | 65 | 2 |
+
+The hardware `attention-timing` suite now gates the ordered writer with real
+weights and exact B1 SDPA. Its paired control uses the same batched attention
+projections and B1 SDPA but retains serial cache-write dispatch, isolating the
+writer change. No full-model or serving adoption follows from this layer gate.
+
 ## Verified first pass, 2026-09-06
 
 - Norm/gate T2 (`20260906T064618Z-338`): both serial T1 calls completed; T2

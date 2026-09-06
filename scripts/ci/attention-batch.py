@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import time
 
-from attention_batch import SerialCacheWriter, serial_tail
+from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 
 
 def main():
@@ -17,6 +17,7 @@ def main():
         raise RuntimeError("Fast-dispatch hardware required")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timing", action="store_true")
+    parser.add_argument("--ordered-cache", action="store_true")
     options = parser.parse_args()
     import torch
     import ttnn
@@ -28,6 +29,8 @@ def main():
 
     report = dict(passed=False, checks=[], negative_controls=[], timings=[], eligible_for_serving_gate=False,
                   scope="One real-weight attention layer, TP2, static positions, serialized shared-page writes; no full-model speed claim")
+    report['ordered_cache'] = options.ordered_cache
+    report['timing_control'] = 'Batched attention with serial cache writes and B1 SDPA' if options.ordered_cache else 'Native serial B1 attention'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
     mesh = None
     traces = []
@@ -39,6 +42,12 @@ def main():
         report["flags"] = {name: os.environ.get(name) for name in ("QWEN_ATTN_PREP", "QWEN_SDPA_BF8")}
         if any(value != "1" for value in report["flags"].values()):
             raise ValueError("Pinned fused attention and BF8 cache flags required")
+        kernels = None
+        if options.ordered_cache:
+            from ordered_cache import HASHES, load_kernels
+            kernels = load_kernels('/opt/tt-metal')
+            report['cache_native_hashes'] = HASHES
+            report['cache_generated_hashes'] = {role: hashlib.sha256(value.encode()).hexdigest() for role, value in kernels.items()}
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
         mesh.enable_program_cache()
@@ -100,20 +109,23 @@ def main():
                     cos, sin = rot_mats_decode(mesh, args.rope_head_dim, args.max_seq_len, args.rope_theta, positions)
                     singleton_rope = [rot_mats_decode(mesh, args.rope_head_dim, args.max_seq_len, args.rope_theta,
                                                      position.reshape(1)) for position in positions]
-                    writer = SerialCacheWriter(ttnn, singleton_positions, [page_single] * rows, attention._kv_shard_cfg(1))
-                    tail = serial_tail(attention, writer, ttnn)
+                    serial_writer = SerialCacheWriter(ttnn, singleton_positions, [page_single] * rows, attention._kv_shard_cfg(1))
+                    writer = OrderedCacheWriter(mesh, ttnn, kernels) if options.ordered_cache else serial_writer
+                    reader = SerialAttentionReader(ttnn, singleton_positions, [page_single] * rows) if options.ordered_cache else None
+                    tail = serial_tail(attention, writer, ttnn, reader)
 
                     def reference():
                         return [attention.forward_decode(token, position, *rope, page_table=page_single)
                                 for token, position, rope in zip(tokens, singleton_positions, singleton_rope, strict=True)]
 
-                    def candidate():
-                        before = writer.calls
-                        attention._decode_from_prep = tail
+                    def candidate(control=False):
+                        selected_writer = serial_writer if control else writer
+                        before = selected_writer.calls
+                        attention._decode_from_prep = serial_tail(attention, serial_writer, ttnn, reader) if control else tail
                         try:
                             result = attention.forward_decode(packed, packed_position, cos, sin, page_table=packed_pages)
-                            if writer.calls - before != 2:
-                                raise AssertionError("Both native K/V writes must use the serial adapter")
+                            if selected_writer.calls - before != 2:
+                                raise AssertionError("Both native K/V writes must use the selected adapter")
                             return [result]
                         finally:
                             del attention._decode_from_prep
@@ -152,7 +164,7 @@ def main():
                     if options.timing and all(check["exact"] for check in report["checks"][-2:]):
                         timed_traces = {}
                         timed_outputs = {}
-                        for arm, operation in (("serial", reference), ("batch", candidate)):
+                        for arm, operation in (("serial", (lambda: candidate(control=True)) if options.ordered_cache else reference), ("batch", candidate)):
                             reset()
                             trace = ttnn.begin_trace_capture(mesh, cq_id=0)
                             outputs = operation()

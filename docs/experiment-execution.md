@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Post-verification GDN commit (host tests passed; hardware next)
+### Post-verification GDN commit (hardware passed 34029984214)
 
 `RetainedGDNBlock` keeps all48 packed histories alive through logit readback and
 permits one commit decision. Every owner binding is checked before writes; a
@@ -24,7 +24,7 @@ partial device failure poisons the decision rather than permitting a fresh retry
 Record buffers are released only when the owning fixture closes, after trace
 release. Downstream-owned layer outputs are excluded from record ownership.
 
-The next full-model gate uses the existing `greedy_verify.select_prefix` helper
+The full-model gate uses the existing `greedy_verify.select_prefix` helper
 on actual target argmax rows. The already-emitted seed is not emitted twice:
 accepted draft proposals plus the correction/bonus determine `state_rows`.
 An explicit abort exercises prefix0. Inputs are forced-rejection fixtures, not
@@ -34,11 +34,36 @@ rollback cases. It must publish the selected native state itself; an external
 restore is deliberately omitted so it cannot hide publication errors.
 
 All earlier full-logit/state/KV/negative-control checks remain. The experiment
-adds16 post-verification decisions and readback/selection/commit component times,
+passed16 post-verification decisions and readback/selection/commit component times,
 not end-to-end throughput. It skips redundant static verifier timing, already
 measured in34028729821. The tested kernels are unchanged.200 CI,55 simulator
-and26 speculative host tests pass; retained full-model lifetimes need hardware
-validation. No serving settings change.
+and26 speculative host tests pass. Hardware run34029984214 at08bd728 passed
+all20 width/mode cases,16 corrected rollbacks and4 negative-control pairs,
+including4 explicit aborts and12 greedy decisions across4K/16K eager/trace.
+All48 layer records survive until the post-verification decision. Readback,
+host selection and eager commit cost25.45-41.57ms in these fixtures; those
+component timings exclude verification and drafting and are not committed TPS.
+No serving settings change.
+
+### Ordered shared-page cache write (simulator passed; hardware next)
+
+The remaining attention adapter dispatches per-token slice, reshard and native
+paged-cache writes. A bounded candidate stages each prepared KV row on one worker,
+then chains the native reader/writer semaphore so each BF8 read-modify-write
+finishes before the next token reads the shared page. Native untilize/tilize math
+and packing remain unchanged. This is one launch with ordered device work, not
+unsafe parallel updates to a shared BF8 tile. B1 SDPA remains unchanged.
+
+`ordered_cache.py` hash-pins all three native kernel sources before generating
+the reader's interleaved-input staging change. Simulator fixtures compare the
+entire physical cache against native serial B1 writes, cross tile/page boundaries,
+verify immutable inputs, detect omitted writes and repeat after restoring the
+initial cache. No hardware dispatch or performance adoption precedes simulator
+success. T1/2/4/8/16 passed with starts15/31/63/65 across three seeds; simulator
+fixture IDs are in `optimisation/sim/README.md`.206 CI,55 simulator and26
+speculative host tests pass. Hardware `attention-timing` compares the exact same
+batched projections and B1 SDPA with serial versus ordered cache writers, keeping
+native complete-cache/output correctness and negative controls.
 
 ### Packed convolution checkpoints (hardware layer passed 34028407207)
 

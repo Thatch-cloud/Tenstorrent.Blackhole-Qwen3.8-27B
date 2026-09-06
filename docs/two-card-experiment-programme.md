@@ -71,12 +71,14 @@ and commit overhead gives only about174.77/159.46 tok/s for T16. The 200 committ
 token/s goal is not met; a sixteen-token cycle must fit within 80 ms including
 drafting and commit. T1 retains native handling.
 
-Current experiment: retain all48 layers' prefix records until verification finishes,
-then use actual target argmax rows to select and restore the accepted prefix.
-This establishes post-verification state lifetime and commit, before integrating
-an actual drafter and reusable request-level traces. GDN recurrence remains
-sequential inside its device loop. Attention still uses the exact serial B1
-SDPA/shared-page writer paths; their remaining cost needs renewed attribution.
+Post-verification record lifetime and greedy commit passed run34029984214:
+all48 layers retained,16 post-output decisions across4K/16K eager/trace, including
+abort and rejection corrections. Readback/selection/eager commit alone costs
+25.45-41.57ms; this is not an actual drafter or reusable serving engine.
+The next simulator-first experiment replaces per-token cache-write launches with
+one ordered device semaphore chain, preserving native BF8 RMW arithmetic.
+Attention retains exact B1 SDPA; GDN recurrence remains sequential inside its
+device loop. Target200 remains unachieved, and serving defaults remain unchanged.
 
 Historical recurrence-kernel development:
 The first recurrence-only prototype retains BF16 state between tokens in L1 and

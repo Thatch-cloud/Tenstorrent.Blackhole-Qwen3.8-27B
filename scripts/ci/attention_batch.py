@@ -41,6 +41,28 @@ class SerialCacheWriter:
         self.calls += 1
 
 
+class OrderedCacheWriter:
+    def __init__(self, mesh, operations, kernels):
+        self.mesh = mesh
+        self.operations = operations
+        self.kernels = kernels
+        self.calls = 0
+
+    def __call__(self, cache, packed, *, update_idxs_tensor, page_table):
+        from ordered_cache import update, validate_shapes
+
+        validate_shapes(tuple(cache.shape), tuple(packed.shape), tuple(update_idxs_tensor.shape), tuple(page_table.shape))
+        operations = self.operations
+        converted = packed.memory_config() != operations.DRAM_MEMORY_CONFIG
+        interleaved = operations.to_memory_config(packed, operations.DRAM_MEMORY_CONFIG) if converted else packed
+        try:
+            update(self.mesh, cache, interleaved, update_idxs_tensor, page_table, self.kernels)
+        finally:
+            if converted:
+                operations.deallocate(interleaved)
+        self.calls += 1
+
+
 class SerialAttentionReader:
     def __init__(self, operations, singleton_positions, singleton_pages):
         if len(singleton_positions) not in (1, 2, 4, 8, 16) or len(singleton_pages) != len(singleton_positions):
