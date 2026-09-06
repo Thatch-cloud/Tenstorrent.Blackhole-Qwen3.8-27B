@@ -8,10 +8,37 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from greedy_session import GreedySession
-from verifier_engine import VerifierEngine
+from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_capture_geometry_respects_budget_and_capacity_before_device_work(self):
+        self.assertEqual(capture_widths(65535, 65536, 32, 1), (1,))
+        self.assertEqual(capture_widths(65531, 65536, 32, 5), (1, 2, 4))
+        self.assertEqual(capture_widths(4095, 65536, 32, 128), (1, 2, 4, 8, 16, 32))
+        for geometry in ((65535, 65536, 32, 2), (-1, 65536, 32, 1),
+                         (0, 65536, 32, 0), (0, 65536, 64, 1), (True, 65536, 32, 1)):
+            with self.assertRaises(ValueError):
+                capture_widths(*geometry)
+
+    def test_constructor_failure_poisoning_prevents_device_state_retry(self):
+        for fail in ('allocate', 'fixture'):
+            session = GreedySession('request', [0, 1, 2], 0, vocab_size=100, max_new_tokens=33)
+            helpers = [SimpleNamespace(live=[object()] * 5, allocate=Mock(return_value=[object()] * 5),
+                                       save=Mock()) for index in range(48)]
+            if fail == 'allocate':
+                helpers[0].allocate.side_effect = RuntimeError('allocation failure')
+            operations = SimpleNamespace(synchronize_device=Mock())
+            with patch.dict(sys.modules, ttnn=operations), patch('verifier_engine.addresses', return_value=(1, 2)), \
+                 patch('verifier_engine.release_owned'), patch.object(VerifierEngine, 'fixture', side_effect=RuntimeError('fixture failure')):
+                with self.assertRaises(RuntimeError):
+                    VerifierEngine(SimpleNamespace(mesh_device=object()), session, SimpleNamespace(shape=(1, 1024)), helpers)
+            self.assertEqual(session.phase, 'failed')
+            self.assertEqual(session.emitted, [0])
+            with self.assertRaises(ValueError):
+                session.propose('request')
+            session.close('request')
+
     def fixture(self, rows=4):
         session = GreedySession('request', [0, 1, 2] * 12, 0, vocab_size=100, max_new_tokens=64)
         engine = VerifierEngine.__new__(VerifierEngine)

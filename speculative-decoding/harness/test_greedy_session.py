@@ -6,6 +6,25 @@ from greedy_session import GreedySession
 
 
 class SessionTests(unittest.TestCase):
+    def test_device_preparation_excludes_proposals_and_poisoned_retry(self):
+        for fail in (False, True):
+            session = self.fixture()
+            session.begin_preparation('request')
+            with self.assertRaises(ValueError):
+                session.propose('request')
+            with self.assertRaises(ValueError):
+                session.begin_preparation('request')
+            if fail:
+                session.fail_preparation('request')
+                with self.assertRaises(ValueError):
+                    session.propose('request')
+                with self.assertRaises(ValueError):
+                    session.begin_preparation('request')
+            else:
+                session.finish_preparation('request')
+                self.assertEqual(session.phase, 'idle')
+            session.close('request')
+
     def fixture(self, budget=64, eos_ids=()):
         return GreedySession('request', [0, 1, 2] * 12, 0, vocab_size=100,
                              max_new_tokens=budget, eos_ids=eos_ids)

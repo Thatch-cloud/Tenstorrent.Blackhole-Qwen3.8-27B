@@ -61,6 +61,17 @@ exactly5 history buffers per layer after scratch release. Both runs closed
 cleanly. The oracle is serial T1 of the same recurrence kernel with native
 convolution, not an independent full-model reference or timing result.
 
+The final ownership guard also passed T2/seed2 continuation run
+`20260906T161556Z-322` (all3 prefixes, one stale-state control; source6cf8aa03).
+Independent engine review found preparation lifecycle gaps: preparation now
+excludes proposals, failed construction poisons its request, and all capture
+widths are bounded by the remaining generation budget before device work.
+The complete budget must fit the page capacity; a last-page T1 request no
+longer warms T32 beyond its allocation. Constructor-failure/geometry tests pass.
+Capture-finalization or post-decode registration failures still require runtime
+teardown rather than in-place recovery; no serving-lifecycle certification is
+claimed for those paths.
+
 ### Full-verifier device selection (hardware gate passed)
 
 Run `34040918809` at `613a591` passed all12 width/context fixtures and1440

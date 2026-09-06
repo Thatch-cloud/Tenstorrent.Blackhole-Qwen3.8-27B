@@ -41,6 +41,24 @@ class GreedySession:
         if request_id != self.request_id or self.phase in ('failed', 'closed'):
             raise ValueError('Closed, failed or mismatched request')
 
+    def begin_preparation(self, request_id):
+        self.check_owner(request_id)
+        if self.phase != 'idle' or self.pending is not None or self.finished:
+            raise ValueError('An unfinished idle request is required before device preparation')
+        self.phase = 'preparing'
+
+    def finish_preparation(self, request_id):
+        self.check_owner(request_id)
+        if self.phase != 'preparing':
+            raise ValueError('Request preparation is not active')
+        self.phase = 'idle'
+
+    def fail_preparation(self, request_id):
+        self.check_owner(request_id)
+        if self.phase != 'preparing':
+            raise ValueError('Request preparation is not active')
+        self.phase = 'failed'
+
     def propose(self, request_id, *, max_rows=16, selected=None):
         self.check_owner(request_id)
         if self.phase != 'idle' or self.finished:

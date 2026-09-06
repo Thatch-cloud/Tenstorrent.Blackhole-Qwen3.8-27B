@@ -10,20 +10,33 @@ from model_batch import ModelBatch
 from verifier_inputs import stage_inputs
 
 
+def capture_widths(position, capacity, verifier_rows, remaining):
+    if any(type(value) is not int for value in (position, capacity, verifier_rows, remaining)):
+        raise ValueError('Integer request geometry required')
+    if position < 0 or remaining < 1 or position + remaining > capacity or verifier_rows not in (16, 32):
+        raise ValueError('The complete decode budget must fit the request page capacity')
+    return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining))
+
+
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None):
         import ttnn
 
         if session.phase != 'idle' or session.pending is not None or session.finished or len(helpers) != 48:
             raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
+        if len(pages.shape) != 2 or pages.shape[0] != 1:
+            raise ValueError('One request page table required')
+        widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
+                                session.max_new_tokens - len(session.emitted))
         self.model, self.session, self.pages, self.helpers = model, session, pages, helpers
         self.operations, self.mesh, self.sampler = ttnn, model.mesh_device, sampler
         self.position = session.position
         self.phase, self.pending = 'preparing', None
         self.initial, self.buckets = [], {}
         self.native_addresses = [[addresses(ttnn, value) for value in helper.live] for helper in helpers]
-        self.widths = (1, 2, 4, 8, 16, 32) if session.verifier_rows == 32 else (1, 2, 4, 8, 16)
+        self.widths = widths
         started = time.perf_counter()
+        session.begin_preparation(session.request_id)
         try:
             for helper in helpers:
                 self.initial.append(helper.allocate())
@@ -64,9 +77,11 @@ class VerifierEngine:
             ttnn.synchronize_device(self.mesh)
             self.validate_bindings()
             self.setup_ms = (time.perf_counter() - started) * 1000
+            session.finish_preparation(session.request_id)
             self.phase = 'idle'
         except BaseException:
             self.phase = 'failed'
+            session.fail_preparation(session.request_id)
             self.close()
             raise
 
