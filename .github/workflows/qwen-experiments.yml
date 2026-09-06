@@ -6,10 +6,14 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-batch-attribution, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, device-readback, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-batch-attribution, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
+        type: boolean
+        default: false
+      reset_authorized:
+        description: Explicit approval for one reset of the two allocated cards (recovery suite only)
         type: boolean
         default: false
 
@@ -36,6 +40,20 @@ jobs:
         if: inputs.suite == 'inventory'
         shell: bash
         run: bash scripts/ci/qwen-inventory.sh
+      - name: Authorized two-card reset
+        if: inputs.suite == 'device-recovery'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RESET_AUTHORIZED: ${{ inputs.reset_authorized && '1' || '0' }}
+        run: timeout -k 15 300 bash scripts/ci/reset-cards.sh
+      - name: Post-reset transfer health
+        if: success() && inputs.suite == 'device-recovery'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: device-readback
+        run: timeout -k 30 300 bash scripts/ci/run-baseline.sh
       - name: Hardware correctness gates
         if: inputs.suite == 'hardware'
         shell: bash

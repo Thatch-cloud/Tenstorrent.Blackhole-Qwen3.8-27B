@@ -42,7 +42,10 @@ larger widths remain uncertified. A bounded stage/stack diagnostic retry keeps
 the same CB5 feedback and head-local assembly kernels to identify the blocking call.
 That retry (34014926676) instead stalled reading the initial tensor, before either
 oracle or custom kernel. A minimal paired-card transfer health check is now staged;
-the original kernel stall remains unresolved. No card reset has been performed.
+the original kernel stall remains unresolved. That health check (34015497253)
+failed during firmware initialization, before transfers. The operator has now
+authorized a controlled two-card reset followed by the same health check; recovery
+is pending and no kernel-result claim follows from reset success alone.
 Real-weight convolution and full-model integration remain; this is not yet a
 complete multi-token GDN layer or speculative serving.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter

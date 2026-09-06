@@ -110,6 +110,14 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 - `device-readback`: bounded two-chip upload/readback health gate, before model
   manifest loading. Checks two tensor sizes and three changing patterns on both
   chips; stage/stack evidence, 180-second timeout, no custom kernels or reset.
+- `device-recovery`: exceptional operator-authorized reset, requiring both
+  `cards_allocated=true` and `reset_authorized=true`. Verifies exactly the two
+  known boards and TT PCI functions, rejects running accelerator-capable containers,
+  and invokes installed host `tt-smi -r all` once. Missing tooling/privilege fails
+  closed; no installation, reboot, firmware update or process killing. Uses the
+  [documented TT-SMI reset interface](https://github.com/tenstorrent/tt-smi/blob/main/README.md#resets).
+  Only on reset-command success does it run `device-readback`; reset command success
+  alone is not recovery proof. Normal experiment suites never reset cards.
 - `gdn-multitoken-norm`: adds unchanged native fused RMS norm/weight/SiLU math,
   BF16 state feedback through the initial-state ring and head-local TILE assembly.
   Repeats exact prefix/continuation gates without timing; synthetic inputs only,

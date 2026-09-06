@@ -16,7 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Transfer health isolation (hardware pending)
+### Authorized recovery (pending)
+
+The operator explicitly approved controlled card reset through CI after health
+run 34015497253 (`3db69df`) failed during mesh opening with `Device 0 init: failed
+to initialize FW! Try resetting the board.` Zero transfer checks executed; the
+7981-byte artifact confirms firmware initialization failure, not the original
+post-T1 kernel stall's cause. Runner was online and idle.
+
+`device-recovery` requires a separate default-false reset authorization input and
+exclusive card allocation, verifies the exact known board IDs, exactly two TT PCI
+functions and no running containers with accelerator-capable mappings. It uses
+installed host TT-SMI once, without installing software or changing services.
+Noninteractive privilege/tool failures stop before reset. A successful command
+must be followed by all 12 transfer checks and clean close before recovery is
+declared. There are no automatic reset retries, reboots or firmware updates.
+
+### Transfer health isolation (failed 34015497253)
 
 Diagnostic run 34014926676 (`5cdd443`) timed out before any native oracle or
 custom kernel: all three stack dumps identify `host(initial)` / `ttnn.to_torch`
