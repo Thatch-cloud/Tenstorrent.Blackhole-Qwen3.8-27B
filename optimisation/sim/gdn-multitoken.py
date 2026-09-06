@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from gdn_multitoken import HANDOFF_HASHES, HASHES, execute, load_kernels
+from gdn_multitoken_conv import run_projected
 
 
 def require_simulator(environment):
@@ -26,12 +27,16 @@ def main():
     parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16), default=2)
     parser.add_argument('--norm-gate', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument('--conv', action='store_true')
     args = parser.parse_args()
+    if args.conv and not args.norm_gate:
+        parser.error('--conv requires --norm-gate')
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
     report = dict(passed=False, backend='ttsim', rows=args.rows, norm_gate=args.norm_gate,
                   seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
+                  convolution=args.conv,
                   native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(source.encode()).hexdigest() for name, source in kernels.items()},
                   scope='Slow-dispatch functional liveness/exactness against serial T1 of same kernel; not native oracle certification or performance')
@@ -74,6 +79,46 @@ def main():
             norm_w = upload((1 + torch.randn(1, 1, 128) * 0.1).bfloat16()) if args.norm_gate else None
             initial_host = (torch.randn(1, 24, 128, 128) * 0.05).bfloat16()
             initial = upload(initial_host)
+            if args.conv:
+                projected = (torch.randn(1, args.rows, 8256) * 0.1).bfloat16()
+                taps = [upload((torch.randn(1, 1, 5120) * 0.1).bfloat16()) for index in range(4)]
+                dt_bias = upload(torch.randn(1, 1, 24).bfloat16())
+                neg_exp_A = upload((-torch.rand(1, 1, 24)).bfloat16())
+                conv_host = [(torch.randn(1, 1, 5120) * 0.05).bfloat16() for index in range(4)]
+                serial_conv = [upload(value) for value in conv_host]
+                candidate_conv = [upload(value) for value in conv_host]
+                serial_results, expected = [], []
+                state = initial
+                for token in range(args.rows):
+                    stage('conv-serial-t1', token=token)
+                    result = run_projected(mesh, upload(projected[:, token:token + 1]), state, serial_conv,
+                                           taps, dt_bias, neg_exp_A, norm_w, kernels)
+                    serial_results.append(result)
+                    state = result['states']
+                    expected.append((host(result['output']), host(state), [host(value) for value in serial_conv]))
+                stage('conv-multitoken-submit')
+                result = run_projected(mesh, upload(projected), initial, candidate_conv,
+                                       taps, dt_bias, neg_exp_A, norm_w, kernels)
+                stage('conv-multitoken-readback')
+                outputs, states = host(result['output']), host(result['states'])
+                for token in range(args.rows):
+                    prefix = [host(value) for value in result['conv_prefixes'][token]]
+                    for chip in range(2):
+                        if not torch.equal(outputs[chip][:, token:token + 1], expected[token][0][chip]):
+                            raise AssertionError(f'Convolution-chain output mismatch {token=} {chip=}')
+                        if not torch.equal(states[chip][token:token + 1], expected[token][1][chip]):
+                            raise AssertionError(f'Convolution-chain recurrent state mismatch {token=} {chip=}')
+                        for tap in range(4):
+                            if not torch.equal(prefix[tap][chip], expected[token][2][tap][chip]):
+                                raise AssertionError(f'Convolution prefix mismatch {token=} {chip=} {tap=}')
+                if not all(torch.equal(value, initial_host) for value in host(initial)):
+                    raise AssertionError('Initial recurrent state modified')
+                stage('mesh-close')
+                ttnn.close_mesh_device(mesh)
+                mesh = None
+                report['passed'] = True
+                stage('complete')
+                return
             packed = [upload(value) for value in values]
 
             def run(inputs, state):

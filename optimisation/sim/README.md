@@ -19,6 +19,18 @@
 
 ## Running
 
+### Convolution integration first pass
+
+Add `--norm-gate --conv` and set `KERNEL_TIMEOUT=600` for the projected-input
+composition fixture. It runs native serial convolution/gates, gathers their outputs,
+then calls the device-loop recurrence/norm kernel once. Synthetic projected rows,
+taps and state are compared against serial T1 calls of the same helper on both
+simulated chips: every output, recurrent prefix and all four convolution prefixes.
+This is not a convolution token-loop fusion, independent native recurrence oracle,
+real-weight test, fast-dispatch trace test or performance result. The separate
+`gdn-multitoken-conv` CI suite supplies real-weight native projections and compares
+the composed path against native GDN before output projection, eager and traced.
+
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation
 flags, and has no hardware fallback. It uses the existing D-drive WSL distribution

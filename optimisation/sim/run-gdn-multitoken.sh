@@ -23,6 +23,6 @@ export QWEN_SIM_REPORT="$SIM_ROOT/results/$RUN_ID-multitoken.json"
 printf 'report=%s\n' "$QWEN_SIM_REPORT"
 cd "$SIM_ROOT"
 status=0
-timeout -k 10 "${KERNEL_TIMEOUT:-180}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/gdn-multitoken.py" "$@" 2>&1 | tee "$SIM_ROOT/results/$RUN_ID-multitoken.log" || status=$?
+timeout -k 10 "${KERNEL_TIMEOUT:-180}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/gdn-multitoken.py" "$@" 2>&1 | sed -E '/\| +info +\| +Metal +\| (DFB size:|Writing DFB config)/d' | tee "$SIM_ROOT/results/$RUN_ID-multitoken.log" || status=$?
 printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-multitoken.exit-status"
 exit "$status"

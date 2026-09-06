@@ -16,6 +16,38 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Projected-input convolution integration (simulator passed; hardware pending)
+
+The shared `gdn_multitoken_conv.run_projected` adapter composes native serial
+convolution/gates with one multi-token recurrence/norm call. It retains all four
+convolution state snapshots per token and the recurrent prefixes; it does not fuse
+the convolution token loop or include output projection/CCL.
+
+Seven dual-chip synthetic fixtures passed exact outputs, every recurrent prefix,
+all convolution prefixes, unchanged initial recurrence and clean close with exit0:
+
+| Seed | Tokens | Simulator run |
+| --- | --- | --- |
+| 0 | 1 | `20260906T073404Z-412` |
+| 0 | 2 | `20260906T073143Z-327` |
+| 0 | 4 | `20260906T073427Z-458` |
+| 0 | 8 | `20260906T073533Z-568` |
+| 0 | 16 | `20260906T073730Z-684` |
+| 1 | 2 | `20260906T074120Z-868` |
+| 2 | 2 | `20260906T074203Z-941` |
+
+Reports/logs are in `/opt/ttsim/results` on D-drive `TT-Sim`. This first pass uses
+synthetic weights/projected rows and serial T1 calls of the same helper, not an
+independent native recurrence oracle. Generated norm kernels remain identical to
+the hardware-validated `36b9eed` versions. Local validation:59 GDN unit tests pass,
+Python AST, shell syntax and workflow suite routing pass.
+
+Next hardware suite `gdn-multitoken-conv` captures93 real-weight native projections
+across three seeds and T1/2/4/8/16. It compares30 eager/trace cases against native
+GDN gated output and all recurrent/convolution prefixes on both cards, also checking
+entry snapshots and stable working convolution addresses. No reset, serving change,
+rollback-continuation certification or timing claim is part of this gate.
+
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
 Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)

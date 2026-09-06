@@ -9,6 +9,13 @@ controls. The CB5 counter handoff fix is hardware-validated. No timing was measu
 real-weight convolution and full-model integration remain next. Historical entries
 below explain the earlier stalls and recovery, not the current kernel status.
 
+Next integration checkpoint: native serial convolution/gates feeding the device-loop
+recurrence/norm passed seven simulator fixtures (seed0 T1/2/4/8/16, seeds1/2 T2),
+including every output and recurrent/convolution prefix. The real-weight native
+oracle eager/trace hardware gate is prepared as `gdn-multitoken-conv`; hardware
+results are pending. This composition is not convolution token-loop fusion and
+does not yet include output projection, full-model timing or a throughput claim.
+
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
 of this programme. The [execution ledger](experiment-execution.md) records individual
