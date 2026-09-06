@@ -18,6 +18,17 @@ class TimingMatrixTests(unittest.TestCase):
         gate.validate_matrix(fixtures)
         self.assertEqual(sum(record['timed_replays'] for record in fixtures), 2160)
 
+    def test_stage_timing_requires_complete_finite_exact_matrix(self):
+        fixtures = self.fixture()
+        with self.assertRaises(AssertionError):
+            gate.validate_matrix(fixtures, stage_timing=True)
+        for record in fixtures:
+            record['stage_attribution'] = dict(exact=True, timed_replays=120, recurrence_ms=.4, norm_gate_ms=.6)
+        gate.validate_matrix(fixtures, stage_timing=True)
+        fixtures[0]['stage_attribution']['norm_gate_ms'] = float('nan')
+        with self.assertRaises(AssertionError):
+            gate.validate_matrix(fixtures, stage_timing=True)
+
     def test_missing_or_duplicate_width_rejected(self):
         for duplicate in (False, True):
             fixtures = self.fixture()

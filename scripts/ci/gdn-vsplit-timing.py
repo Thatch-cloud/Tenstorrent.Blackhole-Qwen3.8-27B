@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -14,18 +15,27 @@ from gdn_vsplit_prepared import PreparedVSplit
 import gdn_vsplit
 
 
-def validate_matrix(fixtures):
+def validate_matrix(fixtures, *, stage_timing=False):
     expected = {(seed, rows) for seed in (0, 1, 2) for rows in (1, 2, 4, 8, 16, 32)}
     if ({(record['seed'], record['rows']) for record in fixtures} != expected
             or len(fixtures) != len(expected)
             or any(record.get('exact') is not True or record['timed_replays'] != 120
                    or record.get('refreshed_checks') != 2 for record in fixtures)):
         raise AssertionError('Incomplete exact paired width/seed matrix')
+    if stage_timing:
+        for record in fixtures:
+            stage = record.get('stage_attribution', {})
+            if (stage.get('exact') is not True or stage.get('timed_replays') != 120
+                    or any(not isinstance(stage.get(name), (int, float))
+                           or not math.isfinite(stage[name]) or stage[name] <= 0
+                           for name in ('recurrence_ms', 'norm_gate_ms'))):
+                raise AssertionError('Incomplete exact stage-attribution matrix')
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--prefetch-inputs', action='store_true')
+    parser.add_argument('--stage-timing', action='store_true')
     args = parser.parse_args()
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit allocation of both hardware cards required')
@@ -148,6 +158,22 @@ def main():
                     report['last_stage'] = dict(seed=seed, rows=rows, stage='paired-replay')
                     path.write_text(json.dumps(report, indent=2))
                     timing = measure(replay, validate, lambda: ttnn.synchronize_device(mesh))
+                    if args.stage_timing:
+                        for index, name in enumerate(('recurrence', 'norm_gate')):
+                            traces[name], unused = capture_operation(ttnn, mesh,
+                                lambda index=index: ttnn.generic_op(prepared._tensors, prepared._programs[index]))
+
+                        def replay_stage(arm):
+                            name = 'recurrence' if arm == 'serial' else 'norm_gate'
+                            ttnn.execute_trace(mesh, traces[name], cq_id=0, blocking=True)
+
+                        stage_cost = measure(replay_stage, lambda arm: validate('multitoken'),
+                                             lambda: ttnn.synchronize_device(mesh))
+                        timing['stage_attribution'] = dict(recurrence_ms=stage_cost['serial_median_ms'],
+                            norm_gate_ms=stage_cost['multitoken_median_ms'], timed_replays=stage_cost['timed_replays'],
+                            exact=stage_cost['exact'], scope='Separate blocking stage traces; do not sum as model latency',
+                            samples=[dict(stage='recurrence' if sample['arm'] == 'serial' else 'norm_gate',
+                                block=sample['block'], milliseconds=sample['milliseconds']) for sample in stage_cost['samples']])
                     for source, destination in zip(refreshed_inputs, packed, strict=True):
                         ttnn.copy(source, destination)
                     ttnn.synchronize_device(mesh)
@@ -176,7 +202,7 @@ def main():
                     if 'serial' in outputs:
                         release_owned(ttnn, outputs['serial'])
                     release_owned(ttnn, owned)
-        validate_matrix(report['fixtures'])
+        validate_matrix(report['fixtures'], stage_timing=args.stage_timing)
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'

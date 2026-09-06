@@ -16,6 +16,18 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Recurrence input prefetch: correct, no latency improvement
+
+Run34049169694 (`b4054bf`) passed18 independent native fixtures,2160 paired
+replays and36 changed-input checks on fixed addresses. Median-of-seed candidate
+times were0.133481/0.162156/0.217013/0.329596/0.551384/0.997197 ms for
+T1/2/4/8/16/32. Paired T32 improvement versus24-worker control was only about
+0.4-0.5%, below the plain split's already marginal result. Do not adopt it.
+Reducing issued input-read payload did not improve this composition's critical
+path. Separate captured recurrence and norm/gate timing follows before further
+arithmetic changes. Those isolated blocking timings are diagnostic, not additive
+full-model latency or committed-token throughput.
+
 ### Value-split captured timing: correct, no useful gain
 
 Run34048090329 (`1b70865`) passed all18 native-oracle fixtures and2160 paired
