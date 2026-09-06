@@ -160,7 +160,16 @@ cost as the factor erasing the benefit in this fixture. Policies run sequentiall
 so do not interpret cross-policy differences as a precise isolated kernel cost.
 These are layer block-cost ratios, not full-model or committed-token throughput.
 
-### E3 compact checkpoint DMA (hardware pending)
+### E3 compact checkpoint DMA (passed 34005970668)
+
+Run 34005970668 (`07f2b59`) passed 45 fixtures / 5400 timed replays, 216 exact
+prefix/continuation checks, 30 negative controls, 15 isolation checks, 651 in-place
+alias checks and 354 compact checkpoint DMA calls. T16 median paired ratios across
+seeds were 1.042-1.054x with all-prefix checkpoints, 1.054-1.060x end-only and
+1.058-1.062x without checkpoints. The all-prefix median regression is removed,
+although one of nine T16 all-prefix paired blocks was slightly below 1.0 (0.996x).
+T1 remained slower across all policies and seeds. These are single-layer gains,
+not a measured full-model improvement or committed-token rate.
 
 `gdn-checkpoint-dma` changes only compact checkpoint saving from five generic
 copies to one mesh generic-op invocation, reusing the existing unchanged 48-core
@@ -176,6 +185,28 @@ and 5400 paired replays, with 354 compact checkpoint DMA calls required during
 warmup/capture/eager (trace replay does not increment Python counters). It also
 records the unchanged C++ kernel hash and new Python adapter hash. The old generic
 copy path remains selectable; no speedup or full-model integration is assumed.
+
+### E3 full-model compact GDN integration (hardware pending)
+
+`full-compact-gdn` opts the static verifier into compact state plus direct compact
+checkpoint DMA for T2/4/8/16 across all 48 GDN layers. T1 and the default path keep
+native B1-in-B8 state handling. B1 SDPA reads, projection batching, model precision
+and live native buffer ownership are unchanged. Every eager/capture invocation
+requires all 48 compact layers to perform exactly T in-place updates and one
+selected-prefix checkpoint. Working sets are fixture-owned, preallocated before
+capture and released only after their traces; they add 96 MiB per chip at T>1.
+
+The gate repeats 4095/16383-token full-logit/state/valid-KV exactness at all widths
+in eager/trace and T16 rollback prefixes 0/1/8/16 with corrected continuations and
+negative controls. Only after that matrix passes, timing captures native serial,
+the existing batched native-state control, and the compact candidate. Both batched
+arms include one end-prefix checkpoint, checked against native serial state after
+each sample. Restore remains outside each timed replay; no prefill occurs while
+candidate trace buffers are live. Three ABBA blocks compare compact versus the
+existing batched control in addition to the serial-versus-batch comparison.
+Ten fixtures require 2400 timed decode replays across the two comparisons, plus
+separate restore measurements. Do not extrapolate layer gains or call verifier
+block throughput committed tok/s. No serving promotion or default change is made.
 
 `gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
 compact B1 working set (recurrence and all four conv taps), copied from native B8

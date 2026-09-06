@@ -16,21 +16,32 @@ def summarize(samples):
 
 
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
-            restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False):
+            restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
+            compact_gdn=False, checkpoint_digest=None):
     import torch
     import ttnn
 
     rows = len(tokens)
+    if compact_gdn and checkpoint_digest is None:
+        raise ValueError("Compact timing requires exact end-checkpoint validation")
     mesh = model.mesh_device
     prefill()
     save_initial()
-    candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa)
+    candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
+                           compact_gdn=compact_gdn)
+    control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
+                         serial_sdpa=serial_sdpa) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
     outputs = {}
     report = dict(length=length, rows=rows, blocks=[], restore_samples_ms=[], exact=False, serial_sdpa=serial_sdpa,
+                  compact_gdn_enabled=candidate.compact_gdn,
                   checkpoint_policy="One preselected end-prefix snapshot set, not all-prefix staging")
+    if compact_gdn:
+        import math
+        report["working_state_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
+            for state in candidate.working_states for tensor in state.state)
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -48,6 +59,12 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
         return len(actual) == len(expected) == 2 and all(torch.equal(value, reference)
             for value, reference in zip(actual, expected, strict=True))
 
+    def validate(arm):
+        if not exact_logits(read(outputs[arm]), expected) or state_digest() != expected_state or kv_digest(length + rows) != expected_kv:
+            raise AssertionError(f"{arm} timing trace differs from native serial logits/state/KV")
+        if arm != "serial" and checkpoint_digest is not None and checkpoint_digest() != expected_state:
+            raise AssertionError("Timed end checkpoint differs from native serial state")
+
     try:
         initial_state = state_digest()
         expected_outputs = serial()
@@ -57,7 +74,10 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
         for value in expected_outputs:
             ttnn.deallocate(value)
 
-        for arm, operation in (("serial", serial), ("batch", batch)):
+        operations = [("serial", serial), ("batch", batch)]
+        if control is not None:
+            operations.append(("control", lambda: [control.run()]))
+        for arm, operation in operations:
             restore_initial()
             warm = operation()
             for value in warm:
@@ -69,8 +89,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             traces[arm] = trace
             restore_initial()
             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
-            if not exact_logits(read(outputs[arm]), expected) or state_digest() != expected_state or kv_digest(length + rows) != expected_kv:
-                raise AssertionError(f"{arm} timing trace differs from native serial logits/state/KV")
+            validate(arm)
 
         for block in range(3):
             samples = []
@@ -82,10 +101,18 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                     started = time.perf_counter()
                     ttnn.execute_trace(mesh, traces[arm], cq_id=0, blocking=True)
                     elapsed.append((time.perf_counter() - started) * 1000)
-                if not exact_logits(read(outputs[arm]), expected) or state_digest() != expected_state or kv_digest(length + rows) != expected_kv:
-                    raise AssertionError("Timed replay changed full logits/state/KV")
+                validate(arm)
                 samples.append(dict(arm=arm, milliseconds=sum(elapsed) / len(elapsed), repeats=10, replay_ms=elapsed))
             report["blocks"].append(dict(block=block, samples=samples, **summarize(samples)))
+
+        if control is not None:
+            from gdn_pair_timing import paired_replays
+            arms = dict(control="control", candidate="batch")
+            report["compact_comparison"] = paired_replays(
+                restore_initial, lambda: ttnn.synchronize_device(mesh),
+                lambda arm: ttnn.execute_trace(mesh, traces[arms[arm]], cq_id=0, blocking=True),
+                lambda arm: validate(arms[arm]))
+            report["compact_comparison"]["scope"] = "Full-model compact versus native GDN state, same batching/end checkpoint; no committed tok/s"
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)
@@ -111,5 +138,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             for value in values:
                 ttnn.deallocate(value)
         candidate.close()
+        if control is not None:
+            control.close()
         for fixture in singleton:
             fixture.close()

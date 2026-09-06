@@ -1,10 +1,22 @@
 import unittest
 from types import SimpleNamespace
 
-from model_batch import instance_overrides, validate_checkpoint
+from model_batch import compact_gdn_enabled, instance_overrides, validate_checkpoint
 
 
 class ModelBatchTests(unittest.TestCase):
+    def test_compact_path_never_changes_t1_or_default(self):
+        self.assertFalse(compact_gdn_enabled(1, True, True, None))
+        for rows in (1, 2, 4, 8, 16):
+            self.assertFalse(compact_gdn_enabled(rows, False, False, None))
+        for rows in (2, 4, 8, 16):
+            self.assertTrue(compact_gdn_enabled(rows, True, True, None))
+
+    def test_compact_requires_exact_attention_policy_without_profiling(self):
+        for serial_sdpa, profiler in ((False, None), (True, object())):
+            with self.assertRaises(ValueError):
+                compact_gdn_enabled(16, True, serial_sdpa, profiler)
+
     def test_prefix_bounds(self):
         for rows in (1, 2, 4, 8, 16):
             for prefix in range(rows + 1):

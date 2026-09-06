@@ -29,14 +29,24 @@ def validate_checkpoint(rows, prefix):
         raise ValueError("Checkpoint must be in [0, T]")
 
 
+def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
+    validate_checkpoint(rows, rows)
+    if requested and (not serial_sdpa or profiler is not None):
+        raise ValueError("Compact GDN requires the unprofiled B1-SDPA correctness path")
+    return bool(requested and rows > 1)
+
+
 class ModelBatch:
-    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None):
+    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
+                 compact_gdn=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        self.compact_gdn = compact_gdn_enabled(self.rows, compact_gdn, serial_sdpa, profiler)
+        self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
         self.model = model
@@ -107,6 +117,12 @@ class ModelBatch:
         operations = self.operations
         native_gated = gated_decode(layer, profiler=self.profiler)
         snapshot = helper.save
+        working = None
+        if self.compact_gdn:
+            from gdn_working_state import WorkingState
+            working = WorkingState(helper, operations, compact_dma=True)
+            self.working_states.append(working)
+            snapshot = working.save
         if self.profiler:
             native_gated = self.profiler.wrap("gdn.native_row", native_gated)
             snapshot = self.profiler.wrap("gdn.checkpoint", snapshot)
@@ -124,9 +140,12 @@ class ModelBatch:
                 if prefix == self.prefix:
                     snapshot(checkpoint)
 
-            save(0)
-            outputs = decode_projected(layer, packed, tokens, save, operations, forward=native_gated,
-                                       profiler=self.profiler)
+            if working:
+                outputs = working.decode(packed, tokens, save)
+            else:
+                save(0)
+                outputs = decode_projected(layer, packed, tokens, save, operations, forward=native_gated,
+                                           profiler=self.profiler)
             gated = outputs[0] if self.rows == 1 else operations.concat(outputs, dim=1)
             partial = layer._row_proj(gated, layer.tw["out"])
             if self.rows != 1:
@@ -143,6 +162,7 @@ class ModelBatch:
 
     def run(self):
         before_gdn = self.gdn_calls
+        before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
         before_reads = [reader.calls for reader in self.readers]
         with instance_overrides(self.bindings):
@@ -153,9 +173,17 @@ class ModelBatch:
             raise AssertionError("All 48 GDN and 16 attention adapters must engage")
         if any(reader.calls - before != 1 for reader, before in zip(self.readers, before_reads, strict=True)):
             raise AssertionError("Every selected B1 SDPA adapter must engage")
+        if len(self.working_states) != (48 if self.compact_gdn else 0) or any(
+            state.calls - before[0] != self.rows or state.checkpoint_calls - before[1] != 1
+            for state, before in zip(self.working_states, before_compact, strict=True)
+        ):
+            raise AssertionError("Every compact GDN layer must update in place and checkpoint exactly once")
         return result
 
     def close(self):
+        for state in self.working_states:
+            state.close()
+        self.working_states.clear()
         for value in self.buffers:
             self.operations.deallocate(value)
         self.buffers.clear()
