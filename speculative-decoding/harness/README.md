@@ -57,3 +57,22 @@ lookup T32 session accounting pass; hardware acceptance and speed remain unteste
 Accepted EOS publishes only inputs preceding that terminal output, matching
 native autoregressive stopping. Verification failures poison the request through
 `fail_verification`; no output or draft history is advanced by a failed block.
+
+## Offline lookup acceptance
+
+`python speculative-decoding/harness/lookup_acceptance.py REQUEST_REPORT.json`
+scores48 combinations of width cap, minimum match length and suffix tie-break
+against a complete native-checked request tape. It requires the new prompt/output
+token hashes, vocabulary, budget and EOS metadata; older reports missing these
+fields cannot be reconstructed by guessing. Output is JSON on stdout.
+
+The drafter sees only the prompt and committed output prefix. Native tape entries
+after the first mismatch are not valid target predictions for the rejected branch
+and are never used to decide acceptance. Tests cover this boundary, accepted EOS,
+correction EOS, budget exhaustion, mutated evidence and random output tapes.
+
+Results contain acceptance and committed tokens per block, not hardware latency,
+throughput, state correctness or coding quality. They are policy-selection
+diagnostics on an existing trace, not independent held-out validation. The default
+runtime routing remains unchanged; any selected policy needs a fresh hardware
+request test and a separate coding corpus before adoption.
