@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
-from attention_head_fold import causal_mask, fold_query, unfold_output
+from attention_head_fold import causal_mask, chunk_groups, fold_query, unfold_output
 
 
 def main():
@@ -20,6 +20,8 @@ def main():
     parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16, 32), default=2)
     parser.add_argument('--start', type=int, choices=(15, 31, 63, 127, 4095, 4096, 16383, 16384), default=63)
     parser.add_argument('--finite-mask', action='store_true')
+    parser.add_argument('--grouped', action='store_true')
+    parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
@@ -28,6 +30,7 @@ def main():
     path = Path(os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, finite_mask=args.finite_mask,
         capacity=args.capacity, chunk_size=args.chunk_size,
+        grouped=args.grouped, seed=args.seed,
         scope='Host-folded query and explicit mask versus native causal B1; no device layout or speed certification')
     mesh = None
     owned = []
@@ -56,7 +59,7 @@ def main():
                 raise AssertionError('Two chips required')
             return [ttnn.to_torch(part).clone() for part in parts]
 
-        torch.manual_seed(0)
+        torch.manual_seed(args.seed)
         query = torch.randn(1, args.rows, 12, 256).bfloat16()
         blocks = max(4, args.capacity // 64)
         keys = upload(torch.randn(blocks, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
@@ -76,19 +79,28 @@ def main():
             owned.append(native)
             outputs.append(host(native))
         expected = [torch.cat([output[chip] for output in outputs], dim=1) for chip in range(2)]
-        stage('folded-masked')
-        mask = causal_mask(args.rows, args.start, args.capacity)
-        if args.finite_mask:
-            mask.masked_fill_(torch.isneginf(mask), -1e9)
-        folded = ttnn.transformer.paged_scaled_dot_product_attention_decode(
-            upload(fold_query(query)), keys, values,
-            page_table_tensor=upload(torch.tensor([page_ids[:args.capacity // 64]], dtype=torch.int32), ttnn.int32),
-            is_causal=False,
-            attn_mask=upload(mask), scale=0.0625,
-            program_config=ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
-                exp_approx_mode=False, q_chunk_size=0, k_chunk_size=args.chunk_size), memory_config=ttnn.L1_MEMORY_CONFIG)
-        owned.append(folded)
-        actual = [unfold_output(value, args.rows) for value in host(folded)]
+        groups = chunk_groups(args.start, args.rows) if args.grouped else [
+            dict(offset=0, rows=args.rows, signature=(args.chunk_size, args.capacity))]
+        report['groups'] = groups
+        grouped_outputs = []
+        for group in groups:
+            offset, rows = group['offset'], group['rows']
+            chunk_size, capacity = group['signature']
+            stage(f'folded-{offset}-{rows}')
+            if capacity % 64:
+                raise ValueError('This probe requires a complete native cache-page view')
+            mask = causal_mask(rows, args.start + offset, capacity)
+            if args.finite_mask:
+                mask.masked_fill_(torch.isneginf(mask), -1e9)
+            folded = ttnn.transformer.paged_scaled_dot_product_attention_decode(
+                upload(fold_query(query[:, offset:offset + rows].contiguous())), keys, values,
+                page_table_tensor=upload(torch.tensor([page_ids[:capacity // 64]], dtype=torch.int32), ttnn.int32),
+                is_causal=False, attn_mask=upload(mask), scale=0.0625,
+                program_config=ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                    exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk_size), memory_config=ttnn.L1_MEMORY_CONFIG)
+            owned.append(folded)
+            grouped_outputs.append([unfold_output(value, rows) for value in host(folded)])
+        actual = [torch.cat([output[chip] for output in grouped_outputs], dim=1) for chip in range(2)]
         report['checks'] = [dict(chip=chip, exact=torch.equal(reference, candidate),
             differences=int((reference != candidate).sum()), max_abs=float((reference.float() - candidate.float()).abs().max()),
             reference_max=float(reference.abs().max()), candidate_max=float(candidate.abs().max()),

@@ -16,6 +16,29 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Full T32 grouped attention passes boundary simulation
+
+The simulator now executes every planned group, not just the CPU layout oracle:
+- `20260906T210330Z-288`: T32/start4095/seed1, finite mask, exact both chips.
+- `20260906T210610Z-284`: T2/start4095/seed2, native negative-infinity mask,
+  exact both chips after splitting at the boundary.
+- `20260906T210645Z-473`: T32/start16383/seed2, native negative-infinity mask,
+  exact both chips for every token, with clean close after356.6 simulated seconds.
+
+Both T32 cases use groups1/4/4/4/4/4/4/4/3. The first group has the old rounded
+cache extent and the remainder have the next extent; no full T32 circular-buffer
+allocation is attempted. The negative-infinity pass shows the finite-mask
+workaround is unnecessary for this correctly partitioned fixture. It does not
+prove all geometries or pathological inputs.
+
+These tests upload host-folded queries and masks, so no device-side layout cost,
+captured trace reuse or performance claim follows. Next build and simulator-test
+device packing/unpacking, then measure the complete grouped operation against
+native serial attention on hardware. Dynamic position changes must also select
+the correct group/cache-view plan; a static plan must not be reused blindly
+after crossing a chunk boundary. Serving and current verifier defaults remain
+unchanged.
+
 ### Attention grouping: bounded groups pass simulator exactness
 
 The head-fold hypothesis is not categorically rejected: the first masked variant
