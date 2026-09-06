@@ -119,6 +119,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-checkpoint-dma ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state --paired-timing --checkpoint-diagnostics --compact-checkpoint-dma
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken.py
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-direct ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot
     exit 0

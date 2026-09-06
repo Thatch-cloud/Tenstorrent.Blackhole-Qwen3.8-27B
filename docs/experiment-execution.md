@@ -16,6 +16,36 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E4 multi-token recurrent kernel prerequisite (hardware pending)
+
+`gdn-multitoken` is the first true device-side token-loop prototype, not another
+Python unroll. It derives three kernels from hash-pinned native source without
+patching the installed runtime. Each of 24 head-owning cores per chip processes
+T1/2/4/8/16 sequential packed rows. The reader loads the initial recurrent state
+only for token zero. Compute retains subsequent state in a dedicated 16-tile BF16
+L1 feedback ring (32 KiB/core), preserving the native inter-token state rounding;
+FP32 math scratch is not silently carried as persistent higher-precision state.
+The writer exports every token output and every prefix state to disjoint buffers.
+Total configured CB storage is 618496 bytes/core, including feedback. Physical
+resource compatibility and compilation remain hardware gates, not local claims.
+
+This initial operator gate uses synthetic packed QKV/beta/g inputs and the native
+packed recurrence without fused output norm/gate as oracle. It does not include
+real weights, convolution, output normalization/gating, attention or full-model
+integration. Native arithmetic statements are preserved; strict replacement anchors
+change only iteration/state supply/feedback. Independent initial state must remain
+unchanged, and every emitted state/output must equal the corresponding serial B1
+result on both chips. Reloaded prefix states must produce exact native continuation
+outputs and states. Inputs are replicated synthetic fixtures, not coding evaluation.
+
+Required coverage: 30 seed/width/eager-trace cases, 216 restored-prefix continuation
+checks and 15 stale-state negative controls. No performance timing or throughput
+claim is attached to this prerequisite. Subsequent gates must add native norm/gate,
+real-weight conv integration, device checkpoint/rollback integration and paired
+full-model timing against run 34011273093 before adoption. Keeping all-prefix DRAM
+exports intentionally preserves observability; this prototype removes repeated
+state reads but does not yet eliminate checkpoint writes.
+
 ### E3 remaining-work attribution (passed 34004475100)
 
 Run 34004475100 (`f4443cf`) passed all four T1/T16 context fixtures, including
