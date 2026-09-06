@@ -30,7 +30,7 @@ def select_prefix(proposals, target_argmax, *, vocab_size, eos_ids=(), max_propo
             break
         accepted += 1
         if proposed in eos_ids:
-            return Decision(proposals[:accepted], accepted, accepted + 1, None, True)
+            return Decision(proposals[:accepted], accepted, accepted, None, True)
     correction = target_argmax[accepted]
     finished = correction in eos_ids
     return Decision(proposals[:accepted] + (correction,), accepted, accepted + 1,

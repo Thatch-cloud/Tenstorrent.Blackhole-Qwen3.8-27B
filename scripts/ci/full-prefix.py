@@ -80,7 +80,10 @@ def main():
     parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
     parser.add_argument('--replay-inputs', action='store_true')
     parser.add_argument('--device-selection', action='store_true')
+    parser.add_argument('--request-pilot', action='store_true')
     options = parser.parse_args()
+    if options.request_pilot and (not options.device_selection or options.max_rows != 32):
+        raise ValueError('Request pilot requires the T32 device-selection configuration')
     if options.device_selection and (not options.coding_cost or not options.packed_checkpoints or not options.ordered_cache
                                     or options.deferred_commit or options.attribution or options.replay_inputs):
         raise ValueError('Device selection requires the standalone static ordered-cache coding-cost gate')
@@ -123,7 +126,7 @@ def main():
     if options.ordered_cache:
         from ordered_cache import HASHES as CACHE_HASHES, load_kernels as load_cache_kernels
         cache_kernels = load_cache_kernels('/opt/tt-metal')
-    if options.deferred_commit:
+    if options.deferred_commit or options.request_pilot:
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
@@ -463,6 +466,19 @@ def main():
             prompt = base_prompt[:length]
             if len(prompt) != length:
                 raise AssertionError("Insufficient fixed prompt tokens")
+            if options.request_pilot:
+                from full_request import measure_request
+                eos_ids = config.eos_token_id
+                eos_ids = () if eos_ids is None else (eos_ids,) if isinstance(eos_ids, int) else tuple(eos_ids)
+                result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
+                    live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids)
+                report.update(scope='Actual lookup request pilot on synthetic repeated code; not a coding-quality benchmark')
+                report.setdefault('request_checks', []).append(result)
+                report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                                             for name in ('full_request.py', 'verifier_engine.py')}
+                output_path.write_text(json.dumps(report, indent=2))
+                print(json.dumps(result), flush=True)
+                continue
             oracle = [prefill(prompt)]
             oracle_logits = []
             for position in range(options.max_rows * (2 if options.replay_inputs else 1) + 2):
@@ -599,6 +615,11 @@ def main():
                             raise AssertionError("Full-model negative control was not detected")
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
+        if options.request_pilot:
+            if addresses() != original_addresses or len(report.get('request_checks', [])) != len(lengths):
+                raise AssertionError('Incomplete request pilot matrix')
+            report['passed'] = True
+            return
         if options.device_selection:
             if addresses() != original_addresses or len(report.get('selection_checks', [])) != len(lengths) * len(widths):
                 raise AssertionError('Incomplete stable-state device-selection matrix')

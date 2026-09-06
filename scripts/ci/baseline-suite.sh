@@ -91,6 +91,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-row-layout ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-engine ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-selection ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     timeout -k 15 300 python3 /experiment-scripts/ci/sampling-kernel.py

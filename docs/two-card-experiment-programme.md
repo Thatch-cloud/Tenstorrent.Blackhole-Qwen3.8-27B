@@ -1,5 +1,13 @@
 # Qwen3.8-27B: two-card experiment programme
 
+Current request-engine checkpoint: T32 changed-input replay and synchronized
+publication passed run34041390068 (36 two-block fixtures). Device force-argmax
+passed34040918809; T32 verification plus readback is131.190/148.752ms at4K/16K.
+These component results do not establish200 committed tokens/s. The next pilot
+uses actual lookup proposals, exact native token/state comparison, complete
+proposal-to-commit timing and separately reported per-request capture cost.
+Repeated-code pilot prompts cannot establish representative coding quality.
+
 ## Programme checkpoint — 2026-09-06
 
 Latest kernel checkpoint: run34019033933 (`36b9eed`) passed synthetic multi-token

@@ -106,6 +106,10 @@ class GreedySession:
         self.aborted_blocks += 1
         self.pending, self.phase = None, 'idle'
 
+    def fail_verification(self, request_id, ticket):
+        self.check_ticket(request_id, ticket)
+        self.phase = 'failed'
+
     def close(self, request_id):
         if request_id != self.request_id or self.phase not in ('idle', 'failed'):
             raise ValueError('Finish or abort the block before closing its request')

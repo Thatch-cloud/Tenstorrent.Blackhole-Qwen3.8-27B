@@ -16,7 +16,30 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Full-verifier device selection (hardware gate pending)
+### Actual request engine (pilot pending)
+
+The opt-in `full-verifier-engine` pilot connects real request-local lookup
+proposals to T1/2/4/8/16/32 captured verifiers, force-argmax and synchronized
+prefix publication. Capture is per request after prefill; all traces are closed
+before the next prefill. Report setup and the post-seed setup gap separately,
+without amortization, and time the complete proposal-to-commit loop. Compare
+actual emitted tokens, final active GDN, valid KV and inactive slots against
+native autoregressive generation. No oracle tokens enter the drafter. These
+repeated-code prompts are pipeline fixtures, not representative coding quality.
+
+Host review also corrected accepted-EOS publication: consume the seed and
+preceding accepted tokens, but not the terminal EOS, matching native generation
+and correction-EOS semantics. All31 possible accepted terminal positions have
+an explicit state-row regression check; nonterminal decisions are unchanged.
+
+### Full-verifier device selection (hardware gate passed)
+
+Run `34040918809` at `613a591` passed all12 width/context fixtures and1440
+paired timed replays. T32 verifier plus first-chip token readback measured
+131.190365ms at4K and148.751581ms at16K, versus host-selection
+134.513634ms and151.960231ms. All widths improved; complete pre-gather
+logits, selected IDs and native state checks passed. These are component
+latencies, not committed throughput, and exclude drafting/dynamic publication.
 
 `full-verifier-selection` compares the same packed-history/ordered-cache verifier
 with full-vocabulary gather plus host argmax versus pre-gather logits plus native
@@ -34,7 +57,10 @@ The next width extension is opt-in T32: simulator publication passed all33
 prefixes and input staging `20260906T150111Z-317` passed token, packed/singleton
 position, native-RoPE and unchanged-page checks at31/4095/16383. The replay suite
 now requests T2/T16/T32 (36 two-block fixtures), alongside24 width/mode cases
-and16 captured post-verification decisions. T32 hardware results are pending.
+and16 captured post-verification decisions. Run `34041390068` at `eb4f744`
+passed all36 two-block fixtures,24 width/mode checks,16 rollback/commit checks
+and4 negative-control pairs. This certifies T32 changed-input replay and
+publication, not actual drafting throughput or a multi-request lifecycle.
 Host proposal/selection capacity31 requires explicit opt-in; defaults remain15.
 
 `full-verifier-replay` reuses one captured verifier across two blocks at4K/16K,

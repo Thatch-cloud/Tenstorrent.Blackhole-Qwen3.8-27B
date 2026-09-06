@@ -20,7 +20,15 @@ class GreedyVerifyTests(unittest.TestCase):
 
     def test_accepted_eos_discards_later_rows(self):
         self.assertEqual(select_prefix([1, 2, 3], [1, 2, 3, 4], vocab_size=10, eos_ids=[2]),
-                         Decision((1, 2), 2, 3, None, True))
+                         Decision((1, 2), 2, 2, None, True))
+
+    def test_each_accepted_eos_commits_only_inputs_before_terminal_token(self):
+        for terminal in range(1, 32):
+            result = select_prefix(range(1, 32), range(1, 33), vocab_size=100,
+                                   eos_ids=(terminal,), max_proposals=31)
+            self.assertEqual(result.state_rows, len(result.emitted))
+            self.assertEqual(result.emitted[-1], terminal)
+            self.assertIsNone(result.next_input)
 
     def test_correction_eos_is_not_consumed(self):
         self.assertEqual(select_prefix([1, 2], [1, 9, 4], vocab_size=10, eos_ids=[9]),
