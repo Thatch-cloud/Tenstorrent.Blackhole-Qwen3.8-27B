@@ -16,6 +16,30 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Norm-batch force-argmax passed; matched request gate enabled
+
+Run34054076401 (`1882a31`) passed all12 width/context fixtures and1440 paired
+timing replays. Both-chip full logits, greedy IDs and native GDN/KV state were
+checked outside timing. Timed readback uses the first chip in both arms. Median
+of six per-arm sample means, including verifier and selection/readback:
+
+| Context | T | Host argmax ms | Device force-argmax ms |
+| --- | ---: | ---: | ---: |
+|4095|1|48.841846|47.470447|
+|4095|8|71.583713|69.883303|
+|4095|16|86.592667|83.972513|
+|4095|32|115.775775|112.415496|
+|16383|1|48.937715|48.023741|
+|16383|8|76.086096|74.306094|
+|16383|16|95.366206|92.816976|
+|16383|32|133.145671|129.999195|
+
+These costs exclude drafting and dynamic commit. With static, retained replay
+and selection prerequisites inspected, `full-norm-engine` now enables eight
+actual requests: one ABBA control/candidate block at each context. New telemetry
+will support offline lookup policy scoring after the hardware request report
+passes. No serving defaults, precision, reset or access changes are part of it.
+
 ### Norm-batch retained replay passed
 
 Run34053795475 (`729c408`) passed in22m12s:24 eager/trace width fixtures,
@@ -38,8 +62,8 @@ prompt/output tokens, budgets, proposal inputs/routing, acceptance, inactive-sta
 checks or zero-token measurements. It reports aggregate committed decode rate
 and setup-inclusive post-seed rate separately for each arm; this is one ABBA
 block, not a statistically broad benchmark. Per-arm evidence is written as each
-request finishes. The CLI still rejects norm-batch requests pending inspection
-of the live selection gate; this preparation is not a hardware result.
+request finishes. The CLI now enables norm-batch requests following the inspected
+selection pass above; harness preparation is not a hardware request result.
 
 ### Lookup acceptance bottleneck and next-request telemetry
 
@@ -93,8 +117,8 @@ gate, whose prerequisite is the full-logit pass above. Selection compares host
 argmax/full-logit readback with device force-argmax/ID readback using the same
 norm-batch verifier, not old versus new GDN kernels. Its device logits and IDs
 must match the native reference on both chips. Hardware concurrency serializes
-it behind the running replay gate. Request combinations remain rejected until
-both gates are inspected; this wiring is not a request-path certification. Host validation passes
+it behind the replay gate. Both gates have now passed; request combinations are
+enabled for the next experiment, not certified by wiring alone. Host validation passes
 337 CI tests,55 simulator-support tests and51 speculative-session tests.
 Serving defaults remain unchanged.
 

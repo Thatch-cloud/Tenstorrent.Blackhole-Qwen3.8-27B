@@ -84,7 +84,7 @@ def main():
     parser.add_argument('--norm-batch', action='store_true')
     options = parser.parse_args()
     if options.norm_batch and (not options.packed_checkpoints or not options.coding_cost or not options.ordered_cache
-            or options.request_pilot or options.attribution
+            or options.attribution
             or (options.deferred_commit and not options.replay_inputs)):
         raise ValueError('Norm batching requires packed static selection or retained-replay verification')
     if options.request_pilot and (not options.device_selection or options.max_rows != 32):
