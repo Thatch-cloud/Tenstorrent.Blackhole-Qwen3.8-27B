@@ -6,6 +6,19 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_batched_dma_uses_same_selected_and_final_publication(self):
+        adapter, active = self.fixture()
+        adapter.compact_prologue = adapter.batch_conv = adapter.dma_windows = True
+        with patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[])) as run, \
+                patch('gdn_device_loop_state.run_projected') as serial, \
+                patch('gdn_device_loop_state.restore_prefix') as restore:
+            adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], 2)
+        self.assertEqual(run.call_args.kwargs, dict(conv_checkpoints=(2, 4), hoist_input=True, dma_windows=True))
+        serial.assert_not_called()
+        self.assertEqual([call.args[-1] for call in restore.call_args_list], [2, 4])
+        active.restore.assert_called_once_with(adapter.state)
+
     def test_compact_prologue_selects_checkpoint_and_final_only(self):
         adapter, active = self.fixture()
         adapter.compact_prologue = True

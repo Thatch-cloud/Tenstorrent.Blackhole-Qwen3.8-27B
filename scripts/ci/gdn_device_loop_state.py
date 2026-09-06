@@ -3,14 +3,18 @@
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_projected
 from gdn_prefix import validate_rows
 from gdn_state_copy import copy_compact
+from gdn_batched_conv import run_batched_projected
 
 
 class DeviceLoopState:
-    def __init__(self, active, operations, kernels, compact_prologue=False):
+    def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False):
+        if dma_windows and not batch_conv:
+            raise ValueError('DMA windows require batched convolution')
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError('Audited stable B8 active snapshots required')
         self.active, self.gdn, self.operations, self.kernels = active, active.gdn, operations, kernels
         self.compact_prologue = compact_prologue
+        self.batch_conv, self.dma_windows = batch_conv, dma_windows
         self.entry = active.allocate()
         self.state = active.allocate()
         self.calls = self.checkpoint_calls = self.skipped_clones = 0
@@ -29,8 +33,10 @@ class DeviceLoopState:
         projected = layer._project_qkvzab_raw(packed, rows, operations.L1_MEMORY_CONFIG)
         result = None
         try:
-            result = run_projected(layer.mesh, projected, self.entry[0], self.state[1:],
+            operation = run_batched_projected if self.batch_conv else run_projected
+            result = operation(layer.mesh, projected, self.entry[0], self.state[1:],
                 list(layer.tw['conv_taps']), layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels,
+                **(dict(dma_windows=True) if self.dma_windows else {}),
                 **(dict(conv_checkpoints=tuple(sorted({prefix, rows} - {0})), hoist_input=True) if self.compact_prologue else {}))
             result['owned'].append(projected)
             restore_prefix(operations, result, self.entry, checkpoint, prefix)

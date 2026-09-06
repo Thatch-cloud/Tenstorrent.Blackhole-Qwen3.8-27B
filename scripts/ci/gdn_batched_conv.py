@@ -12,7 +12,7 @@ def history_windows(rows):
 
 
 def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,
-                          operations=None, *, conv_checkpoints=None, hoist_input=False):
+                          operations=None, *, conv_checkpoints=None, hoist_input=False, dma_windows=False):
     if operations is None:
         import ttnn as operations
     rows = validate_projected(tuple(projected.shape), conv_states)
@@ -42,15 +42,20 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
         return result
 
     try:
-        source = layout(projected, operations.ROW_MAJOR_LAYOUT)
-        projected_qkv = sliced(source, (0, 0, 0), (1, rows, 5120))
-        history = own(operations.concat([*[layout(state, operations.ROW_MAJOR_LAYOUT) for state in conv_states],
-                                         projected_qkv], dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
-        windows = []
-        for start, end in history_windows(rows):
-            window = layout(sliced(history, (0, start, 0), (1, end, 5120)), operations.TILE_LAYOUT)
-            independent_row(operations, history, window)
-            windows.append(window)
+        if dma_windows:
+            from gdn_conv_windows import build_windows
+            windows = build_windows(mesh, projected, conv_states)
+            owned.extend(windows)
+        else:
+            source = layout(projected, operations.ROW_MAJOR_LAYOUT)
+            projected_qkv = sliced(source, (0, 0, 0), (1, rows, 5120))
+            history = own(operations.concat([*[layout(state, operations.ROW_MAJOR_LAYOUT) for state in conv_states],
+                                             projected_qkv], dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
+            windows = []
+            for start, end in history_windows(rows):
+                window = layout(sliced(history, (0, start, 0), (1, end, 5120)), operations.TILE_LAYOUT)
+                independent_row(operations, history, window)
+                windows.append(window)
         packed = operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
             dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
             channels=5120, a_col=8192, b_col=8216)
@@ -74,7 +79,7 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
         if [addresses(operations, state) for state in conv_states] != original_addresses:
             raise AssertionError('Batched convolution changed stable state addresses')
         return dict(output=output, states=states, conv_prefixes=prefixes, owned=owned,
-                    materialized_conv_prefixes=selected, hoisted_input=True, batched_convolution=True)
+                    materialized_conv_prefixes=selected, hoisted_input=True, batched_convolution=True, dma_windows=dma_windows)
     except BaseException:
         release_owned(operations, owned)
         raise

@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Parallel causal convolution windows (simulator passed; hardware next)
+### Parallel causal convolution windows (hardware passed 34026768263)
 
 `gdn_batched_conv.py` builds each token's four-tap window from entry history and
 projected input, then calls the unchanged native convolution/gates kernel once
@@ -39,6 +39,33 @@ result. Next `gdn-multitoken-conv` CI uses the new candidate against the previou
 serial-convolution/device-loop full-layer adapter, rather than a naive serial
 projection control. Native-oracle all-prefix eager/trace and corrected continuation
 checks still gate the paired measurements. No full-model routing or serving change.
+
+Run34026768263 (`2288bab`) passed all30 real-weight eager/trace cases,
+216 two-step restored-prefix cases and15 stale-state controls. All five paired
+timing fixtures passed exactness (600 replays); the17624-byte artifact confirms
+the simulator adapter hash. Results versus the prior serial-conv/device-loop layer:
+
+| T | Control mean ms | Batched-conv mean ms | Median paired ratio |
+| --- | --- | --- | --- |
+| 1 | 0.332765 | 0.332644 | 1.000074 |
+| 2 | 0.574181 | 0.968120 | 0.592697 |
+| 4 | 0.972758 | 1.313739 | 0.745849 |
+| 8 | 1.770593 | 1.967011 | 0.900074 |
+| 16 | 3.371502 | 3.302826 | 1.020746 |
+
+T16 improved only about2%; T2/T4/T8 regressed. Do not promote this composition
+as a general performance win. Next remove the input-window layout/concat/slice
+chain with one arithmetic-free DMA kernel, then remeasure before full-model use.
+
+The first DMA prototype failed safely in simulator fixture `20260906T101509Z-321`
+(exit1): a32-byte read from history row0 into an odd output row violated source
+versus destination NOC alignment. It was never run on hardware. The correction
+stages five full tiles (projected input plus four entry states) in aligned L1,
+rearranges rows locally and writes four complete output tiles. Corrected T2/seed0
+fixture `20260906T101726Z-332` passed every prefix, all3 corrected continuations,
+the stale-state control and clean close. T16/seed1 fixture `20260906T101946Z-516`
+also passed every output/state/history prefix and synthetic local output projection.
+Model-adapter coverage follows; no full-model routing is changed by this kernel gate.
 
 ### Projected-input convolution integration (passed 34019928513)
 

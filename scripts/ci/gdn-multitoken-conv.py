@@ -20,7 +20,10 @@ def main():
     parser.add_argument('--full-layer', action='store_true')
     parser.add_argument('--paired-timing', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
+    parser.add_argument('--dma-windows', action='store_true')
     options = parser.parse_args()
+    if options.dma_windows and not options.batch_conv:
+        parser.error('--dma-windows requires --batch-conv')
     if options.paired_timing and not options.full_layer:
         parser.error('--paired-timing requires --full-layer')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
@@ -51,6 +54,8 @@ def main():
                   continuation_enabled=options.continuation,
                   full_layer=options.full_layer, paired_timing=[],
                   batched_convolution=options.batch_conv,
+                  dma_windows=options.dma_windows,
+                  window_dma_hashes={suffix: hashlib.sha256(Path(__file__).with_name('gdn_conv_windows.' + suffix).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if options.dma_windows else {},
                   batched_adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_batched_conv.py').read_bytes()).hexdigest() if options.batch_conv else None,
                   scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
     context = {}
@@ -146,7 +151,8 @@ def main():
                         source = original(packed_input, rows, ttnn.L1_MEMORY_CONFIG) if options.full_layer else projected
                         operation = run_batched_projected if use_batched else run_projected
                         result = operation(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
-                            gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels)
+                            gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels,
+                            **(dict(dma_windows=True) if use_batched and options.dma_windows else {}))
                         if options.full_layer:
                             result['owned'].append(source)
                             finish_output(gdn, result, ttnn, tt_all_reduce)

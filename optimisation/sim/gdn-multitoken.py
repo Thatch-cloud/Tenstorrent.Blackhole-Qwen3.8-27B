@@ -31,13 +31,16 @@ def main():
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--conv', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
+    parser.add_argument('--dma-windows', action='store_true')
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--output-projection', action='store_true')
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
     args = parser.parse_args()
-    if args.batch_conv and (not args.conv or args.model_adapter):
-        parser.error('--batch-conv requires --conv and excludes --model-adapter')
+    if args.dma_windows and not args.batch_conv:
+        parser.error('--dma-windows requires --batch-conv')
+    if args.batch_conv and not args.conv:
+        parser.error('--batch-conv requires --conv')
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
     if args.continuation and not args.conv:
@@ -55,6 +58,8 @@ def main():
                   seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
                   convolution=args.conv,
                   batched_convolution=args.batch_conv,
+                  dma_windows=args.dma_windows,
+                  window_dma_hashes={suffix: hashlib.sha256((Path(__file__).resolve().parents[2] / ('scripts/ci/gdn_conv_windows.' + suffix)).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if args.dma_windows else {},
                   batched_adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_batched_conv.py').read_bytes()).hexdigest() if args.batch_conv else None,
                   continuation_enabled=args.continuation,
                   output_projection=args.output_projection,
@@ -127,7 +132,8 @@ def main():
                 candidate = run_batched_projected if args.batch_conv else run_projected
                 candidate_projected = upload(projected)
                 result = candidate(mesh, candidate_projected, initial, candidate_conv,
-                                       taps, dt_bias, neg_exp_A, norm_w, kernels)
+                                       taps, dt_bias, neg_exp_A, norm_w, kernels,
+                                       **(dict(dma_windows=True) if args.dma_windows else {}))
                 stage('conv-multitoken-readback')
                 outputs, states = host(result['output']), host(result['states'])
                 for token in range(args.rows):
@@ -165,7 +171,7 @@ def main():
                         _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
-                    adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue)
+                    adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows)
                     checkpoint = active.allocate()
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):

@@ -99,7 +99,12 @@ resource fit or fabric timing. No real-card reset or hardware job is launched he
 Add `--conv --norm-gate --batch-conv` to `run-gdn-multitoken.sh` to compare one
 native convolution/gates call over causal token windows against serial T1 calls.
 Use `--continuation` for every accepted-prefix restore and stale-state control,
-or `--output-projection` for the synthetic local projection check. This option
-does not yet support `--model-adapter`. T2/seed0, T16/seed1 and T4/seed2 passed
+or `--output-projection` for the synthetic local projection check. Add
+`--dma-windows` to test aligned full-tile staging and local causal-window assembly
+instead of the layout/concat/slice chain. `--model-adapter --compact-prologue`
+checks active-slot publication with sparse checkpoints. T2/seed0, T16/seed1 and T4/seed2 passed
 in fixtures `20260906T100224Z-326`, `20260906T100449Z-630` and
-`20260906T100806Z-838`. These are functional checks, not hardware timings.
+`20260906T100806Z-838` without DMA. Corrected DMA T2/seed0 and T16/seed1 passed
+in `20260906T101726Z-332` and `20260906T101946Z-516`. These are functional
+checks, not hardware timings. The discarded32-byte direct-read prototype failed
+the simulator NOC-alignment check in `20260906T101509Z-321`; never run it on cards.
