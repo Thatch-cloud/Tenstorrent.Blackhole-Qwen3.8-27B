@@ -13,7 +13,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Compact state/DMA/input/layout optimizations win in full-model tests; first device-token-loop recurrence prototype staged for hardware | Certify BF16 L1 feedback, add norm/gate and real-weight conv, then full-model timing; memory-pipeline prototypes |
+| E4 fusion/pipeline | Compact state/DMA/input/layout optimizations win in full-model tests; BF16 L1-feedback device token loop passed recurrence-only hardware exactness | Measure paired recurrence cost, add norm/gate and real-weight conv, then full-model timing; memory-pipeline prototypes |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
@@ -31,9 +31,11 @@ tok/s for T16. T1 retains native handling. The 200 committed-token/s goal is not
 Projected-row layout hoisting passed exactness and paired timing. Next prioritize
 E4's true multi-token recurrent kernel, using the hoisted-layout candidate as control,
 rather than continuing an open-ended sequence of copy tweaks.
-The first recurrence-only prototype now retains BF16 state between tokens in L1;
-hardware compilation/exactness are pending. It is not yet a complete multi-token GDN
-layer or a speculative-serving implementation.
+The first recurrence-only prototype retains BF16 state between tokens in L1 and
+passed hardware compilation/exactness in run 34012883902 (`855f8de`): 30 eager/trace
+cases, 216 restored-prefix continuations and 15 stale-state controls. No timing was
+measured. Next measure paired recurrence cost and integrate norm/gate and real-weight
+convolution; this is not yet a complete multi-token GDN layer or speculative serving.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
 tests or oracle verification as real coding throughput.
 

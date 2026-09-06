@@ -16,7 +16,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E4 multi-token recurrent kernel prerequisite (hardware pending)
+### E4 multi-token recurrent kernel prerequisite (passed 34012883902)
+
+Run [34012883902](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34012883902)
+(`855f8de`) compiled and passed on both cards: 30 exact seed/width/eager-trace
+cases, 216 exact restored-prefix continuations and 15 detected stale-state negative
+controls. The artifact is 12602 bytes. This certifies the bounded recurrence-only
+prototype below, not full GDN integration or a performance improvement.
 
 `gdn-multitoken` is the first true device-side token-loop prototype, not another
 Python unroll. It derives three kernels from hash-pinned native source without
@@ -26,8 +32,8 @@ only for token zero. Compute retains subsequent state in a dedicated 16-tile BF1
 L1 feedback ring (32 KiB/core), preserving the native inter-token state rounding;
 FP32 math scratch is not silently carried as persistent higher-precision state.
 The writer exports every token output and every prefix state to disjoint buffers.
-Total configured CB storage is 618496 bytes/core, including feedback. Physical
-resource compatibility and compilation remain hardware gates, not local claims.
+Total configured CB storage is 618496 bytes/core, including feedback. Compilation
+and resource compatibility passed for this configuration on the paired cards.
 
 This initial operator gate uses synthetic packed QKV/beta/g inputs and the native
 packed recurrence without fused output norm/gate as oracle. It does not include
