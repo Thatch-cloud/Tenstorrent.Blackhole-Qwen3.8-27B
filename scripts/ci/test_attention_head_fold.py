@@ -1,11 +1,36 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 
-from attention_head_fold import causal_mask, chunk_groups, fold_query, unfold_output
+from attention_head_fold import causal_mask, chunk_groups, device_layout, fold_query, unfold_output
 
 
 class HeadFoldTests(unittest.TestCase):
+    def test_device_layout_operation_chain_matches_host_and_retains_temporaries(self):
+        def tensor(value, layout='tile'):
+            return SimpleNamespace(value=value, shape=value.shape, dtype='bf16', layout=layout)
+
+        operations = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', ROW_MAJOR_LAYOUT='row', DRAM_MEMORY_CONFIG='dram')
+        operations.slice = lambda value, begin, end, **kwargs: tensor(value.value[tuple(slice(first, last) for first, last in zip(begin, end))])
+        operations.to_layout = lambda value, layout, **kwargs: tensor(value.value.contiguous(), layout)
+        operations.reshape = lambda value, shape: tensor(value.value.reshape(shape), value.layout)
+        operations.permute = lambda value, axes, **kwargs: tensor(value.value.permute(axes).contiguous(), value.layout)
+        source = torch.arange(8 * 12 * 256).reshape(1, 8, 12, 256)
+        for rows in (1, 2, 3, 4):
+            owned = []
+            packed = device_layout(operations, tensor(source), rows, owned, offset=2)
+            self.assertEqual(len(owned), 6)
+            self.assertIs(owned[-1], packed)
+            self.assertTrue(torch.equal(packed.value, fold_query(source[:, 2:2 + rows])))
+            restored = device_layout(operations, packed, rows, owned, inverse=True)
+            self.assertEqual(len(owned), 11)
+            self.assertTrue(torch.equal(restored.value, source[:, 2:2 + rows]))
+        with self.assertRaises(ValueError):
+            device_layout(operations, tensor(source), 8, [])
+        with self.assertRaises(ValueError):
+            device_layout(operations, tensor(source), 4, [], offset=7)
+
     def test_chunk_boundaries_split_queries_before_core_assignment_changes(self):
         self.assertEqual(chunk_groups(4095, 32, max_group_rows=32), [dict(offset=0, rows=1, signature=(256, 4096)),
                                                 dict(offset=1, rows=31, signature=(256, 4352))])

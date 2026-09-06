@@ -46,3 +46,29 @@ def chunk_groups(start, rows, *, max_chunk_tiles=8, max_group_rows=4):
         else:
             groups.append(dict(offset=offset, rows=1, signature=signature))
     return groups
+
+
+def device_layout(operations, tensor, rows, owned, *, inverse=False, offset=0):
+    if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 4:
+        raise ValueError('Explicit direction and one to four query rows required')
+    if type(offset) is not int or offset < 0 or (inverse and offset):
+        raise ValueError('Valid input-row offset required')
+    shape = tuple(tensor.shape)
+    if inverse:
+        valid = shape == (1, 1, rows * 12, 256)
+    else:
+        valid = len(shape) == 4 and shape[0] == 1 and shape[2:] == (12, 256) and offset + rows <= shape[1]
+    if not valid or tensor.dtype != operations.bfloat16 or tensor.layout != operations.TILE_LAYOUT:
+        raise ValueError('Native BF16 tiled attention geometry required')
+
+    def keep(value):
+        owned.append(value)
+        return value
+
+    selected = tensor if inverse else keep(operations.slice(tensor, (0, offset, 0, 0), (1, offset + rows, 12, 256),
+        memory_config=operations.DRAM_MEMORY_CONFIG))
+    linear = keep(operations.to_layout(selected, operations.ROW_MAJOR_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG))
+    shaped = keep(operations.reshape(linear, (2, rows, 6, 256) if inverse else (rows, 2, 6, 256)))
+    transposed = keep(operations.permute(shaped, (1, 0, 2, 3), memory_config=operations.DRAM_MEMORY_CONFIG))
+    final = keep(operations.reshape(transposed, (1, rows, 12, 256) if inverse else (1, 1, rows * 12, 256)))
+    return keep(operations.to_layout(final, operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG))

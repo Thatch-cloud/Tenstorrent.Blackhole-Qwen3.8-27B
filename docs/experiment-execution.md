@@ -16,6 +16,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Device attention packing/unpacking passes first simulator cases
+
+`device_layout` now executes query slicing, untilize, reshape, permutation,
+reshape and tilize on the device, with the inverse operation after SDPA. It
+retains intermediate handles for caller-owned lifetime management; the simulator
+deduplicates buffer addresses before final release so reshape aliases are not
+freed twice. Output remains BF16 and no arithmetic is added to the layout path.
+
+Both-chip packing is checked against the independent Torch layout oracle before
+SDPA, and unpacked SDPA results against native causal B1 outputs:
+- `20260906T211544Z-314`: T4/start4096/seed0, one four-query group, exact.
+- `20260906T211739Z-300`: T8/start4095/seed1, groups1/4/3, exact including offsets
+  and the non-power-of-two tail. Both use negative-infinity masks and close cleanly.
+
+Masks/page views are still host-prepared fixture metadata. This is a correctness
+prototype using stock TTNN layout operations, not a fused copy kernel or proven
+latency optimization. Hardware timing must include all packing/unpacking and
+check capture memory headroom; simulator wall time is not a performance metric.
+
 ### Full T32 grouped attention passes boundary simulation
 
 The simulator now executes every planned group, not just the CPU layout oracle:
