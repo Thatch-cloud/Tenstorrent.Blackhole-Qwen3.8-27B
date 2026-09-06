@@ -37,6 +37,13 @@ the top-level multimodal Qwen3_5Config has no eos_token_id. The retry reads and
 hashes the frozen generation_config.json, validates all terminal IDs, and fails
 closed on missing/invalid metadata. No performance result or reset is inferred.
 
+Retry34043284318 (`c9775cc`) returned green but both truncated static prompts
+produced terminal prefill seeds: zero decode tokens and no constructed engine.
+This is only a terminal-request/accounting check, NOT an engine correctness or
+throughput pass. The next pilot preserves the complete chat template using the
+existing bounded prompt builder rather than truncating its generation marker;
+actual context lengths are reported. Zero-decode fixtures now fail the pilot.
+
 ### Full-verifier device selection (hardware gate passed)
 
 Run `34040918809` at `613a591` passed all12 width/context fixtures and1440

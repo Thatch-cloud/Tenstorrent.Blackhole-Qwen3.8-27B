@@ -463,8 +463,8 @@ def main():
         base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost or options.attribution else baseline.make_prompt(tokenizer, 128, 0)
         timing_fixtures = []
         for length in lengths:
-            prompt = base_prompt[:length]
-            if len(prompt) != length:
+            prompt = baseline.make_prompt(tokenizer, length, 0) if options.request_pilot else base_prompt[:length]
+            if not options.request_pilot and len(prompt) != length:
                 raise AssertionError("Insufficient fixed prompt tokens")
             if options.request_pilot:
                 from full_request import measure_request, terminal_ids
@@ -479,6 +479,8 @@ def main():
                                              for name in ('full_request.py', 'verifier_engine.py')}
                 output_path.write_text(json.dumps(report, indent=2))
                 print(json.dumps(result), flush=True)
+                if result['committed_decode_tokens'] == 0:
+                    raise AssertionError('Request pilot must exercise decode, not only terminal prefill')
                 continue
             oracle = [prefill(prompt)]
             oracle_logits = []
