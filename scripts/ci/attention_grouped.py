@@ -1,14 +1,17 @@
 """Static-position grouped reader for bounded real-weight attention experiments."""
 
 from attention_batch import SerialAttentionReader
-from attention_head_fold import causal_mask, chunk_groups, device_layout
+from attention_head_fold import causal_mask, chunk_groups, device_layout, parallel_groups
 from gdn_multitoken_conv import addresses, release_owned
 
 
 class GroupedAttentionReader:
-    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload, *, dma_layout=False):
+    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload, *, dma_layout=False, parallel=False):
         if type(dma_layout) is not bool:
             raise ValueError('Explicit boolean DMA selection required')
+        if type(parallel) is not bool or (parallel and not dma_layout):
+            raise ValueError('Parallel groups require explicit boolean selection and DMA layout')
+        self.parallel = parallel
         self.mesh, self.dma_layout = mesh, dma_layout
         self.operations = operations
         self.rows = rows
@@ -24,6 +27,18 @@ class GroupedAttentionReader:
         groups = chunk_groups(start, rows)
         if any(group['signature'][1] % 64 or group['signature'][1] // 64 > pages_host.shape[1] for group in groups):
             raise ValueError('Whole-page bounded group required')
+        if parallel:
+            import torch
+            for bundle in parallel_groups(start, rows):
+                chunk, capacity = bundle[0]['signature']
+                group_pages = upload(pages_host[:, :capacity // 64].repeat(len(bundle), 1).contiguous(), operations.int32)
+                mask = upload(torch.cat([causal_mask(group['rows'], start + group['offset'], capacity)
+                    for group in bundle], dim=0))
+                self.owned.extend((group_pages, mask))
+                config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                    exp_approx_mode=False, q_chunk_size=0, k_chunk_size=chunk)
+                self.metadata.append((bundle, group_pages, mask, config))
+            return
         for group in groups:
             chunk, capacity = group['signature']
             group_pages = upload(pages_host[:, :capacity // 64].contiguous(), operations.int32)
@@ -52,6 +67,12 @@ class GroupedAttentionReader:
 
         protected = {addresses(operations, value) for value in (query, keys, values)}
         try:
+            if self.parallel:
+                from attention_parallel import execute
+                output = execute(self.mesh, operations, query, keys, values, self.metadata, owned,
+                    scale=kwargs['scale'], memory_config=kwargs['memory_config'])
+                protected.add(addresses(operations, output))
+                return output
             for group, pages, mask, config in self.metadata:
                 packed = layout(query, group['rows'], offset=group['offset'])
                 options = dict(kwargs, program_config=config, is_causal=False, attn_mask=mask)

@@ -84,6 +84,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = attention-parallel-groups ]; then
     timeout -k 15 60 python3 /experiment-scripts/ci/sdpa-tree-audit.py
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --parallel-groups
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout --parallel-groups
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = attention-tree-scratch ]; then

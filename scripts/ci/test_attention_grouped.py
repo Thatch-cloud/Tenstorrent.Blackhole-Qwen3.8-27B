@@ -12,13 +12,14 @@ class GroupedReaderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GroupedAttentionReader(None, None, 0, 8, None, None, None, None, dma_layout='yes')
 
-    def fixture(self, rows, capacity=16640):
+    def fixture(self, rows, capacity=16640, parallel=False):
         operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock(),
             transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock()))
         mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
         upload = Mock(side_effect=lambda value, dtype=None: value)
         reader = GroupedAttentionReader(operations, mesh, 16383, rows,
-            torch.arange(capacity // 64).reshape(1, -1), list(range(rows)), 'pages', upload)
+            torch.arange(capacity // 64).reshape(1, -1), list(range(rows)), 'pages', upload,
+            dma_layout=parallel, parallel=parallel)
         return reader, operations, upload
 
     def test_small_width_uses_native_without_masks(self):
@@ -41,6 +42,25 @@ class GroupedReaderTests(unittest.TestCase):
     def test_insufficient_cache_rejected(self):
         with self.assertRaises(ValueError):
             self.fixture(8, capacity=16384)
+
+    def test_parallel_requires_dma_and_explicit_boolean(self):
+        for parallel in ('yes', True):
+            with self.assertRaises(ValueError):
+                GroupedAttentionReader(None, None, 0, 8, None, None, None, None, parallel=parallel)
+
+    def test_parallel_boundary_metadata_preserves_each_query_mask(self):
+        reader, _, upload = self.fixture(32, parallel=True)
+        self.assertEqual([len(entry[0]) for entry in reader.metadata], [1, 3, 3, 1, 1])
+        self.assertEqual(upload.call_count, 10)
+        for bundle, pages, mask, _ in reader.metadata:
+            self.assertEqual(pages.shape[0], len(bundle))
+            self.assertEqual(mask.shape[0], len(bundle))
+            for index, group in enumerate(bundle):
+                for row in range(group['rows']):
+                    position = 16383 + group['offset'] + row
+                    selected = mask[index, 0, row * 12 // 2]
+                    self.assertTrue(torch.all(selected[:position + 1] == 0))
+                    self.assertTrue(torch.all(torch.isneginf(selected[position + 1:])))
 
     def test_changed_geometry_rejected(self):
         reader, _, _ = self.fixture(8)

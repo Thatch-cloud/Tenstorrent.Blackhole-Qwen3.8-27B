@@ -20,11 +20,14 @@ def main():
     parser.add_argument("--ordered-cache", action="store_true")
     parser.add_argument("--grouped", action="store_true")
     parser.add_argument('--dma-layout', action='store_true')
+    parser.add_argument('--parallel-groups', action='store_true')
     options = parser.parse_args()
     if options.grouped and not options.ordered_cache:
         parser.error('--grouped requires --ordered-cache')
     if options.dma_layout and not options.grouped:
         parser.error('--dma-layout requires --grouped')
+    if options.parallel_groups and not options.dma_layout:
+        parser.error('--parallel-groups requires --dma-layout')
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_attn_layer
@@ -38,11 +41,19 @@ def main():
     report['ordered_cache'] = options.ordered_cache
     report['grouped'] = options.grouped
     report['dma_layout'] = options.dma_layout
+    report['parallel_groups'] = options.parallel_groups
+    report['adapter_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+        for name in ('attention_grouped.py', 'attention_parallel.py', 'attention_fold_dma.py',
+                     'attention_fold_dma.cpp', 'attention_head_fold.py')}
     report['timing_control'] = 'Batched attention with serial cache writes and B1 SDPA' if options.ordered_cache else 'Native serial B1 attention'
     if options.grouped:
         report['timing_control'] = 'Identical ordered cache and batched projections; native B1 SDPA only'
     if options.dma_layout:
         report['timing_control'] = 'Identical grouped attention, ordered cache and projections; stock layout chain versus DMA'
+    if options.parallel_groups:
+        from sdpa_tree_scratch import audit
+        report['native_sources'] = audit('/opt/tt-metal')
+        report['timing_control'] = 'Identical DMA layouts, ordered cache and projections; serial versus parallel groups'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
 
     def stage(name, **details):
@@ -140,10 +151,10 @@ def main():
                     if options.grouped:
                         from attention_grouped import GroupedAttentionReader
                         grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
-                            singleton_positions, page_single, upload, dma_layout=options.dma_layout)
+                            singleton_positions, page_single, upload, dma_layout=options.dma_layout, parallel=options.parallel_groups)
                         if options.dma_layout:
                             stock_grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
-                                singleton_positions, page_single, upload)
+                                singleton_positions, page_single, upload, dma_layout=options.parallel_groups)
                             control_reader = stock_grouped_reader
                     tail = serial_tail(attention, writer, ttnn, grouped_reader or reader)
 

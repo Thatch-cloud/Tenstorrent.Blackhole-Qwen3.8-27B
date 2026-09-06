@@ -22,6 +22,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
   Three groups preserve16 workers per KV head and allow96 SDPA workers on the
   110-core grid. These are component timings, not committed request throughput.
 
+Prepared parallel reader simulator `20260906T232103Z-427` passes T16/start16383/
+seed2 on both chips, including boundary groups, DMA outputs and borrowed-query
+lifetime. The `attention-parallel-groups` suite now runs its matched real-weight
+layer gate after the microbenchmark; both layer arms use identical DMA layouts,
+ordered K/V writes and projections. Only group scheduling differs. Native scratch
+cold-build retry `34066556771` runs separately with no serving-image changes.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,

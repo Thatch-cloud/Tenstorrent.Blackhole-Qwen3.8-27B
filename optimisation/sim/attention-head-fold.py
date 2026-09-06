@@ -204,13 +204,14 @@ def main():
                 if any(not torch.equal(reference, actual) for reference, actual in zip(expected, host(result), strict=True)):
                     raise AssertionError('Reusable parallel adapter differs from native B1')
                 report['parallel_adapter_exact'] = True
-        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and args.parallel_groups == 1:
+        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and (args.parallel_groups == 1 or args.dma_layout):
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')
             positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)
                          for offset in range(args.rows)]
             reader = GroupedAttentionReader(ttnn, mesh, args.start, args.rows,
-                torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload, dma_layout=args.dma_layout)
+                torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload,
+                dma_layout=args.dma_layout, parallel=args.parallel_groups > 1)
             result = reader(device_query, keys, values, page_table_tensor=pages, cur_pos_tensor=positions[0],
                 scale=0.0625, program_config=native_config, memory_config=ttnn.L1_MEMORY_CONFIG)
             owned.append(result)
