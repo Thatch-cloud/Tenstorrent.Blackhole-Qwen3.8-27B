@@ -16,14 +16,16 @@ class BlockTicket:
 
 
 class GreedySession:
-    def __init__(self, request_id, prompt, seed, *, vocab_size, max_new_tokens, eos_ids=(), neural=None, verifier_rows=16):
+    def __init__(self, request_id, prompt, seed, *, vocab_size, max_new_tokens, eos_ids=(), neural=None, verifier_rows=16,
+                 prefer_full_suffix=False):
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError('Positive generation budget required')
         if type(verifier_rows) is not int or verifier_rows not in (16, 32):
             raise ValueError('Explicit T16 or T32 verifier capacity required')
         prompt, eos_ids = tuple(prompt), tuple(eos_ids)
         select_prefix((), (seed,), vocab_size=vocab_size, eos_ids=eos_ids)
-        self.drafter = HybridDraft(request_id, prompt, vocab_size=vocab_size, neural=neural, max_proposals=verifier_rows - 1)
+        self.drafter = HybridDraft(request_id, prompt, vocab_size=vocab_size, neural=neural,
+                                  max_proposals=verifier_rows - 1, prefer_full_suffix=prefer_full_suffix)
         self.drafter.commit_verified(request_id, (seed,))
         self.request_id, self.vocab_size = request_id, vocab_size
         self.max_new_tokens, self.eos_ids = max_new_tokens, eos_ids

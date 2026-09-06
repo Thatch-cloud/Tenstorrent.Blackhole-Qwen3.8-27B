@@ -46,3 +46,14 @@ periodic history, its longest nearest match may have only a short known suffix.
 The coordinator respects that actual proposal length rather than padding it with
 oracle tokens. Learned drafting and any periodic-extension experiment require
 their own measured acceptance/latency gates.
+
+`prefer_full_suffix=True` is an opt-in lookup tie-break experiment. Match length
+still wins first; among equally long matches it prefers a longer available
+continuation, capped at the requested count, then the nearest match. It copies
+only a contiguous slice of committed history and never extrapolates repetitions.
+Defaults retain the nearest-match policy. Host exhaustive-rank tests and real
+lookup T32 session accounting pass; hardware acceptance and speed remain untested.
+
+Accepted EOS publishes only inputs preceding that terminal output, matching
+native autoregressive stopping. Verification failures poison the request through
+`fail_verification`; no output or draft history is advanced by a failed block.

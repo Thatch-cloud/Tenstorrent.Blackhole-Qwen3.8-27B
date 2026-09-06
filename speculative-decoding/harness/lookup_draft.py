@@ -2,7 +2,7 @@
 
 
 class LookupDraft:
-    def __init__(self, request_id, prompt, *, history_limit=32768, match_limit=128, max_proposals=15):
+    def __init__(self, request_id, prompt, *, history_limit=32768, match_limit=128, max_proposals=15, prefer_full_suffix=False):
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("A request identity is required")
         if type(history_limit) is not int or history_limit < 2:
@@ -11,10 +11,13 @@ class LookupDraft:
             raise ValueError("match_limit must be positive")
         if type(max_proposals) is not int or max_proposals not in (15, 31):
             raise ValueError('Explicit T16 or T32 proposal capacity required')
+        if type(prefer_full_suffix) is not bool:
+            raise ValueError('Known-suffix tie preference must be an explicit boolean')
         self.request_id = request_id
         self.history_limit = history_limit
         self.match_limit = match_limit
         self.max_proposals = max_proposals
+        self.prefer_full_suffix = prefer_full_suffix
         self.closed = False
         self.history = []
         self.commit(request_id, prompt)
@@ -45,9 +48,11 @@ class LookupDraft:
             length = 1
             while length < min(limit, end + 1) and history[end - length] == history[-1 - length]:
                 length += 1
-            if length > best_length:
+            longer_suffix = (self.prefer_full_suffix and length == best_length and best_end is not None
+                             and min(count, len(history) - end - 1) > min(count, len(history) - best_end - 1))
+            if length > best_length or longer_suffix:
                 best_length, best_end = length, end
-                if length == limit:
+                if length == limit and (not self.prefer_full_suffix or len(history) - end - 1 >= count):
                     break
         return [] if best_end is None else history[best_end + 1:best_end + 1 + count]
 
