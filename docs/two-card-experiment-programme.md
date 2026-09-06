@@ -15,10 +15,12 @@ including every output and recurrent/convolution prefix. Run34019928513 (`8e75a9
 then passed all30 real-weight native-oracle eager/trace hardware cases. Composed
 state rollback and two-step corrected continuation passed simulator T1/T2/T4
 checks and hardware run34021612139 (`241be95`):216 two-step prefix-continuation
-cases and15 stale-state controls passed. Full-layer batched output projection,
-fabric reduction and paired layer timing are next; synthetic local output
-projection passed simulation. This is not convolution token-loop fusion,
-full-model timing or a committed-throughput result.
+cases and15 stale-state controls passed. Full-layer run34022668338 (`6b7d2b2`)
+also passed native output projection/fabric reduction and all correctness checks.
+T16 mean layer time improved5.176 to3.372ms against native serial; T1 regressed and
+remains native. The new full-model adapter passed simulator active-slot/checkpoint
+checks and is ready for the4K/16K comparison against our stronger row-layout baseline.
+This is not convolution token-loop fusion or a committed-throughput result.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
@@ -31,7 +33,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Compact state/DMA/input/layout wins; device token loop plus fused norm/gate and real-weight convolution composition passed simulator/native hardware exactness; recurrence-only timing measured | Composed-state rollback, output projection/full-model integration and matched timing; memory-pipeline prototypes |
+| E4 fusion/pipeline | Device-loop recurrence/norm, real convolution, rollback and full-layer projection/reduction passed hardware; T16 layer paired ratio1.535 versus native serial | Full-model4K/16K gate versus optimized row-layout control; memory-pipeline prototypes |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

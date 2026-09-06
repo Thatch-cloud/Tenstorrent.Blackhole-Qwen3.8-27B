@@ -58,6 +58,7 @@ def main():
     parser.add_argument("--reuse-gdn-input", action="store_true")
     parser.add_argument("--skip-row-clones", action="store_true")
     parser.add_argument("--hoist-row-layout", action="store_true")
+    parser.add_argument("--device-loop-gdn", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -73,6 +74,8 @@ def main():
         raise ValueError("Clone removal requires reused GDN input")
     if options.hoist_row_layout and not options.skip_row_clones:
         raise ValueError("Layout hoisting requires selective clone removal")
+    if options.device_loop_gdn and not options.hoist_row_layout:
+        raise ValueError('Device loop requires the previous full row-layout control')
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -103,6 +106,11 @@ def main():
     if options.hoist_row_layout:
         output_path = root / "full-gdn-row-layout.json"
         report.update(hoist_row_layout=True, layout_prerequisite=34009858516)
+    if options.device_loop_gdn:
+        output_path = root / 'full-gdn-device-loop.json'
+        report.update(device_loop_gdn=True, native_t1_retained=True,
+                      legacy_gdn_flags_describe_paired_control=True,
+                      checkpoint_materialization='all internal prefixes; selected external checkpoint')
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -117,6 +125,14 @@ def main():
     generator = None
     try:
         source = Path("/opt/tt-metal")
+        if options.device_loop_gdn:
+            from gdn_multitoken import HANDOFF_HASHES, load_kernels, validate_handoff_runtime
+            validate_handoff_runtime(source)
+            kernels = load_kernels(source, True)
+            report.update(full_layer_prerequisite=34022668338, handoff_runtime_hashes=HANDOFF_HASHES,
+                generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
+                adapter_hashes={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in ('gdn_device_loop_state.py', 'gdn_multitoken_conv.py')})
         if options.skip_row_clones:
             ownership_hashes = {
                 "ttnn/cpp/ttnn/operations/data_movement/slice/slice.cpp": "817b571dc619eef7af7988ad90e3eda4a89632af3477ca935048b05dc52aea6f",
@@ -245,7 +261,7 @@ def main():
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                  reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                                 hoist_row_layout=options.hoist_row_layout)
+                                 hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
             captured = None
             output = None
             try:
@@ -281,7 +297,7 @@ def main():
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                                         hoist_row_layout=options.hoist_row_layout)
+                                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -421,7 +437,7 @@ def main():
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
                         compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                        hoist_row_layout=options.hoist_row_layout)
+                        hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

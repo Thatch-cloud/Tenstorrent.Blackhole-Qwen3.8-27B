@@ -36,9 +36,17 @@ def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
     return bool(requested and rows > 1)
 
 
+def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout):
+    validate_checkpoint(rows, rows)
+    if requested and not (compact_gdn and hoist_row_layout):
+        raise ValueError('Device loop requires the exact compact row-layout control')
+    return bool(requested and rows > 1)
+
+
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
-                 compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False):
+                 compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
+                 device_loop_gdn=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -55,6 +63,7 @@ class ModelBatch:
         if hoist_row_layout and not skip_row_clones:
             raise ValueError("Layout hoisting requires the selective-clone control")
         self.hoist_row_layout = hoist_row_layout and self.rows > 1
+        self.device_loop_gdn = device_loop_enabled(self.rows, device_loop_gdn, compact_gdn, hoist_row_layout)
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -124,6 +133,27 @@ class ModelBatch:
 
     def gdn_forward(self, layer, helper, checkpoint):
         operations = self.operations
+        if self.device_loop_gdn:
+            from pathlib import Path
+            from gdn_device_loop_state import DeviceLoopState
+            from gdn_multitoken import load_kernels
+            from gdn_multitoken_conv import finish_output, release_owned
+            state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True))
+            self.working_states.append(state)
+
+            def device_forward(value):
+                from models.tt_transformers.tt.ccl import tt_all_reduce
+                if tuple(value.shape) != (1, 1, self.rows, 5120):
+                    raise ValueError('Unexpected full-model GDN input geometry')
+                packed = operations.reshape(value, (1, self.rows, 5120))
+                result = state.decode(packed, checkpoint, self.prefix)
+                finish_output(layer, result, operations, tt_all_reduce)
+                output = result['layer_output']
+                release_owned(operations, [value for value in result['owned'] if value is not output])
+                self.gdn_calls += 1
+                return output
+
+            return device_forward
         if self.reuse_gdn_input:
             import inspect
             validate_reused_input(inspect.getsource(type(layer).forward_decode))
@@ -187,11 +217,11 @@ class ModelBatch:
         if any(reader.calls - before != 1 for reader, before in zip(self.readers, before_reads, strict=True)):
             raise AssertionError("Every selected B1 SDPA adapter must engage")
         if len(self.working_states) != (48 if self.compact_gdn else 0) or any(
-            state.calls - before[0] != self.rows or state.checkpoint_calls - before[1] != 1
+            state.calls - before[0] != (1 if self.device_loop_gdn else self.rows) or state.checkpoint_calls - before[1] != 1
             for state, before in zip(self.working_states, before_compact, strict=True)
         ):
             raise AssertionError("Every compact GDN layer must update in place and checkpoint exactly once")
-        if any(state.skipped_clones - before != (self.rows - 1 if self.skip_row_clones else 0)
+        if any(state.skipped_clones - before != (self.rows - 1 if self.skip_row_clones and not self.device_loop_gdn else 0)
                for state, before in zip(self.working_states, before_clones, strict=True)):
             raise AssertionError("Projected-row clone removal did not engage exactly")
         return result

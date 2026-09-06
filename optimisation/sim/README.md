@@ -48,6 +48,11 @@ output projection with serial T1 projection on both chips. T2/seed0
 `20260906T083558Z-338` passed. The simulator substitutes an identity collective;
 real-weight 5120-wide projection and fabric reduction remain hardware checks.
 
+`--model-adapter --conv --norm-gate` runs the full-model adapter's active/compact
+state transfers with synthetic projected inputs. T2/seed0 `20260906T084858Z-363`
+passed checkpoints0/1/2, final active state and preservation of all seven inactive
+slots on both chips. This does not simulate the64-layer model or attention.
+
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation
 flags, and has no hardware fallback. It uses the existing D-drive WSL distribution

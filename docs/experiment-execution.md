@@ -111,6 +111,43 @@ Simulator T2 `20260906T084141Z-327` passed with the corrected helper (adapter ha
 clean close/exit0;69 focused GDN,176 CI and55 simulator unit tests pass. Hardware
 retry is required before any timing or full-layer adoption claim. No reset needed.
 
+Retry [34022668338](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34022668338)
+(`6b7d2b2`) passed all30 full-layer eager/trace cases,216 two-step continuations,
+15 stale-state controls and five timing fixtures (600 timed replays), with clean
+close. The ownership correction is hardware-validated. Seed0 mean block times:
+
+| T | Native serial ms | Candidate ms | Median paired ratio |
+| --- | --- | --- | --- |
+| 1 | 0.31330 | 0.33316 | 0.9398 |
+| 2 | 0.67204 | 0.57339 | 1.1718 |
+| 4 | 1.31505 | 0.97451 | 1.3498 |
+| 8 | 2.60140 | 1.77148 | 1.4681 |
+| 16 | 5.17571 | 3.37186 | 1.5355 |
+
+Native T1 must remain the deployed/control path. These gains are against serial
+full-layer projections, not the faster previous full-model row-layout control.
+
+### Full-model device-loop integration (next)
+
+`full-gdn-device-loop` wires the validated path into all48 GDN layers for T>1,
+retaining native T1 and the16 existing B1 attention/KV adapters. Independent compact
+entry/working buffers protect the stable native B8 allocation. It publishes the
+selected prefix separately from final active-slot state, leaving inactive slots
+untouched. Every internal prefix is still materialized, which may offset kernel
+gains; do not infer a full-model win from the layer timing.
+
+Simulator `20260906T084858Z-363` passed T2/seed0 at accepted prefixes0/1/2:
+exact outputs/recurrent prefixes, selected recurrent/convolution checkpoints,
+final active state and all seven inactive slots on both chips, clean close/exit0.
+It ran the actual active/compact DMA kernels and the new state adapter; projection
+inputs were synthetic, not full-model weights/attention. Adapter hash:
+`fd5ca6746a84184d105dd0698a4d4716705c678fa5296baea8ad1cbd86cc85bf`.
+
+Hardware gate:4K/16K coding contexts, five widths, eager/trace full logits and state,
+corrected rollback, valid-KV checks, stale-state/wrong-page controls, and paired
+full-model timing against the previous compact/input-reuse/selective-clone/row-layout
+candidate from run34011273093. No serving change or200 committed-tok/s claim.
+
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
 Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)

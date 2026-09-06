@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--conv', action='store_true')
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--output-projection', action='store_true')
+    parser.add_argument('--model-adapter', action='store_true')
     args = parser.parse_args()
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
@@ -38,6 +39,8 @@ def main():
         parser.error('--continuation requires --conv')
     if args.output_projection and not args.conv:
         parser.error('--output-projection requires --conv')
+    if args.model_adapter and not args.conv:
+        parser.error('--model-adapter requires --conv')
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
@@ -46,6 +49,8 @@ def main():
                   convolution=args.conv,
                   continuation_enabled=args.continuation,
                   output_projection=args.output_projection,
+                  model_adapter_checks=0,
+                  model_adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_device_loop_state.py').read_bytes()).hexdigest() if args.model_adapter else None,
                   output_projection_scope='Synthetic 3072x128 local projection only; no real weights or inter-chip collective' if args.output_projection else None,
                   adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_multitoken_conv.py').read_bytes()).hexdigest() if args.conv else None,
                   continuation_checks=0, stale_controls=0,
@@ -125,6 +130,51 @@ def main():
                                 raise AssertionError(f'Convolution prefix mismatch {token=} {chip=} {tap=}')
                 if not all(torch.equal(value, initial_host) for value in host(initial)):
                     raise AssertionError('Initial recurrent state modified')
+                if args.model_adapter:
+                    from gdn_device_loop_state import DeviceLoopState
+                    from gdn_snapshot import ActiveSnapshot
+                    full_host = [torch.cat([initial_host, (torch.randn(7, 24, 128, 128) * 0.05).bfloat16()], dim=0)]
+                    full_host.extend(torch.cat([value, (torch.randn(1, 7, 5120) * 0.05).bfloat16()], dim=1) for value in conv_host)
+                    full_entry = [upload(value) for value in full_host]
+                    live = [upload(value) for value in full_host]
+                    projected_device = upload(projected)
+                    dummy = upload(torch.zeros(1, args.rows, 5120).bfloat16())
+                    def slice_along(value, dimension, start, end):
+                        begins, ends = [0] * len(value.shape), list(value.shape)
+                        begins[dimension], ends[dimension] = start, end
+                        return ttnn.slice(value, begins, ends, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                    layer = SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh,
+                        _slice_along=slice_along,
+                        _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                        tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
+                    active = ActiveSnapshot(layer, ttnn, direct=True)
+                    adapter = DeviceLoopState(active, ttnn, kernels)
+                    checkpoint = active.allocate()
+                    expected_values = [host(result['output']), host(result['states'])]
+                    for accepted in range(args.rows + 1):
+                        stage('model-adapter-active-slot', accepted=accepted)
+                        for source, destination in zip(full_entry, live, strict=True):
+                            ttnn.copy(source, destination)
+                        actual = adapter.decode(dummy, checkpoint, accepted)
+                        for value, reference in zip((actual['output'], actual['states']), expected_values, strict=True):
+                            if not all(torch.equal(left, right) for left, right in zip(host(value), reference, strict=True)):
+                                raise AssertionError('Model adapter output/recurrent prefix mismatch')
+                        for index, (destination, snapshot) in enumerate(zip(live, checkpoint, strict=True)):
+                            final_reference = expected[-1][1] if index == 0 else expected[-1][2][index - 1]
+                            prefix_reference = [initial_host if index == 0 else conv_host[index - 1]] * 2 if accepted == 0 else (
+                                expected[accepted - 1][1] if index == 0 else expected[accepted - 1][2][index - 1])
+                            for chip, (actual_live, saved) in enumerate(zip(host(destination), host(snapshot), strict=True)):
+                                active_row = actual_live[:1] if index == 0 else actual_live[:, :1]
+                                inactive = actual_live[1:] if index == 0 else actual_live[:, 1:]
+                                original_inactive = full_host[index][1:] if index == 0 else full_host[index][:, 1:]
+                                if not torch.equal(active_row, final_reference[chip]) or not torch.equal(saved, prefix_reference[chip]):
+                                    raise AssertionError(f'Model adapter publication mismatch {accepted=} {index=} {chip=}')
+                                if not torch.equal(inactive, original_inactive):
+                                    raise AssertionError('Model adapter modified an inactive slot')
+                        release_owned(ttnn, actual['owned'])
+                        report['model_adapter_checks'] += 1
+                    adapter.close()
+                    release_owned(ttnn, [*checkpoint, *full_entry, *live, projected_device, dummy])
                 if args.output_projection:
                     stage('local-output-projection')
                     weights = upload((torch.randn(3072, 128) * 0.01).bfloat16())
