@@ -20,9 +20,12 @@ def main():
     parser.add_argument("--batch-output", action="store_true")
     parser.add_argument("--active-snapshot", action="store_true")
     parser.add_argument("--direct-snapshot", action="store_true")
+    parser.add_argument("--working-state", action="store_true")
     options = parser.parse_args()
     if options.direct_snapshot and not options.active_snapshot:
         raise ValueError("Direct snapshot requires active-slot mode")
+    if options.working_state and not (options.direct_snapshot and options.batch_output):
+        raise ValueError("Working state requires direct active snapshots and batched output")
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
@@ -36,10 +39,14 @@ def main():
     report["batched_output_projection"] = options.batch_output
     report["active_snapshot"] = options.active_snapshot
     report["direct_snapshot"] = options.direct_snapshot
+    report["working_state"] = options.working_state
     if options.direct_snapshot:
         report["copy_kernel_sha256"] = hashlib.sha256(Path(__file__).with_name("gdn_state_copy.cpp").read_bytes()).hexdigest()
     output_path = root / ("gdn-direct.json" if options.direct_snapshot else "gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
+    if options.working_state:
+        output_path = root / "gdn-inplace.json"
     mesh = None
+    working = None
     traces = []
     try:
         source = Path("/opt/tt-metal/models/demos/blackhole/qwen36/tt/gdn/tp.py")
@@ -65,6 +72,10 @@ def main():
         live = [gdn.rec_state, *gdn.conv_states]
         addresses = [tensor.buffer_address() for tensor in live]
         active = ActiveSnapshot(gdn, ttnn, direct=options.direct_snapshot)
+        working = None
+        if options.working_state:
+            from gdn_working_state import WorkingState
+            working = WorkingState(active, ttnn)
         report.update(layer=layer, state_shapes=[list(tensor.shape) for tensor in live])
 
         def upload(host):
@@ -187,13 +198,18 @@ def main():
 
                 def operation():
                     def save(prefix):
-                        if options.active_snapshot:
+                        if working:
+                            working.save(staging[prefix])
+                        elif options.active_snapshot:
                             active.save(staging[prefix])
                         else:
                             copy(live, staging[prefix])
-                    save(0)
-                    outputs = decode_projected(gdn, packed, tokens, save,
-                                               ttnn, forward=native_gated)
+                    if working:
+                        outputs = working.decode(packed, tokens, save)
+                    else:
+                        save(0)
+                        outputs = decode_projected(gdn, packed, tokens, save,
+                                                   ttnn, forward=native_gated)
                     if not options.batch_output:
                         return outputs
                     gated = outputs[0] if rows == 1 else ttnn.concat(outputs, dim=1)
@@ -241,6 +257,8 @@ def main():
                                                    layer_with_snapshots_ms=1000 * (time.perf_counter() - started)))
                     if not all(exact(output, expected) for output, expected in zip(read_outputs(outputs), expected_outputs, strict=True)):
                         raise AssertionError(f"GDN output divergence: {seed=} {rows=} {mode=}")
+                    if not state_exact(state_host(live), expected_states[rows]):
+                        raise AssertionError("Block publication changed final active state or idle slots")
                     for prefix in range(rows + 1):
                         expected_snapshot = expected_states[prefix]
                         if options.active_snapshot:
@@ -305,6 +323,10 @@ def main():
                 output_path.write_text(json.dumps(report, indent=2))
                 print(json.dumps(dict(seed=seed, rows=rows, exact=True)), flush=True)
             release(initial)
+        if working:
+            report["inplace_requested_and_aliased_calls"] = working.calls
+            if working.calls != 279 or len(report["checks"]) != 216 or len(report["negative_controls"]) != 30:
+                raise AssertionError("Incomplete compact-state coverage")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
@@ -314,6 +336,8 @@ def main():
         if mesh is not None:
             for trace in traces:
                 ttnn.release_trace(mesh, trace)
+            if working is not None:
+                working.close()
             ttnn.close_mesh_device(mesh)
 
 

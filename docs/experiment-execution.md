@@ -44,13 +44,63 @@ using a sharded active-prefix write, so this is **not** a whole-B8 copy finding.
 Conv/gates and recurrence/norm/gate math are already fused; the remaining question
 is how much redundant movement surrounds them.
 
-Next bounded attribution revision (hardware pending) adds separate coverage for
+The second bounded attribution revision (passed 34004870686, `28b8dd4`) adds separate coverage for
 projected-row slice/clone, fused conv/gates, packed recurrence/norm/gate, active
 state slicing and active-prefix writeback. Each must engage exactly 48*T times.
 It uses only cloned function namespaces and reversible instance wrappers, preserving
 native state geometry, precision, kernels and execution order. An active-B1
 working-state/in-place candidate remains a hypothesis, not an implemented speedup;
 it will need exact rollback, continuation, idle-slot and trace-address gates.
+
+All four fixtures and twelve fenced passes passed exact logits/state/valid-KV
+checks. Each of the five new categories engaged exactly 48*T times in every pass.
+The downloaded artifact is 228636 bytes. T16 trace medians remain 235.112 ms at
+4095 tokens and 243.885 ms at 16383 tokens; this is instrumentation, not a speedup.
+
+| T16 fenced exclusive category | 4095-token median ms | 16383-token median ms |
+| --- | --- | --- |
+| Projected-row slice/clone | 87.957 | 90.081 |
+| Fused conv/gates | 137.818 | 138.192 |
+| Packed recurrence/norm/gate | 97.843 | 97.943 |
+| Active recurrent-state slice | 31.583 | 31.730 |
+| Active recurrent-state writeback | 62.328 | 62.268 |
+
+These independent medians include fences/dispatch and must not be subtracted from
+trace time to predict savings. Fenced root medians were 732.041/734.234 ms versus
+unfenced eager medians of 439.437/425.633 ms. The native-row exclusive category now
+excludes its five measured children and is not directly comparable with revision 1.
+
+The next implementation candidate keeps an isolated active recurrent working state
+through the T-token GDN block, enabling native B1 in-place updates instead of 768
+active-state slice/write pairs across 48 layers. Copy into/out of that working
+state at bounded block/checkpoint boundaries, preserving native live-buffer addresses
+and idle slots. First certify a single-layer candidate with every rollback prefix
+and corrected continuation in eager/trace; only then integrate and run paired
+full-model timing. Keep projected-row clone removal separate: ownership/aliasing
+must be established before deleting it. No arithmetic or precision changes are
+justified by this attribution pass, and no serving promotion has been made.
+
+### E3 isolated in-place working state (hardware pending)
+
+`gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
+compact B1 working set (recurrence and all four conv taps), copied from native B8
+slot zero once per block. Instance-local B/state bindings enable the native
+in-place guard during the sequential fused rows. A cloned function namespace
+requires the in-place request and verifies returned recurrence buffer addresses on
+both chips at every eager/capture call. No installed source or math is changed.
+All-prefix checkpoints copy the compact state directly; final publication uses
+the already-certified active-slot DMA and restores native B8 Python bindings even
+on failure. Working tensors are preallocated and remain stable across trace replay.
+
+The gate requires 216 exact prefix/continuation checks over three seeds and
+T1/2/4/8/16 in eager/trace, 30 stale-state negative controls, full-state equality
+immediately after each candidate block (including idle slots), stable live
+addresses, and 279 successful in-place wrapper calls across warmup/capture/eager.
+Trace replays execute captured device work, not Python counters. The existing
+15 active-restore isolation cases remain enabled. This changes working-state
+geometry, so local tests alone do not certify native-kernel compatibility or
+numerical equivalence. Reported single-sample layer times are diagnostic only;
+paired performance measurements and full-model integration remain subsequent gates.
 
 `full-batch-attribution` targets the remaining 235-244 ms T16 path with a bounded,
 JSON-only in-situ profiler, avoiding the historic multi-GB raw profiler exports.

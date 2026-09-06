@@ -87,6 +87,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-active ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-inplace ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-direct ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot
     exit 0

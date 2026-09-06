@@ -98,6 +98,10 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   tests. Reject dropped markers, missing device timings, skipped tests or a missing
   chip. Never score these instrumented runs as full-model decode throughput.
 
+- `gdn-inplace`: opt-in compact B1 working-state gate over the real-weight GDN
+  prefix matrix. Verifies native in-place request and buffer aliasing on both chips,
+  all rollback prefixes and corrected continuations, idle slots and trace-stable
+  native B8 state. No full-model integration or serving promotion on this gate.
 - `attention-batch`: real-weight attention layer gate, T=1/2/4/8/16 at positions
   31/63/65, two seeds, eager/trace, both chips. Batch native fused QKV preparation,
   SDPA and output projection, but serialize paged K/V writes using B1 shards.
