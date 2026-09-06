@@ -6,12 +6,14 @@ from gdn_prefix import decode_projected, gated_decode
 
 
 class WorkingState:
-    def __init__(self, active, operations):
+    def __init__(self, active, operations, compact_dma=False):
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError("Expected audited direct snapshots and stable B8 state")
         self.active = active
         self.gdn = active.gdn
         self.operations = operations
+        self.compact_dma = compact_dma
+        self.checkpoint_calls = 0
         self.state = active.allocate()
         self.calls = 0
         self.addresses = self.pointers(self.state)
@@ -44,6 +46,11 @@ class WorkingState:
     def save(self, destination):
         if len(destination) != len(self.state):
             raise ValueError("Complete compact checkpoint required")
+        if self.compact_dma:
+            from gdn_state_copy import copy_compact
+            copy_compact(self.state, destination)
+            self.checkpoint_calls += 1
+            return
         for source, target in zip(self.state, destination, strict=True):
             self.operations.copy(source, target)
 

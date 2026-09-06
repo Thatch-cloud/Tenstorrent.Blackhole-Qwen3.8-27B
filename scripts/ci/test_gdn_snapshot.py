@@ -4,10 +4,21 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from gdn_snapshot import ActiveSnapshot
-from gdn_state_copy import page_counts
+from gdn_state_copy import page_counts, transfer_counts
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_transfer_modes_reject_unintended_shapes(self):
+        compact = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
+        full = [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4
+        self.assertEqual(transfer_counts(compact, compact, True), [384, 160, 160, 160, 160])
+        self.assertEqual(transfer_counts(compact, full), transfer_counts(full, compact))
+        for source, destination, mode in ((full, full, False), (compact, compact, False),
+                                          (full, compact, True), (compact, full, True),
+                                          (compact[:4], compact, True), (full, compact[:4], False)):
+            with self.assertRaises(ValueError):
+                transfer_counts(source, destination, mode)
+
     def test_face_transfers_preserve_noc_address_alignment(self):
         source = Path(__file__).with_name("gdn_state_copy.cpp").read_text()
         self.assertIn("source.get_noc_addr(page, 512), scratch + 512, 32", source)

@@ -11,17 +11,33 @@ def page_counts(shapes):
     return [384, 160, 160, 160, 160]
 
 
+def transfer_counts(source_shapes, destination_shapes, compact_only=False):
+    compact_shapes = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
+    full_shapes = [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4
+    source_shapes = [tuple(shape) for shape in source_shapes]
+    destination_shapes = [tuple(shape) for shape in destination_shapes]
+    allowed = [(compact_shapes, compact_shapes)] if compact_only else [
+        (compact_shapes, full_shapes), (full_shapes, compact_shapes)]
+    if (source_shapes, destination_shapes) not in allowed:
+        raise ValueError("Expected frozen compact-to-compact or active-slot transfer geometry")
+    return page_counts(compact_shapes)
+
+
 def copy_active(source, destination):
+    _copy_state(source, destination, compact_only=False)
+
+
+def copy_compact(source, destination):
+    _copy_state(source, destination, compact_only=True)
+
+
+def _copy_state(source, destination, compact_only):
     import ttnn
 
     if len(source) != 5 or len(destination) != 5:
         raise ValueError("Expected complete state lists")
     source_shapes, destination_shapes = [tuple(tensor.shape) for tensor in source], [tuple(tensor.shape) for tensor in destination]
-    compact = source if source_shapes[0][0] == 1 else destination
-    counts = page_counts([tuple(tensor.shape) for tensor in compact])
-    full_shapes = [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4
-    if source_shapes != full_shapes and destination_shapes != full_shapes:
-        raise ValueError("One side must be the frozen eight-slot state")
+    counts = transfer_counts(source_shapes, destination_shapes, compact_only)
     tensors = [tensor for pair in zip(source, destination, strict=True) for tensor in pair]
     if any(tensor.dtype != ttnn.bfloat16 or tensor.layout != ttnn.TILE_LAYOUT
            or tensor.memory_config() != ttnn.DRAM_MEMORY_CONFIG for tensor in tensors):

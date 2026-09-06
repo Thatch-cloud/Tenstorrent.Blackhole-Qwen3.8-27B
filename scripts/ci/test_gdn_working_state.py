@@ -11,6 +11,16 @@ def native_gated(self, token):
 
 
 class WorkingStateTests(unittest.TestCase):
+    def test_dma_checkpoint_replaces_five_generic_copies(self):
+        working, active, layer, operations = self.fixture()
+        working.compact_dma = True
+        destination = ["target"] * 5
+        with patch("gdn_state_copy.copy_compact") as copy:
+            working.save(destination)
+            copy.assert_called_once_with(working.state, destination)
+        operations.copy.assert_not_called()
+        self.assertEqual(working.checkpoint_calls, 1)
+
     def tensor(self, address):
         return SimpleNamespace(buffer_address=lambda: address)
 

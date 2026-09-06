@@ -126,7 +126,7 @@ arm alone certifies dynamic rollback or a complete speculative commit pipeline.
 Retain the full all-prefix correctness gate; do not hide the failed all-prefix
 performance result or predict savings from fenced eager attribution.
 
-`gdn-checkpoint-cost` implements that diagnostic (hardware pending). It retains
+`gdn-checkpoint-cost` implements that diagnostic (passed 34005748778, `5fac974`). It retains
 the all-prefix correctness/rollback/continuation/isolation matrix and reruns the
 all-prefix paired control alongside `none` and `end` checkpoint policies. Both
 arms use the same policy; compact entry/publication transfers remain timed even
@@ -143,6 +143,39 @@ ratios rather than mixing samples or treating reduced-checkpoint diagnostics as
 a complete speculative verifier. This can separate checkpoint-related costs from
 the combined recurrence/working-state-transfer cost; it does not isolate recurrence
 kernel latency alone. No full-model integration or serving promotion is enabled.
+
+Run 34005748778 passed all 45 fixtures / 5400 timed replays, 216 exact prefix and
+continuation checks, 30 negative controls, 15 isolation checks and 651 in-place
+request/alias checks. T16 paired control/candidate ratios across seeds were:
+
+| Policy | Seed 0 | Seed 1 | Seed 2 |
+| --- | --- | --- | --- |
+| All-prefix | 0.942 | 0.942 | 0.942 |
+| None | 1.060 | 1.062 | 1.057 |
+| End-only | 1.050 | 1.085 | 1.052 |
+
+End-only candidate means were 3.302/3.301/3.299 ms. Every T16 none/end paired block
+favored the candidate, while all-prefix remained slower. This supports checkpoint
+cost as the factor erasing the benefit in this fixture. Policies run sequentially,
+so do not interpret cross-policy differences as a precise isolated kernel cost.
+These are layer block-cost ratios, not full-model or committed-token throughput.
+
+### E3 compact checkpoint DMA (hardware pending)
+
+`gdn-checkpoint-dma` changes only compact checkpoint saving from five generic
+copies to one mesh generic-op invocation, reusing the existing unchanged 48-core
+data-movement kernel. A new strict compact-to-compact mode validates both ends as
+one recurrent state plus four conv taps, BF16 interleaved DRAM tiles, with ten
+non-aliased buffers per chip. Existing active-slot transfers remain a separate
+full-to-compact/compact-to-full mode. Recurrence copies complete tiles; conv copies
+only the two logical-row face segments, not padded rows. No arithmetic or native
+fused kernel changes are made; padding is not promoted to logical model state.
+
+The hardware gate repeats all three checkpoint policies, the full exactness matrix
+and 5400 paired replays, with 354 compact checkpoint DMA calls required during
+warmup/capture/eager (trace replay does not increment Python counters). It also
+records the unchanged C++ kernel hash and new Python adapter hash. The old generic
+copy path remains selectable; no speedup or full-model integration is assumed.
 
 `gdn-inplace` runs the existing real-weight single-layer matrix with an opt-in
 compact B1 working set (recurrence and all four conv taps), copied from native B8

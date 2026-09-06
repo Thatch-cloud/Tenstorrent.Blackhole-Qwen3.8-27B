@@ -108,6 +108,9 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 - `gdn-checkpoint-cost`: retains the full correctness gate and compares matched
   all-prefix, no-checkpoint and end-only policies. End staging is poisoned outside
   each timed replay. Includes working-state transfers; diagnostic, not serving-ready.
+- `gdn-checkpoint-dma`: same matrix with one direct compact-state DMA per checkpoint
+  instead of five generic copies. Uses the unchanged active-copy C++ kernel with
+  explicit compact-to-compact geometry checks; no serving promotion.
 - `attention-batch`: real-weight attention layer gate, T=1/2/4/8/16 at positions
   31/63/65, two seeds, eager/trace, both chips. Batch native fused QKV preparation,
   SDPA and output projection, but serialize paged K/V writes using B1 shards.

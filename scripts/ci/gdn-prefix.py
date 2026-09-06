@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--working-state", action="store_true")
     parser.add_argument("--paired-timing", action="store_true")
     parser.add_argument("--checkpoint-diagnostics", action="store_true")
+    parser.add_argument("--compact-checkpoint-dma", action="store_true")
     options = parser.parse_args()
     if options.direct_snapshot and not options.active_snapshot:
         raise ValueError("Direct snapshot requires active-slot mode")
@@ -33,6 +34,8 @@ def main():
         raise ValueError("Paired timing requires the compact working-state gate")
     if options.checkpoint_diagnostics and not options.paired_timing:
         raise ValueError("Checkpoint diagnostics require paired timing")
+    if options.compact_checkpoint_dma and not options.checkpoint_diagnostics:
+        raise ValueError("Compact checkpoint DMA requires the complete diagnostic matrix")
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
@@ -47,6 +50,7 @@ def main():
     report["active_snapshot"] = options.active_snapshot
     report["direct_snapshot"] = options.direct_snapshot
     report["working_state"] = options.working_state
+    report["compact_checkpoint_dma"] = options.compact_checkpoint_dma
     if options.direct_snapshot:
         report["copy_kernel_sha256"] = hashlib.sha256(Path(__file__).with_name("gdn_state_copy.cpp").read_bytes()).hexdigest()
     output_path = root / ("gdn-direct.json" if options.direct_snapshot else "gdn-active.json" if options.active_snapshot else "gdn-block.json" if options.batch_output else "gdn-prefix.json")
@@ -57,6 +61,9 @@ def main():
         report["paired_timing"] = []
     if options.checkpoint_diagnostics:
         output_path = root / "gdn-checkpoint-cost.json"
+    if options.compact_checkpoint_dma:
+        output_path = root / "gdn-checkpoint-dma.json"
+        report["copy_adapter_sha256"] = hashlib.sha256(Path(__file__).with_name("gdn_state_copy.py").read_bytes()).hexdigest()
     mesh = None
     working = None
     traces = []
@@ -87,7 +94,7 @@ def main():
         working = None
         if options.working_state:
             from gdn_working_state import WorkingState
-            working = WorkingState(active, ttnn)
+            working = WorkingState(active, ttnn, compact_dma=options.compact_checkpoint_dma)
         report.update(layer=layer, state_shapes=[list(tensor.shape) for tensor in live])
 
         def upload(host):
@@ -406,6 +413,10 @@ def main():
             if working.calls != expected_calls or len(report["checks"]) != 216 or len(report["negative_controls"]) != 30:
                 raise AssertionError("Incomplete compact-state coverage")
         expected_fixtures = 45 if options.checkpoint_diagnostics else 15
+        if options.compact_checkpoint_dma:
+            report["compact_checkpoint_dma_calls"] = working.checkpoint_calls
+            if working.checkpoint_calls != 354:
+                raise AssertionError("Incomplete compact checkpoint DMA coverage")
         if options.paired_timing and len(report["paired_timing"]) != expected_fixtures:
             raise AssertionError("Incomplete paired timing matrix")
         report["passed"] = True
