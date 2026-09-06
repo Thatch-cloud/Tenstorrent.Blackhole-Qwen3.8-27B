@@ -16,6 +16,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Grouped attention hardware screen prepared
+
+`attention-groups` compares independent native B1 attention against serial
+query slicing/SDPA/concatenation and the simulator-validated grouped path.
+The matrix is T1/2/4/8/16/32 at4095/16383 tokens with seeds0/1/2. Each fixture
+checks eager and captured output on both chips, runs three ABBA blocks with ten
+blocking replays per sample, then changes the query at the same buffer address
+and checks both traces against a separately computed native reference. Read-only
+KV tensors must remain unchanged. Matrix totals are36 fixtures,4320 timed
+replays and72 changed-input checks.
+
+Timing includes device query packing, SDPA, unpacking and output concatenation.
+Masks, page-table views, allocation/warmup/capture, validation readback and query
+refresh are outside timing. There are no real model weights, KV writes, dynamic
+position changes or committed-token claims. T1 is deliberately measured rather
+than hidden: layout overhead can make this approach slower at small widths.
+Scratch cleanup protects caller input buffers against no-op slice/reshape aliases.
+No serving or verifier default uses the candidate.
+
 ### Device attention packing/unpacking passes first simulator cases
 
 `device_layout` now executes query slicing, untilize, reshape, permutation,
