@@ -72,30 +72,45 @@ def independent_row(operations, packed, sliced):
 
 
 def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None, profiler=None,
-                     clone_skipped=None):
+                     clone_skipped=None, hoist_row_layout=False):
     rows = validate_rows(tuple(packed_input.shape))
     if len(token_inputs) != rows or any(tuple(token.shape) != (1, 1, 5120) for token in token_inputs):
         raise ValueError("Expected one B1 input per verification row")
+    if hoist_row_layout and (rows == 1 or clone_skipped is None):
+        raise ValueError("Hoisted layout requires multirow selective-clone control")
     original = gdn._project_qkvzab_raw
     packed = original(packed_input, rows, operations.L1_MEMORY_CONFIG)
+    row_source = packed
     cursor = 0
 
     def projected_row(unused_input, batch, memory):
         nonlocal cursor
         if batch != 1 or cursor >= rows:
             raise ValueError("Native projection callback did not consume exactly one row")
-        sliced = operations.slice(packed, (0, cursor, 0), (1, cursor + 1, packed.shape[-1]),
+        sliced = operations.slice(row_source, (0, cursor, 0), (1, cursor + 1, packed.shape[-1]),
                                   memory_config=memory)
+        if hoist_row_layout:
+            independent_row(operations, row_source, sliced)
+            tiled = operations.to_layout(sliced, operations.TILE_LAYOUT, memory_config=memory)
+            independent_row(operations, sliced, tiled)
+            independent_row(operations, packed, tiled)
+            operations.deallocate(sliced)
+            sliced = tiled
         if clone_skipped is not None and cursor > 0:
             output = independent_row(operations, packed, sliced)
             clone_skipped()
         else:
             output = operations.clone(sliced, memory_config=memory)
+            if hoist_row_layout:
+                operations.deallocate(sliced)
         cursor += 1
         return output
 
     outputs = []
     try:
+        if hoist_row_layout:
+            converted = operations.to_layout(packed, operations.ROW_MAJOR_LAYOUT, memory_config=operations.L1_MEMORY_CONFIG)
+            row_source = independent_row(operations, packed, converted)
         gdn._project_qkvzab_raw = profiler.wrap("gdn.projected_row_copy", projected_row) if profiler else projected_row
         for index, token in enumerate(token_inputs):
             outputs.append((forward or gdn.forward_decode)(token))
@@ -105,4 +120,6 @@ def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, fo
         return outputs
     finally:
         gdn._project_qkvzab_raw = original
+        if row_source is not packed:
+            operations.deallocate(row_source)
         operations.deallocate(packed)

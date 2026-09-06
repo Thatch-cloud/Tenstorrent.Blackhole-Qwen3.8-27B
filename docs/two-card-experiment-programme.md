@@ -1,5 +1,41 @@
 # Qwen3.8-27B: two-card experiment programme
 
+## Programme checkpoint — 2026-09-06
+
+Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
+`Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
+of this programme. The [execution ledger](experiment-execution.md) records individual
+passes, failures and timing evidence. No serving defaults have been promoted.
+
+| Track | Verified progress | Remaining programme gate |
+| --- | --- | --- |
+| E0 baseline | Pinned runtime and card-backed endpoint benchmarks | Complete engine-commit accounting and gateway comparison |
+| E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
+| E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
+| E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
+| E4 fusion/pipeline | Compact in-place state, direct checkpoint DMA, input reuse and selective clone removal win in full-model tests | True multi-token recurrent kernel retaining state internally; memory-pipeline prototypes |
+| E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
+| E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
+| E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
+| E8 precomputation | Planning and cost investigation | Measured table/precomputation candidate; no LUT gain established |
+| E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
+| E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
+
+Latest verified full-model T16 block costs (run **34009858516**, `215b933`) are
+**197.479 ms at 4095 tokens** and **206.547 ms at 16383 tokens**, down from the
+earlier 235-244 ms verifier. Full logits, active GDN state, valid KV and corrected
+rollback passed. These are static verifier costs, not committed-token throughput:
+even perfect acceptance with zero drafting/commit overhead gives only 81.02/77.46
+tok/s for T16. T1 retains native handling. The 200 committed-token/s goal is not met.
+
+Next bounded experiment: hoist repeated projected-row layout conversion, with the
+latest exact candidate as paired control. After resolving that arm, prioritize E4's
+true multi-token recurrent kernel rather than an open-ended sequence of copy tweaks.
+Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
+tests or oracle verification as real coding throughput.
+
+## Initial execution context
+
 Status: execution started, 2026-09-05. Hardware operator prerequisites passed in
 [run 33941853075](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33941853075):
 80 fused-kernel reference cases, 224 recurrent/KV-state checks and 8 eager/traced

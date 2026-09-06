@@ -252,6 +252,21 @@ missing optional roots rather than assuming them. This audit uses no cards and
 does not execute model code. The existing clone path remains unchanged until its
 aliasing and deallocation behavior can be established from the actual image.
 
+### E3 projected-row layout hoisting (hardware pending)
+
+`full-gdn-row-layout` converts the packed projection to row-major once per T>1
+block rather than allowing each nonzero TILE row slice to repeat that conversion.
+It slices B1 row-major tensors and tiles each output separately. Both-chip ownership
+guards require independent converted/source/sliced/output buffers before releasing
+intermediates. The first-row clone remains; T1 and default behavior are unchanged.
+Conversion setup failures release the original projection without changing the hook.
+
+The direct paired control retains compact state, checkpoint DMA, input reuse and
+selective clone removal from 34009858516. Layout conversion adds live scratch and
+changes padding preparation, so savings and correctness must not be assumed.
+The full 4K/16K exactness/rollback gate precedes 2400 timed decode replays. Once this
+bounded arm is resolved, prioritize E4's multi-token state-retaining recurrent kernel.
+
 ### E3 selective projected-row clone removal (passed 34009858516)
 
 Run 34009858516 (`215b933`) passed 20 width/mode checks, 16 corrected rollback
@@ -555,13 +570,13 @@ commit cost at realistic contexts before introducing a drafter.
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Coding-length exactness and paired full-logit block costs passed 34002876975 with B1 SDPA reads; T16 takes 235-244 ms | Profile remaining per-row work; reduce target block cost toward <80 ms, then implement dynamic all-prefix selection/commit |
-| E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
+| E3 verifier | Exact full-model compact/DMA/input-reuse/selective-clone candidate passed 34009858516; T16 costs 197.479/206.547 ms at 4K/16K | Resolve layout-hoisting arm, then prioritize multi-token GDN; reach <80 ms before drafting overhead and implement dynamic selection/commit |
+| E4 fusion/pipeline | State/copy changes now win in full-model paired tests; earlier 91-core MLP fusion missed repeatability | True multi-token state-retaining recurrent kernel and memory-pipeline experiments; no serving promotion |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
 | E7 prefix reuse | Dependency-gated | E1/E2 lifecycle gate; hybrid KV plus recurrent/conv state identity and isolation |
 | E8 precomputation | Planned audit | Bound removable cost before table prototypes; no unapproved arithmetic changes |
-| E9 spare-core work | Three eager layer profiles passed, run 33945221856 | Full-model traced attribution before reader/core-map/L1 changes |
+| E9 spare-core work | Layer/full-model attribution, direct DMA and guarded force-argmax measured | Persistent L1 state, dedicated staging and broader mappings; fenced attribution is not traced critical-path timing |
 | E10 disaggregation | Eight-slot TP1 pool fails analytical capacity bound | Smaller-pool TP1 and hybrid-state handoff remain unverified; E2 mixed-traffic control first |
 
 The queue is not a claim that all tracks already have runnable implementations.

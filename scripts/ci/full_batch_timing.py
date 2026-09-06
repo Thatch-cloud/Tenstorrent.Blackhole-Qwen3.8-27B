@@ -17,7 +17,7 @@ def summarize(samples):
 
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
-            compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False):
+            compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False):
     import torch
     import ttnn
 
@@ -28,10 +28,12 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     prefill()
     save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
-                           compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones)
+                           compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                           hoist_row_layout=hoist_row_layout)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False,
-                         reuse_gdn_input=reuse_gdn_input if skip_row_clones else False) if compact_gdn else None
+                         reuse_gdn_input=reuse_gdn_input if skip_row_clones else False,
+                         skip_row_clones=skip_row_clones if hoist_row_layout else False) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -44,6 +46,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     if skip_row_clones:
         report.update(skip_row_clones_enabled=candidate.skip_row_clones,
                       paired_control="compact GDN with reused input and all projected-row clones")
+    if hoist_row_layout:
+        report.update(hoist_row_layout_enabled=candidate.hoist_row_layout,
+                      paired_control="compact GDN with input reuse and selective clone removal")
     if compact_gdn:
         import math
         report["working_state_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
@@ -123,6 +128,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report["compact_comparison"]["scope"] = "Full-model reused versus distinct GDN input rows, both compact/DMA; no committed tok/s"
             if skip_row_clones:
                 report["compact_comparison"]["scope"] = "Full-model selective clone removal versus reused-input control; no committed tok/s"
+            if hoist_row_layout:
+                report["compact_comparison"]["scope"] = "Full-model hoisted layout versus selective-clone control; no committed tok/s"
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)

@@ -38,7 +38,7 @@ def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
 
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
-                 compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False):
+                 compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -52,6 +52,9 @@ class ModelBatch:
         if skip_row_clones and not reuse_gdn_input:
             raise ValueError("Clone removal requires the exact reused-input control")
         self.skip_row_clones = skip_row_clones and self.rows > 1
+        if hoist_row_layout and not skip_row_clones:
+            raise ValueError("Layout hoisting requires the selective-clone control")
+        self.hoist_row_layout = hoist_row_layout and self.rows > 1
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -129,7 +132,8 @@ class ModelBatch:
         working = None
         if self.compact_gdn:
             from gdn_working_state import WorkingState
-            working = WorkingState(helper, operations, compact_dma=True, skip_row_clones=self.skip_row_clones)
+            working = WorkingState(helper, operations, compact_dma=True, skip_row_clones=self.skip_row_clones,
+                                   hoist_row_layout=self.hoist_row_layout)
             self.working_states.append(working)
             snapshot = working.save
         if self.profiler:

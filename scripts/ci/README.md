@@ -117,6 +117,9 @@ Hardware entry-point guard tests require Python 3.10 or newer:
 - `full-gdn-input-reuse`: same full-model gate, reusing one shape-only GDN input row
   instead of T redundant slices. Paired control uses compact state/DMA too; projected
   row cloning remains unchanged, and T1 is not optimized by this experiment.
+- `full-gdn-row-layout`: hoists projected input conversion to row-major once per
+  block, then extracts/tiles independently owned B1 rows. Uses the selective-clone
+  candidate as paired control; preserves T1 and requires full exactness before timing.
 - `attention-batch`: real-weight attention layer gate, T=1/2/4/8/16 at positions
   31/63/65, two seeds, eager/trace, both chips. Batch native fused QKV preparation,
   SDPA and output projection, but serialize paged K/V writes using B1 shards.

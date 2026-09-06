@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
     parser.add_argument("--skip-row-clones", action="store_true")
+    parser.add_argument("--hoist-row-layout", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -70,6 +71,8 @@ def main():
         raise ValueError("GDN input reuse requires compact GDN")
     if options.skip_row_clones and not options.reuse_gdn_input:
         raise ValueError("Clone removal requires reused GDN input")
+    if options.hoist_row_layout and not options.skip_row_clones:
+        raise ValueError("Layout hoisting requires selective clone removal")
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -97,6 +100,9 @@ def main():
     if options.skip_row_clones:
         output_path = root / "full-gdn-row-clones.json"
         report.update(skip_row_clones=True, ownership_audit=34009341359)
+    if options.hoist_row_layout:
+        output_path = root / "full-gdn-row-layout.json"
+        report.update(hoist_row_layout=True, layout_prerequisite=34009858516)
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -238,7 +244,8 @@ def main():
 
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
-                                 reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
+                                 reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
+                                 hoist_row_layout=options.hoist_row_layout)
             captured = None
             output = None
             try:
@@ -273,7 +280,8 @@ def main():
                 for rows in (1, 2, 4, 8, 16):
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
-                                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
+                                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
+                                         hoist_row_layout=options.hoist_row_layout)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -412,7 +420,8 @@ def main():
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
                         compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
-                        reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
+                        reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
+                        hoist_row_layout=options.hoist_row_layout)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

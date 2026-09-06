@@ -7,6 +7,41 @@ from gdn_prefix import decode_projected, independent_row, prepare_token_rows, sp
 
 
 class PrefixTests(unittest.TestCase):
+    def test_layout_conversion_is_hoisted_once_and_rows_stay_owned(self):
+        layer, packed, tokens, operations, projection = self.fixture()
+        operations.ROW_MAJOR_LAYOUT = "RM"
+        operations.TILE_LAYOUT = "TILE"
+        operations.to_layout = Mock(side_effect=lambda *args, **kwargs: object())
+        operations.slice = Mock(side_effect=lambda *args, **kwargs: object())
+        operations.get_device_tensors = lambda tensor: [SimpleNamespace(buffer_address=lambda: id(tensor))] * 2
+        skipped = Mock()
+        outputs = decode_projected(layer, packed, tokens, Mock(), operations,
+                                   clone_skipped=skipped, hoist_row_layout=True)
+        layouts = [call.args[1] for call in operations.to_layout.call_args_list]
+        self.assertEqual(layouts, ["RM"] + ["TILE"] * 4)
+        self.assertEqual(operations.clone.call_count, 1)
+        self.assertEqual(skipped.call_count, 3)
+        self.assertEqual(len(outputs), 4)
+        self.assertEqual(operations.deallocate.call_count, 7)
+        self.assertIs(layer._project_qkvzab_raw, projection)
+
+    def test_hoisted_conversion_failure_releases_projection(self):
+        layer, packed, tokens, operations, projection = self.fixture()
+        operations.ROW_MAJOR_LAYOUT = "RM"
+        operations.to_layout = Mock(side_effect=RuntimeError("layout"))
+        with self.assertRaises(RuntimeError):
+            decode_projected(layer, packed, tokens, Mock(), operations,
+                             clone_skipped=Mock(), hoist_row_layout=True)
+        operations.deallocate.assert_called_once_with(projection.return_value)
+        self.assertIs(layer._project_qkvzab_raw, projection)
+
+    def test_hoisted_layout_rejects_t1_before_allocation(self):
+        layer, packed, tokens, operations, projection = self.fixture(1)
+        with self.assertRaises(ValueError):
+            decode_projected(layer, packed, tokens, Mock(), operations,
+                             clone_skipped=Mock(), hoist_row_layout=True)
+        projection.assert_not_called()
+
     def test_only_nonzero_rows_skip_cloning(self):
         layer, packed, tokens, operations, projection = self.fixture()
         operations.get_device_tensors = lambda tensor: [SimpleNamespace(buffer_address=lambda: id(tensor))] * 2
