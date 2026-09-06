@@ -1,58 +1,40 @@
+"""The profiling adaptation changes only the scoped cache allocation dtype."""
+
+import importlib.util
+from pathlib import Path
 import unittest
 
-from stage_profile import StageProfile, direct_calls
-from full_batch_attribution import aggregate
+spec = importlib.util.spec_from_file_location("stage_profile", Path(__file__).with_name("stage-profile.py"))
+stage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stage)
 
-
-class StageProfileTests(unittest.TestCase):
-    def test_aggregation_reconciles_exclusive_categories(self):
-        records = [dict(category="model.block", layer=None, calls=1, inclusive_ms=10, exclusive_ms=1),
-                   dict(category="row", layer=0, calls=2, inclusive_ms=4, exclusive_ms=4),
-                   dict(category="row", layer=1, calls=2, inclusive_ms=5, exclusive_ms=5)]
-        totals = aggregate(records)
-        self.assertEqual(totals[0]["category"], "row")
-        self.assertEqual(totals[0]["calls"], 4)
-        records[0]["exclusive_ms"] = 2
-        with self.assertRaises(ValueError):
-            aggregate(records)
-
-    def test_nested_exclusive_time_does_not_double_count(self):
-        times = iter((0.0, 1.0, 3.0, 5.0))
-        fences = []
-        profiler = StageProfile(lambda: fences.append(True), lambda: next(times))
-        profiler.begin()
-        with profiler.scope("outer", 7):
-            with profiler.scope("inner"):
-                pass
-        records = {record["category"]: record for record in profiler.finish()}
-        self.assertEqual(records["outer"]["inclusive_ms"], 5000)
-        self.assertEqual(records["outer"]["exclusive_ms"], 3000)
-        self.assertEqual(records["inner"]["exclusive_ms"], 2000)
-        self.assertEqual(records["inner"]["layer"], 7)
-        self.assertEqual(len(fences), 4)
-
-    def test_disabled_wrapper_adds_no_fences_or_records(self):
-        profiler = StageProfile(lambda: self.fail("Unexpected fence"))
-        self.assertEqual(profiler.wrap("disabled", lambda value: value + 1)(2), 3)
-        self.assertEqual(profiler.records, {})
-
-    def test_exception_unwinds_scope(self):
-        times = iter((0.0, 1.0))
-        profiler = StageProfile(lambda: None, lambda: next(times))
-        profiler.begin()
-        with self.assertRaises(ValueError):
-            with profiler.scope("failure"):
-                raise ValueError("device")
-        self.assertEqual(profiler.stack, [])
-        self.assertEqual(profiler.finish()[0]["calls"], 1)
-
-    def test_direct_decoder_calls_exclude_attention_methods(self):
-        source = '''def forward(self, value):
-    hidden = self.attention_norm(value)
-    hidden = self.attention.forward_decode(hidden)
-    return self.feed_forward(self.ffn_norm(hidden))
+SOURCE = '''import os
+def unrelated():
+    return make(dtype=ttnn.bfloat16)
+def test_attention_tp_paged():
+    def mk_cache():
+        return make(
+            zeros(dtype=torch.bfloat16),
+            dtype=ttnn.bfloat16,
+        )
+    assert accuracy > 0.99
 '''
-        self.assertEqual(direct_calls(source), ["attention_norm", "feed_forward", "ffn_norm"])
+
+
+class StageTests(unittest.TestCase):
+    def test_scoped_replacement(self):
+        updated = stage.transform(SOURCE)
+        replacement = 'dtype=ttnn.bfloat8_b if os.environ.get("QWEN_SDPA_BF8") == "1" else ttnn.bfloat16,'
+        self.assertEqual(updated.replace(replacement, "dtype=ttnn.bfloat16,"), SOURCE)
+        self.assertEqual(updated.count(replacement), 1)
+
+    def test_reject_changed_anchor(self):
+        with self.assertRaises(ValueError):
+            stage.transform(SOURCE.replace("dtype=ttnn.bfloat16,", "dtype=ttnn.bfloat8_b,"))
+
+    def test_reject_ambiguous_test(self):
+        with self.assertRaises(ValueError):
+            stage.transform(SOURCE + SOURCE)
 
 
 if __name__ == "__main__":
