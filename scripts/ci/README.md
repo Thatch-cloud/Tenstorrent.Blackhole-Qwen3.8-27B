@@ -104,7 +104,9 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   native B8 state. No full-model integration or serving promotion on this gate.
 - `gdn-multitoken`: synthetic recurrence-only device token loop with BF16 L1
   feedback, derived from pinned kernels. Checks all prefix outputs/states and
-  restored continuations against native serial B1; excludes conv/norm-gate and timing.
+  restored continuations against native serial B1. Adds three paired ABBA timing
+  blocks per seed/width, with all-prefix exports and exact post-sample checks on
+  both arms. Excludes conv/norm-gate, input packing and full-model throughput.
 - `gdn-inplace-timing`: repeats that gate and measures three ABBA blocks per
   seed/width against captured projection-batched native state handling. Restores
   initial state outside every timed replay and checks every staged prefix afterward.

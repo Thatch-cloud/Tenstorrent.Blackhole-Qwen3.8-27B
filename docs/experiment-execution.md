@@ -16,6 +16,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E4 paired recurrence latency (hardware pending)
+
+The `gdn-multitoken` suite now retains the passing correctness matrix and adds
+native serial B1 versus device-token-loop captured traces. Both arms export every
+token output and every prefix state, with an immutable initial state. Three ABBA
+blocks, ten blocking replays per sample, across three seeds and T1/2/4/8/16 yield
+1800 timed replays. Each arm is warmed and validated before timing; every timing
+sample is followed by exact output/all-prefix/initial-state checks on both chips.
+Capture, compilation, input packing/upload, host reads and continuation checks are
+outside timing. Report raw samples and paired block ratios; these are fenced host
+trace latencies, not device-only kernel time or committed-token/model throughput.
+No speedup is established until the hardware artifact passes and is reviewed.
+
 ### E4 multi-token recurrent kernel prerequisite (passed 34012883902)
 
 Run [34012883902](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34012883902)

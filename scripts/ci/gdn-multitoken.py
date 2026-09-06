@@ -1,4 +1,4 @@
-"""Hardware recurrence-only multi-token correctness gate; no model throughput claim."""
+"""Hardware recurrence-only exactness and paired cost; no model throughput claim."""
 
 import hashlib
 import json
@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from gdn_multitoken import HASHES, cb_plan, execute, load_kernels
+from gdn_multitoken_timing import measure
 
 
 def main():
@@ -18,9 +19,9 @@ def main():
     from models.experimental.gated_attention_gated_deltanet.tt.ttnn_delta_rule_ops import recurrent_gated_delta_rule_decode_packed_ttnn
 
     kernels = load_kernels()
-    report = dict(passed=False, checks=[], continuations=[], negative_controls=[], native_hashes=HASHES,
+    report = dict(passed=False, checks=[], continuations=[], negative_controls=[], timings=[], native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
-                  scope='Synthetic packed recurrence only: no conv, norm/gate, real weights, full model or speed claim',
+                  scope='Synthetic packed recurrence only: no conv, norm/gate, real weights or model throughput claim',
                   cores_per_chip=24, feedback_dtype='BF16', feedback_bytes_per_core=32768,
                   cb_bytes_per_core=sum(cb_plan()[0].values()) * 2048 + sum(cb_plan()[1].values()) * 4096)
     path = Path('/experiment/results/gdn-multitoken.json')
@@ -117,6 +118,40 @@ def main():
                 if not detected:
                     raise AssertionError('Stale state failed to change continuation')
                 report['negative_controls'].append(dict(seed=seed, rows=rows, stale_state_detected=True))
+                serial_trace = None
+                serial_values = []
+                try:
+                    ttnn.synchronize_device(mesh)
+                    serial_trace = ttnn.begin_trace_capture(mesh, cq_id=0)
+                    state = initial
+                    for token in tokens:
+                        output, state = native(token, state)
+                        serial_values.append((output, state))
+                    ttnn.end_trace_capture(mesh, serial_trace, cq_id=0)
+
+                    def replay(arm):
+                        ttnn.execute_trace(mesh, serial_trace if arm == 'serial' else trace, cq_id=0, blocking=True)
+
+                    def validate_timing(arm):
+                        if not exact(host(initial), expected_state[0]):
+                            raise AssertionError('Timed kernel modified initial state')
+                        if arm == 'serial':
+                            outputs = [host(pair[0]) for pair in serial_values]
+                            states = [host(pair[1]) for pair in serial_values]
+                        else:
+                            packed_outputs, packed_states = host(captured[0]), host(captured[1])
+                            outputs = [[value[index:index + 1] for value in packed_outputs] for index in range(rows)]
+                            states = [[value[index:index + 1] for value in packed_states] for index in range(rows)]
+                        for index in range(rows):
+                            if not exact(outputs[index], expected_output[index]) or not exact(states[index], expected_state[index + 1]):
+                                raise AssertionError(f'Timing output/prefix mismatch {arm=} {index=}')
+
+                    timing = measure(replay, validate_timing, lambda: ttnn.synchronize_device(mesh))
+                    report['timings'].append(dict(seed=seed, rows=rows, **timing))
+                finally:
+                    if serial_trace is not None:
+                        ttnn.release_trace(mesh, serial_trace)
+                    release([value for pair in serial_values for value in pair])
                 ttnn.release_trace(mesh, trace)
                 trace = None
                 release([*captured, *packed, *reference, *correction, *[value for token in tokens for value in token]])
@@ -124,6 +159,8 @@ def main():
                 print(json.dumps(dict(seed=seed, rows=rows, exact=True)), flush=True)
         if len(report['checks']) != 30 or len(report['continuations']) != 216 or len(report['negative_controls']) != 15:
             raise AssertionError('Incomplete recurrence gate')
+        if len(report['timings']) != 15 or sum(timing['timed_replays'] for timing in report['timings']) != 1800:
+            raise AssertionError('Incomplete paired recurrence timing')
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
