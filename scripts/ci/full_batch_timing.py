@@ -17,7 +17,7 @@ def summarize(samples):
 
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
-            compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False):
+            compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False):
     import torch
     import ttnn
 
@@ -28,9 +28,10 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     prefill()
     save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
-                           compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input)
+                           compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
-                         serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False) if compact_gdn else None
+                         serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False,
+                         reuse_gdn_input=reuse_gdn_input if skip_row_clones else False) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -40,6 +41,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                   reuse_gdn_input_enabled=candidate.reuse_gdn_input,
                   paired_control="compact GDN with distinct input slices" if reuse_gdn_input else "batched native GDN state",
                   checkpoint_policy="One preselected end-prefix snapshot set, not all-prefix staging")
+    if skip_row_clones:
+        report.update(skip_row_clones_enabled=candidate.skip_row_clones,
+                      paired_control="compact GDN with reused input and all projected-row clones")
     if compact_gdn:
         import math
         report["working_state_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
@@ -117,6 +121,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             report["compact_comparison"]["scope"] = "Full-model compact versus native GDN state, same batching/end checkpoint; no committed tok/s"
             if reuse_gdn_input:
                 report["compact_comparison"]["scope"] = "Full-model reused versus distinct GDN input rows, both compact/DMA; no committed tok/s"
+            if skip_row_clones:
+                report["compact_comparison"]["scope"] = "Full-model selective clone removal versus reused-input control; no committed tok/s"
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)

@@ -3,10 +3,37 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from gdn_prefix import decode_projected, prepare_token_rows, split_gated_source, validate_reused_input, validate_rows
+from gdn_prefix import decode_projected, independent_row, prepare_token_rows, split_gated_source, validate_reused_input, validate_rows
 
 
 class PrefixTests(unittest.TestCase):
+    def test_only_nonzero_rows_skip_cloning(self):
+        layer, packed, tokens, operations, projection = self.fixture()
+        operations.get_device_tensors = lambda tensor: [SimpleNamespace(buffer_address=lambda: id(tensor))] * 2
+        skipped = Mock()
+        decode_projected(layer, packed, tokens, Mock(), operations, clone_skipped=skipped)
+        self.assertEqual(operations.clone.call_count, 1)
+        self.assertEqual(skipped.call_count, 3)
+        self.assertIs(layer._project_qkvzab_raw, projection)
+
+    def test_alias_on_either_chip_is_rejected(self):
+        source, destination = object(), object()
+        for addresses in ((10, 21), (11, 20)):
+            operations = SimpleNamespace(get_device_tensors=lambda tensor: [
+                SimpleNamespace(buffer_address=lambda value=value: value)
+                for value in ((10, 20) if tensor is source else addresses)])
+            with self.assertRaises(ValueError):
+                independent_row(operations, source, destination)
+
+    def test_alias_failure_restores_projection_hook(self):
+        layer, packed, tokens, operations, projection = self.fixture()
+        operations.get_device_tensors = lambda tensor: [SimpleNamespace(buffer_address=lambda: 7)] * 2
+        skipped = Mock()
+        with self.assertRaises(ValueError):
+            decode_projected(layer, packed, tokens, Mock(), operations, clone_skipped=skipped)
+        skipped.assert_not_called()
+        self.assertIs(layer._project_qkvzab_raw, projection)
+
     def test_reused_input_has_single_owner_and_one_slice(self):
         for rows in (1, 2, 4, 8, 16):
             layer, packed, tokens, operations, projection = self.fixture(rows)

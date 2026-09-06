@@ -60,7 +60,19 @@ def prepare_token_rows(operations, packed, reuse=False):
     return (owned * rows if reuse else owned), owned
 
 
-def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None, profiler=None):
+def independent_row(operations, packed, sliced):
+    source = operations.get_device_tensors(packed)
+    destination = operations.get_device_tensors(sliced)
+    if len(source) != 2 or len(destination) != 2:
+        raise ValueError("Both chips required for projected-row ownership")
+    if any(first.buffer_address() == second.buffer_address()
+           for first, second in zip(source, destination, strict=True)):
+        raise ValueError("Projected row aliases its live packed projection")
+    return sliced
+
+
+def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None, profiler=None,
+                     clone_skipped=None):
     rows = validate_rows(tuple(packed_input.shape))
     if len(token_inputs) != rows or any(tuple(token.shape) != (1, 1, 5120) for token in token_inputs):
         raise ValueError("Expected one B1 input per verification row")
@@ -74,7 +86,11 @@ def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, fo
             raise ValueError("Native projection callback did not consume exactly one row")
         sliced = operations.slice(packed, (0, cursor, 0), (1, cursor + 1, packed.shape[-1]),
                                   memory_config=memory)
-        output = operations.clone(sliced, memory_config=memory)
+        if clone_skipped is not None and cursor > 0:
+            output = independent_row(operations, packed, sliced)
+            clone_skipped()
+        else:
+            output = operations.clone(sliced, memory_config=memory)
         cursor += 1
         return output
 

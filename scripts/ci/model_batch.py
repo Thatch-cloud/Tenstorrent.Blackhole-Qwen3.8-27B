@@ -38,7 +38,7 @@ def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
 
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
-                 compact_gdn=False, reuse_gdn_input=False):
+                 compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -49,6 +49,9 @@ class ModelBatch:
         if reuse_gdn_input and not compact_gdn:
             raise ValueError("Input reuse requires the exact compact GDN control")
         self.reuse_gdn_input = reuse_gdn_input and self.rows > 1
+        if skip_row_clones and not reuse_gdn_input:
+            raise ValueError("Clone removal requires the exact reused-input control")
+        self.skip_row_clones = skip_row_clones and self.rows > 1
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -126,7 +129,7 @@ class ModelBatch:
         working = None
         if self.compact_gdn:
             from gdn_working_state import WorkingState
-            working = WorkingState(helper, operations, compact_dma=True)
+            working = WorkingState(helper, operations, compact_dma=True, skip_row_clones=self.skip_row_clones)
             self.working_states.append(working)
             snapshot = working.save
         if self.profiler:
@@ -168,6 +171,7 @@ class ModelBatch:
     def run(self):
         before_gdn = self.gdn_calls
         before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
+        before_clones = [state.skipped_clones for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
         before_reads = [reader.calls for reader in self.readers]
         with instance_overrides(self.bindings):
@@ -183,6 +187,9 @@ class ModelBatch:
             for state, before in zip(self.working_states, before_compact, strict=True)
         ):
             raise AssertionError("Every compact GDN layer must update in place and checkpoint exactly once")
+        if any(state.skipped_clones - before != (self.rows - 1 if self.skip_row_clones else 0)
+               for state, before in zip(self.working_states, before_clones, strict=True)):
+            raise AssertionError("Projected-row clone removal did not engage exactly")
         return result
 
     def close(self):

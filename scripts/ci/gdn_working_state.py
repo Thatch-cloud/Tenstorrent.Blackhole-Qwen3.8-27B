@@ -6,13 +6,15 @@ from gdn_prefix import decode_projected, gated_decode
 
 
 class WorkingState:
-    def __init__(self, active, operations, compact_dma=False):
+    def __init__(self, active, operations, compact_dma=False, skip_row_clones=False):
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError("Expected audited direct snapshots and stable B8 state")
         self.active = active
         self.gdn = active.gdn
         self.operations = operations
         self.compact_dma = compact_dma
+        self.skip_row_clones = skip_row_clones
+        self.skipped_clones = 0
         self.checkpoint_calls = 0
         self.state = active.allocate()
         self.calls = 0
@@ -64,7 +66,10 @@ class WorkingState:
         try:
             layer.B, layer.rec_state, layer.conv_states = 1, self.state[0], self.state[1:]
             checkpoint(0)
-            outputs = decode_projected(layer, packed, tokens, checkpoint, self.operations, forward=self.forward)
+            def skipped():
+                self.skipped_clones += 1
+            outputs = decode_projected(layer, packed, tokens, checkpoint, self.operations, forward=self.forward,
+                                       **({"clone_skipped": skipped} if self.skip_row_clones else {}))
             if self.calls - before != len(tokens) or self.pointers(self.state) != self.addresses:
                 raise AssertionError("Every row must update the same compact state in place")
         finally:

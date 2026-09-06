@@ -252,6 +252,27 @@ missing optional roots rather than assuming them. This audit uses no cards and
 does not execute model code. The existing clone path remains unchanged until its
 aliasing and deallocation behavior can be established from the actual image.
 
+### E3 selective projected-row clone removal (hardware pending)
+
+Ownership audit 34009341359 passed and exported the pinned slice implementation.
+The no-op path can return input storage; nonzero row starts within these T<=16
+tiles take the row-major slicing path, whose device op allocates a fresh output
+when no preallocated output is supplied. Native GDN consumes/deallocates the
+projected row, so the first-row clone is retained conservatively, including T1.
+
+`full-gdn-row-clones` skips only clones after row zero. The exact slice frontend
+and device-op source hashes are required before model startup; every skipped clone
+also requires distinct source/destination buffer addresses on both chips. A
+failure aborts rather than silently falling back or reporting a fake optimization.
+Each active compact layer must skip exactly T-1 clones per eager/capture invocation,
+removing 720 clone calls at T16. Native slice, fused math and precision are unchanged.
+
+The paired control is the current compact/DMA/reused-input candidate, not the
+older native-state baseline. Full-logit/GDN/valid-KV/rollback exactness at 4K/16K
+must pass before 2400 timed replays. T1/default paths stay unchanged. Ownership
+source evidence and local tests do not substitute for hardware exactness, trace
+replay or a measured speedup; no serving promotion is enabled.
+
 `full-gdn-input-reuse` isolates input-row preparation against the exact full-model
 compact/DMA control from 34006233354. Batched projection already consumes the full
 input and the projected-row hook supplies each token's distinct projected data.

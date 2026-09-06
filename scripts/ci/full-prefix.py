@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--attribution", action="store_true")
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
+    parser.add_argument("--skip-row-clones", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -67,6 +68,8 @@ def main():
         raise ValueError("Compact GDN requires the coding-context B1-SDPA gate")
     if options.reuse_gdn_input and not options.compact_gdn:
         raise ValueError("GDN input reuse requires compact GDN")
+    if options.skip_row_clones and not options.reuse_gdn_input:
+        raise ValueError("Clone removal requires reused GDN input")
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -91,6 +94,9 @@ def main():
         output_path = root / "full-gdn-input-reuse.json"
         report["input_reuse_prerequisite"] = 34006233354
         report["reuse_gdn_input"] = True
+    if options.skip_row_clones:
+        output_path = root / "full-gdn-row-clones.json"
+        report.update(skip_row_clones=True, ownership_audit=34009341359)
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -105,6 +111,15 @@ def main():
     generator = None
     try:
         source = Path("/opt/tt-metal")
+        if options.skip_row_clones:
+            ownership_hashes = {
+                "ttnn/cpp/ttnn/operations/data_movement/slice/slice.cpp": "817b571dc619eef7af7988ad90e3eda4a89632af3477ca935048b05dc52aea6f",
+                "ttnn/cpp/ttnn/operations/data_movement/slice/device/slice_device_operation.cpp": "6ec5f59e394c9497c9ef87282b67e934be62c5b74c51bc1b88c9789efae38023",
+            }
+            for name, expected in ownership_hashes.items():
+                if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
+                    raise ValueError("Pinned slice ownership implementation changed")
+            report["ownership_source"] = ownership_hashes
         expected_source = {
             "models/demos/blackhole/qwen36/tt/gdn/tp.py": "f767d0648ae01b0b1c0bb7bf601f5490661707b845c11ce6dbebb86ba0f84dc9",
             "models/demos/blackhole/qwen36/tt/qwen36_vllm.py": "cda38c3121b7a61417885469c224c0c69189fda899fbf8361565f4d93125c2fe",
@@ -223,7 +238,7 @@ def main():
 
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
-                                 reuse_gdn_input=options.reuse_gdn_input)
+                                 reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
             captured = None
             output = None
             try:
@@ -258,7 +273,7 @@ def main():
                 for rows in (1, 2, 4, 8, 16):
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
-                                         reuse_gdn_input=options.reuse_gdn_input)
+                                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -397,7 +412,7 @@ def main():
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
                         compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
-                        reuse_gdn_input=options.reuse_gdn_input)
+                        reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
