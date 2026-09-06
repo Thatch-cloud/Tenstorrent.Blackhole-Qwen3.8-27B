@@ -1,10 +1,28 @@
 from types import SimpleNamespace
 import unittest
 
-from gdn_multitoken_conv import addresses, release_owned, restore_prefix, validate_projected
+from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, validate_projected
 
 
 class ConvIntegrationTests(unittest.TestCase):
+    def test_output_projection_preserves_rows_and_uses_native_reduce_contract(self):
+        calls = []
+        partial = SimpleNamespace(shape=(1, 4, 5120))
+        output = object()
+        gdn = SimpleNamespace(_row_proj=lambda value, weight: partial, tw={'out': object()},
+                              mesh='mesh', tt_ccl='ccl', args=SimpleNamespace(ccl_topology=lambda: 'fabric'))
+        operations = SimpleNamespace(reshape=lambda value, shape: calls.append(shape) or value,
+                                     DRAM_MEMORY_CONFIG='dram')
+        def reduce(value, mesh, ccl, **kwargs):
+            calls.append((value, mesh, ccl, kwargs))
+            return output
+        result = dict(output=SimpleNamespace(shape=(1, 4, 3072)), owned=[])
+        self.assertIs(finish_output(gdn, result, operations, reduce), result)
+        self.assertEqual(calls[0], (1, 1, 4, 5120))
+        self.assertEqual(calls[1][1:], ('mesh', 'ccl', dict(cluster_axis=0, dim=3, topology='fabric', memory_config='dram')))
+        self.assertIs(result['layer_output'], output)
+        self.assertEqual(result['owned'], [output])
+
     def test_compact_single_sequence_geometry(self):
         states = [SimpleNamespace(shape=(1, 1, 5120)) for index in range(4)]
         for rows in (1, 2, 4, 8, 16):

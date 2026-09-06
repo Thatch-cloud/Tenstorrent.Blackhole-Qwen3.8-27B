@@ -8,14 +8,19 @@ import os
 from pathlib import Path
 
 from gdn_prefix import gated_decode
+from gdn_pair_timing import paired_replays
 from gdn_multitoken import HANDOFF_HASHES, load_kernels, validate_handoff_runtime
-from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_projected
+from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, run_projected
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--continuation', action='store_true')
+    parser.add_argument('--full-layer', action='store_true')
+    parser.add_argument('--paired-timing', action='store_true')
     options = parser.parse_args()
+    if options.paired_timing and not options.full_layer:
+        parser.error('--paired-timing requires --full-layer')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -25,7 +30,7 @@ def main():
     from models.demos.blackhole.qwen36.tests.test_factory import load_gdn_layer
     from models.demos.blackhole.qwen36.tt.gdn.tp import TPGatedDeltaNet, load_gdn_weights_tp
     from models.demos.blackhole.qwen36.tt.model_config import Qwen36ModelArgs
-    from models.tt_transformers.tt.ccl import TT_CCL
+    from models.tt_transformers.tt.ccl import TT_CCL, tt_all_reduce
 
     root = Path('/opt/tt-metal')
     source = root / 'models/demos/blackhole/qwen36/tt/gdn/tp.py'
@@ -42,8 +47,11 @@ def main():
                   generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
                   adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_multitoken_conv.py').read_bytes()).hexdigest(),
                   continuation_enabled=options.continuation,
+                  full_layer=options.full_layer, paired_timing=[],
                   scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
     context = {}
+    if options.full_layer:
+        report['scope'] = 'One full real-weight TP2 GDN layer with batched input/output projections, fabric reduce, every state prefix and final-state commit; excludes attention, full model and committed token throughput'
 
     def stage(name, **details):
         report['last_stage'] = dict(stage=name, **context, **details)
@@ -51,6 +59,7 @@ def main():
         print(json.dumps(report['last_stage']), flush=True)
 
     mesh, trace = None, None
+    timing_traces = {}
     with path.with_suffix('.stacks.log').open('w') as stacks:
         faulthandler.dump_traceback_later(120, repeat=True, file=stacks)
         try:
@@ -65,7 +74,7 @@ def main():
             gdn.B = 1
             gdn.reset_state()
             gdn._stable_state = True
-            forward = gated_decode(gdn)
+            forward = gdn.forward_decode if options.full_layer else gated_decode(gdn)
             report['layer'] = layer
             report['checkpoint_revision'] = Path(args.CKPT_DIR).name
 
@@ -94,6 +103,7 @@ def main():
                         ttnn.copy(initial, destination)
                     entry_host = [host(value) for value in entry]
                     inputs = [upload((torch.randn(1, 1, 5120) * 0.1).bfloat16()) for token in range(rows)]
+                    packed_input = ttnn.concat(inputs, dim=1, memory_config=ttnn.DRAM_MEMORY_CONFIG) if options.full_layer else None
                     projected_rows, expected, oracle_prefixes = [], [], []
                     original = gdn._project_qkvzab_raw
 
@@ -123,16 +133,26 @@ def main():
                     def restore():
                         for initial, destination in zip(entry[1:], working, strict=True):
                             ttnn.copy(initial, destination)
+                        if options.full_layer:
+                            for initial, destination in zip(entry, live, strict=True):
+                                ttnn.copy(initial, destination)
                         ttnn.synchronize_device(mesh)
 
                     def candidate():
-                        return run_projected(mesh, projected, entry[0], working, list(gdn.tw['conv_taps']),
+                        source = original(packed_input, rows, ttnn.L1_MEMORY_CONFIG) if options.full_layer else projected
+                        result = run_projected(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
                             gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels)
+                        if options.full_layer:
+                            result['owned'].append(source)
+                            finish_output(gdn, result, ttnn, tt_all_reduce)
+                            restore_prefix(ttnn, result, entry, live, rows)
+                        return result
 
-                    def validate(result, mode):
-                        outputs, states = host(result['output']), host(result['states'])
+                    def validate(result, mode, record=True):
+                        outputs, states = host(result['layer_output'] if options.full_layer else result['output']), host(result['states'])
                         for token in range(rows):
-                            if not exact([value[:, token:token + 1] for value in outputs], expected[token][0]):
+                            actual_output = [value[:, :, token:token + 1] if options.full_layer else value[:, token:token + 1] for value in outputs]
+                            if not exact(actual_output, expected[token][0]):
                                 raise AssertionError(f'Gated output mismatch {token=} {mode=}')
                             if not exact([value[token:token + 1] for value in states], expected[token][1]):
                                 raise AssertionError(f'Recurrent prefix mismatch {token=} {mode=}')
@@ -143,7 +163,12 @@ def main():
                             raise AssertionError('Initial state snapshots modified')
                         if [addresses(ttnn, value) for value in working] != working_addresses:
                             raise AssertionError('Working convolution addresses changed')
-                        report['checks'].append(dict(seed=seed, rows=rows, mode=mode, exact=True))
+                        if options.full_layer:
+                            if not exact(host(gdn.rec_state), expected[-1][1]) or not all(
+                                    exact(host(value), saved) for value, saved in zip(gdn.conv_states, expected[-1][2], strict=True)):
+                                raise AssertionError('Final-state commit differs from native')
+                        if record:
+                            report['checks'].append(dict(seed=seed, rows=rows, mode=mode, exact=True))
 
                     def continuation_values():
                         values = []
@@ -203,13 +228,55 @@ def main():
                     trace = None
                     validate_continuations(captured, 'trace')
                     release_owned(ttnn, captured['owned'])
+                    if options.paired_timing and seed == 0:
+                        def control():
+                            owned, outputs, states, conv_prefixes = [], [], [], []
+                            for value in inputs:
+                                output = forward(value)
+                                state = ttnn.clone(gdn.rec_state, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                                prefix = [ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG) for value in gdn.conv_states]
+                                outputs.append(output)
+                                states.append(state)
+                                conv_prefixes.append(prefix)
+                                owned.extend([output, state, *prefix])
+                            output = ttnn.concat(outputs, dim=2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                            packed_states = ttnn.concat(states, dim=0, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                            owned.extend([output, packed_states])
+                            return dict(layer_output=output, states=packed_states, conv_prefixes=conv_prefixes, owned=owned)
+
+                        stage('paired-full-layer-capture')
+                        arms, results = dict(control=control, candidate=candidate), {}
+                        for arm, operation in arms.items():
+                            restore()
+                            warm = operation()
+                            validate(warm, arm + '-warm', record=False)
+                            release_owned(ttnn, warm['owned'])
+                        for arm, operation in arms.items():
+                            restore()
+                            timing_traces[arm] = ttnn.begin_trace_capture(mesh, cq_id=0)
+                            results[arm] = operation()
+                            ttnn.end_trace_capture(mesh, timing_traces[arm], cq_id=0)
+                        stage('paired-full-layer-replay')
+                        timing = paired_replays(restore, lambda: ttnn.synchronize_device(mesh),
+                            lambda arm: ttnn.execute_trace(mesh, timing_traces[arm], cq_id=0, blocking=False),
+                            lambda arm: validate(results[arm], arm + '-timing', record=False))
+                        timing.update(seed=seed, rows=rows, checkpoint_policy='all',
+                            scope='One GDN layer: native serial input/output projections versus batched projections and device-loop recurrence; both return every DRAM prefix and commit final native state; restore outside timing; not full-model tok/s',
+                            control_recurrence_state='native L1', candidate_recurrence_state='immutable initial DRAM plus device-local loop')
+                        report['paired_timing'].append(timing)
+                        for arm in arms:
+                            ttnn.release_trace(mesh, timing_traces.pop(arm))
+                            release_owned(ttnn, results[arm]['owned'])
                     release_owned(ttnn, [*entry, *inputs, *projected_rows, projected, *working, *corrections,
+                                         *([packed_input] if packed_input is not None else []),
                                          *[state for prefix in oracle_prefixes for state in prefix]])
                     stage('fixture-complete')
             if len(report['checks']) != 30 or report['projection_calls'] != 93:
                 raise AssertionError('Incomplete real-weight integration gate')
             if options.continuation and (len(report['continuation_checks']) != 216 or len(report['stale_controls']) != 15):
                 raise AssertionError('Incomplete composed-prefix continuation gate')
+            if options.paired_timing and len(report['paired_timing']) != 5:
+                raise AssertionError('Incomplete paired full-layer timing matrix')
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None
@@ -221,6 +288,8 @@ def main():
             raise
         finally:
             if mesh is not None:
+                for captured_trace in timing_traces.values():
+                    ttnn.release_trace(mesh, captured_trace)
                 if trace is not None:
                     ttnn.release_trace(mesh, trace)
                 ttnn.close_mesh_device(mesh)

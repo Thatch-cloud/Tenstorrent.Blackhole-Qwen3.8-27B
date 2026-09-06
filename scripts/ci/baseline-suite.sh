@@ -132,7 +132,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-norm ]; then
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-conv ]; then
-    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --continuation
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --continuation --full-layer --paired-timing
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-direct ]; then

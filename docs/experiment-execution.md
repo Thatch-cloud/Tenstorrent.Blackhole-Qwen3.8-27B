@@ -71,7 +71,33 @@ unit tests pass under WSL. The broader suites require Linux paths/Torch and fail
 in Windows before being rerun successfully in WSL. AST/shell/workflow syntax passes.
 An initial WSL VM startup timed out before the simulator ran; restarting only the
 dedicated `TT-Sim` distribution restored operation. No card reset occurred.
-The extended native hardware continuation gate is ready; results are pending.
+The extended native hardware continuation gate passed in
+[34021612139](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34021612139)
+(`241be95`):30 eager/trace cases,216 accepted-prefix/mode two-step native
+continuations (432 compared steps),15 detected stale-state controls and clean close.
+The hardware adapter hash matched the simulator's final guarded version.
+
+### Full GDN layer projection and paired timing (next)
+
+The composed gate now has optional `--full-layer --paired-timing`: real batched
+input projection, the validated convolution/device-loop recurrence path, batched
+output projection/native fabric reduction, and final state committed into stable
+native buffers. Native serial full-layer output is the independent oracle. All30
+eager/trace and216 two-step prefix-continuation cases remain mandatory.
+
+Simulator `20260906T083558Z-338` passed T2/seed0 composition plus exact synthetic
+3072x128 local output projection against serial T1, clean close/exit0. It does not
+simulate the fabric reduction or real projection weights. Native input/output
+projection and CCL are reused; no recurrence kernel math changed. Local validation:
+68 focused GDN tests,175 CI and55 simulator unit tests pass.
+
+Timing uses seed0 T1/2/4/8/16, three ABBA blocks and120 replays per width. Both arms
+return every DRAM state prefix and commit their final native state. Initial restore
+is outside timing. The control is native serial input/output projections, not the
+previous optimized full-model row-layout control; candidate batches projections.
+Native recurrence uses L1 state while the candidate loads immutable DRAM state and
+loops locally. Report these differences and raw paired samples; no full-model or
+committed-token speedup follows from this isolated layer experiment.
 
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 

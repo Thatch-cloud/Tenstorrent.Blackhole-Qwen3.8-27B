@@ -7,10 +7,11 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from gdn_multitoken import HANDOFF_HASHES, HASHES, execute, load_kernels
-from gdn_multitoken_conv import release_owned, restore_prefix, run_projected
+from gdn_multitoken_conv import finish_output, release_owned, restore_prefix, run_projected
 
 
 def require_simulator(environment):
@@ -29,11 +30,14 @@ def main():
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--conv', action='store_true')
     parser.add_argument('--continuation', action='store_true')
+    parser.add_argument('--output-projection', action='store_true')
     args = parser.parse_args()
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
     if args.continuation and not args.conv:
         parser.error('--continuation requires --conv')
+    if args.output_projection and not args.conv:
+        parser.error('--output-projection requires --conv')
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
@@ -41,6 +45,8 @@ def main():
                   seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
                   convolution=args.conv,
                   continuation_enabled=args.continuation,
+                  output_projection=args.output_projection,
+                  output_projection_scope='Synthetic 3072x128 local projection only; no real weights or inter-chip collective' if args.output_projection else None,
                   adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_multitoken_conv.py').read_bytes()).hexdigest() if args.conv else None,
                   continuation_checks=0, stale_controls=0,
                   native_hashes=HASHES,
@@ -119,6 +125,22 @@ def main():
                                 raise AssertionError(f'Convolution prefix mismatch {token=} {chip=} {tap=}')
                 if not all(torch.equal(value, initial_host) for value in host(initial)):
                     raise AssertionError('Initial recurrent state modified')
+                if args.output_projection:
+                    stage('local-output-projection')
+                    weights = upload((torch.randn(3072, 128) * 0.01).bfloat16())
+                    gdn = SimpleNamespace(mesh=mesh, tt_ccl=None, tw={'out': weights},
+                        args=SimpleNamespace(ccl_topology=lambda: None),
+                        _row_proj=lambda value, weight: ttnn.linear(value, weight, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+                    def local_only(partial, *unused, **kwargs):
+                        return partial
+                    finish_output(gdn, result, ttnn, local_only)
+                    projected_outputs = host(result['layer_output'])
+                    for token, serial in enumerate(serial_results):
+                        finish_output(gdn, serial, ttnn, local_only)
+                        for chip, expected_output in enumerate(host(serial['layer_output'])):
+                            if not torch.equal(projected_outputs[chip][:, :, token:token + 1], expected_output):
+                                raise AssertionError(f'Local output projection mismatch {token=} {chip=}')
+                    report['output_projection_exact'] = True
                 if args.continuation:
                     entry = [initial, *[upload(value) for value in conv_host]]
                     destinations = [upload(torch.zeros_like(initial_host)), *[upload(torch.zeros_like(value)) for value in conv_host]]

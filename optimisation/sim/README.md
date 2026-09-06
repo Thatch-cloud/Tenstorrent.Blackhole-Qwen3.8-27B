@@ -43,6 +43,11 @@ adapter T1/seed1 `20260906T081239Z-328` and T4/seed1 `20260906T081508Z-676`
 also passed every accepted prefix, detected stale-state controls and exited0.
 See the ledger for the exact adapter hash and separate native hardware status.
 
+`--output-projection --conv --norm-gate` also compares synthetic 3072x128 local
+output projection with serial T1 projection on both chips. T2/seed0
+`20260906T083558Z-338` passed. The simulator substitutes an identity collective;
+real-weight 5120-wide projection and fabric reduction remain hardware checks.
+
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation
 flags, and has no hardware fallback. It uses the existing D-drive WSL distribution

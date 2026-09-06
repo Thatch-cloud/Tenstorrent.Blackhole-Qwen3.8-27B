@@ -67,6 +67,17 @@ def restore_prefix(operations, result, entry, destinations, accepted):
             operations.deallocate(sliced)
 
 
+def finish_output(gdn, result, operations, reduce):
+    rows = result['output'].shape[1]
+    partial = gdn._row_proj(result['output'], gdn.tw['out'])
+    partial = operations.reshape(partial, (1, 1, rows, partial.shape[-1]))
+    output = reduce(partial, gdn.mesh, gdn.tt_ccl, cluster_axis=0, dim=3,
+                    topology=gdn.args.ccl_topology(), memory_config=operations.DRAM_MEMORY_CONFIG)
+    result['layer_output'] = output
+    result['owned'].append(output)
+    return result
+
+
 def run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None):
     if operations is None:
         import ttnn as operations

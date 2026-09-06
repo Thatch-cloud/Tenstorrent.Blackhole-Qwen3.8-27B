@@ -14,9 +14,11 @@ recurrence/norm passed seven simulator fixtures (seed0 T1/2/4/8/16, seeds1/2 T2)
 including every output and recurrent/convolution prefix. Run34019928513 (`8e75a95`)
 then passed all30 real-weight native-oracle eager/trace hardware cases. Composed
 state rollback and two-step corrected continuation passed simulator T1/T2/T4
-checks; the extended native hardware gate is next. This composition is not
-convolution token-loop fusion and does not yet
-include output projection, full-model timing or a throughput claim.
+checks and hardware run34021612139 (`241be95`):216 two-step prefix-continuation
+cases and15 stale-state controls passed. Full-layer batched output projection,
+fabric reduction and paired layer timing are next; synthetic local output
+projection passed simulation. This is not convolution token-loop fusion,
+full-model timing or a committed-throughput result.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
