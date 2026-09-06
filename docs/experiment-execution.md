@@ -16,6 +16,30 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Attention head-fold first pass rejected in TTsim
+
+The prior trace attributes about75% of summed B1 kernel time to matmuls; earlier
+grid/block/packing sweeps did not yield a large repeatable gain. To investigate
+wide verification instead, a new host-layout oracle folds token queries into
+KV-grouped query heads with a separate causal mask per virtual head. Three host
+tests cover roundtrip, GQA mapping and future-token masking through T32.
+
+The stock non-causal masked SDPA probe is not exact against native causal B1:
+- `20260906T204731Z-306`: T2/start63, all6144 elements differ on each chip.
+- `20260906T204913Z-393`: T1/start63 diagnostic, all3072 elements differ;
+  candidate output is zero, native maximum magnitude0.046875. Both are finite.
+- `20260906T205021Z-304`: T1/start63 with finite negative mask instead of
+  negative infinity,2554 differences per chip, maximum error0.000732421875.
+
+All simulations closed cleanly with an intentional failing exactness assertion.
+The finite-mask result isolates one masked-softmax issue but does not establish
+native numerical equivalence. The probe changes causal mode and K chunking;
+it does not isolate the head-layout transformation as the cause of residual
+drift. No tolerance was relaxed, no hardware run was dispatched, and no serving
+adapter uses this path. A future attention optimization must preserve native
+per-query reduction/masking behavior rather than assume the stock masked API
+is a drop-in exact replacement.
+
 ### Matched actual norm-batch requests passed, modest decode gain only
 
 Run34055684657 (`c98f401`) passed eight actual requests in5m1s, one ABBA block
