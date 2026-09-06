@@ -16,13 +16,32 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Request-path preparation while the static gate runs
+### Full-model norm-batch exactness and static timing passed
 
-Run34052200159 (`397fa9d`) is the pending full-model static norm-batch gate.
+Run34052200159 (`397fa9d`) passed24 eager/trace width fixtures,16 rollback
+checks and4 negative controls. All12 matched timing comparisons were exact.
+All48 GDN layers use the candidate only at T>=8; the ordered cache and B1 SDPA
+remain identical between arms. Median arm costs from six sample means:
+
+| Context | T | Control ms | Candidate ms | Median paired ratio |
+| --- | ---: | ---: | ---: | ---: |
+|4095|8|70.024971|67.462975|1.037808x|
+|4095|16|89.578100|81.551613|1.098420x|
+|4095|32|128.820462|109.972825|1.171447x|
+|16383|8|74.434865|71.865865|1.035723x|
+|16383|16|98.385381|90.345532|1.089042x|
+|16383|32|146.353723|127.515929|1.147720x|
+
+T1/2/4 controls were unchanged within timing noise. These are static full-logit
+verification costs, not committed request throughput. The latest actual request
+pilot remains21.415/17.741 committed decode tokens/s. The next hardware gate is
+`full-norm-replay`: changed token/position inputs, retained histories, captured
+DMA publication and corrected continuations.
+
 The selection, retained replay and request helpers now accept and forward an
 explicit `norm_batch` option, including warm and captured verifier buckets.
-The CLI still rejects these combinations until the static gate is inspected;
-this wiring is not a hardware request-path certification. Host validation passes
+The CLI now allows the retained-replay gate but still rejects selection/request
+combinations; this wiring is not a hardware request-path certification. Host validation passes
 337 CI tests,55 simulator-support tests and51 speculative-session tests.
 Serving defaults remain unchanged.
 

@@ -84,9 +84,9 @@ def main():
     parser.add_argument('--norm-batch', action='store_true')
     options = parser.parse_args()
     if options.norm_batch and (not options.packed_checkpoints or not options.coding_cost or not options.ordered_cache
-            or options.request_pilot or options.attribution or options.device_selection or options.deferred_commit
-            or options.replay_inputs):
-        raise ValueError('Norm batching first gate requires packed static full-logit coding verification')
+            or options.request_pilot or options.attribution or options.device_selection
+            or (options.deferred_commit and not options.replay_inputs)):
+        raise ValueError('Norm batching requires packed static or retained-replay full-logit verification')
     if options.request_pilot and (not options.device_selection or options.max_rows != 32):
         raise ValueError('Request pilot requires the T32 device-selection configuration')
     if options.device_selection and (not options.coding_cost or not options.packed_checkpoints or not options.ordered_cache
