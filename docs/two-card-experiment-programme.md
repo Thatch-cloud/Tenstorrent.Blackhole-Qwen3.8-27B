@@ -46,16 +46,22 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
 | E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
 
-Latest verified full-model T16 block costs (run **34011273093**, `6ded69e`) are
-**173.065 ms at 4095 tokens** and **181.846 ms at 16383 tokens**, down from the
-earlier 235-244 ms verifier. Full logits, active GDN state, valid KV and corrected
-rollback passed. These are static verifier costs, not committed-token throughput:
-even perfect acceptance with zero drafting/commit overhead gives only 92.45/87.99
-tok/s for T16. T1 retains native handling. The 200 committed-token/s goal is not met.
+Latest verified full-model T16 block costs (run **34024642720**, `8cb31c8`) are
+**163.227 ms at 4095 tokens** and **172.023 ms at 16383 tokens**. Full logits,
+active GDN state, valid KV and corrected rollback passed. These are static verifier
+costs, not committed-token throughput: even perfect acceptance with zero drafting
+and commit overhead gives only about 98.02/93.01 tok/s for T16. The 200 committed
+token/s goal is not met; a sixteen-token cycle must fit within 80 ms including
+drafting and commit. T1 retains native handling.
 
-Projected-row layout hoisting passed exactness and paired timing. Next prioritize
-E4's true multi-token recurrent kernel, using the hoisted-layout candidate as control,
-rather than continuing an open-ended sequence of copy tweaks.
+Current experiment: construct causal convolution windows from immutable input
+history and run the native convolution/gates kernel once with token rows treated
+as independent windows. GDN recurrence still runs sequentially inside its device
+loop. This removes per-token convolution dispatch without changing arithmetic;
+simulator and native-oracle gates precede any full-model adoption. All convolution
+prefixes remain available for acceptance decided after verification.
+
+Historical recurrence-kernel development:
 The first recurrence-only prototype retains BF16 state between tokens in L1 and
 passed hardware compilation/exactness in run 34012883902 (`855f8de`): 30 eager/trace
 cases, 216 restored-prefix continuations and 15 stale-state controls. No timing was

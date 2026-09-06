@@ -16,6 +16,30 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Parallel causal convolution windows (simulator passed; hardware next)
+
+`gdn_batched_conv.py` builds each token's four-tap window from entry history and
+projected input, then calls the unchanged native convolution/gates kernel once
+with `batch=T`. This is input-window parallelism, not parallel GDN recurrence.
+Native BF16 arithmetic and the device-loop recurrence/norm kernel are unchanged.
+Every convolution prefix is retained; acceptance need not be known in advance.
+The working final history is copied back to stable addresses. T1 remains native.
+
+Simulator fixtures passed on both simulated chips, with clean close and exit 0:
+
+| Fixture | Width/seed | Additional checks |
+| --- | --- | --- |
+| `20260906T100224Z-326` | T2/0 | All3 corrected-prefix continuations; stale-state control |
+| `20260906T100449Z-630` | T16/1 | All16 output/state/history prefixes; local output projection |
+| `20260906T100806Z-838` | T4/2 | All5 corrected-prefix continuations; stale-state control; immutable projected input and final working history |
+
+Adapter SHA256: `a34fc390f39263f791c1bf6c31e03ee1f35ed36168e4acf7e13900d6fe88d8e3`.
+187 CI and55 simulator unit tests pass. Simulator timing is not a card performance
+result. Next `gdn-multitoken-conv` CI uses the new candidate against the previous
+serial-convolution/device-loop full-layer adapter, rather than a naive serial
+projection control. Native-oracle all-prefix eager/trace and corrected continuation
+checks still gate the paired measurements. No full-model routing or serving change.
+
 ### Projected-input convolution integration (passed 34019928513)
 
 The shared `gdn_multitoken_conv.run_projected` adapter composes native serial

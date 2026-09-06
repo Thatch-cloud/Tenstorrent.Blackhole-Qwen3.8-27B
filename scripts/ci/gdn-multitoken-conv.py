@@ -11,6 +11,7 @@ from gdn_prefix import gated_decode
 from gdn_pair_timing import paired_replays
 from gdn_multitoken import HANDOFF_HASHES, load_kernels, validate_handoff_runtime
 from gdn_multitoken_conv import addresses, finish_output, release_owned, restore_prefix, run_projected
+from gdn_batched_conv import run_batched_projected
 
 
 def main():
@@ -18,6 +19,7 @@ def main():
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--full-layer', action='store_true')
     parser.add_argument('--paired-timing', action='store_true')
+    parser.add_argument('--batch-conv', action='store_true')
     options = parser.parse_args()
     if options.paired_timing and not options.full_layer:
         parser.error('--paired-timing requires --full-layer')
@@ -48,6 +50,8 @@ def main():
                   adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_multitoken_conv.py').read_bytes()).hexdigest(),
                   continuation_enabled=options.continuation,
                   full_layer=options.full_layer, paired_timing=[],
+                  batched_convolution=options.batch_conv,
+                  batched_adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_batched_conv.py').read_bytes()).hexdigest() if options.batch_conv else None,
                   scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
     context = {}
     if options.full_layer:
@@ -138,9 +142,10 @@ def main():
                                 ttnn.copy(initial, destination)
                         ttnn.synchronize_device(mesh)
 
-                    def candidate():
+                    def candidate(use_batched=options.batch_conv):
                         source = original(packed_input, rows, ttnn.L1_MEMORY_CONFIG) if options.full_layer else projected
-                        result = run_projected(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
+                        operation = run_batched_projected if use_batched else run_projected
+                        result = operation(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
                             gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels)
                         if options.full_layer:
                             result['owned'].append(source)
@@ -230,6 +235,8 @@ def main():
                     release_owned(ttnn, captured['owned'])
                     if options.paired_timing and seed == 0:
                         def control():
+                            if options.batch_conv:
+                                return candidate(False)
                             owned, outputs, states, conv_prefixes = [], [], [], []
                             for value in inputs:
                                 output = forward(value)
@@ -263,6 +270,9 @@ def main():
                         timing.update(seed=seed, rows=rows, checkpoint_policy='all',
                             scope='One GDN layer: native serial input/output projections versus batched projections and device-loop recurrence; both return every DRAM prefix and commit final native state; restore outside timing; not full-model tok/s',
                             control_recurrence_state='native L1', candidate_recurrence_state='immutable initial DRAM plus device-local loop')
+                        if options.batch_conv:
+                            timing.update(scope='Paired full GDN layer: serial versus parallel-window native convolution; both batched projections, device-loop recurrence, all DRAM prefixes and native final commit; not full-model throughput',
+                                          control_recurrence_state='immutable initial DRAM plus device-local loop')
                         report['paired_timing'].append(timing)
                         for arm in arms:
                             ttnn.release_trace(mesh, timing_traces.pop(arm))

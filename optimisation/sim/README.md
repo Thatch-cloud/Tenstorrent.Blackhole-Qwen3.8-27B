@@ -94,3 +94,12 @@ kill grace; `KERNEL_TIMEOUT` can bound a longer simulation. Simulator wall time 
 not kernel latency or tokens/s. Slow dispatch, disabled SFPLOADMACRO, topology and
 harvesting differences mean simulation does not certify production fast dispatch,
 resource fit or fabric timing. No real-card reset or hardware job is launched here.
+# Parallel causal convolution windows
+
+Add `--conv --norm-gate --batch-conv` to `run-gdn-multitoken.sh` to compare one
+native convolution/gates call over causal token windows against serial T1 calls.
+Use `--continuation` for every accepted-prefix restore and stale-state control,
+or `--output-projection` for the synthetic local projection check. This option
+does not yet support `--model-adapter`. T2/seed0, T16/seed1 and T4/seed2 passed
+in fixtures `20260906T100224Z-326`, `20260906T100449Z-630` and
+`20260906T100806Z-838`. These are functional checks, not hardware timings.

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from gdn_multitoken import HANDOFF_HASHES, HASHES, execute, load_kernels
 from gdn_multitoken_conv import finish_output, release_owned, restore_prefix, run_projected
+from gdn_batched_conv import run_batched_projected
 
 
 def require_simulator(environment):
@@ -29,11 +30,14 @@ def main():
     parser.add_argument('--norm-gate', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--conv', action='store_true')
+    parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--output-projection', action='store_true')
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
     args = parser.parse_args()
+    if args.batch_conv and (not args.conv or args.model_adapter):
+        parser.error('--batch-conv requires --conv and excludes --model-adapter')
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
     if args.continuation and not args.conv:
@@ -50,6 +54,8 @@ def main():
     report = dict(passed=False, backend='ttsim', rows=args.rows, norm_gate=args.norm_gate,
                   seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
                   convolution=args.conv,
+                  batched_convolution=args.batch_conv,
+                  batched_adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_batched_conv.py').read_bytes()).hexdigest() if args.batch_conv else None,
                   continuation_enabled=args.continuation,
                   output_projection=args.output_projection,
                   model_adapter_checks=0,
@@ -118,7 +124,9 @@ def main():
                     state = result['states']
                     expected.append((host(result['output']), host(state), [host(value) for value in serial_conv]))
                 stage('conv-multitoken-submit')
-                result = run_projected(mesh, upload(projected), initial, candidate_conv,
+                candidate = run_batched_projected if args.batch_conv else run_projected
+                candidate_projected = upload(projected)
+                result = candidate(mesh, candidate_projected, initial, candidate_conv,
                                        taps, dt_bias, neg_exp_A, norm_w, kernels)
                 stage('conv-multitoken-readback')
                 outputs, states = host(result['output']), host(result['states'])
@@ -134,6 +142,11 @@ def main():
                                 raise AssertionError(f'Convolution prefix mismatch {token=} {chip=} {tap=}')
                 if not all(torch.equal(value, initial_host) for value in host(initial)):
                     raise AssertionError('Initial recurrent state modified')
+                if not all(torch.equal(value, projected) for value in host(candidate_projected)):
+                    raise AssertionError('Candidate modified immutable projected input')
+                for tap, value in enumerate(candidate_conv):
+                    if not all(torch.equal(actual, control) for actual, control in zip(host(value), expected[-1][2][tap], strict=True)):
+                        raise AssertionError('Final working convolution state mismatch')
                 if args.model_adapter:
                     from gdn_device_loop_state import DeviceLoopState
                     from gdn_snapshot import ActiveSnapshot
