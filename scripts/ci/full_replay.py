@@ -8,7 +8,7 @@ from verifier_inputs import stage_inputs
 def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
     if any(type(value) is not int for value in (rows, first_prefix, second_prefix, oracle_length)):
         raise ValueError('Integer replay geometry required')
-    if rows not in (2, 16) or first_prefix not in (0, 1, rows) or second_prefix not in (1, rows):
+    if rows not in (2, 16, 32) or first_prefix not in (0, 1, rows) or second_prefix not in (1, rows):
         raise ValueError('Bounded replay fixture required')
     if oracle_length < first_prefix + rows + 3:
         raise ValueError('Oracle must include the replay block and corrected continuation')

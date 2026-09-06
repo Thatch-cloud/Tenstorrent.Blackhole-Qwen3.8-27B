@@ -38,6 +38,10 @@ fixture failed on a Torch UInt32-versus-Int comparison, not on device data; its
 expected token dtype was corrected to native UInt32 before retry. This is input
 staging certification only, not full-model trace reuse or throughput.
 
+T32 input staging also passed `20260906T150111Z-317`, including all32 singleton
+positions and native RoPE at each of31/4095/16383. This is the prerequisite for
+the wider two-block hardware replay test, not its result.
+
 ## Ordered shared-page cache writes
 
 `run-ordered-cache.sh --rows 16 --start 31 --seed 1` compares a single ordered

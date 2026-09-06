@@ -6,19 +6,27 @@ from gdn_records import RetainedGDNBlock
 
 
 class RecordTests(unittest.TestCase):
-    def fixture(self, count=48):
+    def fixture(self, count=48, rows=4):
         operations = SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2,
                                      synchronize_device=Mock())
-        block = RetainedGDNBlock(4, operations)
+        block = RetainedGDNBlock(rows, operations)
         mesh = object()
         for index in range(count):
             live = [object() for slot in range(5)]
             state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh),
                 native_addresses=[(id(value), id(value)) for value in live], entry=[object()] * 5,
                 active=SimpleNamespace(restore=Mock()))
-            result = dict(packed_checkpoints=True, states=SimpleNamespace(shape=(4, 24, 128, 128)), owned=[object()])
+            result = dict(packed_checkpoints=True, states=SimpleNamespace(shape=(rows, 24, 128, 128)), owned=[object()])
             block.append(state, result, [object() for slot in range(5)])
         return block
+
+    def test_t32_retains_every_prefix_and_replays_after_commit(self):
+        block = self.fixture(rows=32)
+        with patch('gdn_records.restore_prefix'):
+            for prefix in range(33):
+                block.commit(prefix, synchronize=True)
+                block.replay(lambda: None)
+        self.assertEqual(block.replay_epoch, 33)
 
     def test_replay_rearms_only_after_synchronized_commit_and_execution(self):
         block = self.fixture()

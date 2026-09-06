@@ -20,7 +20,7 @@ def main():
     spec.loader.exec_module(guard)
     guard.require_simulator(os.environ)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16), default=2)
+    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16, 32), default=2)
     args = parser.parse_args()
     path = Path(os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, backend='ttsim', rows=args.rows, checks=[],

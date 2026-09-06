@@ -2,7 +2,7 @@
 
 
 def validate_tokens(tokens, rows, start, vocab_size, capacity):
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16) or len(tokens) != rows:
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or len(tokens) != rows:
         raise ValueError('Ticket must match the captured verifier bucket')
     if type(start) is not int or start < 0 or start + rows > capacity:
         raise ValueError('Ticket positions exceed the captured page-table capacity')

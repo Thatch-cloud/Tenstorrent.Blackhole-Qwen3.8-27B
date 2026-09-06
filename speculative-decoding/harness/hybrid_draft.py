@@ -32,8 +32,8 @@ class HybridDraft:
 
     def propose(self, request_id, count, *, greedy=False, verifier_ready=False, selected=None):
         self.lookup.check_owner(request_id)
-        if type(count) is not int or not 1 <= count <= 15:
-            raise ValueError("Proposal count must be between 1 and 15")
+        if type(count) is not int or not 1 <= count <= self.lookup.max_proposals:
+            raise ValueError('Proposal count exceeds the configured verifier capacity')
         if greedy is not True or verifier_ready is not True:
             return Proposal("target", ())
         tokens = self.lookup.propose(request_id, count)

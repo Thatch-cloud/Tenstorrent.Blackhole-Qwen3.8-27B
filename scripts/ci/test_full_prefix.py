@@ -11,11 +11,13 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
-    def test_t32_requires_static_packed_history_control(self):
+    def test_t32_requires_packed_history_control(self):
         flags = dict(packed_checkpoints=True, ordered_cache=True, deferred_commit=False, attribution=False)
         self.assertEqual(full_prefix.verification_widths(16, **flags), (1, 2, 4, 8, 16))
         self.assertEqual(full_prefix.verification_widths(32, **flags), (1, 2, 4, 8, 16, 32))
-        for name in flags:
+        flags['deferred_commit'] = True
+        self.assertEqual(full_prefix.verification_widths(32, **flags), (1, 2, 4, 8, 16, 32))
+        for name in ('packed_checkpoints', 'ordered_cache', 'attribution'):
             invalid = dict(flags)
             invalid[name] = not flags[name]
             with self.assertRaises(ValueError):

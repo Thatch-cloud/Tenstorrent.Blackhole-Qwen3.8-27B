@@ -9,7 +9,7 @@ from verifier_inputs import host_inputs, stage_inputs, validate_tokens
 
 class InputTests(unittest.TestCase):
     def test_host_metadata_shapes_and_rotary_zero(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             tokens, positions, cos, sin = host_inputs(list(range(rows)), 0, 64, 1000000)
             self.assertEqual(tuple(tokens.shape), (rows, 1))
             self.assertEqual(positions.tolist(), list(range(rows)))

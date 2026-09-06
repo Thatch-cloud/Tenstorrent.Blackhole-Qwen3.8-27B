@@ -5,7 +5,7 @@ from gdn_multitoken_conv import addresses, release_owned, restore_prefix
 
 class RetainedGDNBlock:
     def __init__(self, rows, operations):
-        if type(rows) is not int or rows not in (2, 4, 8, 16):
+        if type(rows) is not int or rows not in (2, 4, 8, 16, 32):
             raise ValueError('Multirow packed-history block required')
         self.rows, self.operations = rows, operations
         self.records = []

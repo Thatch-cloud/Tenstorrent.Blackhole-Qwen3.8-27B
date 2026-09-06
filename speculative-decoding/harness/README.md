@@ -1,5 +1,12 @@
 # Greedy request coordinator
 
+T32 proposal capacity is an explicit experiment opt-in: construct `GreedySession`
+with `verifier_rows=32` and call `propose(..., max_rows=32)`. Standalone lookup,
+hybrid and greedy-selection helpers require `max_proposals=31`. Defaults remain
+T16/15 proposals, and a wider host contract does not certify a hardware executor.
+No proposal is padded with oracle tokens; actual available proposals and the
+remaining generation budget still determine the selected bucket.
+
 `GreedySession` connects the existing request-local lookup/neural proposal routing
 to greedy selection and a caller-owned, synchronized device publication callback.
 It is a host coordinator, **not a TT device executor or a throughput result**.

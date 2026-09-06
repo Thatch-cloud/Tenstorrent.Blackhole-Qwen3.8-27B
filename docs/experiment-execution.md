@@ -30,6 +30,13 @@ before the full model. No serving sampling default changes.
 
 ### Changed-metadata verifier replay (hardware gate passed)
 
+The next width extension is opt-in T32: simulator publication passed all33
+prefixes and input staging `20260906T150111Z-317` passed token, packed/singleton
+position, native-RoPE and unchanged-page checks at31/4095/16383. The replay suite
+now requests T2/T16/T32 (36 two-block fixtures), alongside24 width/mode cases
+and16 captured post-verification decisions. T32 hardware results are pending.
+Host proposal/selection capacity31 requires explicit opt-in; defaults remain15.
+
 `full-verifier-replay` reuses one captured verifier across two blocks at4K/16K,
 T2/T16. First decisions0/1/T and second decisions1/T cover abort, partial and
 complete publication. Tokens, packed/singleton positions and RoPE are updated

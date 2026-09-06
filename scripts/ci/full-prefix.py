@@ -50,8 +50,8 @@ def logical_kv_chunk(host, first_page, valid_tokens):
 def verification_widths(max_rows, *, packed_checkpoints, ordered_cache, deferred_commit, attribution):
     if type(max_rows) is not int or max_rows not in (16, 32):
         raise ValueError('Maximum verification width must be 16 or 32')
-    if max_rows == 32 and (not packed_checkpoints or not ordered_cache or deferred_commit or attribution):
-        raise ValueError('T32 requires the static packed-history ordered-cache gate without deferred decisions or attribution')
+    if max_rows == 32 and (not packed_checkpoints or not ordered_cache or attribution):
+        raise ValueError('T32 requires the packed-history ordered-cache gate without attribution')
     return (1, 2, 4, 8, 16, 32) if max_rows == 32 else (1, 2, 4, 8, 16)
 
 
@@ -84,8 +84,10 @@ def main():
     if options.device_selection and (not options.coding_cost or not options.packed_checkpoints or not options.ordered_cache
                                     or options.deferred_commit or options.attribution or options.replay_inputs):
         raise ValueError('Device selection requires the standalone static ordered-cache coding-cost gate')
-    if options.replay_inputs and (options.max_rows != 16 or not options.deferred_commit or not options.ordered_cache):
-        raise ValueError('Replay gate requires T16 retained histories and ordered cache')
+    if options.replay_inputs and (not options.deferred_commit or not options.ordered_cache):
+        raise ValueError('Replay gate requires retained histories and ordered cache')
+    if options.max_rows == 32 and options.deferred_commit and not options.commit_dma:
+        raise ValueError('T32 decisions require simulator-certified DMA publication')
     widths = verification_widths(options.max_rows, packed_checkpoints=options.packed_checkpoints,
         ordered_cache=options.ordered_cache, deferred_commit=options.deferred_commit, attribution=options.attribution)
     if options.coding_cost and not options.batch:
@@ -404,7 +406,7 @@ def main():
                     if not abort and tokens[0] != known_seed:
                         raise ValueError('Greedy verification must consume the already-emitted seed')
                     decision = None if abort else select_prefix(tokens[1:], actual[0].float().argmax(dim=-1).tolist(),
-                                                                 vocab_size=model.args.vocab_size)
+                                                                 vocab_size=model.args.vocab_size, max_proposals=options.max_rows - 1)
                     selected = 0 if abort else decision.state_rows
                     selection_finished = time.perf_counter()
                     fixture.retained.commit(selected, dma=options.commit_dma,
@@ -604,8 +606,9 @@ def main():
             return
         if options.replay_inputs:
             from full_replay import verify_replay
+            replay_widths = (2, 16, 32) if options.max_rows == 32 else (2, 16)
             for prompt, oracle in timing_fixtures:
-                for rows in (2, 16):
+                for rows in replay_widths:
                     for first_prefix in (0, 1, rows):
                         for second_prefix in (1, rows):
                             result = verify_replay(model, prompt, oracle, page_table, helpers, candidate_saved, replay_initial,
@@ -615,7 +618,7 @@ def main():
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)
-            if len(report.get('replay_checks', [])) != 12 * len(lengths):
+            if len(report.get('replay_checks', [])) != 6 * len(replay_widths) * len(lengths):
                 raise AssertionError('Missing changed-metadata replay cases')
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")

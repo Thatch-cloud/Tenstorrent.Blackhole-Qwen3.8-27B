@@ -16,15 +16,18 @@ class BlockTicket:
 
 
 class GreedySession:
-    def __init__(self, request_id, prompt, seed, *, vocab_size, max_new_tokens, eos_ids=(), neural=None):
+    def __init__(self, request_id, prompt, seed, *, vocab_size, max_new_tokens, eos_ids=(), neural=None, verifier_rows=16):
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError('Positive generation budget required')
+        if type(verifier_rows) is not int or verifier_rows not in (16, 32):
+            raise ValueError('Explicit T16 or T32 verifier capacity required')
         prompt, eos_ids = tuple(prompt), tuple(eos_ids)
         select_prefix((), (seed,), vocab_size=vocab_size, eos_ids=eos_ids)
-        self.drafter = HybridDraft(request_id, prompt, vocab_size=vocab_size, neural=neural)
+        self.drafter = HybridDraft(request_id, prompt, vocab_size=vocab_size, neural=neural, max_proposals=verifier_rows - 1)
         self.drafter.commit_verified(request_id, (seed,))
         self.request_id, self.vocab_size = request_id, vocab_size
         self.max_new_tokens, self.eos_ids = max_new_tokens, eos_ids
+        self.verifier_rows = verifier_rows
         self.position, self.seed = len(prompt), seed
         self.emitted = [seed]
         self.finished = seed in eos_ids or max_new_tokens == 1
@@ -40,7 +43,7 @@ class GreedySession:
         self.check_owner(request_id)
         if self.phase != 'idle' or self.finished:
             raise ValueError('An unfinished idle request is required')
-        if type(max_rows) is not int or max_rows not in (1, 2, 4, 8, 16):
+        if type(max_rows) is not int or max_rows not in (1, 2, 4, 8, 16, 32) or max_rows > self.verifier_rows:
             raise ValueError('Supported verifier bucket required')
         remaining = self.max_new_tokens - len(self.emitted)
         limit = min(max_rows, remaining)
@@ -52,7 +55,7 @@ class GreedySession:
             self.phase = 'failed'
             raise
         tokens = () if proposal is None else proposal.tokens
-        rows = max(width for width in (1, 2, 4, 8, 16) if width <= min(limit, len(tokens) + 1))
+        rows = max(width for width in (1, 2, 4, 8, 16, 32) if width <= min(limit, len(tokens) + 1))
         self.epoch += 1
         ticket = BlockTicket(request_id, self.epoch, self.position, (self.seed, *tokens[:rows - 1]),
                              proposal.source if rows > 1 else 'target')
@@ -68,7 +71,8 @@ class GreedySession:
         self.check_ticket(request_id, ticket)
         if not callable(publish):
             raise ValueError('Synchronized state publication callback required')
-        decision = select_prefix(ticket.tokens[1:], predictions, vocab_size=self.vocab_size, eos_ids=self.eos_ids)
+        decision = select_prefix(ticket.tokens[1:], predictions, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
+                                 max_proposals=self.verifier_rows - 1)
         self.phase = 'committing'
         try:
             if publish(decision.state_rows) is not None:
