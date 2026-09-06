@@ -50,6 +50,14 @@ checks plus clean mesh close passed. The unchanged instrumented norm/gate test i
 next, without another reset; the original kernel stall remains unresolved.
 Real-weight convolution and full-model integration remain; this is not yet a
 complete multi-token GDN layer or speculative serving.
+
+Kernel development is now **simulator-first**: new device-loop changes must pass
+local liveness/output/prefix-state gates before silicon native-oracle, trace and
+performance validation. Run34016749007 reproduced T2 candidate warm-up stalling
+after native reference success on recovered cards. The operator requested another
+CI reset; run34017283126 reset/reinitialized both cards and passed all12 transfer
+checks. Cards remain idle while the same generated kernels are tested locally in
+TT-Sim. See [simulator entry point and limits](../optimisation/sim/README.md).
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
 tests or oracle verification as real coding throughput.
 

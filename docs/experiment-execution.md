@@ -16,6 +16,36 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Simulator-first kernel debugging and second authorized recovery
+
+Recovered-device run 34016749007 (`ae5b71b`) timed out at seed0/T2
+`candidate-warm-submitted`; all three stacks point to synchronization after the
+custom kernel. Both native T2 oracle tokens and native continuation references had
+completed. T1 passed eager/trace, four continuations and its negative control.
+This isolates the original stall to candidate warm-up, before T2 trace capture;
+it does not yet identify the internal deadlock mechanism.
+
+At the operator's renewed request, recovery run 34017283126 reused the guarded
+`9c4eaed` recovery workflow. Reset/reinitialization of devices0/2 completed at
+06:45:20 UTC; all12 transfer checks and clean mesh close passed (0.391 s).
+No further physical-card kernel run is authorized by this checkpoint: first use
+the [simulator-only harness](../optimisation/sim/README.md).
+
+The harness uses the same hash-checked source transformation and generic-op builder
+with two simulated Blackhole chips, slow dispatch and disabled SFPLOADMACRO. It
+compares all output/prefix states against serial T1 executions of the same kernel;
+this is not an independent native-oracle certification. The existing local runtime
+can compile the generated source without installing the production GDN op.
+Initial local run `20260906T064618Z-338` completed both serial T1 calls and reached
+T2 readback, where repeated stack dumps show it waiting until the bounded process
+failed at the timeout. This is not a simulator pass. Recurrence-only T2 control
+`20260906T064957Z-301` then passed exact output/prefix-state comparisons on both
+simulated chips, unchanged initial state and clean close. The local source-built
+extension hash is `9fa83a78556aaf99e3cf59f59e44199d8ffa1839b09505e399c26ad2018de5aa`.
+This provides a local failing norm/gate case and passing recurrence control; it
+does not prove the internal cause. Hardware remains idle while the circular-buffer
+protocol is investigated locally.
+
 ### Authorized recovery (passed 34016364842)
 
 Run [34016364842](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34016364842)
