@@ -166,6 +166,19 @@ device-poisoned padding. New simulator and hardware exactness gates are required
 
 ### General gates
 
+The separate `batch_norm=True` prepared variant uses `gdn_vsplit_norm_batch`.
+It cannot be combined with input prefetch in this experiment. Recurrence is
+unchanged. Instead of repeating norm arithmetic T times with only row zero
+active, its reader places all T FP32 bridge rows in four whole-head tiles and
+replicates the shared BF16 norm weights across their rows. Native norm, SiLU
+and BF16 conversion operations execute once on the independent token rows.
+The writer waits for that complete output block, zeroes unused rows in its
+exclusively consumed CB and fences full-tile writes before releasing it.
+All CB formats/capacities are unchanged. This is token-row parallelism, not
+partition-local normalization, altered recurrence ordering or relaxed precision.
+`--batch-norm-value-split` selects its simulator path; the corresponding
+hardware suite is `gdn-value-split-norm-batch`, with paired and stage timing.
+
 1. Review the source audit and pins against the intended full tt-metal checkout.
    Confirm board identity, physical worker availability, 128-byte DRAM accessor
    pages and actual per-stage L1 placement when changing the implementation.

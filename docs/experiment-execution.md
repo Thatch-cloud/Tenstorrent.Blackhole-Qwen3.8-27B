@@ -16,6 +16,31 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Row-parallel norm/gate: simulator gates passed
+
+Stage-attribution run34049504379 (`9a2633e`) passed18 exact fixtures,2160
+paired composition replays,2160 separate-stage replays and36 input-refresh
+checks. T32 median-of-seed isolated costs were0.504833 ms recurrence and
+0.510840 ms norm/gate; combined captured cost was0.991795 ms. Separate blocking
+stage traces include extra host/dispatch boundaries, so do not sum them as
+full-model latency. They expose repeated whole-tile norm/gate work as a concrete
+optimization candidate, not just a memory-bandwidth hypothesis.
+
+`gdn_vsplit_norm_batch` keeps recurrence unchanged but packs token outputs into
+the32 rows of each whole128-wide head's four FP32 norm tiles. The existing
+FNG arithmetic and BF16 round trips run once on those independent rows. Norm
+weights repeat across rows, z arrives as full tiles, and the writer exports
+four full BF16 tiles per head after zeroing only unused token rows. No norm
+reduction spans different tokens or partitions a128-wide head. The only compute
+source change is the loop bound; this still requires numeric device validation.
+T2/seed1 simulator run `20260906T174736Z-317` passed three prepared executions,
+including two changed-input checks on fixed addresses. T32/seed2 run
+`20260906T174951Z-316` passed the same three executions and two refreshed-input
+checks across every output and recurrent prefix, including token rows15/16/31.
+Both closed cleanly. Independent hardware correctness/performance remains a
+separate gate. Host validation passed328 CI,55 simulator-support and51
+speculative harness tests, with shell syntax, workflow YAML and diff checks.
+
 ### Recurrence input prefetch: correct, no latency improvement
 
 Run34049169694 (`b4054bf`) passed18 independent native fixtures,2160 paired

@@ -43,7 +43,10 @@ def main():
     parser.add_argument('--prepared-value-split', action='store_true')
     parser.add_argument('--prefetch-value-split', action='store_true')
     parser.add_argument('--refresh-value-split-inputs', action='store_true')
+    parser.add_argument('--batch-norm-value-split', action='store_true')
     args = parser.parse_args()
+    if args.batch_norm_value_split and (not args.prepared_value_split or args.prefetch_value_split):
+        parser.error('--batch-norm-value-split requires prepared value split without input prefetch')
     if args.refresh_value_split_inputs and not args.prepared_value_split:
         parser.error('--refresh-value-split-inputs requires --prepared-value-split')
     if args.prefetch_value_split and not args.prepared_value_split:
@@ -322,10 +325,13 @@ def main():
                     from gdn_vsplit_prepared import PreparedVSplit
                     prepared = PreparedVSplit(mesh, *packed[:3], initial, z=packed[3], norm_w=norm_w,
                         root=args.source_root, experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG,
-                        prefetch_inputs=args.prefetch_value_split)
+                        prefetch_inputs=args.prefetch_value_split, batch_norm=args.batch_norm_value_split)
                     if args.prefetch_value_split:
                         import gdn_vsplit_prefetch
                         report['prefetch'] = gdn_vsplit_prefetch.audit(args.source_root)
+                    if args.batch_norm_value_split:
+                        import gdn_vsplit_norm_batch
+                        report['norm_batch'] = gdn_vsplit_norm_batch.audit(args.source_root)
                     for repeat in range(3):
                         if repeat == 1 and args.refresh_value_split_inputs:
                             stage('prepared-refresh-inputs')

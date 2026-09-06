@@ -219,6 +219,20 @@ class PreparedTests(unittest.TestCase):
                     self.assertEqual(len(kernel.core_ranges), split.stage_spec(stage, 32)['workers'])
         prepared.close()
 
+    def test_batch_norm_is_isolated_and_preserves_recurrence_sources(self):
+        import gdn_vsplit_norm_batch as batch
+        with patch.object(batch, 'validate_runtime'):
+            prepared = self.prepare(batch_norm=True)
+        prepared.run()
+        for event, stage in zip(self.backend.events[3:], ('recurrence', 'norm_gate')):
+            for descriptor in event[1].values():
+                for kernel, role in zip(descriptor.kernels, ('reader', 'writer', 'compute')):
+                    self.assertEqual(kernel.kernel_source, batch.load_kernels(ROOT)[stage][role])
+        prepared.close()
+        for kwargs in (dict(batch_norm=1), dict(batch_norm=True, prefetch_inputs=True)):
+            with self.assertRaises(ValueError):
+                self.prepare(**kwargs)
+
     def test_all_supported_rows_and_default_shapes(self):
         for rows in (1, 2, 4, 8, 16, 32):
             with self.subTest(rows=rows):

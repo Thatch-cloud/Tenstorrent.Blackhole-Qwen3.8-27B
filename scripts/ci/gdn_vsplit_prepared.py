@@ -56,11 +56,13 @@ class PreparedVSplit:
 
     def __init__(self, mesh, qkv, beta, gate, initial, *, z, norm_w,
                  root=split.DEFAULT_ROOT, experimental=False, output_memory=None, operations=None,
-                 prefetch_inputs=False):
+                 prefetch_inputs=False, batch_norm=False):
         if experimental is not True:
             raise ValueError('Prepared V-split requires explicit experimental=True')
         if type(prefetch_inputs) is not bool:
             raise ValueError('prefetch_inputs must be explicit bool')
+        if type(batch_norm) is not bool or (batch_norm and prefetch_inputs):
+            raise ValueError('batch_norm must be bool and isolated from input prefetch')
         if operations is None:
             import ttnn as operations
 
@@ -82,6 +84,10 @@ class PreparedVSplit:
                 import gdn_vsplit_prefetch as prefetch
                 prefetch.validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(split.DEFAULT_ROOT))))
                 kernels = prefetch.load_kernels(Path(root))
+            if batch_norm:
+                import gdn_vsplit_norm_batch as norm_batch
+                norm_batch.validate_runtime(Path(os.environ.get('TT_METAL_HOME', str(split.DEFAULT_ROOT))))
+                kernels = norm_batch.load_kernels(Path(root))
             self._rows = split.native.validate_geometry(*(tuple(value.shape) for value in self._inputs[:4]))
             if tuple(z.shape) != (1, self.rows, 3072) or tuple(norm_w.shape) != (1, 1, 128):
                 raise ValueError('Expected z [1,T,3072] and norm_w [1,1,128]')

@@ -36,7 +36,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--prefetch-inputs', action='store_true')
     parser.add_argument('--stage-timing', action='store_true')
+    parser.add_argument('--batch-norm', action='store_true')
     args = parser.parse_args()
+    if args.batch_norm and args.prefetch_inputs:
+        parser.error('Batch norm and input prefetch must be isolated')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit allocation of both hardware cards required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -45,8 +48,12 @@ def main():
     import ttnn
     from models.experimental.gated_attention_gated_deltanet.tt.ttnn_delta_rule_ops import recurrent_gated_delta_rule_decode_packed_ttnn
 
-    path = Path('/experiment/results/gdn-vsplit-prefetch-timing.json' if args.prefetch_inputs
-                else '/experiment/results/gdn-vsplit-timing.json')
+    filename = 'gdn-vsplit-timing.json'
+    if args.prefetch_inputs:
+        filename = 'gdn-vsplit-prefetch-timing.json'
+    if args.batch_norm:
+        filename = 'gdn-vsplit-norm-batch-timing.json'
+    path = Path('/experiment/results') / filename
     report = dict(passed=False, fixtures=[], prerequisite_run=34046231437,
         scope='Paired captured24-worker FNG versus96-worker recurrence plus24-worker FNG; synthetic kernel only',
         output_placement='Both arms BF16 TILE L1; all recurrent prefixes BF16 TILE DRAM',
@@ -58,6 +65,11 @@ def main():
         report['prefetch'] = gdn_vsplit_prefetch.audit(Path('/opt/tt-metal'))
         report['prerequisite_run'] = 34048090329
         report['scope'] += '; recurrence input prefetch enabled'
+    if args.batch_norm:
+        import gdn_vsplit_norm_batch
+        report['norm_batch'] = gdn_vsplit_norm_batch.audit(Path('/opt/tt-metal'))
+        report['prerequisite_run'] = 34049504379
+        report['scope'] += '; norm/gate token rows processed in parallel'
     mesh = None
     kernels = load_kernels(fuse_norm_gate=True)
     report['control_kernels'] = {name: hashlib.sha256(source.encode()).hexdigest() for name, source in kernels.items()}
@@ -126,7 +138,8 @@ def main():
                     refreshed_inputs = [upload(value) for value in refreshed_values]
                     owned.extend(refreshed_inputs)
                     prepared = PreparedVSplit(mesh, *packed[:3], initial, z=packed[3], norm_w=norm_w,
-                        experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG, prefetch_inputs=args.prefetch_inputs)
+                        experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG, prefetch_inputs=args.prefetch_inputs,
+                        batch_norm=args.batch_norm)
 
                     def control():
                         return control_execute(mesh, *packed[:3], initial, kernels, z=packed[3], norm_w=norm_w)
