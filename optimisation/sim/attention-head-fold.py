@@ -17,12 +17,17 @@ def main():
     spec.loader.exec_module(guard)
     guard.require_simulator(os.environ)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rows', type=int, choices=(1, 2, 4), default=2)
-    parser.add_argument('--start', type=int, choices=(15, 31, 63, 127), default=63)
+    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16, 32), default=2)
+    parser.add_argument('--start', type=int, choices=(15, 31, 63, 127, 4095, 4096, 16383, 16384), default=63)
     parser.add_argument('--finite-mask', action='store_true')
+    parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
+    parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.start + args.rows > args.capacity or args.capacity % args.chunk_size:
+        parser.error('Candidate cache view must cover positions and contain complete chunks')
     path = Path(os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, finite_mask=args.finite_mask,
+        capacity=args.capacity, chunk_size=args.chunk_size,
         scope='Host-folded query and explicit mask versus native causal B1; no device layout or speed certification')
     mesh = None
     owned = []
@@ -53,9 +58,11 @@ def main():
 
         torch.manual_seed(0)
         query = torch.randn(1, args.rows, 12, 256).bfloat16()
-        keys = upload(torch.randn(4, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
-        values = upload(torch.randn(4, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
-        pages = upload(torch.tensor([[2, 0, 3, 1]], dtype=torch.int32), ttnn.int32)
+        blocks = max(4, args.capacity // 64)
+        keys = upload(torch.randn(blocks, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
+        values = upload(torch.randn(blocks, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat8_b)
+        page_ids = [2, 0, 3, 1, *range(4, blocks)]
+        pages = upload(torch.tensor([page_ids], dtype=torch.int32), ttnn.int32)
         grid = mesh.compute_with_storage_grid_size()
         native_config = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
             exp_approx_mode=False, q_chunk_size=0, k_chunk_size=0)
@@ -70,19 +77,22 @@ def main():
             outputs.append(host(native))
         expected = [torch.cat([output[chip] for output in outputs], dim=1) for chip in range(2)]
         stage('folded-masked')
-        mask = causal_mask(args.rows, args.start, 256)
+        mask = causal_mask(args.rows, args.start, args.capacity)
         if args.finite_mask:
             mask.masked_fill_(torch.isneginf(mask), -1e9)
         folded = ttnn.transformer.paged_scaled_dot_product_attention_decode(
-            upload(fold_query(query)), keys, values, page_table_tensor=pages, is_causal=False,
+            upload(fold_query(query)), keys, values,
+            page_table_tensor=upload(torch.tensor([page_ids[:args.capacity // 64]], dtype=torch.int32), ttnn.int32),
+            is_causal=False,
             attn_mask=upload(mask), scale=0.0625,
             program_config=ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
-                exp_approx_mode=False, q_chunk_size=0, k_chunk_size=32), memory_config=ttnn.L1_MEMORY_CONFIG)
+                exp_approx_mode=False, q_chunk_size=0, k_chunk_size=args.chunk_size), memory_config=ttnn.L1_MEMORY_CONFIG)
         owned.append(folded)
         actual = [unfold_output(value, args.rows) for value in host(folded)]
         report['checks'] = [dict(chip=chip, exact=torch.equal(reference, candidate),
             differences=int((reference != candidate).sum()), max_abs=float((reference.float() - candidate.float()).abs().max()),
             reference_max=float(reference.abs().max()), candidate_max=float(candidate.abs().max()),
+            differences_by_token=[int((reference[:, token] != candidate[:, token]).sum()) for token in range(args.rows)],
             reference_finite=bool(torch.isfinite(reference).all()), candidate_finite=bool(torch.isfinite(candidate).all()))
             for chip, (reference, candidate) in enumerate(zip(expected, actual, strict=True))]
         stage('comparison')

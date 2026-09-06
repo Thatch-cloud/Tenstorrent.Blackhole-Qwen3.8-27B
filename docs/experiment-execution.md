@@ -16,6 +16,34 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Attention grouping: bounded groups pass simulator exactness
+
+The head-fold hypothesis is not categorically rejected: the first masked variant
+changed the number of key chunks assigned to cores. The native runtime reverses
+chunk-to-core assignment as chunk count changes, so even a fully masked extra
+chunk can alter reduction ordering. No numerical tolerance was changed.
+
+With finite masks and bounded cache views/chunks, seed0 exact comparisons on
+both simulated chips now pass:
+- `20260906T205313Z-305`: T1/start63,64-token view and chunk.
+- `20260906T205333Z-521`: T2/start63,128-token view and chunk.
+- `20260906T205404Z-382`: T4/start127,256-token view and chunk.
+- `20260906T205713Z-300`: T2/start4096,4352-token view,256-token chunks.
+- `20260906T210011Z-298`: T4/start16384,16640-token view,256-token chunks.
+
+Boundary diagnostic `20260906T205608Z-299` at T2/start4095 differs in2285
+elements only for the first token; the next token is exact. This supports
+splitting groups at native chunk-count boundaries. A host planner now groups
+by dynamic chunk size and rounded valid extent, with a default four-query cap.
+It handles non-power-of-two tails without changing the target's verification
+block width. This is not yet an integrated device-layout adapter.
+
+T32/start4096 probe `20260906T205751Z-456` was rejected before candidate kernel
+execution: static circular buffers need6122688B versus1572864B L1. No hardware
+test is authorized by these narrow simulator passes. Remaining gates include
+grouped boundary execution, changed inputs/seeds, device-side packing and real
+hardware latency including layout and mask work. No attention speedup is claimed.
+
 ### Attention head-fold first pass rejected in TTsim
 
 The prior trace attributes about75% of summed B1 kernel time to matmuls; earlier
