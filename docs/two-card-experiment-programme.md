@@ -185,6 +185,14 @@ baseline comparisons and both stale-GDN/wrong-page controls in six configuration
   shared-page KV writes. Timing measured T=16 at 0.5218 ms versus 4.4063 ms serial
   (8.451x median speedup), one real-weight layer at short context only. Static
   position fixtures are not a full-model/device-dynamic verifier integration.
+  Integrated `full-batch` run 34001403540 subsequently passed 30 full-model
+  T=1/2/4/8/16 eager/trace cases and all 102 T=16 prefix rollback cases, at prompt
+  lengths 63/64/65, with exact active-token logits, all 48 active GDN states and
+  valid KV prefixes across all 16 attention layers. Per-layer candidate snapshots
+  are independent of the reference buffers. Six baseline mode checks and six
+  stale-GDN/wrong-page negative-control pairs also passed. This remains a static,
+  short-context correctness gate: full-model timings, coding-length contexts and
+  a device-dynamic serving/drafter integration are still required.
   The full-model serial oracle verifies full logits, active GDN states and valid KV values, not batched target
 execution or safe concurrent writes to shared KV pages. Keep the old multi-token
 harness diagnostic-only; its composed operations

@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E3 full-model batch integration (hardware result pending)
+### E3 full-model batch integration (passed 34001403540)
 
 The `full-batch` suite reuses the serial oracle without changing its default path.
 The candidate invokes the native 64-layer `_forward_decode` with instance-local
@@ -27,7 +27,7 @@ attention batches arithmetic with ordered B1 shared-page writes. A third reusabl
 all-layer compact snapshot set holds candidate checkpoints separately from reference
 and scratch, so the reference snapshot cannot accidentally repair the candidate.
 
-Planned gate: 30 full-logit/state/KV comparisons (T=1/2/4/8/16, eager/trace, prompt
+Gate: 30 full-logit/state/KV comparisons (T=1/2/4/8/16, eager/trace, prompt
 lengths 63/64/65), then all 102 T=16 prefix rollback cases and existing negative
 controls. All candidate shapes are compiled before parking native prefill/decode
 traces. No installed-source patch, serving eligibility, drafter or speed claim is introduced.
@@ -38,6 +38,26 @@ the serial Generator API returned Bmax8-padded host logits, not a single row.
 The comparator now explicitly accepts native one/eight-row API geometry and selects
 the active row, with padding-canary and invalid-geometry regression tests. No model
 arithmetic was changed and this harness failure is not evidence of numerical drift.
+
+Retry 34001403540 (`028c23f`) passed in 8m11s:
+
+- All 30 batched-width cases: full active-token vocabulary logits on both chips,
+  active states across all 48 GDN layers, and valid KV prefixes across all 16 full
+  attention layers exactly match native sequential B1.
+- All 102 T=16 rollback cases: every prefix 0..16, prompt lengths 63/64/65,
+  eager/trace; candidate-owned per-layer checkpoints restore the reference state,
+  and two corrected continuation steps preserve exact full logits/state/KV.
+- Six native eager/trace baseline comparisons and six pairs of stale-GDN/wrong-page
+  negative controls passed. Rejected future rows do not change accepted-prefix
+  logits in the tested cases.
+- Three reusable compact snapshot sets consume 301989888 bytes per chip (288 MiB).
+  Candidate checkpoints are separate from reference and scratch buffers.
+
+Local validation: 108 CI/helper tests, 26 drafting tests, shell syntax and diff
+checks passed. This closes the first integrated **short-context correctness** gate;
+it does not measure full-model block latency, prove long-context equivalence, or
+enable a serving/drafter integration. Next measure paired T=1/2/4/8/16 verification
+and commit cost at coding-length contexts, repeating exactness gates there first.
 
 ### E3 attention shared-page gate (passed 34000512864)
 
@@ -92,7 +112,7 @@ commit cost at realistic contexts before introducing a drafter.
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Full-model serial oracle passed 33999532634; GDN batching/compact DMA validated; shared-page attention gate and timing passed 34000512864/34000694699 | Integrate full-model batched verification against the oracle; measure T=1/2/4/8/16 verification and commit cost at realistic contexts |
+| E3 verifier | Integrated full-model batching and all T16 prefix rollbacks passed 34001403540; attention layer timing separately passed 34000694699 | Extend exactness to coding-length contexts; measure paired T=1/2/4/8/16 full-model verification and commit cost |
 | E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
