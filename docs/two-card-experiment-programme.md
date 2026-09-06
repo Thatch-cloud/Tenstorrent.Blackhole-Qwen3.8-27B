@@ -6,15 +6,17 @@ Latest kernel checkpoint: run34019033933 (`36b9eed`) passed synthetic multi-toke
 recurrence plus fused norm/gate on both cards after simulator-first debugging:
 30 exact eager/trace cases, 216 restored-prefix continuations and 15 negative
 controls. The CB5 counter handoff fix is hardware-validated. No timing was measured;
-real-weight convolution and full-model integration remain next. Historical entries
+full-model integration remains next. Historical entries
 below explain the earlier stalls and recovery, not the current kernel status.
 
-Next integration checkpoint: native serial convolution/gates feeding the device-loop
+Latest integration checkpoint: native serial convolution/gates feeding the device-loop
 recurrence/norm passed seven simulator fixtures (seed0 T1/2/4/8/16, seeds1/2 T2),
-including every output and recurrent/convolution prefix. The real-weight native
-oracle eager/trace hardware gate is prepared as `gdn-multitoken-conv`; hardware
-results are pending. This composition is not convolution token-loop fusion and
-does not yet include output projection, full-model timing or a throughput claim.
+including every output and recurrent/convolution prefix. Run34019928513 (`8e75a95`)
+then passed all30 real-weight native-oracle eager/trace hardware cases. Composed
+state rollback and two-step corrected continuation passed simulator T1/T2/T4
+checks; the extended native hardware gate is next. This composition is not
+convolution token-loop fusion and does not yet
+include output projection, full-model timing or a throughput claim.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
@@ -27,7 +29,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Compact state/DMA/input/layout wins; device token loop plus fused norm/gate passed simulator and native hardware exactness; recurrence-only timing measured | Real-weight convolution/GDN integration, matched norm/gate cost and full-model timing; memory-pipeline prototypes |
+| E4 fusion/pipeline | Compact state/DMA/input/layout wins; device token loop plus fused norm/gate and real-weight convolution composition passed simulator/native hardware exactness; recurrence-only timing measured | Composed-state rollback, output projection/full-model integration and matched timing; memory-pipeline prototypes |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

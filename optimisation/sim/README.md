@@ -30,6 +30,18 @@ This is not a convolution token-loop fusion, independent native recurrence oracl
 real-weight test, fast-dispatch trace test or performance result. The separate
 `gdn-multitoken-conv` CI suite supplies real-weight native projections and compares
 the composed path against native GDN before output projection, eager and traced.
+That hardware gate passed all30 cases in run34019928513 (`8e75a95`).
+
+Add `--continuation` with `--conv --norm-gate` to test restoration at every accepted
+prefix (zero through all), then compare two new projected rows with an independent
+serial-prefix snapshot control. It also requires a stale-final-state negative
+control to differ. This remains synthetic functional evidence, not native-oracle
+certification. New continuation results must pass before the extended hardware
+suite is dispatched; use `KERNEL_TIMEOUT=900` for the added checks.
+Continuation first pass: T2/seed0 `20260906T080711Z-332` passed; final guarded
+adapter T1/seed1 `20260906T081239Z-328` and T4/seed1 `20260906T081508Z-676`
+also passed every accepted prefix, detected stale-state controls and exited0.
+See the ledger for the exact adapter hash and separate native hardware status.
 
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation

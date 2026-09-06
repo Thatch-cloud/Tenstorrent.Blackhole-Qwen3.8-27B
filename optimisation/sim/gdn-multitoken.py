@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from gdn_multitoken import HANDOFF_HASHES, HASHES, execute, load_kernels
-from gdn_multitoken_conv import run_projected
+from gdn_multitoken_conv import release_owned, restore_prefix, run_projected
 
 
 def require_simulator(environment):
@@ -28,15 +28,21 @@ def main():
     parser.add_argument('--norm-gate', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--conv', action='store_true')
+    parser.add_argument('--continuation', action='store_true')
     args = parser.parse_args()
     if args.conv and not args.norm_gate:
         parser.error('--conv requires --norm-gate')
+    if args.continuation and not args.conv:
+        parser.error('--continuation requires --conv')
     require_simulator(os.environ)
     path = Path(os.environ['QWEN_SIM_REPORT'])
     kernels = load_kernels(args.source_root, args.norm_gate)
     report = dict(passed=False, backend='ttsim', rows=args.rows, norm_gate=args.norm_gate,
                   seed=args.seed, handoff_runtime_hashes=HANDOFF_HASHES if args.norm_gate else {},
                   convolution=args.conv,
+                  continuation_enabled=args.continuation,
+                  adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_multitoken_conv.py').read_bytes()).hexdigest() if args.conv else None,
+                  continuation_checks=0, stale_controls=0,
                   native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(source.encode()).hexdigest() for name, source in kernels.items()},
                   scope='Slow-dispatch functional liveness/exactness against serial T1 of same kernel; not native oracle certification or performance')
@@ -113,6 +119,37 @@ def main():
                                 raise AssertionError(f'Convolution prefix mismatch {token=} {chip=} {tap=}')
                 if not all(torch.equal(value, initial_host) for value in host(initial)):
                     raise AssertionError('Initial recurrent state modified')
+                if args.continuation:
+                    entry = [initial, *[upload(value) for value in conv_host]]
+                    destinations = [upload(torch.zeros_like(initial_host)), *[upload(torch.zeros_like(value)) for value in conv_host]]
+                    reference_conv = [upload(torch.zeros_like(value)) for value in conv_host]
+                    correction = upload((torch.randn(1, 2, 8256) * 0.1).bfloat16())
+                    for accepted in range(args.rows + 1):
+                        stage('conv-restored-continuation', accepted=accepted)
+                        sources = entry if accepted == 0 else [serial_results[accepted - 1]['states'],
+                                                               *serial_results[accepted - 1]['conv_prefixes'][0]]
+                        for source, destination in zip(sources[1:], reference_conv, strict=True):
+                            ttnn.copy(source, destination)
+                        control = run_projected(mesh, correction, sources[0], reference_conv,
+                                                taps, dt_bias, neg_exp_A, norm_w, kernels)
+                        restore_prefix(ttnn, result, entry, destinations, accepted)
+                        actual = run_projected(mesh, correction, destinations[0], destinations[1:],
+                                               taps, dt_bias, neg_exp_A, norm_w, kernels)
+                        control_values = [control['output'], control['states'], *[value for prefix in control['conv_prefixes'] for value in prefix]]
+                        actual_values = [actual['output'], actual['states'], *[value for prefix in actual['conv_prefixes'] for value in prefix]]
+                        for actual_value, control_value in zip(actual_values, control_values, strict=True):
+                            if not all(torch.equal(left, right) for left, right in zip(host(actual_value), host(control_value), strict=True)):
+                                raise AssertionError(f'Restored continuation mismatch {accepted=}')
+                        report['continuation_checks'] += 1
+                        if accepted == 0:
+                            restore_prefix(ttnn, result, entry, destinations, args.rows)
+                            stale = run_projected(mesh, correction, destinations[0], destinations[1:],
+                                                  taps, dt_bias, neg_exp_A, norm_w, kernels)
+                            if all(torch.equal(left, right) for left, right in zip(host(stale['states']), host(control['states']), strict=True)):
+                                raise AssertionError('Stale-state control was not detected')
+                            report['stale_controls'] += 1
+                            release_owned(ttnn, stale['owned'])
+                        release_owned(ttnn, [*control['owned'], *actual['owned']])
                 stage('mesh-close')
                 ttnn.close_mesh_device(mesh)
                 mesh = None

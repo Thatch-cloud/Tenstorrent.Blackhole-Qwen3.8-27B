@@ -1,5 +1,6 @@
 """Real-weight projected-input convolution/recurrence gate; no throughput claim."""
 
+import argparse
 import faulthandler
 import hashlib
 import json
@@ -8,10 +9,13 @@ from pathlib import Path
 
 from gdn_prefix import gated_decode
 from gdn_multitoken import HANDOFF_HASHES, load_kernels, validate_handoff_runtime
-from gdn_multitoken_conv import addresses, release_owned, run_projected
+from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_projected
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--continuation', action='store_true')
+    options = parser.parse_args()
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -34,10 +38,11 @@ def main():
     validate_handoff_runtime(root)
     kernels = load_kernels(root, True)
     path = Path('/experiment/results/gdn-multitoken-conv.json')
-    report = dict(passed=False, checks=[], projection_calls=0, handoff_runtime_hashes=HANDOFF_HASHES,
+    report = dict(passed=False, checks=[], continuation_checks=[], stale_controls=[], projection_calls=0, handoff_runtime_hashes=HANDOFF_HASHES,
                   generated_hashes={name: hashlib.sha256(value.encode()).hexdigest() for name, value in kernels.items()},
                   adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_multitoken_conv.py').read_bytes()).hexdigest(),
-                  scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; excludes output projection, attention, full model, rollback continuation and timing')
+                  continuation_enabled=options.continuation,
+                  scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
     context = {}
 
     def stage(name, **details):
@@ -83,12 +88,13 @@ def main():
                     context.update(seed=seed, rows=rows)
                     stage('fixture-initialize')
                     live = [gdn.rec_state, *gdn.conv_states]
+                    live_addresses = [addresses(ttnn, value) for value in live]
                     entry = [upload((torch.randn(tuple(value.shape)) * 0.05).bfloat16()) for value in live]
                     for initial, destination in zip(entry, live, strict=True):
                         ttnn.copy(initial, destination)
                     entry_host = [host(value) for value in entry]
                     inputs = [upload((torch.randn(1, 1, 5120) * 0.1).bfloat16()) for token in range(rows)]
-                    projected_rows, expected = [], []
+                    projected_rows, expected, oracle_prefixes = [], [], []
                     original = gdn._project_qkvzab_raw
 
                     def record_projection(value, batch, memory):
@@ -103,6 +109,8 @@ def main():
                             stage('native-reference', token=token)
                             output = forward(value)
                             expected.append((host(output), host(gdn.rec_state), [host(state) for state in gdn.conv_states]))
+                            if options.continuation:
+                                oracle_prefixes.append([ttnn.clone(state, memory_config=ttnn.DRAM_MEMORY_CONFIG) for state in live])
                             ttnn.deallocate(output)
                     finally:
                         gdn._project_qkvzab_raw = original
@@ -137,10 +145,50 @@ def main():
                             raise AssertionError('Working convolution addresses changed')
                         report['checks'].append(dict(seed=seed, rows=rows, mode=mode, exact=True))
 
+                    def continuation_values():
+                        values = []
+                        for value in corrections:
+                            output = forward(value)
+                            values.append([host(output), *[host(state) for state in live]])
+                            ttnn.deallocate(output)
+                        if [addresses(ttnn, value) for value in [gdn.rec_state, *gdn.conv_states]] != live_addresses:
+                            raise AssertionError('Native continuation changed stable state addresses')
+                        return values
+
+                    def continuation_equal(actual, control):
+                        return all(exact(actual_value, control_value)
+                            for actual_step, control_step in zip(actual, control, strict=True)
+                            for actual_value, control_value in zip(actual_step, control_step, strict=True))
+
+                    def validate_continuations(result, mode):
+                        if not options.continuation:
+                            return
+                        for accepted in range(rows + 1):
+                            stage('restored-native-continuation', mode=mode, accepted=accepted)
+                            sources = entry if accepted == 0 else oracle_prefixes[accepted - 1]
+                            for source, destination in zip(sources, live, strict=True):
+                                ttnn.copy(source, destination)
+                            control = continuation_values()
+                            restore_prefix(ttnn, result, entry, live, accepted)
+                            actual = continuation_values()
+                            if not continuation_equal(actual, control):
+                                raise AssertionError(f'Restored native continuation mismatch {accepted=} {mode=}')
+                            report['continuation_checks'].append(dict(seed=seed, rows=rows, mode=mode, accepted=accepted, steps=2, exact=True))
+                            if accepted == 0 and mode == 'eager':
+                                restore_prefix(ttnn, result, entry, live, rows)
+                                stale = continuation_values()
+                                if continuation_equal(stale, control):
+                                    raise AssertionError('Stale-state negative control was not detected')
+                                report['stale_controls'].append(dict(seed=seed, rows=rows, detected=True))
+                        if not all(exact(host(value), saved) for value, saved in zip(entry, entry_host, strict=True)):
+                            raise AssertionError('Continuation modified entry snapshots')
+
+                    corrections = [upload((torch.randn(1, 1, 5120) * 0.1).bfloat16()) for step in range(2)] if options.continuation else []
                     stage('candidate-eager')
                     restore()
                     result = candidate()
                     validate(result, 'eager')
+                    validate_continuations(result, 'eager')
                     release_owned(ttnn, result['owned'])
                     restore()
                     stage('candidate-capture')
@@ -153,11 +201,15 @@ def main():
                     validate(captured, 'trace')
                     ttnn.release_trace(mesh, trace)
                     trace = None
+                    validate_continuations(captured, 'trace')
                     release_owned(ttnn, captured['owned'])
-                    release_owned(ttnn, [*entry, *inputs, *projected_rows, projected, *working])
+                    release_owned(ttnn, [*entry, *inputs, *projected_rows, projected, *working, *corrections,
+                                         *[state for prefix in oracle_prefixes for state in prefix]])
                     stage('fixture-complete')
             if len(report['checks']) != 30 or report['projection_calls'] != 93:
                 raise AssertionError('Incomplete real-weight integration gate')
+            if options.continuation and (len(report['continuation_checks']) != 216 or len(report['stale_controls']) != 15):
+                raise AssertionError('Incomplete composed-prefix continuation gate')
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None

@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Projected-input convolution integration (simulator passed; hardware pending)
+### Projected-input convolution integration (passed 34019928513)
 
 The shared `gdn_multitoken_conv.run_projected` adapter composes native serial
 convolution/gates with one multi-token recurrence/norm call. It retains all four
@@ -42,11 +42,36 @@ independent native recurrence oracle. Generated norm kernels remain identical to
 the hardware-validated `36b9eed` versions. Local validation:59 GDN unit tests pass,
 Python AST, shell syntax and workflow suite routing pass.
 
-Next hardware suite `gdn-multitoken-conv` captures93 real-weight native projections
-across three seeds and T1/2/4/8/16. It compares30 eager/trace cases against native
-GDN gated output and all recurrent/convolution prefixes on both cards, also checking
-entry snapshots and stable working convolution addresses. No reset, serving change,
-rollback-continuation certification or timing claim is part of this gate.
+Run [34019928513](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019928513)
+(`8e75a95`) passed all30 eager/trace cases across three seeds and T1/2/4/8/16,
+using93 captured real-weight native projections. Native GDN gated outputs and every
+recurrent/convolution prefix matched exactly on both cards; entry snapshots and
+stable working convolution addresses also passed. The report reached clean close
+and `passed=true`, with the expected checkpoint, generated kernel and runtime header
+hashes. No reset, serving change, rollback-continuation certification or timing claim
+is part of this completed gate.
+
+Next: restore every accepted prefix (including zero/all) into independent stable
+native recurrent and convolution buffers, then compare two corrected native steps
+against independently saved native-oracle prefixes. The extended suite requires216
+prefix/mode cases (432 steps) and15 stale-final-state negative controls. The shared
+restore helper rejects snapshot aliasing on either chip before writes.
+
+Simulator continuation passed: development T2/seed0 `20260906T080711Z-332` checked
+all3 accepted prefixes and detected its stale-state control. After adding stricter
+shape/alias guards, final T1/seed1 `20260906T081239Z-328` and T4/seed1
+`20260906T081508Z-676` checked all2/all5 prefixes respectively, both with detected
+stale-state controls, clean close and exit0. The final two reports pin adapter SHA256
+`f5e91983b050f443129e2d00af8e5373a02093c871cb5b0c0c287a0767fd062f`.
+Generated recurrence kernels are unchanged. These are synthetic two-row continuation
+comparisons, not native hardware or full-model token acceptance results.
+
+Local validation:67 focused GDN tests pass on Windows; all174 CI and55 simulator
+unit tests pass under WSL. The broader suites require Linux paths/Torch and failed
+in Windows before being rerun successfully in WSL. AST/shell/workflow syntax passes.
+An initial WSL VM startup timed out before the simulator ran; restarting only the
+dedicated `TT-Sim` distribution restored operation. No card reset occurred.
+The extended native hardware continuation gate is ready; results are pending.
 
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
