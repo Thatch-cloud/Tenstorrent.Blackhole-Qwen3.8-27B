@@ -40,6 +40,9 @@ paired blocks favored the candidate, with timing spikes; no full-model speedup i
 established. The norm/gate extension timed out in run 34013517498 after T1 passed;
 larger widths remain uncertified. A bounded stage/stack diagnostic retry keeps
 the same CB5 feedback and head-local assembly kernels to identify the blocking call.
+That retry (34014926676) instead stalled reading the initial tensor, before either
+oracle or custom kernel. A minimal paired-card transfer health check is now staged;
+the original kernel stall remains unresolved. No card reset has been performed.
 Real-weight convolution and full-model integration remain; this is not yet a
 complete multi-token GDN layer or speculative serving.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter

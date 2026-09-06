@@ -10,6 +10,10 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_RUN_MODE:-baseline}" = device-readback ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    exit 0
+fi
 python3 - <<'PY' > /experiment/results/token-protocol-fields.json
 import ast
 import importlib.util

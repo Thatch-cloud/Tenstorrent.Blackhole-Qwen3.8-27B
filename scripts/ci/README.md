@@ -107,6 +107,9 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   restored continuations against native serial B1. Adds three paired ABBA timing
   blocks per seed/width, with all-prefix exports and exact post-sample checks on
   both arms. Excludes conv/norm-gate, input packing and full-model throughput.
+- `device-readback`: bounded two-chip upload/readback health gate, before model
+  manifest loading. Checks two tensor sizes and three changing patterns on both
+  chips; stage/stack evidence, 180-second timeout, no custom kernels or reset.
 - `gdn-multitoken-norm`: adds unchanged native fused RMS norm/weight/SiLU math,
   BF16 state feedback through the initial-state ring and head-local TILE assembly.
   Repeats exact prefix/continuation gates without timing; synthetic inputs only,

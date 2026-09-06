@@ -16,6 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Transfer health isolation (hardware pending)
+
+Diagnostic run 34014926676 (`5cdd443`) timed out before any native oracle or
+custom kernel: all three stack dumps identify `host(initial)` / `ttnn.to_torch`
+at seed 0 / T1. The 10114-byte artifact's last stage is `fixture-upload`.
+This does not reproduce or explain the original post-T1 stall. Residual unhealthy
+device/dispatch state after forced termination is a hypothesis, not a confirmed cause.
+
+`device-readback` isolates transfers in the same pinned image and 1x2 fabric mesh.
+It uploads BF16 TILE DRAM tensors of shapes `[1,1,32,32]` and `[1,24,128,128]`,
+using three distinct exact integer patterns and reading each chip separately.
+Twelve exact checks, synchronization and successful mesh close are required.
+Durable stages identify the shape/pattern/chip; stack dumps repeat every 30 seconds.
+The process is bounded to 180 seconds plus 15-second kill grace. No model imports,
+weight loading, trace capture, custom kernels, card resets or serving changes.
+Do not retry the GDN experiment until this gate passes or recovery is authorized.
+
 ### E4 multi-token norm/gate prerequisite (timed out 34013517498)
 
 Run 34013517498 (`3e0846f`) timed out after seed 0 / T1 passed eager, trace,
