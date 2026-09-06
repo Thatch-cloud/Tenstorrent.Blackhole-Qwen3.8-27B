@@ -37,8 +37,9 @@ cases, 216 restored-prefix continuations and 15 stale-state controls. No timing 
 measured in that run. Paired recurrence timing passed in run 34013199242: 1800
 replays, T16 medians about 0.532 ms serial versus 0.340 ms device loop. All nine T16
 paired blocks favored the candidate, with timing spikes; no full-model speedup is
-established. The norm/gate extension is now implemented and pending hardware
-exactness, retaining BF16 feedback via CB5 and assembling output tiles per head.
+established. The norm/gate extension timed out in run 34013517498 after T1 passed;
+larger widths remain uncertified. A bounded stage/stack diagnostic retry keeps
+the same CB5 feedback and head-local assembly kernels to identify the blocking call.
 Real-weight convolution and full-model integration remain; this is not yet a
 complete multi-token GDN layer or speculative serving.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter

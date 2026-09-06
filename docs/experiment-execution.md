@@ -16,7 +16,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E4 multi-token norm/gate prerequisite (hardware pending)
+### E4 multi-token norm/gate prerequisite (timed out 34013517498)
+
+Run 34013517498 (`3e0846f`) timed out after seed 0 / T1 passed eager, trace,
+all four restored continuations and the stale-state control. The 11311-byte
+artifact does not locate the next blocking call; T2 and larger are not certified.
+The unused-reader-helper compiler warning is nonfatal. A diagnostic retry preserves
+the same kernels, writes durable stage markers before blocking phases, and dumps
+Python stacks every 120 seconds. Its test timeout is reduced to 420 seconds plus
+a 30-second kill grace. Do not infer a CB5 deadlock or blame trace allocation from
+the last printed line alone; native oracle execution also occurs before each candidate.
 
 `gdn-multitoken-norm` extends the token loop with the native fused output math,
 including BF16 rounding of norm-times-weight, SiLU and final multiply. CB30/31

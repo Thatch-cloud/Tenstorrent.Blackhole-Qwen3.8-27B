@@ -124,7 +124,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken ]; then
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-norm ]; then
-    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate
+    timeout -k 30 420 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-direct ]; then
