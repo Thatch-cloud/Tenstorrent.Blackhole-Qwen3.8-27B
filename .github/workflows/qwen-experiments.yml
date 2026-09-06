@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -99,8 +99,8 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 4800 bash scripts/ci/run-baseline.sh
-      - name: Full-model serial rollback and KV mask oracle
-        if: inputs.suite == 'full-prefix' || inputs.suite == 'full-batch'
+      - name: Full-model prefix correctness and verification cost
+        if: inputs.suite == 'full-prefix' || inputs.suite == 'full-batch' || inputs.suite == 'full-coding-cost'
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}

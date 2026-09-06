@@ -11,6 +11,25 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_chunked_long_prefix_covers_all_heads_and_pages(self):
+        values = torch.arange(257 * 2 * 64 * 3).reshape(257, 2, 64, 3)
+        for length in (4095, 4096, 4097, 16383, 16401):
+            chunks = [full_prefix.logical_kv_chunk(values[start:min(start + 64, 257)], start, length)
+                      for start in range(0, (length + 63) // 64, 64)]
+            actual = torch.cat(chunks, dim=1)
+            expected = values.permute(1, 0, 2, 3).reshape(2, -1, 3)[:, :length]
+            self.assertTrue(torch.equal(actual, expected))
+
+    def test_long_prefix_masks_only_future_tail(self):
+        chunk = torch.zeros(1, 2, 64, 3)
+        before = full_prefix.logical_kv_chunk(chunk, 256, 16401).clone()
+        chunk[:, :, 17:] = 99
+        self.assertTrue(torch.equal(before, full_prefix.logical_kv_chunk(chunk, 256, 16401)))
+        chunk[:, :, 16] = 99
+        self.assertFalse(torch.equal(before, full_prefix.logical_kv_chunk(chunk, 256, 16401)))
+        with self.assertRaises(ValueError):
+            full_prefix.logical_kv_chunk(chunk, 257, 16401)
+
     def test_native_api_padding_is_not_an_active_token(self):
         values = torch.arange(8 * 12).reshape(1, 8, 12)
         expected = values[:, 0].clone()

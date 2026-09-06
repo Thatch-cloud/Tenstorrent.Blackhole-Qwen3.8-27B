@@ -16,6 +16,24 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E3 coding-context verification cost (hardware result pending)
+
+`full-coding-cost` extends exactness to 4095/16383-token deterministic repeated-code
+fixtures, crossing the 4K/16K boundaries during verification. It checks all T widths
+in eager/trace and rollback prefixes 0/1/8/16 with corrected continuations. Valid KV
+hashing now covers the whole request prefix in bounded 64-page chunks across both
+chips and all attention layers; no raw KV/logit arrays are exported. This is a
+synthetic context-length probe, not a coding-quality benchmark.
+
+Only after the full correctness matrix passes, compare captured native serial B1
+and batched full-logit blocks using three ABBA blocks, ten replays per sample. Every
+replay restores the initial GDN state outside timing; captured candidate execution
+includes one preselected end-prefix checkpoint. Full logits/state/KV are rechecked
+before timing and after each sample. Separately measure captured active-state
+restore. These measurements exclude drafter generation, dynamic acceptance,
+all-prefix checkpoint staging/selection and a complete speculative commit pipeline.
+Report block milliseconds and paired ratios, not committed-token throughput.
+
 ### E3 full-model batch integration (passed 34001403540)
 
 The `full-batch` suite reuses the serial oracle without changing its default path.

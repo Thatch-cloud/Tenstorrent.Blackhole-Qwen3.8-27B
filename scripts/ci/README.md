@@ -117,6 +117,15 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   checkpoint and two correction steps at prompt lengths 63/64/65. Snapshots are
   captured per GDN layer at the selected prefix, not by a global mid-layer save.
   This is a static-fixture correctness gate; it does not enable a serving verifier.
+- `full-coding-cost`: exactness first at 4095/16383-token repeated-code contexts,
+  T=1/2/4/8/16 eager/trace, and T16 rollback prefixes 0/1/8/16. Hash the entire
+  valid KV prefix in bounded 64-page chunks, not just the latest pages. After all
+  cases pass, time captured native serial and batched full-logit blocks using
+  three ABBA blocks and ten state-reset replays per sample. Reset/readback is
+  outside timing; the batched arm includes one preselected end checkpoint.
+  Measure active GDN restore separately. This omits draft generation, runtime
+  acceptance selection, all-prefix staging and a complete commit pipeline; it
+  is not end-to-end speculative throughput or a coding-quality benchmark.
 
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.

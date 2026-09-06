@@ -33,6 +33,17 @@ def logical_kv_prefix(host, valid_tokens):
     return host.permute(1, 0, 2, 3).reshape(heads, 128, width)[:, :valid_tokens]
 
 
+def logical_kv_chunk(host, first_page, valid_tokens):
+    if type(first_page) is not int or first_page < 0 or type(valid_tokens) is not int:
+        raise ValueError("Expected integer page offset and valid-token count")
+    if len(host.shape) != 4 or host.shape[0] < 1 or host.shape[2] != 64:
+        raise ValueError("Expected a nonempty chunk of 64-token pages")
+    count = min(host.shape[0] * 64, valid_tokens - first_page * 64)
+    if count <= 0:
+        raise ValueError("Chunk contains no valid tokens")
+    return host.permute(1, 0, 2, 3).reshape(host.shape[1], -1, host.shape[3])[:, :count]
+
+
 def main():
     if os.environ.get("QWEN_HARDWARE_TESTS") != "1" or os.environ.get("QWEN_CARDS_ALLOCATED") != "1":
         raise RuntimeError("Explicit hardware allocation required")
@@ -40,7 +51,12 @@ def main():
         raise RuntimeError("Fast-dispatch hardware required")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--coding-cost", action="store_true")
     options = parser.parse_args()
+    if options.coding_cost and not options.batch:
+        raise ValueError("Coding cost requires the batched candidate")
+    lengths = (4095, 16383) if options.coding_cost else (63, 64, 65)
+    prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
     import ttnn
     from transformers import AutoConfig, AutoTokenizer
@@ -51,8 +67,13 @@ def main():
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
     report["batched_candidate"] = options.batch
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
+    if options.coding_cost:
+        output_path = root / "full-coding-cost.json"
+    report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
     if options.batch:
         report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
+    if options.coding_cost:
+        report["scope"] = "64-layer static coding-context correctness and full-logit block costs; no committed-token throughput"
     mesh = None
     generator = None
     try:
@@ -136,17 +157,19 @@ def main():
 
         def kv_digest(valid_tokens):
             result = []
-            if not 0 < valid_tokens <= 128:
-                raise ValueError("Oracle covers the first two physical pages only")
+            if not 0 < valid_tokens <= 65536:
+                raise ValueError("KV prefix exceeds the identity-mapped request allocation")
             for tensor in caches:
                 heads, block_size, width = cache_geometry(tensor.shape)
                 if block_size != 64:
                     raise ValueError("Expected 64-token KV pages")
-                first_pages = ttnn.slice(tensor, (0, 0, 0, 0), (2, heads, 64, width))
-                for host in local_host(first_pages):
-                    valid = logical_kv_prefix(host, valid_tokens)
-                    result.append(digest(valid))
-                ttnn.deallocate(first_pages)
+                total_pages = math.ceil(valid_tokens / 64)
+                for first_page in range(0, total_pages, 64):
+                    end_page = min(first_page + 64, total_pages)
+                    chunk = ttnn.slice(tensor, (first_page, 0, 0, 0), (end_page, heads, 64, width))
+                    for host in local_host(chunk):
+                        result.append(digest(logical_kv_chunk(host, first_page, valid_tokens)))
+                    ttnn.deallocate(chunk)
             return result
 
         def decode(token, position, trace, pages=None):
@@ -197,16 +220,19 @@ def main():
         kv_digest(128)
         if options.batch:
             from model_batch import ModelBatch
-            for rows in (1, 2, 4, 8, 16):
-                fixture = ModelBatch(model, [1] * rows, 63, page_table, helpers, candidate_saved, rows)
-                output = fixture.run()
-                ttnn.deallocate(output)
-                fixture.close()
+            for length in lengths:
+                kv_digest(length + 18)
+                for rows in (1, 2, 4, 8, 16):
+                    fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows)
+                    output = fixture.run()
+                    ttnn.deallocate(output)
+                    fixture.close()
         generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=True)
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
-        base_prompt = baseline.make_prompt(tokenizer, 128, 0)
-        for length in (63, 64, 65):
+        base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost else baseline.make_prompt(tokenizer, 128, 0)
+        timing_fixtures = []
+        for length in lengths:
             prompt = base_prompt[:length]
             if len(prompt) != length:
                 raise AssertionError("Insufficient fixed prompt tokens")
@@ -216,6 +242,10 @@ def main():
                 logits = decode(oracle[-1], length + position, False)
                 oracle_logits.append(logits)
                 oracle.append(argmax(logits))
+            timing_fixtures.append((prompt, oracle))
+            report.setdefault("prompts", []).append(dict(length=length,
+                tokens_sha256=hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
+                kind="Truncated deterministic repeated-code fixture, not a coding-quality benchmark"))
             for trace in (False, True):
                 prefill(prompt)
                 for index, expected in enumerate(oracle_logits):
@@ -245,7 +275,7 @@ def main():
                             logits_exact=True, all_gdn_states_exact=True, valid_kv_exact=True))
                         output_path.write_text(json.dumps(report, indent=2))
                         print(json.dumps(dict(length=length, rows=rows, trace=trace, batched_exact=True)), flush=True)
-                for prefix in range(17):
+                for prefix in prefixes:
                     if prefill(prompt) != oracle[0]:
                         raise AssertionError("Reference prefill seed changed")
                     for index in range(prefix):
@@ -291,7 +321,10 @@ def main():
                         stale_detected = not torch.equal(stale, expected_logits[0])
                         prefill(prompt)
                         wrong_pages = page_table.clone()
-                        wrong_pages[0, 0] = 8199
+                        if options.coding_cost:
+                            wrong_pages.fill_(8199)
+                        else:
+                            wrong_pages[0, 0] = 8199
                         wrong = decode(oracle[0], length, trace, wrong_pages)
                         page_detected = not torch.equal(wrong, expected_logits[0])
                         report["negative_controls"].append(dict(length=length, trace=trace,
@@ -302,8 +335,23 @@ def main():
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")
-        if options.batch and len(report.get("batch_checks", [])) != 30:
+        if options.batch and len(report.get("batch_checks", [])) != len(lengths) * 10:
             raise AssertionError("Missing batched width/mode checks")
+        if len(report["checks"]) != len(lengths) * 2 * len(prefixes):
+            raise AssertionError("Missing rollback cases")
+        if options.coding_cost:
+            from full_batch_timing import measure
+            report["timing_scope"] = "Captured full-logit blocks with one preselected end checkpoint; no drafter, dynamic selection or complete speculative commit pipeline"
+            for prompt, oracle in timing_fixtures:
+                for rows in (1, 2, 4, 8, 16):
+                    measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
+                        prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
+                        state_digest=live_digest, kv_digest=kv_digest, local_host=local_host)
+                    report.setdefault("timings", []).append(measurement)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(measurement), flush=True)
+            if len(report.get("timings", [])) != len(lengths) * 5:
+                raise AssertionError("Missing full-model timing fixtures")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
