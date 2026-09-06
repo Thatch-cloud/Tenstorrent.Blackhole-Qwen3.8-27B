@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Packed convolution checkpoints (simulator passed; hardware next)
+### Packed convolution checkpoints (hardware layer passed 34028407207)
 
 The next isolated experiment retains the four post-convolution `[1,T,5120]`
 tensors as immutable packed histories, rather than materializing four separate
@@ -52,6 +52,22 @@ Packed model-adapter fixture `20260906T104508Z-326` also passed all3 prefix
 selections atT2/seed2, exact final active-slot publication and inactive-slot
 preservation, with clean close and exit0. This gate does not enable packed
 checkpoints in the full-model suite yet.
+
+Run34028407207 (`7a20340`) passed30 native-oracle eager/trace checks,
+216 two-step corrected-prefix cases,15 stale controls and600 paired layer replays.
+The19213-byte artifact confirms matching adapter, restore and prefix-copy hashes.
+
+| T | Separate-prefix control ms | Packed-prefix candidate ms | Median paired ratio |
+| --- | --- | --- | --- |
+| 1 | 0.334818 | 0.333533 | 1.002951 |
+| 2 | 0.663980 | 0.435348 | 1.525094 |
+| 4 | 0.994694 | 0.500429 | 1.987312 |
+| 8 | 1.658873 | 0.631632 | 2.626395 |
+| 16 | 3.005572 | 0.911663 | 3.360829 |
+
+The next full-model gate probes packed histories at every T>1, versus the previous
+DMA-window full-model candidate atT8/T16 and its retained compact path atT2/T4.
+T1 remains native. These layer ratios are not extrapolated to full-model speed.
 
 ### Parallel causal convolution windows (hardware passed 34026768263)
 
@@ -123,6 +139,23 @@ fixture `20260906T102349Z-322` passed the actual DeviceLoopState adapter atT2/se
 all3 prefix selections, final native-slot publication and inactive-slot preservation.
 This validates adapter plumbing, not full-model logits or timing. Full-model
 eager/trace/rollback/valid-KV and paired4K/16K costs are the next hardware gate.
+
+Full-model run34027510486 (`de6fd22`) passed20 width/mode cases,16 corrected
+rollbacks,4 negative-control pairs and10 timing fixtures (2400 model replays).
+All full logits, active GDN state and logically valid KV matched on both cards.
+The84002-byte artifact matches simulator adapter and window-DMA kernel hashes.
+
+| Context | T | Compact-prologue serial-conv ms | DMA batched-conv ms | Median paired ratio |
+| --- | --- | --- | --- | --- |
+| 4095 | 8 | 103.766911 | 74.177437 | 1.399093 |
+| 4095 | 16 | 163.262062 | 94.881889 | 1.720690 |
+| 16383 | 8 | 108.173005 | 78.591578 | 1.376383 |
+| 16383 | 16 | 172.040179 | 103.655336 | 1.659846 |
+
+T1/T2/T4 retained their previous paths and unchanged paired timings. These remain
+fixed verifier blocks: ideal T16 acceptance without draft/commit overhead would
+give about168.63/154.36 tokens/s. Actual committed throughput is not established,
+and the200 goal is not met. No serving defaults changed.
 
 ### Projected-input convolution integration (passed 34019928513)
 

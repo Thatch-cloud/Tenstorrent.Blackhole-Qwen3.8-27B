@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--device-loop-gdn", action="store_true")
     parser.add_argument('--compact-prologue', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
+    parser.add_argument('--packed-checkpoints', action='store_true')
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -82,6 +83,8 @@ def main():
         raise ValueError('Compact prologue requires device-loop GDN')
     if options.batch_conv and not options.compact_prologue:
         raise ValueError('Batched convolution requires compact-prologue control')
+    if options.packed_checkpoints and not options.batch_conv:
+        raise ValueError('Packed checkpoints require batched convolution')
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -115,7 +118,7 @@ def main():
     if options.device_loop_gdn:
         output_path = root / 'full-gdn-device-loop.json'
         report.update(device_loop_gdn=True, native_t1_retained=True,
-                      device_loop_min_rows=8 if options.compact_prologue else 2,
+                      device_loop_min_rows=8 if options.compact_prologue and not options.packed_checkpoints else 2,
                       legacy_gdn_flags_describe_paired_control=True,
                       checkpoint_materialization='all internal prefixes; selected external checkpoint')
         if options.compact_prologue:
@@ -124,6 +127,10 @@ def main():
         if options.batch_conv:
             report.update(batched_convolution=True, dma_windows=True,
                           prior_full_model_run=34024642720, batched_convolution_prerequisite=34027345128)
+        if options.packed_checkpoints:
+            report.update(packed_convolution_checkpoints=True, prior_full_model_run=34027510486,
+                          packed_checkpoint_prerequisite=34028407207,
+                          checkpoint_materialization='all recurrent prefixes; all convolution prefixes in packed windows; selected external checkpoint')
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -149,6 +156,9 @@ def main():
             if options.batch_conv:
                 report['adapter_hashes'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                     for name in ('gdn_batched_conv.py', 'gdn_conv_windows.py', 'gdn_conv_windows.cpp')})
+            if options.packed_checkpoints:
+                report['adapter_hashes'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in ('gdn_conv_prefix_copy.py', 'gdn_conv_prefix_copy.cpp')})
         if options.skip_row_clones:
             ownership_hashes = {
                 "ttnn/cpp/ttnn/operations/data_movement/slice/slice.cpp": "817b571dc619eef7af7988ad90e3eda4a89632af3477ca935048b05dc52aea6f",
@@ -278,7 +288,8 @@ def main():
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                  reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                  hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
-                                 compact_prologue=options.compact_prologue, batch_conv=options.batch_conv)
+                                 compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
+                                 packed_checkpoints=options.packed_checkpoints)
             captured = None
             output = None
             try:
@@ -315,7 +326,8 @@ def main():
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                          hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
-                                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv)
+                                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
+                                         packed_checkpoints=options.packed_checkpoints)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -456,7 +468,8 @@ def main():
                         compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
-                        compact_prologue=options.compact_prologue, batch_conv=options.batch_conv)
+                        compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
+                        packed_checkpoints=options.packed_checkpoints)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

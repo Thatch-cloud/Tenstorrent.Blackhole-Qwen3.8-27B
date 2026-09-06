@@ -5,6 +5,11 @@ from model_batch import compact_gdn_enabled, device_loop_enabled, instance_overr
 
 
 class ModelBatchTests(unittest.TestCase):
+    def test_packed_checkpoint_experiment_probes_every_multirow_width(self):
+        for rows in (1, 2, 4, 8, 16):
+            self.assertEqual(device_loop_enabled(rows, True, True, True, True, True), rows > 1)
+            self.assertFalse(device_loop_enabled(rows, False, True, True, True, True))
+
     def test_device_loop_retains_native_t1_and_default(self):
         self.assertFalse(device_loop_enabled(1, True, True, True))
         for rows in (1, 2, 4, 8, 16):

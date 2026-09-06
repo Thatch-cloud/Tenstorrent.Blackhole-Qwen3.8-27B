@@ -10,6 +10,8 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(paired_control_flags(**flags, batch_conv=True), flags)
         self.assertEqual(paired_control_flags(**flags, batch_conv=False),
                          dict(flags, device_loop_gdn=False, compact_prologue=False))
+        self.assertEqual(paired_control_flags(**flags, batch_conv=True, packed_checkpoints=True),
+                         dict(flags, batch_conv=True))
 
     def test_paired_means_not_mixed_sample_ratio(self):
         samples = [dict(arm=arm, milliseconds=value) for arm, value in

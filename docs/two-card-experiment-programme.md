@@ -27,6 +27,16 @@ Experimental routing now keeps the previous path below T8. These are fixed verif
 blocks with a preselected checkpoint, not dynamic speculative committed throughput.
 This is not convolution token-loop fusion or a committed-throughput result.
 
+Newer checkpoint: parallel causal convolution windows use the unchanged native
+conv/gates kernel once across token rows, with aligned DMA window construction.
+Run34027510486 (`de6fd22`) passed full logits/state/valid-KV/rollback and reduced
+T16 verification to94.882/103.655ms at4K/16K, versus163.262/172.040ms paired controls.
+T8 improved to74.177/78.592ms; T1/T2/T4 retained previous paths. Packed convolution
+histories then passed native-oracle layer run34028407207 (`7a20340`), including
+every rollback prefix, and reduced T16 layer time3.006 to0.912ms. Its full-model
+integration is the next gate. This removes prefix materialization, not arithmetic;
+engine-level dynamic acceptance/commit and executable coding evaluation remain open.
+
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
 of this programme. The [execution ledger](experiment-execution.md) records individual
@@ -38,7 +48,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Compact-prologue device-loop full-model correctness passed; T16 paired ratios1.060/1.057 at4K/16K; route experimental T8/T16 only | Further convolution/packing/export attribution and fusion; dynamic checkpoint lifecycle; memory-pipeline prototypes |
+| E4 fusion/pipeline | DMA causal-window convolution passed full-model correctness; T16 paired ratios1.721/1.660 at4K/16K; packed-history layer gate passed | Packed-history full-model integration; dynamic checkpoint lifecycle; recurrent export and wider worker mappings |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
@@ -46,20 +56,20 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
 | E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
 
-Latest verified full-model T16 block costs (run **34024642720**, `8cb31c8`) are
-**163.227 ms at 4095 tokens** and **172.023 ms at 16383 tokens**. Full logits,
+Latest verified full-model T16 block costs (run **34027510486**, `de6fd22`) are
+**94.882 ms at 4095 tokens** and **103.655 ms at 16383 tokens**. Full logits,
 active GDN state, valid KV and corrected rollback passed. These are static verifier
 costs, not committed-token throughput: even perfect acceptance with zero drafting
-and commit overhead gives only about 98.02/93.01 tok/s for T16. The 200 committed
+and commit overhead gives only about168.63/154.36 tok/s for T16. The 200 committed
 token/s goal is not met; a sixteen-token cycle must fit within 80 ms including
 drafting and commit. T1 retains native handling.
 
-Current experiment: construct causal convolution windows from immutable input
-history and run the native convolution/gates kernel once with token rows treated
-as independent windows. GDN recurrence still runs sequentially inside its device
-loop. This removes per-token convolution dispatch without changing arithmetic;
-simulator and native-oracle gates precede any full-model adoption. All convolution
-prefixes remain available for acceptance decided after verification.
+Current experiment: retain packed post-convolution windows and restore any selected
+prefix through aligned DMA. All convolution prefixes remain available without
+separate per-token snapshots. The layer gate passed; full-model integration must
+still prove exactness and paired gains. GDN recurrence remains sequential inside
+its device loop, and the current full-model fixture still preselects an external
+checkpoint rather than implementing a dynamic speculative engine.
 
 Historical recurrence-kernel development:
 The first recurrence-only prototype retains BF16 state between tokens in L1 and
