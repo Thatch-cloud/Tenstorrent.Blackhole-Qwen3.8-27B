@@ -78,7 +78,10 @@ def main():
     parser.add_argument('--commit-dma', action='store_true')
     parser.add_argument('--captured-commit', action='store_true')
     parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
+    parser.add_argument('--replay-inputs', action='store_true')
     options = parser.parse_args()
+    if options.replay_inputs and (options.max_rows != 16 or not options.deferred_commit or not options.ordered_cache):
+        raise ValueError('Replay gate requires T16 retained histories and ordered cache')
     widths = verification_widths(options.max_rows, packed_checkpoints=options.packed_checkpoints,
         ordered_cache=options.ordered_cache, deferred_commit=options.deferred_commit, attribution=options.attribution)
     if options.coding_cost and not options.batch:
@@ -138,6 +141,10 @@ def main():
         report.update(commit_dma=True, commit_workers_per_chip=96,
             commit_dma_hashes={suffix: hashlib.sha256(Path(__file__).with_name(f'gdn_commit_dma.{suffix}').read_bytes()).hexdigest() for suffix in ('py', 'cpp')})
     report['captured_commit'] = options.captured_commit
+    if options.replay_inputs:
+        report.update(replay_inputs=True, replay_scope='Forced two-block trace reuse; no drafter or committed throughput',
+            replay_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                            for name in ('full_replay.py', 'verifier_inputs.py', 'gdn_records.py')})
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
     if options.coding_cost:
         output_path = root / "full-coding-cost.json"
@@ -440,7 +447,7 @@ def main():
                 raise AssertionError("Insufficient fixed prompt tokens")
             oracle = [prefill(prompt)]
             oracle_logits = []
-            for position in range(options.max_rows + 2):
+            for position in range(options.max_rows * (2 if options.replay_inputs else 1) + 2):
                 logits = decode(oracle[-1], length + position, False)
                 oracle_logits.append(logits)
                 oracle.append(argmax(logits))
@@ -564,6 +571,21 @@ def main():
                             raise AssertionError("Full-model negative control was not detected")
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
+        if options.replay_inputs:
+            from full_replay import verify_replay
+            for prompt, oracle in timing_fixtures:
+                for rows in (2, 16):
+                    for first_prefix in (0, 1, rows):
+                        for second_prefix in (1, rows):
+                            result = verify_replay(model, prompt, oracle, page_table, helpers, candidate_saved, replay_initial,
+                                rows=rows, first_prefix=first_prefix, second_prefix=second_prefix,
+                                prefill=prefill, decode=decode, save=save, restore=restore, state_digest=state_digest,
+                                live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host)
+                            report.setdefault('replay_checks', []).append(result)
+                            output_path.write_text(json.dumps(report, indent=2))
+                            print(json.dumps(result), flush=True)
+            if len(report.get('replay_checks', [])) != 12 * len(lengths):
+                raise AssertionError('Missing changed-metadata replay cases')
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")
         if options.batch and not options.attribution and len(report.get("batch_checks", [])) != len(lengths) * 2 * len(widths):
@@ -588,7 +610,7 @@ def main():
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
-            if len(report.get("timings", [])) != len(lengths) * 5:
+            if len(report.get("timings", [])) != len(lengths) * len(widths):
                 raise AssertionError("Missing full-model timing fixtures")
         if options.attribution and (len(report.get("attribution", [])) != 4 or
                                    not all(value["exact"] for value in report["attribution"])):

@@ -7,16 +7,73 @@ from gdn_records import RetainedGDNBlock
 
 class RecordTests(unittest.TestCase):
     def fixture(self, count=48):
-        operations = SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2)
+        operations = SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2,
+                                     synchronize_device=Mock())
         block = RetainedGDNBlock(4, operations)
+        mesh = object()
         for index in range(count):
             live = [object() for slot in range(5)]
-            state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:]),
+            state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh),
                 native_addresses=[(id(value), id(value)) for value in live], entry=[object()] * 5,
                 active=SimpleNamespace(restore=Mock()))
             result = dict(packed_checkpoints=True, states=SimpleNamespace(shape=(4, 24, 128, 128)), owned=[object()])
             block.append(state, result, [object() for slot in range(5)])
         return block
+
+    def test_replay_rearms_only_after_synchronized_commit_and_execution(self):
+        block = self.fixture()
+        with patch('gdn_records.restore_prefix'):
+            for epoch in range(3):
+                block.commit(epoch, synchronize=True)
+                self.assertTrue(block.replay_ready)
+                operation = Mock(return_value=None)
+                block.replay(operation)
+                operation.assert_called_once_with()
+                self.assertIsNone(block.selected_prefix)
+                self.assertEqual(block.replay_epoch, epoch + 1)
+                with self.assertRaises(ValueError):
+                    block.replay(operation)
+        self.assertEqual(block.operations.synchronize_device.call_count, 6)
+
+    def test_unsynchronized_or_failed_commit_cannot_replay(self):
+        for failure in ('unsynchronized', 'publication', 'synchronization'):
+            block = self.fixture()
+            if failure == 'synchronization':
+                block.operations.synchronize_device.side_effect = RuntimeError('device')
+            with patch('gdn_records.restore_prefix', side_effect=RuntimeError('device') if failure == 'publication' else None):
+                if failure == 'unsynchronized':
+                    block.commit(2)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        block.commit(2, synchronize=True)
+            operation = Mock()
+            with self.assertRaises(ValueError):
+                block.replay(operation)
+            operation.assert_not_called()
+
+    def test_failed_or_rebound_replay_is_poisoned(self):
+        for failure in ('binding', 'callback', 'synchronization', 'return-value', 'reentrancy'):
+            block = self.fixture()
+            with patch('gdn_records.restore_prefix'):
+                block.commit(2, synchronize=True)
+            operation = Mock(return_value=None)
+            if failure == 'binding':
+                block.records[-1][0].gdn.B = 1
+            elif failure == 'callback':
+                operation.side_effect = RuntimeError('device')
+            elif failure == 'synchronization':
+                block.operations.synchronize_device.side_effect = RuntimeError('device')
+            elif failure == 'return-value':
+                operation.return_value = object()
+            else:
+                operation.side_effect = lambda: block.replay(lambda: None)
+            with self.assertRaises((RuntimeError, ValueError)):
+                block.replay(operation)
+            with self.assertRaises(ValueError):
+                block.replay(lambda: None)
+            with self.assertRaises(ValueError):
+                block.commit(2)
+            self.assertEqual(block.replay_epoch, 0)
 
     def test_all_layers_commit_once_and_keep_records_until_trace_release(self):
         for prefix in range(5):

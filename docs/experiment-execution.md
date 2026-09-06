@@ -16,6 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Changed-metadata verifier replay (hardware gate pending)
+
+`full-verifier-replay` reuses one captured verifier across two blocks at4K/16K,
+T2/T16. First decisions0/1/T and second decisions1/T cover abort, partial and
+complete publication. Tokens, packed/singleton positions and RoPE are updated
+in place. Compare full logits, refreshed prefix histories/end checkpoints,
+native active state, valid KV, every inactive slot and two corrected tokens
+against fresh native serial references. These24 fixtures are not actual drafting
+or a committed-throughput benchmark.
+
+Retained records permit replay only after an explicitly synchronized successful
+commit; failed publication, synchronization, callback or rebound native state
+poisons reuse. Exactly one decision follows each successful replay epoch.
+Input staging already passed simulator T2/T16 at31/4095/16383; no new kernel math
+is introduced by this gate. Trace lifetime remains owned by the fixture and
+traces are released before their retained buffers.
+
 ### Captured prefix publication (hardware gate passed)
 
 Prebind and warm all prefix-specific DMA programs, then capture each publication
