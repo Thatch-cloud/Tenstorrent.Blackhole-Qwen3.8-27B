@@ -12,6 +12,7 @@ class ConvIntegrationTests(unittest.TestCase):
         gdn = SimpleNamespace(_row_proj=lambda value, weight: partial, tw={'out': object()},
                               mesh='mesh', tt_ccl='ccl', args=SimpleNamespace(ccl_topology=lambda: 'fabric'))
         operations = SimpleNamespace(reshape=lambda value, shape: calls.append(shape) or value,
+                                     deallocate=lambda value: None,
                                      DRAM_MEMORY_CONFIG='dram')
         def reduce(value, mesh, ccl, **kwargs):
             calls.append((value, mesh, ccl, kwargs))
@@ -22,6 +23,23 @@ class ConvIntegrationTests(unittest.TestCase):
         self.assertEqual(calls[1][1:], ('mesh', 'ccl', dict(cluster_axis=0, dim=3, topology='fabric', memory_config='dram')))
         self.assertIs(result['layer_output'], output)
         self.assertEqual(result['owned'], [output])
+
+    def test_output_projection_transfers_gated_input_ownership(self):
+        gated = SimpleNamespace(shape=(1, 2, 3072))
+        partial = SimpleNamespace(shape=(1, 2, 5120))
+        surviving = object()
+        freed = []
+        def project(value, weight):
+            freed.append(value)
+            return partial
+        gdn = SimpleNamespace(_row_proj=project, tw={'out': object()}, mesh=None, tt_ccl=None,
+                              args=SimpleNamespace(ccl_topology=lambda: None))
+        operations = SimpleNamespace(reshape=lambda value, shape: value, deallocate=freed.append,
+                                     DRAM_MEMORY_CONFIG='dram')
+        result = dict(output=gated, owned=[surviving, gated])
+        finish_output(gdn, result, operations, lambda value, *args, **kwargs: value)
+        self.assertEqual([id(value) for value in result['owned']], [id(surviving), id(partial)])
+        self.assertEqual([id(value) for value in freed], [id(gated), id(gated)])
 
     def test_compact_single_sequence_geometry(self):
         states = [SimpleNamespace(shape=(1, 1, 5120)) for index in range(4)]

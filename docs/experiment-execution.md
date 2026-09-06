@@ -99,6 +99,18 @@ Native recurrence uses L1 state while the candidate loads immutable DRAM state a
 loops locally. Report these differences and raw paired samples; no full-model or
 committed-token speedup follows from this isolated layer experiment.
 
+First full-layer run34022404895 (`e6b134f`) stopped during eager T1 result cleanup
+after exactness and both continuation prefixes passed: `ValueError: Both chips
+required` in the owned-buffer ledger. Device close completed normally; this was
+not a device timeout. The output helper now follows the native projection tail's
+ownership contract: consume/deallocate gated input after `_row_proj` and remove it
+from the retained ledger instead of inspecting it again at fixture cleanup.
+Regression coverage includes a projection that already consumes its input.
+Simulator T2 `20260906T084141Z-327` passed with the corrected helper (adapter hash
+`829e24de72c04759e8950e766c7e8d8aebaa2badc5d36cc7f3266642cb187f1a`),
+clean close/exit0;69 focused GDN,176 CI and55 simulator unit tests pass. Hardware
+retry is required before any timing or full-layer adoption claim. No reset needed.
+
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
 Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)

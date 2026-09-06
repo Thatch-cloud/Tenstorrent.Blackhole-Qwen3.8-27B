@@ -70,6 +70,8 @@ def restore_prefix(operations, result, entry, destinations, accepted):
 def finish_output(gdn, result, operations, reduce):
     rows = result['output'].shape[1]
     partial = gdn._row_proj(result['output'], gdn.tw['out'])
+    result['owned'] = [tensor for tensor in result['owned'] if tensor is not result['output']]
+    operations.deallocate(result['output'])
     partial = operations.reshape(partial, (1, 1, rows, partial.shape[-1]))
     output = reduce(partial, gdn.mesh, gdn.tt_ccl, cluster_axis=0, dim=3,
                     topology=gdn.args.ccl_topology(), memory_config=operations.DRAM_MEMORY_CONFIG)
