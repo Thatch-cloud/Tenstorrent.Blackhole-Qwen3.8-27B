@@ -105,6 +105,11 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   exactly against native sequential B1. Positions/page views are preallocated static
   fixtures, not a serving integration. Negative controls omit writes or map the
   same token sequence to different pages. No speed claim or promotion on divergence.
+- `attention-timing`: repeat the attention gate, then compare captured sequential
+  B1 and batched layer calls in three ABBA blocks per fixture, 30 replays per sample.
+  Validate outputs and all KV values before and after timing. Cache reset and host
+  validation are outside the timing interval; serial KV write overhead remains
+  inside the candidate. This short-context layer cost is not full-model tok/s.
 
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.

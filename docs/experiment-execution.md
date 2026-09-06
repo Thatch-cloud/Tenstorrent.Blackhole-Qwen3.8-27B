@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E3 attention shared-page gate (implementation, hardware result pending)
+### E3 attention shared-page gate (passed 34000512864)
 
 Source-only run 34000023393 exported the actual K-image fused attention source
 (`attention/tp.py`, SHA256 `e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a`).
@@ -33,6 +33,14 @@ outputs plus the entire physical K/V pool must match native sequential B1 exactl
 on both chips; omitted writes and wrong-page writes must be detected. Static host
 position/page fixtures are not a device-dynamic verifier or serving integration.
 This gate deliberately makes no throughput claim; numerical drift blocks promotion.
+
+Hardware run 34000512864 (`fbfefa4`) passed all 60 checks, with zero unequal
+output/KV values on either chip, and 30 pairs of omitted-write/wrong-page controls.
+This validates one real-weight attention layer (layer 3), not all 16 attention
+layers or a full-model batched verifier. `attention-timing` adds paired captured
+serial/batched layer timing: three ABBA blocks, 30 replays per sample, with exact
+output and complete KV revalidation before and after measurement. Timing results
+are pending; no device-dynamic page/position integration has been implemented.
 
 | Track | Current status | Required next evidence |
 | --- | --- | --- |

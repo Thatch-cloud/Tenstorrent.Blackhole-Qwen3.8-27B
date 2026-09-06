@@ -1,9 +1,11 @@
 """Real-weight attention batching gate; static fixture positions, not a serving verifier."""
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import time
 
 from attention_batch import SerialCacheWriter, serial_tail
 
@@ -13,6 +15,9 @@ def main():
         raise RuntimeError("Explicit hardware allocation required")
     if os.environ.get("TT_METAL_SIMULATOR") or os.environ.get("TT_METAL_SLOW_DISPATCH_MODE"):
         raise RuntimeError("Fast-dispatch hardware required")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timing", action="store_true")
+    options = parser.parse_args()
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_attn_layer
@@ -21,9 +26,9 @@ def main():
     from models.demos.blackhole.qwen36.tt.model_config import Qwen36ModelArgs
     from models.tt_transformers.tt.ccl import TT_CCL
 
-    report = dict(passed=False, checks=[], negative_controls=[], eligible_for_serving_gate=False,
+    report = dict(passed=False, checks=[], negative_controls=[], timings=[], eligible_for_serving_gate=False,
                   scope="One real-weight attention layer, TP2, static positions, serialized shared-page writes; no full-model speed claim")
-    output_path = Path("/experiment/results/attention-batch.json")
+    output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
     mesh = None
     traces = []
     try:
@@ -144,6 +149,53 @@ def main():
                             traces.remove(trace)
                         release(outputs)
                         output_path.write_text(json.dumps(report, indent=2))
+                    if options.timing and all(check["exact"] for check in report["checks"][-2:]):
+                        timed_traces = {}
+                        timed_outputs = {}
+                        for arm, operation in (("serial", reference), ("batch", candidate)):
+                            reset()
+                            trace = ttnn.begin_trace_capture(mesh, cq_id=0)
+                            outputs = operation()
+                            ttnn.end_trace_capture(mesh, trace, cq_id=0)
+                            traces.append(trace)
+                            timed_traces[arm] = trace
+                            timed_outputs[arm] = outputs
+                            reset()
+                            ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+                            traced_outputs = [torch.cat([host(value)[chip] for value in outputs], dim=-2) for chip in range(2)]
+                            if not equal(difference(traced_outputs, expected_outputs)) or any(
+                                not equal(difference(host(cache), expected))
+                                for cache, expected in zip(caches, expected_caches, strict=True)
+                            ):
+                                raise AssertionError(f"Timing trace {arm} differs from native B1 oracle")
+                        for block in range(3):
+                            samples = []
+                            for arm in ("serial", "batch", "batch", "serial"):
+                                reset()
+                                ttnn.execute_trace(mesh, timed_traces[arm], cq_id=0, blocking=True)
+                                ttnn.synchronize_device(mesh)
+                                started = time.perf_counter()
+                                for _ in range(30):
+                                    ttnn.execute_trace(mesh, timed_traces[arm], cq_id=0, blocking=False)
+                                ttnn.synchronize_device(mesh)
+                                elapsed_ms = (time.perf_counter() - started) * 1000 / 30
+                                samples.append(dict(arm=arm, milliseconds_per_block=elapsed_ms))
+                                traced_outputs = [torch.cat([host(value)[chip] for value in timed_outputs[arm]], dim=-2)
+                                                  for chip in range(2)]
+                                if not equal(difference(traced_outputs, expected_outputs)) or any(
+                                    not equal(difference(host(cache), expected))
+                                    for cache, expected in zip(caches, expected_caches, strict=True)
+                                ):
+                                    raise AssertionError("Repeated timing replay changed outputs or KV")
+                            serial_ms = sum(sample["milliseconds_per_block"] for sample in samples if sample["arm"] == "serial") / 2
+                            batch_ms = sum(sample["milliseconds_per_block"] for sample in samples if sample["arm"] == "batch") / 2
+                            report["timings"].append(dict(seed=seed, start=start, rows=rows, block=block, repeats=30,
+                                                         samples=samples, serial_ms=serial_ms, batch_ms=batch_ms,
+                                                         speedup=serial_ms / batch_ms))
+                        for arm, trace in timed_traces.items():
+                            ttnn.release_trace(mesh, trace)
+                            traces.remove(trace)
+                            release(timed_outputs[arm])
                     reset()
                     missing_write_detected = any(not equal(difference(host(cache), expected))
                                                  for cache, expected in zip(caches, expected_caches, strict=True))
@@ -164,6 +216,8 @@ def main():
             release(initial + caches + [page_single])
         if len(report["checks"]) != 60 or not all(check["exact"] for check in report["checks"]):
             raise AssertionError("Batched attention does not satisfy the exact native B1 gate")
+        if options.timing and len(report["timings"]) != 90:
+            raise AssertionError("Missing paired timing blocks")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
