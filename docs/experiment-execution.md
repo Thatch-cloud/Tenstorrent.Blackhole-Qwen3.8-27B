@@ -63,8 +63,13 @@ DMA publication and corrected continuations.
 
 The selection, retained replay and request helpers now accept and forward an
 explicit `norm_batch` option, including warm and captured verifier buckets.
-The CLI now allows the retained-replay gate but still rejects selection/request
-combinations; this wiring is not a hardware request-path certification. Host validation passes
+The CLI allows retained replay and the independent static `full-norm-selection`
+gate, whose prerequisite is the full-logit pass above. Selection compares host
+argmax/full-logit readback with device force-argmax/ID readback using the same
+norm-batch verifier, not old versus new GDN kernels. Its device logits and IDs
+must match the native reference on both chips. Hardware concurrency serializes
+it behind the running replay gate. Request combinations remain rejected until
+both gates are inspected; this wiring is not a request-path certification. Host validation passes
 337 CI tests,55 simulator-support tests and51 speculative-session tests.
 Serving defaults remain unchanged.
 
