@@ -27,6 +27,8 @@ def release_owned(operations, tensors):
 
 def restore_prefix(operations, result, entry, destinations, accepted):
     rows = result['states'].shape[0]
+    packed_checkpoints = result.get('packed_checkpoints', False)
+    windows = result.get('packed_conv_states', []) if packed_checkpoints else []
     if rows not in (1, 2, 4, 8, 16) or tuple(result['states'].shape) != (rows, 24, 128, 128):
         raise ValueError('Supported recurrent prefix geometry required')
     if type(accepted) is not int or not 0 <= accepted <= rows:
@@ -36,14 +38,20 @@ def restore_prefix(operations, result, entry, destinations, accepted):
     if any(prefix is not None and (len(prefix) != 4 or any(tuple(value.shape) != (1, 1, 5120) for value in prefix))
            for prefix in result['conv_prefixes']):
         raise ValueError('Complete compact convolution prefixes required')
-    if accepted and result['conv_prefixes'][accepted - 1] is None:
+    if accepted and result['conv_prefixes'][accepted - 1] is None and not packed_checkpoints:
         raise ValueError('Requested convolution prefix was not materialized')
     expected = [(1, 24, 128, 128), *[(1, 1, 5120)] * 4]
     if any(tuple(value.shape) != shape for values in (entry, destinations)
            for value, shape in zip(values, expected, strict=True)):
         raise ValueError('Compact B1 restore shapes required')
+    if packed_checkpoints:
+        from gdn_conv_prefix_copy import copy_prefix, validate_prefix
+        validate_prefix([tuple(value.shape) for value in windows],
+                        [tuple(value.shape) for value in destinations[1:]], max(1, accepted))
+        if windows[0].shape[1] != rows or result.get('mesh') is None:
+            raise ValueError('Packed convolution and recurrent prefix geometry must match')
     destination_addresses = [addresses(operations, value) for value in destinations]
-    protected = [*entry, result['states'], *[value for prefix in result['conv_prefixes'] if prefix is not None for value in prefix]]
+    protected = [*entry, result['states'], *windows, *[value for prefix in result['conv_prefixes'] if prefix is not None for value in prefix]]
     protected_addresses = {addresses(operations, value) for value in protected}
     def overlaps(left, right):
         return any(first == second for first, second in zip(left, right, strict=True))
@@ -58,10 +66,15 @@ def restore_prefix(operations, result, entry, destinations, accepted):
         if accepted:
             sliced = operations.slice(result['states'], (accepted - 1, 0, 0, 0),
                 (accepted, 24, 128, 128), memory_config=operations.DRAM_MEMORY_CONFIG)
-            sources = [sliced, *result['conv_prefixes'][accepted - 1]]
+            if packed_checkpoints:
+                copy_prefix(result['mesh'], windows, destinations[1:], accepted)
+                sources = [sliced]
+            else:
+                sources = [sliced, *result['conv_prefixes'][accepted - 1]]
         else:
             sources = entry
-        for source, destination in zip(sources, destinations, strict=True):
+        targets = destinations[:1] if accepted and packed_checkpoints else destinations
+        for source, destination in zip(sources, targets, strict=True):
             operations.copy(source, destination)
         if [addresses(operations, value) for value in destinations] != destination_addresses:
             raise AssertionError('Restore changed stable state addresses')

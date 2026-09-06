@@ -96,6 +96,14 @@ harvesting differences mean simulation does not certify production fast dispatch
 resource fit or fabric timing. No real-card reset or hardware job is launched here.
 # Parallel causal convolution windows
 
+Add `--window-prefix` to test selection from packed post-convolution windows;
+add `--packed-checkpoints` to retain those windows instead of separate prefix
+snapshots. Both require a multirow batched-convolution fixture; packed checkpoints
+also require `--dma-windows`. `--continuation` validates the new restore path,
+including prefix0 and stale-state detection. Standalone selection passed T4/seed2
+and T16/seed1 (`20260906T103225Z-321`, `20260906T103340Z-466`); packed integration
+passed T2/seed0 and T16/seed1 (`20260906T103845Z-544`, `20260906T104119Z-721`).
+
 Add `--conv --norm-gate --batch-conv` to `run-gdn-multitoken.sh` to compare one
 native convolution/gates call over causal token windows against serial T1 calls.
 Use `--continuation` for every accepted-prefix restore and stale-state control,

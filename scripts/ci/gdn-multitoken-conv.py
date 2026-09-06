@@ -21,9 +21,12 @@ def main():
     parser.add_argument('--paired-timing', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--dma-windows', action='store_true')
+    parser.add_argument('--packed-checkpoints', action='store_true')
     options = parser.parse_args()
     if options.dma_windows and not options.batch_conv:
         parser.error('--dma-windows requires --batch-conv')
+    if options.packed_checkpoints and not options.dma_windows:
+        parser.error('--packed-checkpoints requires --dma-windows')
     if options.paired_timing and not options.full_layer:
         parser.error('--paired-timing requires --full-layer')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
@@ -55,6 +58,8 @@ def main():
                   full_layer=options.full_layer, paired_timing=[],
                   batched_convolution=options.batch_conv,
                   dma_windows=options.dma_windows,
+                  packed_checkpoints=options.packed_checkpoints,
+                  prefix_copy_hashes={suffix: hashlib.sha256(Path(__file__).with_name('gdn_conv_prefix_copy.' + suffix).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if options.packed_checkpoints else {},
                   window_dma_hashes={suffix: hashlib.sha256(Path(__file__).with_name('gdn_conv_windows.' + suffix).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if options.dma_windows else {},
                   batched_adapter_sha256=hashlib.sha256(Path(__file__).with_name('gdn_batched_conv.py').read_bytes()).hexdigest() if options.batch_conv else None,
                   scope='One real-weight TP2 GDN projected-input/conv/gates/recurrence/norm path; optional all-prefix two-step native continuation; excludes output projection, attention, full model and timing')
@@ -147,11 +152,12 @@ def main():
                                 ttnn.copy(initial, destination)
                         ttnn.synchronize_device(mesh)
 
-                    def candidate(use_batched=options.batch_conv):
+                    def candidate(use_batched=options.batch_conv, use_packed=options.packed_checkpoints):
                         source = original(packed_input, rows, ttnn.L1_MEMORY_CONFIG) if options.full_layer else projected
                         operation = run_batched_projected if use_batched else run_projected
                         result = operation(mesh, source, entry[0], working, list(gdn.tw['conv_taps']),
                             gdn.tw['dt_bias'], gdn.tw['neg_exp_A'], gdn.tw['norm_w'], kernels,
+                            **(dict(packed_checkpoints=True) if use_batched and use_packed else {}),
                             **(dict(dma_windows=True) if use_batched and options.dma_windows else {}))
                         if options.full_layer:
                             result['owned'].append(source)
@@ -161,14 +167,16 @@ def main():
 
                     def validate(result, mode, record=True):
                         outputs, states = host(result['layer_output'] if options.full_layer else result['output']), host(result['states'])
+                        packed_history = [host(value) for value in result['packed_conv_states']] if result.get('packed_checkpoints') else None
                         for token in range(rows):
                             actual_output = [value[:, :, token:token + 1] if options.full_layer else value[:, token:token + 1] for value in outputs]
                             if not exact(actual_output, expected[token][0]):
                                 raise AssertionError(f'Gated output mismatch {token=} {mode=}')
                             if not exact([value[token:token + 1] for value in states], expected[token][1]):
                                 raise AssertionError(f'Recurrent prefix mismatch {token=} {mode=}')
-                            for tap, value in enumerate(result['conv_prefixes'][token]):
-                                if not exact(host(value), expected[token][2][tap]):
+                            for tap in range(4):
+                                actual_history = [value[:, token:token + 1] for value in packed_history[tap]] if packed_history is not None else host(result['conv_prefixes'][token][tap])
+                                if not exact(actual_history, expected[token][2][tap]):
                                     raise AssertionError(f'Convolution prefix mismatch {token=} {tap=} {mode=}')
                         if not all(exact(host(value), saved) for value, saved in zip(entry, entry_host, strict=True)):
                             raise AssertionError('Initial state snapshots modified')
@@ -241,6 +249,8 @@ def main():
                     release_owned(ttnn, captured['owned'])
                     if options.paired_timing and seed == 0:
                         def control():
+                            if options.packed_checkpoints:
+                                return candidate(True, False)
                             if options.batch_conv:
                                 return candidate(False)
                             owned, outputs, states, conv_prefixes = [], [], [], []
@@ -279,6 +289,9 @@ def main():
                         if options.batch_conv:
                             timing.update(scope='Paired full GDN layer: serial versus parallel-window native convolution; both batched projections, device-loop recurrence, all DRAM prefixes and native final commit; not full-model throughput',
                                           control_recurrence_state='immutable initial DRAM plus device-local loop')
+                        if options.packed_checkpoints:
+                            timing.update(scope='Paired full GDN layer: packed versus separately materialized convolution prefixes; both DMA-built causal windows, native batched convolution, device-loop recurrence and native final commit; every logical prefix available; not full-model throughput',
+                                          checkpoint_policy='all logical prefixes; packed candidate and separate control tensors')
                         report['paired_timing'].append(timing)
                         for arm in arms:
                             ttnn.release_trace(mesh, timing_traces.pop(arm))

@@ -12,7 +12,7 @@ def history_windows(rows):
 
 
 def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,
-                          operations=None, *, conv_checkpoints=None, hoist_input=False, dma_windows=False):
+                          operations=None, *, conv_checkpoints=None, hoist_input=False, dma_windows=False, packed_checkpoints=False):
     if operations is None:
         import ttnn as operations
     rows = validate_projected(tuple(projected.shape), conv_states)
@@ -60,26 +60,32 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
             dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
             channels=5120, a_col=8192, b_col=8216)
         owned.extend(packed)
-        shifted = [layout(window, operations.ROW_MAJOR_LAYOUT) for window in windows]
-        prefixes = []
-        for token in range(rows):
-            prefix = None
-            if token + 1 in selected:
-                prefix = [layout(sliced(window, (0, token, 0), (1, token + 1, 5120)), operations.TILE_LAYOUT)
-                          for window in shifted]
-            prefixes.append(prefix)
+        prefixes = [None] * rows
+        if not packed_checkpoints:
+            shifted = [layout(window, operations.ROW_MAJOR_LAYOUT) for window in windows]
+            for token in range(rows):
+                if token + 1 in selected:
+                    prefixes[token] = [layout(sliced(window, (0, token, 0), (1, token + 1, 5120)), operations.TILE_LAYOUT)
+                                       for window in shifted]
         z = sliced(projected, (0, 0, 5120), (1, rows, 8192))
         weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
         if addresses(operations, weights) != addresses(operations, norm_w):
             own(weights)
         output, states = execute(mesh, *packed, initial, kernels, z=z, norm_w=weights)
         owned.extend([output, states])
-        for source, destination in zip(prefixes[-1], conv_states, strict=True):
-            operations.copy(source, destination)
+        if packed_checkpoints:
+            from gdn_conv_prefix_copy import copy_prefix
+            copy_prefix(mesh, windows, conv_states, rows)
+        else:
+            for source, destination in zip(prefixes[-1], conv_states, strict=True):
+                operations.copy(source, destination)
         if [addresses(operations, state) for state in conv_states] != original_addresses:
             raise AssertionError('Batched convolution changed stable state addresses')
-        return dict(output=output, states=states, conv_prefixes=prefixes, owned=owned,
-                    materialized_conv_prefixes=selected, hoisted_input=True, batched_convolution=True, dma_windows=dma_windows)
+        return dict(output=output, states=states, conv_prefixes=prefixes, owned=owned, packed_conv_states=windows,
+                    mesh=mesh, packed_checkpoints=packed_checkpoints,
+                    materialized_conv_prefixes=() if packed_checkpoints else selected,
+                    available_conv_prefixes=tuple(range(1, rows + 1)) if packed_checkpoints else selected,
+                    hoisted_input=True, batched_convolution=True, dma_windows=dma_windows)
     except BaseException:
         release_owned(operations, owned)
         raise

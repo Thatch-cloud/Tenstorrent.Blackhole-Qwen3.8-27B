@@ -6,6 +6,16 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_packed_checkpoints_are_opt_in(self):
+        adapter, active = self.fixture()
+        self.assertFalse(adapter.packed_checkpoints)
+        adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = True
+        with patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[])) as run, \
+                patch('gdn_device_loop_state.restore_prefix'):
+            adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], 1)
+        self.assertEqual(run.call_args.kwargs, dict(dma_windows=True, packed_checkpoints=True))
+
     def test_batched_dma_uses_same_selected_and_final_publication(self):
         adapter, active = self.fixture()
         adapter.compact_prologue = adapter.batch_conv = adapter.dma_windows = True

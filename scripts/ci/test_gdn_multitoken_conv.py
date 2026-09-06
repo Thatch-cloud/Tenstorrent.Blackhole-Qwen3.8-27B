@@ -1,10 +1,39 @@
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from gdn_multitoken_conv import addresses, convolution_checkpoints, finish_output, release_owned, restore_prefix, validate_projected
 
 
 class ConvIntegrationTests(unittest.TestCase):
+    def test_packed_history_accepts_every_prefix_after_verification(self):
+        for accepted in range(5):
+            operations, result, entry, destinations, copies, slices, freed = self.restore_fixture(4)
+            result.update(packed_checkpoints=True, packed_conv_states=[SimpleNamespace(shape=(1, 4, 5120)) for slot in range(4)],
+                          conv_prefixes=[None] * 4, mesh='mesh')
+            with patch('gdn_conv_prefix_copy.copy_prefix') as copy:
+                restore_prefix(operations, result, entry, destinations, accepted)
+            if accepted:
+                copy.assert_called_once_with('mesh', result['packed_conv_states'], destinations[1:], accepted)
+                self.assertEqual(len(copies), 1)
+            else:
+                copy.assert_not_called()
+                self.assertEqual(len(copies), 5)
+
+    def test_packed_history_shape_and_alias_fail_before_writes(self):
+        for invalid in ('rows', 'alias', 'mesh'):
+            operations, result, entry, destinations, copies, slices, freed = self.restore_fixture(4)
+            windows = [SimpleNamespace(shape=(1, 2 if invalid == 'rows' else 4, 5120)) for slot in range(4)]
+            result.update(packed_checkpoints=True, packed_conv_states=windows, conv_prefixes=[None] * 4,
+                          mesh=None if invalid == 'mesh' else 'mesh')
+            if invalid == 'alias':
+                operations.get_device_tensors = lambda value: [SimpleNamespace(buffer_address=lambda: id(destinations[1]) if value is windows[0] else id(value))] * 2
+            with patch('gdn_conv_prefix_copy.copy_prefix') as copy:
+                with self.assertRaises(ValueError):
+                    restore_prefix(operations, result, entry, destinations, 1)
+            copy.assert_not_called()
+            self.assertEqual(copies, [])
+
     def test_sparse_convolution_policy_keeps_final_and_rejects_invalid_prefixes(self):
         self.assertEqual(convolution_checkpoints(4, None), (1, 2, 3, 4))
         self.assertEqual(convolution_checkpoints(4, (4, 2)), (2, 4))

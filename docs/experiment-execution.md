@@ -16,6 +16,43 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Packed convolution checkpoints (simulator passed; hardware next)
+
+The next isolated experiment retains the four post-convolution `[1,T,5120]`
+tensors as immutable packed histories, rather than materializing four separate
+compact tensors for every prefix. `gdn_conv_prefix_copy` restores any nonzero
+prefix after verification with one aligned, arithmetic-free DMA launch. Prefix0
+continues to use the entry snapshot. Guards reject out-of-range selections,
+shape mismatches and aliases on either chip before submitting writes.
+
+AtT16 this changes convolution-prefix storage from20MiB to1.25MiB per layer per
+chip (BF16 tile padding included); recurrent-prefix exports are unchanged.
+It does not implement an engine-level draft/accept/commit lifecycle. In particular,
+the current full-model adapter still selects a checkpoint in advance and releases
+its other records at the layer boundary; no dynamic serving claim is made.
+
+Standalone prefix-copy simulator fixtures `20260906T103225Z-321` (T4/seed2) and
+`20260906T103340Z-466` (T16/seed1) passed all4/all16 selections with clean close.
+The development fixture `20260906T103050Z-328` passed kernel comparisons but failed
+because its new cleanup block referenced model-adapter-only variables. Cleanup
+scope was corrected before these passing retries; the failed run is not a pass.
+
+Packed integration fixtures `20260906T103845Z-544` (T2/seed0) and
+`20260906T104119Z-721` (T16/seed1) passed every output/recurrent/history prefix.
+T2 additionally passed all3 corrected-prefix continuations and a stale-state
+control; T16 passed synthetic local output projection. Adapter SHA256:
+`84d8af2bd14ffd0d133c06b3cf777635671cb40d7497abcb16d37ebe3c4baa03`.
+Prefix-copy Python/kernel hashes:
+`06bfde0ee1d8503128b44818a98ce4cc0048b86f37c3f2d11cf926426a7cab38` /
+`31fc2a0e886eb0b85239fa196ca2c571d4eb4124b84c4eb840b6be2f2a71fa7f`.
+195 CI and55 simulator unit tests pass. The hardware layer gate compares packed
+storage against the previous DMA-window/batched-convolution candidate with
+separately materialized prefixes, preserving all logical checkpoints in both arms.
+Packed model-adapter fixture `20260906T104508Z-326` also passed all3 prefix
+selections atT2/seed2, exact final active-slot publication and inactive-slot
+preservation, with clean close and exit0. This gate does not enable packed
+checkpoints in the full-model suite yet.
+
 ### Parallel causal convolution windows (hardware passed 34026768263)
 
 `gdn_batched_conv.py` builds each token's four-tap window from entry history and

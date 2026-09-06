@@ -32,11 +32,17 @@ def main():
     parser.add_argument('--conv', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--dma-windows', action='store_true')
+    parser.add_argument('--window-prefix', action='store_true')
+    parser.add_argument('--packed-checkpoints', action='store_true')
     parser.add_argument('--continuation', action='store_true')
     parser.add_argument('--output-projection', action='store_true')
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
     args = parser.parse_args()
+    if args.packed_checkpoints and (not args.dma_windows or args.rows == 1):
+        parser.error('--packed-checkpoints requires --dma-windows with T>1')
+    if args.window_prefix and (not args.batch_conv or args.rows == 1):
+        parser.error('--window-prefix requires --batch-conv with T>1')
     if args.dma_windows and not args.batch_conv:
         parser.error('--dma-windows requires --batch-conv')
     if args.batch_conv and not args.conv:
@@ -59,6 +65,9 @@ def main():
                   convolution=args.conv,
                   batched_convolution=args.batch_conv,
                   dma_windows=args.dma_windows,
+                  window_prefix_checks=0,
+                  packed_checkpoints=args.packed_checkpoints,
+                  window_prefix_hashes={suffix: hashlib.sha256((Path(__file__).resolve().parents[2] / ('scripts/ci/gdn_conv_prefix_copy.' + suffix)).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if args.window_prefix or args.packed_checkpoints else {},
                   window_dma_hashes={suffix: hashlib.sha256((Path(__file__).resolve().parents[2] / ('scripts/ci/gdn_conv_windows.' + suffix)).read_bytes()).hexdigest() for suffix in ('py', 'cpp')} if args.dma_windows else {},
                   batched_adapter_sha256=hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_batched_conv.py').read_bytes()).hexdigest() if args.batch_conv else None,
                   continuation_enabled=args.continuation,
@@ -133,11 +142,12 @@ def main():
                 candidate_projected = upload(projected)
                 result = candidate(mesh, candidate_projected, initial, candidate_conv,
                                        taps, dt_bias, neg_exp_A, norm_w, kernels,
+                                       **(dict(packed_checkpoints=True) if args.packed_checkpoints else {}),
                                        **(dict(dma_windows=True) if args.dma_windows else {}))
                 stage('conv-multitoken-readback')
                 outputs, states = host(result['output']), host(result['states'])
                 for token in range(args.rows):
-                    prefix = [host(value) for value in result['conv_prefixes'][token]]
+                    prefix = [[value[:, token:token + 1] for value in host(window)] for window in result['packed_conv_states']] if result.get('packed_checkpoints') else [host(value) for value in result['conv_prefixes'][token]]
                     for chip in range(2):
                         if not torch.equal(outputs[chip][:, token:token + 1], expected[token][0][chip]):
                             raise AssertionError(f'Convolution-chain output mismatch {token=} {chip=}')
@@ -171,7 +181,8 @@ def main():
                         _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
-                    adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows)
+                    adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows,
+                                              args.packed_checkpoints)
                     checkpoint = active.allocate()
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):
@@ -198,6 +209,18 @@ def main():
                         report['model_adapter_checks'] += 1
                     adapter.close()
                     release_owned(ttnn, [*checkpoint, *full_entry, *live, projected_device, dummy])
+                if args.window_prefix:
+                    from gdn_conv_prefix_copy import copy_prefix
+                    destinations = [upload(value) for value in conv_host]
+                    for accepted in range(1, args.rows + 1):
+                        stage('packed-window-prefix-copy', accepted=accepted)
+                        copy_prefix(mesh, result['packed_conv_states'], destinations, accepted)
+                        for tap, value in enumerate(destinations):
+                            if not all(torch.equal(actual, control) for actual, control in zip(host(value), expected[accepted - 1][2][tap], strict=True)):
+                                raise AssertionError('Packed convolution prefix copy mismatch')
+                        report['window_prefix_checks'] += 1
+                    for value in destinations:
+                        ttnn.deallocate(value)
                 if args.output_projection:
                     stage('local-output-projection')
                     weights = upload((torch.randn(3072, 128) * 0.01).bfloat16())
