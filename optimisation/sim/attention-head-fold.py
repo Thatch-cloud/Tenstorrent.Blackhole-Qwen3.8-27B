@@ -1,6 +1,7 @@
 """Simulator-only attention folding probe against native serial causal SDPA."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -22,6 +23,7 @@ def main():
     parser.add_argument('--start', type=int, choices=(15, 31, 63, 127, 4095, 4096, 16383, 16384), default=63)
     parser.add_argument('--finite-mask', action='store_true')
     parser.add_argument('--grouped', action='store_true')
+    parser.add_argument('--max-group-rows', type=int, choices=(4, 8, 16, 32), default=4)
     parser.add_argument('--device-layout', action='store_true')
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
@@ -30,18 +32,23 @@ def main():
     args = parser.parse_args()
     if args.dma_layout and not args.device_layout:
         parser.error('DMA layout requires the device-layout oracle checks')
+    if args.device_layout and args.max_group_rows > 4:
+        parser.error('Device layout currently supports groups up to four rows')
     if args.start + args.rows > args.capacity or args.capacity % args.chunk_size:
         parser.error('Candidate cache view must cover positions and contain complete chunks')
     if args.device_layout and not args.grouped and args.rows > 4:
         parser.error('Device layout requires groups of at most four queries')
-    if args.grouped and any(group['signature'][1] % 64 for group in chunk_groups(args.start, args.rows)):
+    if args.grouped and any(group['signature'][1] % 64 for group in chunk_groups(args.start, args.rows, max_group_rows=args.max_group_rows)):
         parser.error('Grouped probe requires complete native cache-page views')
     path = Path(os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, backend='ttsim', rows=args.rows, start=args.start, finite_mask=args.finite_mask,
         capacity=args.capacity, chunk_size=args.chunk_size,
         grouped=args.grouped, seed=args.seed,
+        max_group_rows=args.max_group_rows, tree_scratch_rounds=os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') == '1',
         device_layout=args.device_layout, dma_layout=args.dma_layout,
         scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
+    report['runtime_library_sha256'] = hashlib.sha256((Path(os.environ['TT_METAL_HOME']) /
+        'build_Release/lib/_ttnncpp.so').read_bytes()).hexdigest()
     mesh = None
     owned = []
 
@@ -96,7 +103,7 @@ def main():
             owned.append(native)
             outputs.append(host(native))
         expected = [torch.cat([output[chip] for output in outputs], dim=1) for chip in range(2)]
-        groups = chunk_groups(args.start, args.rows) if args.grouped else [
+        groups = chunk_groups(args.start, args.rows, max_group_rows=args.max_group_rows) if args.grouped else [
             dict(offset=0, rows=args.rows, signature=(args.chunk_size, args.capacity))]
         report['groups'] = groups
         grouped_outputs = []
@@ -142,7 +149,7 @@ def main():
             positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)
                          for offset in range(args.rows)]
             reader = GroupedAttentionReader(ttnn, mesh, args.start, args.rows,
-                torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload)
+                torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload, dma_layout=args.dma_layout)
             result = reader(device_query, keys, values, page_table_tensor=pages, cur_pos_tensor=positions[0],
                 scale=0.0625, program_config=native_config, memory_config=ttnn.L1_MEMORY_CONFIG)
             owned.append(result)

@@ -19,9 +19,12 @@ def main():
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--ordered-cache", action="store_true")
     parser.add_argument("--grouped", action="store_true")
+    parser.add_argument('--dma-layout', action='store_true')
     options = parser.parse_args()
     if options.grouped and not options.ordered_cache:
         parser.error('--grouped requires --ordered-cache')
+    if options.dma_layout and not options.grouped:
+        parser.error('--dma-layout requires --grouped')
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_attn_layer
@@ -34,9 +37,12 @@ def main():
                   scope="One real-weight attention layer, TP2, static positions, serialized shared-page writes; no full-model speed claim")
     report['ordered_cache'] = options.ordered_cache
     report['grouped'] = options.grouped
+    report['dma_layout'] = options.dma_layout
     report['timing_control'] = 'Batched attention with serial cache writes and B1 SDPA' if options.ordered_cache else 'Native serial B1 attention'
     if options.grouped:
         report['timing_control'] = 'Identical ordered cache and batched projections; native B1 SDPA only'
+    if options.dma_layout:
+        report['timing_control'] = 'Identical grouped attention, ordered cache and projections; stock layout chain versus DMA'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
 
     def stage(name, **details):
@@ -129,10 +135,16 @@ def main():
                     writer = OrderedCacheWriter(mesh, ttnn, kernels) if options.ordered_cache else serial_writer
                     reader = SerialAttentionReader(ttnn, singleton_positions, [page_single] * rows) if options.ordered_cache else None
                     grouped_reader = None
+                    control_reader = reader
+                    stock_grouped_reader = None
                     if options.grouped:
                         from attention_grouped import GroupedAttentionReader
                         grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
-                            singleton_positions, page_single, upload)
+                            singleton_positions, page_single, upload, dma_layout=options.dma_layout)
+                        if options.dma_layout:
+                            stock_grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
+                                singleton_positions, page_single, upload)
+                            control_reader = stock_grouped_reader
                     tail = serial_tail(attention, writer, ttnn, grouped_reader or reader)
 
                     def reference():
@@ -142,7 +154,7 @@ def main():
                     def candidate(control=False):
                         selected_writer = serial_writer if control and not options.grouped else writer
                         before = selected_writer.calls
-                        attention._decode_from_prep = serial_tail(attention, selected_writer, ttnn, reader) if control else tail
+                        attention._decode_from_prep = serial_tail(attention, selected_writer, ttnn, control_reader) if control else tail
                         try:
                             result = attention.forward_decode(packed, packed_position, cos, sin, page_table=packed_pages)
                             if selected_writer.calls - before != 2:
@@ -260,6 +272,8 @@ def main():
                     release([value for pair in singleton_rope for value in pair])
                     if grouped_reader is not None:
                         grouped_reader.close()
+                    if stock_grouped_reader is not None:
+                        stock_grouped_reader.close()
             release(initial + caches + [page_single])
         if len(report["checks"]) != (48 if options.grouped else 60) or not all(check["exact"] for check in report["checks"]):
             raise AssertionError("Batched attention does not satisfy the exact native B1 gate")

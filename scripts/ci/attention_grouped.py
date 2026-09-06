@@ -6,7 +6,10 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class GroupedAttentionReader:
-    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload):
+    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload, *, dma_layout=False):
+        if type(dma_layout) is not bool:
+            raise ValueError('Explicit boolean DMA selection required')
+        self.mesh, self.dma_layout = mesh, dma_layout
         self.operations = operations
         self.rows = rows
         self.calls = 0
@@ -41,15 +44,21 @@ class GroupedAttentionReader:
         if self.rows < 8:
             return self.native(query, keys, values, page_table_tensor=page_table_tensor, cur_pos_tensor=cur_pos_tensor, **kwargs)
         owned, chunks = [], []
+        def layout(tensor, count, *, inverse=False, offset=0):
+            if self.dma_layout:
+                from attention_fold_dma import device_layout_dma
+                return device_layout_dma(self.mesh, tensor, count, owned, inverse=inverse, offset=offset)
+            return device_layout(operations, tensor, count, owned, inverse=inverse, offset=offset)
+
         protected = {addresses(operations, value) for value in (query, keys, values)}
         try:
             for group, pages, mask, config in self.metadata:
-                packed = device_layout(operations, query, group['rows'], owned, offset=group['offset'])
+                packed = layout(query, group['rows'], offset=group['offset'])
                 options = dict(kwargs, program_config=config, is_causal=False, attn_mask=mask)
                 result = operations.transformer.paged_scaled_dot_product_attention_decode(packed, keys, values,
                     page_table_tensor=pages, **options)
                 owned.append(result)
-                chunks.append(device_layout(operations, result, group['rows'], owned, inverse=True))
+                chunks.append(layout(result, group['rows'], inverse=True))
             output = operations.concat(chunks, dim=1, memory_config=kwargs['memory_config'])
             protected.add(addresses(operations, output))
             return output

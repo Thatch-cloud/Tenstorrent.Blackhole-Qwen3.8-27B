@@ -74,6 +74,12 @@ if [ "${QWEN_RUN_MODE:-baseline}" = attention-group-dma ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --dma-layout
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-dma-layer ]; then
+    timeout -k 15 60 python3 /experiment-scripts/ci/sdpa-tree-audit.py
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = attention-timing ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache
     exit 0

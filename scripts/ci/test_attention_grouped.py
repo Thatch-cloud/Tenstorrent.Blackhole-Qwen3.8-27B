@@ -8,6 +8,10 @@ from attention_grouped import GroupedAttentionReader
 
 
 class GroupedReaderTests(unittest.TestCase):
+    def test_dma_selection_must_be_explicit_boolean(self):
+        with self.assertRaises(ValueError):
+            GroupedAttentionReader(None, None, 0, 8, None, None, None, None, dma_layout='yes')
+
     def fixture(self, rows, capacity=16640):
         operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock(),
             transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock()))

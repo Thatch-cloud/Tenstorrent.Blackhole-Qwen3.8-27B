@@ -37,6 +37,48 @@ all token outputs exact on both chips with groups1/4/4/4/4/4/4/4/3. Native
 query packing and inverse layouts preserve bits; no simulator speed claim.
 The two-row group also passed `20260906T220602Z-302` (T2/start4096/seed1).
 
+### SDPA tree scratch allocation audit (not yet hardware certified)
+
+Pinned factory `05708e6d...` allocates CB19 for `num_cores_per_head - 1`
+packets. The paired writer `734c90c0...` sends and reads at tree-round offsets,
+not worker offsets; the factory already computes and bounds
+`num_tree_reduction_rounds`. The default `SDPAProgramConfig` caps workers at16
+per head (`sdpa_config.hpp:20`), even when the supplied grid is11x10. These TP2
+fixtures therefore use32 SDPA workers, not110:15 packet slots are allocated
+per worker but only4 round slots are addressed. With an explicit55-worker cap,
+54 slots versus6 would apply, but that is not the tested configuration.
+This over-allocation contributes to the large folded
+query L1 failure, not evidence that the extra math intrinsically cannot fit.
+The prototype changes only this allocation under
+`QWEN_SDPA_TREE_SCRATCH_ROUNDS=1`; reduction order, math and writer are unchanged.
+Set the flag before process startup and never toggle it under a program cache.
+The default allocation remains unchanged. Native patch is tracked in
+`optimisation/sim/sdpa-tree-scratch.patch`, with baseline source hashes in
+`scripts/ci/sdpa_tree_scratch.py`. The local incremental build succeeded;
+original shared libraries are retained in
+`/opt/ttsim/runtime-baselines/sdpa-tree-scratch/`. Candidate library SHA256:
+`d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24`.
+T32 group test `20260906T221642Z-406` still fails L1 allocation at3419328bytes
+(limit1572864); shrinking this one buffer does not make every width fit.
+T8 group test `20260906T221933Z-382` passes exactly on both chips atstart4096,
+seed1. These are host-packed primitive checks, not device-layout or speed
+certification for larger groups. No hardware runtime or serving image changed.
+
+Full-model static grouped run `34062230310` (`add2738`) passed24 mode/width
+fixtures,16 rollback checks,4 negative-control pairs and12 matched timing
+comparisons. Median paired sample means for T32:4K110.015156->103.311151ms;
+16K127.564602->109.918755ms. Both arms retain norm batching and ordered cache.
+This remains full-logit verification, not committed tokens/s or dynamic replay.
+Direct layout DMA micro run `34063065156` (`4e13492`) passed36 fixtures,
+4320 timed replays and72 changed-query checks with exact native outputs and
+unchanged KV on both chips. Matched stock-grouped versus DMA T32 component:
+4K1.108354->0.854201ms;16K1.521339->1.267841ms. Real-layer DMA gate is next;
+small widths remain on native attention regardless of these component timings.
+Prepared DMA reader lifetime check `20260906T222439Z-296` passed in TTsim
+(T8/start4095/seed1, native scratch allocation mode). The borrowed query remains
+intact after temporary-buffer cleanup. The next real-layer run also collects a
+read-only native source/compiler audit before considering a hardware runtime build.
+
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.
 - Plugin: `bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c`; vLLM `0.25.1+empty`.
