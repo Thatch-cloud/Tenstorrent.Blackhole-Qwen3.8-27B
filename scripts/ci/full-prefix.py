@@ -483,17 +483,30 @@ def main():
                 eos_ids = terminal_ids(weights, model.args.vocab_size)
                 report['terminal_ids'] = eos_ids
                 report['generation_config_sha256'] = hashlib.sha256((Path(weights) / 'generation_config.json').read_bytes()).hexdigest()
-                result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
-                    live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
-                    norm_batch=options.norm_batch)
                 report.update(scope='Actual lookup request pilot on synthetic repeated code; not a coding-quality benchmark')
-                report.setdefault('request_checks', []).append(result)
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                                             for name in ('full_request.py', 'verifier_engine.py')}
-                output_path.write_text(json.dumps(report, indent=2))
-                print(json.dumps(result), flush=True)
-                if result['committed_decode_tokens'] == 0:
-                    raise AssertionError('Request pilot must exercise decode, not only terminal prefill')
+                                             for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
+
+                def request_measure(*, norm_batch=options.norm_batch):
+                    result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
+                        live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
+                        norm_batch=norm_batch)
+                    report.setdefault('request_checks', []).append(result)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(result), flush=True)
+                    if result['committed_decode_tokens'] == 0:
+                        raise AssertionError('Request pilot must exercise decode, not only terminal prefill')
+                    return result
+
+                if options.norm_batch:
+                    from full_request_pair import measure_requests
+                    unused_requests, comparison = measure_requests(request_measure)
+                    comparison['length'] = len(prompt)
+                    report.setdefault('request_comparisons', []).append(comparison)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(comparison), flush=True)
+                else:
+                    request_measure()
                 continue
             oracle = [prefill(prompt)]
             oracle_logits = []
@@ -632,8 +645,11 @@ def main():
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
         if options.request_pilot:
-            if addresses() != original_addresses or len(report.get('request_checks', [])) != len(lengths):
+            expected_requests = len(lengths) * (4 if options.norm_batch else 1)
+            if addresses() != original_addresses or len(report.get('request_checks', [])) != expected_requests:
                 raise AssertionError('Incomplete request pilot matrix')
+            if options.norm_batch and len(report.get('request_comparisons', [])) != len(lengths):
+                raise AssertionError('Incomplete matched request comparison matrix')
             report['passed'] = True
             return
         if options.device_selection:

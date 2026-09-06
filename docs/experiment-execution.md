@@ -31,6 +31,16 @@ cost gate. The next actual request run must include matched control/candidate
 requests with fresh prefills and all custom traces closed between requests,
 report setup separately, and retain the new proposal/native-tape telemetry.
 
+The prepared request harness runs one control/candidate/candidate/control block
+per context when norm batching is enabled. Each arm completes its entire request
+and closes custom traces before the next prefill. The comparison rejects unequal
+prompt/output tokens, budgets, proposal inputs/routing, acceptance, inactive-state
+checks or zero-token measurements. It reports aggregate committed decode rate
+and setup-inclusive post-seed rate separately for each arm; this is one ABBA
+block, not a statistically broad benchmark. Per-arm evidence is written as each
+request finishes. The CLI still rejects norm-batch requests pending inspection
+of the live selection gate; this preparation is not a hardware result.
+
 ### Lookup acceptance bottleneck and next-request telemetry
 
 Re-inspection of actual request run34045603132 separates accepted proposal
