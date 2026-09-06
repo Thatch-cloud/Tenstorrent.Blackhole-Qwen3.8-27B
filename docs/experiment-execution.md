@@ -252,7 +252,32 @@ missing optional roots rather than assuming them. This audit uses no cards and
 does not execute model code. The existing clone path remains unchanged until its
 aliasing and deallocation behavior can be established from the actual image.
 
-### E3 selective projected-row clone removal (hardware pending)
+### E3 selective projected-row clone removal (passed 34009858516)
+
+Run 34009858516 (`215b933`) passed 20 width/mode checks, 16 corrected rollback
+cases, four negative-control pairs and ten exact timing fixtures / 2400 timed
+decode replays. Slice ownership guards and per-layer clone-skip engagement passed.
+The paired control already uses compact state, checkpoint DMA and input reuse.
+
+| Context | T | Reused-input control ms | Selective-clone candidate ms | Median paired speedup |
+| --- | --- | --- | --- | --- |
+| 4095 | 2 | 57.944 | 57.508 | 1.008x |
+| 4095 | 4 | 77.665 | 76.868 | 1.010x |
+| 4095 | 8 | 118.283 | 116.995 | 1.011x |
+| 4095 | 16 | 201.794 | 197.479 | 1.022x |
+| 16383 | 2 | 59.048 | 58.648 | 1.007x |
+| 16383 | 4 | 79.885 | 79.052 | 1.010x |
+| 16383 | 8 | 122.857 | 121.524 | 1.011x |
+| 16383 | 16 | 210.808 | 206.547 | 1.020x |
+
+Every T>1 paired block favored clone removal. T1 explicitly kept cloning and
+native state handling; its small timing variation is not a gain. T16 saves another
+4.3 ms per full-model verification block. Full active logits/GDN state/end
+checkpoints/valid KV and corrected continuations remain exact. The opt-in candidate
+is suitable as the next experiment control, not an automatic serving promotion.
+Idealized perfect-acceptance/zero-overhead T16 bounds are 81.02/77.46 tok/s, still
+far from 200 committed tok/s. Current evidence does not justify extrapolating to
+a pure kernel speedup or removing the first-row alias-protection clone.
 
 Ownership audit 34009341359 passed and exported the pinned slice implementation.
 The no-op path can return input storage; nonzero row starts within these T<=16
