@@ -193,6 +193,16 @@ baseline comparisons and both stale-GDN/wrong-page controls in six configuration
   stale-GDN/wrong-page negative-control pairs also passed. This remains a static,
   short-context correctness gate: full-model timings, coding-length contexts and
   a device-dynamic serving/drafter integration are still required.
+  Coding-context run 34002876975 subsequently passed 20 width/mode and 16 selected
+  rollback cases at 4095/16383 tokens, plus paired timings. Batched SDPA caused
+  long-context drift; retaining B1 SDPA reads restored exactness while projections
+  stayed batched. T16 full-logit blocks measured 235.098/243.876 ms versus serial
+  701.383/710.095 ms (2.983x/2.912x median paired speedup). Separate active-state
+  restore costs about 0.867 ms. Timings include one preselected end checkpoint,
+  not dynamic all-prefix selection/commit. Even perfect acceptance and zero other
+  overhead imply only a 68.06/65.61-token/s bound for this target path, not 200.
+  Prioritize reducing target block time below 80 ms before relying on a neural
+  drafter to approach 200 committed tokens/s; this is not a hardware-wide ceiling.
   The full-model serial oracle verifies full logits, active GDN states and valid KV values, not batched target
 execution or safe concurrent writes to shared KV pages. Keep the old multi-token
 harness diagnostic-only; its composed operations

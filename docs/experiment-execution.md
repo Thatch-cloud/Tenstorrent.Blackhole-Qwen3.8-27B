@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E3 coding-context verification cost (hardware result pending)
+### E3 coding-context verification cost (passed 34002876975)
 
 `full-coding-cost` extends exactness to 4095/16383-token deterministic repeated-code
 fixtures, crossing the 4K/16K boundaries during verification. It checks all T widths
@@ -60,6 +60,46 @@ trace buffers are live. KV writes touch only candidate/future positions, which t
 position mask excludes until rewritten; exact KV checks remain mandatory. Timing
 also prefills before allocating candidate fixtures. Snapshot allocation is now
 384 MiB/chip. Structural regression tests guard both trace/prefill boundaries.
+
+Run 34002876975 (`6937529`) passed the complete selected matrix: 20 width/mode
+checks, 16 rollback cases, four native baseline mode checks and four negative-control
+pairs. All full active-token logits, active GDN states and entire valid KV prefixes
+matched exactly on both chips. Ten timing fixtures passed all pre/post checks,
+covering 30 ABBA blocks and 1200 individually state-reset timed replays.
+
+| Context | T | Serial block mean (ms) | Candidate block mean (ms) | Median paired speedup |
+| --- | --- | --- | --- | --- |
+| 4095 | 1 | 43.799 | 44.985 | 0.973x |
+| 4095 | 2 | 87.650 | 58.716 | 1.493x |
+| 4095 | 4 | 175.233 | 84.217 | 2.081x |
+| 4095 | 8 | 350.618 | 134.474 | 2.607x |
+| 4095 | 16 | 701.383 | 235.098 | 2.983x |
+| 16383 | 1 | 44.349 | 45.555 | 0.974x |
+| 16383 | 2 | 88.756 | 59.833 | 1.483x |
+| 16383 | 4 | 177.423 | 86.422 | 2.053x |
+| 16383 | 8 | 354.974 | 138.879 | 2.556x |
+| 16383 | 16 | 710.095 | 243.876 | 2.912x |
+
+Separate active-state restore averaged 0.866-0.867 ms. Candidate timing includes
+batched projections, sequential native fused GDN recurrence, B1 SDPA reads, ordered
+KV writes, native MLP/norms/LM head and one preselected end checkpoint. T1 is slower
+than native serial, so this wrapper is not a replacement for the normal B1 path.
+
+**200 tok/s assessment:** the optimistic `16 / block_seconds` bound is only
+68.06 tokens/s at 4K and 65.61 at 16K for this implementation, assuming perfect
+acceptance and zero drafter/selection/commit overhead. These are derived ceilings,
+not measured committed throughput or hardware-wide limits. A 200-token/s T16 path
+would need at most 80 ms per block before overhead: another 2.94-3.05x reduction in
+the measured candidate cost. The previous 8.45x result was one short-context
+attention layer, not this full-model/long-context execution policy.
+
+Next prioritize attribution of remaining per-row GDN and B1 attention work and
+evaluate a time-fused GDN block or B1-equivalent parallel attention kernel against
+this exact oracle. A neural drafter alone cannot overcome this target-path bound.
+All-prefix checkpoint staging, dynamic acceptance and true commit costs still need
+implementation; no serving promotion is enabled. Local c31021a passed 113 CI/helper
+and 26 drafting tests; subsequent affected helper/trace-boundary tests passed on
+Windows Python 3.11 after WSL startup timed out (no VM/service reset attempted).
 
 ### E3 full-model batch integration (passed 34001403540)
 
@@ -157,7 +197,7 @@ commit cost at realistic contexts before introducing a drafter.
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Integrated full-model batching and all T16 prefix rollbacks passed 34001403540; attention layer timing separately passed 34000694699 | Extend exactness to coding-length contexts; measure paired T=1/2/4/8/16 full-model verification and commit cost |
+| E3 verifier | Coding-length exactness and paired full-logit block costs passed 34002876975 with B1 SDPA reads; T16 takes 235-244 ms | Profile remaining per-row work; reduce target block cost toward <80 ms, then implement dynamic all-prefix selection/commit |
 | E4 fusion/pipeline | Full-model exactness passed, run 33996306217; repeatability gate missed | No serving promotion; retain 91-core kernel experiment and E3 state prerequisite |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |
