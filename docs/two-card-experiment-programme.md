@@ -416,8 +416,9 @@ repeatable gain; retain the negative result.
 #### Drafter comparison update (2026-09-06)
 
 Do not restrict the experiment to MTP. Neither DFlash2 nor DSpark has a recorded
-P150A hardware result in this repository. Lookup proposal policy has host tests,
-not an integrated device-throughput result. The older EAGLE3 discussion is analysis,
+P150A hardware result in this repository. Lookup has an integrated exact request
+pilot at21.415/17.741 committed decode tokens/s, not a representative coding-quality
+result. The older EAGLE3 discussion is analysis,
 not evidence that an EAGLE3 drafter ran here.
 
 | Arm | Upstream implementation to audit | TT port work beyond the shared verifier |
@@ -450,6 +451,18 @@ Prioritize the published 3.8 DFlash2/DSpark checkpoints and lookup/MTP controls;
 keep EAGLE3 as a compatibility/transfer candidate rather than silently substituting
 a 3.6 head. Engine support for an `EAGLE`/MTP flag is not evidence of an external
 EAGLE3 checkpoint or a TT backend port.
+
+The upstream MLX implementation at
+[`07ebd93`, target hooks and generation loop](https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py)
+provides a concrete feature-capture contract for the next port: zero-based layer
+IDs index decoder layers, hooks save each layer's returned hidden output, and
+those outputs concatenate along the hidden dimension in configured tap order.
+They are not GDN recurrent states or final-normalized logits inputs. The draft
+applies its learned feature projection and hidden normalization. Prefill retains
+a bounded hidden suffix when configured; verification captures new block
+features. A TT adapter must establish the same post-layer residual boundary,
+token alignment and accepted-prefix feature ownership before draft execution.
+The public implementation is a reference, not a TT-certified feature adapter.
 
 The [DFlash2 authors' Qwen3.8 model-card comparison](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
 uses one H200, SGLang, default sampled xhigh reasoning and seven proposals per
