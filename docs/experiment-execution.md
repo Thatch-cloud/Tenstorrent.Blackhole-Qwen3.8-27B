@@ -16,7 +16,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Authorized recovery (pending)
+### Authorized recovery (passed 34016364842)
+
+Run [34016364842](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34016364842)
+(`9c4eaed`) verified the two expected boards and PCI functions, then reset host
+devices 0 and 2 once with installed `/home/thatch/.local/bin/tt-smi`. Reset and
+reinitialization completed at 06:25:32 UTC. The subsequent health test passed all
+12 exact readbacks on both chips, synchronization and clean mesh close (0.450 s).
+The 9326-byte artifact confirms transfer health recovery, not norm/gate correctness.
+Next rerun the unchanged instrumented norm/gate suite without reset authorization
+to locate the original post-T1 stall on recovered devices. No automatic reset loop.
 
 The operator explicitly approved controlled card reset through CI after health
 run 34015497253 (`3db69df`) failed during mesh opening with `Device 0 init: failed
