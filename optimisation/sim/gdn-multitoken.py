@@ -40,7 +40,10 @@ def main():
     parser.add_argument('--compact-prologue', action='store_true')
     parser.add_argument('--retain-histories', action='store_true')
     parser.add_argument('--value-split', action='store_true')
+    parser.add_argument('--prepared-value-split', action='store_true')
     args = parser.parse_args()
+    if args.prepared_value_split and not args.value_split:
+        parser.error('--prepared-value-split requires --value-split')
     if args.value_split and (not args.norm_gate or args.conv):
         parser.error('--value-split first pass requires --norm-gate without convolution')
     if args.retain_histories and not args.packed_checkpoints:
@@ -96,6 +99,7 @@ def main():
         print(json.dumps(report['last_stage']), flush=True)
 
     mesh = None
+    prepared = None
     with path.with_suffix('.stacks.log').open('w') as stacks:
         faulthandler.dump_traceback_later(30, repeat=True, file=stacks)
         try:
@@ -308,8 +312,25 @@ def main():
             if args.value_split:
                 import gdn_vsplit
                 report['value_split'] = gdn_vsplit.audit(args.source_root)
-                output, states, bridge = gdn_vsplit.execute(mesh, *packed[:3], initial,
-                    z=packed[3], norm_w=norm_w, root=args.source_root, experimental=True)
+                if args.prepared_value_split:
+                    from gdn_vsplit_prepared import PreparedVSplit
+                    prepared = PreparedVSplit(mesh, *packed[:3], initial, z=packed[3], norm_w=norm_w,
+                        root=args.source_root, experimental=True, output_memory=ttnn.L1_MEMORY_CONFIG)
+                    for repeat in range(3):
+                        output, states, bridge = prepared.run()
+                        ttnn.synchronize_device(mesh)
+                        repeated_outputs, repeated_states = host(output), host(states)
+                        for token in range(args.rows):
+                            for chip, (actual_output, actual_state) in enumerate(zip(repeated_outputs, repeated_states, strict=True)):
+                                if (not torch.equal(actual_output.reshape(args.rows, 1, 24, 128)[token:token + 1], expected_outputs[token][chip])
+                                        or not torch.equal(actual_state[token:token + 1], expected_states[token][chip])):
+                                    raise AssertionError(f'Prepared replay mismatch {repeat=} {token=} {chip=}')
+                    report['prepared_replays'] = 3
+                    report['prepared_output_memory'] = 'L1'
+                    report['prepared_sha256'] = hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_vsplit_prepared.py').read_bytes()).hexdigest()
+                else:
+                    output, states, bridge = gdn_vsplit.execute(mesh, *packed[:3], initial,
+                        z=packed[3], norm_w=norm_w, root=args.source_root, experimental=True)
                 if not all(torch.isfinite(value).all() for value in host(bridge)):
                     raise AssertionError('Nonfinite FP32 pre-norm bridge')
                 report['fp32_bridge_finite'] = True
@@ -330,6 +351,9 @@ def main():
                 for tensor, expected in zip(packed, values, strict=True):
                     if not all(torch.equal(value, expected) for value in host(tensor)):
                         raise AssertionError('Value-split modified immutable input')
+            if prepared is not None:
+                prepared.close()
+                prepared = None
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None
@@ -340,6 +364,8 @@ def main():
             path.write_text(json.dumps(report, indent=2))
             raise
         finally:
+            if prepared is not None:
+                prepared.close()
             if mesh is not None:
                 ttnn.close_mesh_device(mesh)
             faulthandler.cancel_dump_traceback_later()

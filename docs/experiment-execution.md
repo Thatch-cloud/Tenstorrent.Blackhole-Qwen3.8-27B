@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-###96-worker recurrence: simulator first pass passed, hardware gate next
+### 96-worker recurrence: native hardware correctness passed
 
 The opt-in `gdn_vsplit` prototype splits each128-wide value head into four32-wide
 partitions (96 recurrence workers/chip), preserving native state tile order.
@@ -37,6 +37,24 @@ native packed FNG operation:18 eager fixtures,207 restored-prefix continuations
 and18 stale controls. It is intentionally fenced/eager only. Trace-safe prepared
 programs, paired timing, real-layer integration and model performance follow
 only if this correctness gate passes. No default or serving integration exists.
+
+Run34046231437 (`fa3e1b9`) passed all18 eager fixtures,207 restored-prefix
+continuations and18 stale controls against the independent native packed FNG
+operation. No timing was collected. The96-worker recurrence and24-worker
+FP32-preserving norm/gate composition is now hardware-correct for these
+synthetic cases; prepared/captured execution, real-layer and full-model
+integration remain separate gates.
+
+The prepared variant allocates output, prefix history and FP32 bridge once,
+then enqueues the same two CQ0 programs without an intervening host fence.
+T2/seed1 simulator run `20260906T165618Z-318` passed three repeated executions
+with L1 output, exact outputs/prefixes and immutable initial state. T32/seed2
+run `20260906T170429Z-430` passed the same three-execution checks with clean
+close. The new `gdn-value-split-timing` hardware gate pairs
+the existing24-worker FNG control with the96-worker composition at identical
+L1 output placement, checking an independent native oracle outside timing.
+Three seeds across T1/2/4/8/16/32 require18 fixtures and2160 ABBA timed replays.
+This measures synthetic captured kernel cost, not committed model throughput.
 
 ### Actual request engine: correctness passed, speed target missed
 

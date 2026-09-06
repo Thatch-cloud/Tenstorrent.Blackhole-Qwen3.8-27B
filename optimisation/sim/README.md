@@ -1,6 +1,6 @@
 # Simulator-first device-loop GDN gate
 
-##96-worker value partitioning
+## 96-worker value partitioning
 
 `--norm-gate --value-split` replaces only the candidate recurrence/norm path
 with96 value-partition workers and a24-head FP32-preserving normalization stage.

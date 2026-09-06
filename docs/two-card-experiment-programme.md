@@ -91,7 +91,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact T32 verification, dynamic commit and reused request pipeline | Substantially lower V(T), multi-request trace lifecycle and representative repeatability |
-| E4 fusion/pipeline | Packed histories, ordered writes, captured96-worker commit and force-argmax passed full-model gates | FP32-preserving96-worker recurrence prototype; independent native correctness and performance |
+| E4 fusion/pipeline | Packed histories, ordered writes, captured96-worker commit and force-argmax passed full-model gates;96-worker recurrence passed independent native synthetic correctness34046231437 | Prepared/captured96-worker paired timing, real-layer integration and full-model recertification |
 | E5 drafting | Actual lookup request pilot exact but only21.415/17.741 tok/s; historical MTP groundwork | Better acceptance/routing and matched evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

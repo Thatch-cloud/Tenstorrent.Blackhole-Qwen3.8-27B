@@ -3,12 +3,12 @@
 ## Status and ownership
 
 All six generated kernel sources and the two-stage orchestration are implemented in
-`gdn_vsplit.py`. This is an isolated, opt-in prototype, not an engine change or a
-certified kernel. Only host tests and the read-only source audit have been run.
-No device compilation, TTsim, hardware execution, CI dispatch, commit or push is
-part of this work. The main agent owns simulator scheduling, the running hardware
-recertification gate `34044312880`, and any later engine integration. Default
-pathways and existing files remain unchanged.
+`gdn_vsplit.py`. This is an isolated, opt-in prototype, not an engine change.
+T1/T2/T32 simulator fixtures passed against the existing generated24-worker control.
+Hardware run34046231437 passed18 eager fixtures,207 restored-prefix continuations
+and18 stale controls against independent native packed FNG. These synthetic checks
+do not certify captured execution, real-layer integration or model throughput.
+Default pathways remain unchanged. See `docs/experiment-execution.md` for evidence.
 
 The reported native B1 and T32 verifier timings are context, not measurements of
 this prototype. No speedup or progress toward 200 committed tokens/s is claimed.
@@ -120,13 +120,30 @@ CB formats/capacities, compile/runtime ABI, and mocked two-chip orchestration.
 Mocks do not establish C++ API compatibility, DMA behavior, numerical correctness
 on the device, or deadlock freedom.
 
-## Central validation handoff
+## Prepared execution and timing
+
+`gdn_vsplit_prepared.PreparedVSplit` allocates three fixed outputs and builds both
+programs before capture. `run()` enqueues recurrence then norm/gate on CQ0, with
+no intermediate host fence or device allocation. It returns the same tuple each
+time. The caller must warm and synchronize before capture, keep every binding
+alive and address-stable, and release all external traces before `close()`.
+Input contents may change in place; tensor bindings may not. `close()` fences
+before releasing owned outputs and never frees caller inputs.
+
+The default output remains DRAM. Explicit `output_memory=ttnn.L1_MEMORY_CONFIG`
+requires separate placement validation. The simulator's `--value-split
+--prepared-value-split --norm-gate` path uses L1 output and checks three executions.
+`gdn-value-split-timing` pairs captured24-worker control and96-worker candidate
+with identical L1 output placement and all-prefix DRAM export. Its18 fixtures
+require2160 ABBA timed replays and independent native exactness outside timing.
+No drafting, projections, attention, collectives or model throughput is measured.
+
+## Validation requirements
 
 1. Review the source audit and pins against the intended full tt-metal checkout.
    Confirm board identity, physical worker availability, 128-byte DRAM accessor
-   pages and actual per-stage L1 placement. The current snapshot has not compiled
-   the new C++ sources.
-2. Main agent schedules the first simulator job. Import `gdn_vsplit` on the
+   pages and actual per-stage L1 placement when changing the implementation.
+2. Schedule simulator jobs serially. Import `gdn_vsplit` on the
    harness's module path and explicitly call
    `execute(mesh, qkv, beta, gate, initial, z=z, norm_w=norm_w, root=root, experimental=True)`.
    This API consumes existing device tensors; it never opens a mesh itself.
