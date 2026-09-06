@@ -223,6 +223,28 @@ per-token work using the new candidate as a contemporaneous control. Keep attent
 numerics and GDN precision unchanged, and require full-model paired gains rather
 than extrapolating layer timing or fenced attribution.
 
+### E3 redundant GDN input preparation (hardware pending)
+
+`full-gdn-input-reuse` isolates input-row preparation against the exact full-model
+compact/DMA control from 34006233354. Batched projection already consumes the full
+input and the projected-row hook supplies each token's distinct projected data.
+Pinned native decode otherwise reads its input only for shape/reshape preparation.
+The candidate therefore prepares one B1 input row per layer and reuses that
+shape-only argument across T native row calls, instead of preparing T input slices.
+At T16 this removes 720 input-slice calls across 48 layers; it does not remove
+projected-row slicing/cloning or change their ownership. A source AST guard rejects
+new input consumers outside shape/projection preparation, in addition to pinned
+source hashes and existing exact projection-hook engagement checks. One owned
+input tensor is released once, not once per repeated reference. T1 stays unchanged.
+
+The gate repeats full-logit/GDN/valid-KV exactness and corrected rollback at 4K/16K
+before 2400 timed replays. Its direct paired control now also enables compact state
+and checkpoint DMA: only distinct versus reused input rows differ. Reports identify
+that control explicitly; do not mislabel this as another native-state comparison.
+Both simultaneously captured arms allocate compact working sets (192 MiB/chip
+combined at T>1, separate from shared snapshots). No speedup or serving-default
+change is assumed before hardware evidence.
+
 `full-compact-gdn` opts the static verifier into compact state plus direct compact
 checkpoint DMA for T2/4/8/16 across all 48 GDN layers. T1 and the default path keep
 native B1-in-B8 state handling. B1 SDPA reads, projection batching, model precision

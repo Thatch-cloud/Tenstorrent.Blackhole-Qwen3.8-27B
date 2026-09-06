@@ -37,6 +37,29 @@ def validate_rows(shape):
     return shape[1]
 
 
+def validate_reused_input(source):
+    tree = ast.parse(textwrap.dedent(source))
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    allowed = {"self._project_qkvzab_raw", "self._project_qkvzab", "ttnn.reshape"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or node.id != "x" or not isinstance(node.ctx, ast.Load):
+            continue
+        parent = parents[node]
+        if isinstance(parent, ast.Attribute) and parent.attr == "shape":
+            continue
+        if isinstance(parent, ast.Call) and parent.args and parent.args[0] is node and ast.unparse(parent.func) in allowed:
+            continue
+        raise ValueError("Native GDN now consumes input outside shape/projection preparation")
+
+
+def prepare_token_rows(operations, packed, reuse=False):
+    rows = validate_rows(tuple(packed.shape))
+    owned = [operations.slice(packed, (0, index, 0), (1, index + 1, 5120),
+                              memory_config=operations.L1_MEMORY_CONFIG)
+             for index in range(1 if reuse else rows)]
+    return (owned * rows if reuse else owned), owned
+
+
 def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None, profiler=None):
     rows = validate_rows(tuple(packed_input.shape))
     if len(token_inputs) != rows or any(tuple(token.shape) != (1, 1, 5120) for token in token_inputs):

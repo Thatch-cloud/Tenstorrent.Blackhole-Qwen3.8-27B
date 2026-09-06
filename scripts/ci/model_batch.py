@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 
 from attention_batch import SerialAttentionReader, SerialCacheWriter, serial_tail
-from gdn_prefix import decode_projected, gated_decode
+from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
 
 
 @contextmanager
@@ -38,7 +38,7 @@ def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
 
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
-                 compact_gdn=False):
+                 compact_gdn=False, reuse_gdn_input=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -46,6 +46,9 @@ class ModelBatch:
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
         self.compact_gdn = compact_gdn_enabled(self.rows, compact_gdn, serial_sdpa, profiler)
+        if reuse_gdn_input and not compact_gdn:
+            raise ValueError("Input reuse requires the exact compact GDN control")
+        self.reuse_gdn_input = reuse_gdn_input and self.rows > 1
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -115,6 +118,9 @@ class ModelBatch:
 
     def gdn_forward(self, layer, helper, checkpoint):
         operations = self.operations
+        if self.reuse_gdn_input:
+            import inspect
+            validate_reused_input(inspect.getsource(type(layer).forward_decode))
         native_gated = gated_decode(layer, profiler=self.profiler)
         snapshot = helper.save
         working = None
@@ -133,8 +139,7 @@ class ModelBatch:
             if tuple(value.shape) != (1, 1, self.rows, 5120):
                 raise ValueError("Unexpected full-model GDN input geometry")
             packed = operations.reshape(value, (1, self.rows, 5120))
-            tokens = [operations.slice(packed, (0, index, 0), (1, index + 1, 5120),
-                                       memory_config=operations.L1_MEMORY_CONFIG) for index in range(self.rows)]
+            tokens, owned_tokens = prepare_token_rows(operations, packed, reuse=self.reuse_gdn_input)
 
             def save(prefix):
                 if prefix == self.prefix:
@@ -150,7 +155,7 @@ class ModelBatch:
             partial = layer._row_proj(gated, layer.tw["out"])
             if self.rows != 1:
                 operations.deallocate(gated)
-            for tensor in outputs + tokens:
+            for tensor in outputs + owned_tokens:
                 operations.deallocate(tensor)
             partial = operations.reshape(partial, (1, 1, self.rows, partial.shape[-1]))
             result = tt_all_reduce(partial, self.model.mesh_device, layer.tt_ccl, cluster_axis=0, dim=3,

@@ -55,6 +55,7 @@ def main():
     parser.add_argument("--serial-sdpa", action="store_true")
     parser.add_argument("--attribution", action="store_true")
     parser.add_argument("--compact-gdn", action="store_true")
+    parser.add_argument("--reuse-gdn-input", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -64,6 +65,8 @@ def main():
         raise ValueError("Attribution requires batch/B1-SDPA and is separate from the cost matrix")
     if options.compact_gdn and not (options.coding_cost and options.serial_sdpa):
         raise ValueError("Compact GDN requires the coding-context B1-SDPA gate")
+    if options.reuse_gdn_input and not options.compact_gdn:
+        raise ValueError("GDN input reuse requires compact GDN")
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -84,6 +87,10 @@ def main():
         output_path = root / "full-compact-gdn.json"
         report["compact_gdn_prerequisite"] = 34005970668
         report["native_t1_state_path"] = True
+    if options.reuse_gdn_input:
+        output_path = root / "full-gdn-input-reuse.json"
+        report["input_reuse_prerequisite"] = 34006233354
+        report["reuse_gdn_input"] = True
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -215,7 +222,8 @@ def main():
             from model_batch import ModelBatch
 
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
-                                 serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn)
+                                 serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
+                                 reuse_gdn_input=options.reuse_gdn_input)
             captured = None
             output = None
             try:
@@ -249,7 +257,8 @@ def main():
                 kv_digest(length + 18)
                 for rows in (1, 2, 4, 8, 16):
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
-                                         serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn)
+                                         serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
+                                         reuse_gdn_input=options.reuse_gdn_input)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -387,7 +396,8 @@ def main():
                     measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
-                        compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved))
+                        compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
+                        reuse_gdn_input=options.reuse_gdn_input)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

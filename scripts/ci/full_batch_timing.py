@@ -17,7 +17,7 @@ def summarize(samples):
 
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
-            compact_gdn=False, checkpoint_digest=None):
+            compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False):
     import torch
     import ttnn
 
@@ -28,15 +28,17 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     prefill()
     save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
-                           compact_gdn=compact_gdn)
+                           compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
-                         serial_sdpa=serial_sdpa) if compact_gdn else None
+                         serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
     outputs = {}
     report = dict(length=length, rows=rows, blocks=[], restore_samples_ms=[], exact=False, serial_sdpa=serial_sdpa,
                   compact_gdn_enabled=candidate.compact_gdn,
+                  reuse_gdn_input_enabled=candidate.reuse_gdn_input,
+                  paired_control="compact GDN with distinct input slices" if reuse_gdn_input else "batched native GDN state",
                   checkpoint_policy="One preselected end-prefix snapshot set, not all-prefix staging")
     if compact_gdn:
         import math
@@ -113,6 +115,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 lambda arm: ttnn.execute_trace(mesh, traces[arms[arm]], cq_id=0, blocking=True),
                 lambda arm: validate(arms[arm]))
             report["compact_comparison"]["scope"] = "Full-model compact versus native GDN state, same batching/end checkpoint; no committed tok/s"
+            if reuse_gdn_input:
+                report["compact_comparison"]["scope"] = "Full-model reused versus distinct GDN input rows, both compact/DMA; no committed tok/s"
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)

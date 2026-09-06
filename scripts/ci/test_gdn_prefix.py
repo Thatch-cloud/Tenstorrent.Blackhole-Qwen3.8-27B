@@ -3,10 +3,37 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from gdn_prefix import decode_projected, split_gated_source, validate_rows
+from gdn_prefix import decode_projected, prepare_token_rows, split_gated_source, validate_reused_input, validate_rows
 
 
 class PrefixTests(unittest.TestCase):
+    def test_reused_input_has_single_owner_and_one_slice(self):
+        for rows in (1, 2, 4, 8, 16):
+            layer, packed, tokens, operations, projection = self.fixture(rows)
+            reused, owned = prepare_token_rows(operations, packed, reuse=True)
+            self.assertEqual(len(reused), rows)
+            self.assertEqual(len(owned), 1)
+            self.assertTrue(all(value is owned[0] for value in reused))
+            operations.slice.assert_called_once_with(packed, (0, 0, 0), (1, 1, 5120), memory_config="L1")
+
+    def test_control_still_prepares_every_distinct_input_row(self):
+        layer, packed, tokens, operations, projection = self.fixture()
+        prepared, owned = prepare_token_rows(operations, packed)
+        self.assertIs(prepared, owned)
+        self.assertEqual(operations.slice.call_count, 4)
+
+    def test_reused_input_source_rejects_new_data_consumers(self):
+        source = '''def forward_decode(self, x):
+    if len(x.shape) == 4:
+        x = ttnn.reshape(x, (1, x.shape[-2], x.shape[-1]))
+    return self._project_qkvzab_raw(x, x.shape[-2], memory)
+'''
+        validate_reused_input(source)
+        for changed in (source.replace("return self", "hidden = ttnn.add(x, other)\n    return self"),
+                        source.replace("return self", "hidden = x\n    return self")):
+            with self.assertRaises(ValueError):
+                validate_reused_input(changed)
+
     def test_split_preserves_native_core_and_removes_only_tail(self):
         source = '''def forward_decode(self, token):
     gated = self.core(token)
