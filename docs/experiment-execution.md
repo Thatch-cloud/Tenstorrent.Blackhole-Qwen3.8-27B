@@ -16,6 +16,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Fused retained-state publication (simulator first pass)
+
+`gdn_commit_dma` publishes an arbitrary selected prefix for all48 GDN layers in
+one arithmetic-free launch:96 workers per chip, two disjoint page partitions per
+layer. It reads immutable entry or packed-history buffers and writes native slot0
+plus the external checkpoint. Native inactive slots1-7 are untouched. All layers,
+buffer aliases and accessor layouts are checked before submitting any write.
+The existing multi-operation commit remains the default until certification.
+
+The simulator fixture checks every prefix against exact BF16 host slices, all
+native inactive-slot canaries, external checkpoints and immutable sources. T2,
+two synthetic layers, seed0 passed `20260906T120611Z-321`; T16 seed1 passed all17
+prefixes in `20260906T120814Z-316`, with clean close and exit0.
+This does not validate96-worker hardware scheduling or commit performance.
+The future full-model gate records readback, selection and commit separately,
+so host logit transfer cannot be mistaken for kernel execution time.
+210 CI,55 simulator and26 speculative host tests pass. The new commit remains
+opt-in and is not included in the current attention hardware run34031827886.
+
 ### Post-verification GDN commit (hardware passed 34029984214)
 
 `RetainedGDNBlock` keeps all48 packed histories alive through logit readback and

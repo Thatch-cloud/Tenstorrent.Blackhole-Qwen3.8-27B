@@ -16,7 +16,11 @@ def summarize(samples):
 
 
 def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
-                         device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False):
+                         device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False):
+    if ordered_cache:
+        return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                    hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                    compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints)
     flags = dict(compact_gdn=compact_gdn if reuse_gdn_input else False,
                 reuse_gdn_input=reuse_gdn_input if skip_row_clones else False,
                 skip_row_clones=skip_row_clones if hoist_row_layout else False,
@@ -31,7 +35,7 @@ def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-            device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False):
+            device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False):
     import torch
     import ttnn
 
@@ -44,13 +48,14 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
                            compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                            hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
-                           compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints)
+                           compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
+                           ordered_cache=ordered_cache)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
                              reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                              hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                              compact_prologue=compact_prologue, batch_conv=batch_conv,
-                             packed_checkpoints=packed_checkpoints)) if compact_gdn else None
+                             packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -90,6 +95,10 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
         report.update(packed_convolution_checkpoints_enabled=candidate.packed_checkpoints,
                       paired_control='DMA-window batched convolution at T8/T16; previous compact path below T8',
                       candidate_internal_checkpoints='all recurrent prefixes and all convolution prefixes in packed windows; selected external checkpoint' if candidate.packed_checkpoints else 'native T1 fallback')
+
+    if ordered_cache:
+        report.update(ordered_cache_enabled=candidate.ordered_cache,
+                      paired_control='Same packed GDN histories and exact B1 SDPA, with previous serial cache writer')
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)

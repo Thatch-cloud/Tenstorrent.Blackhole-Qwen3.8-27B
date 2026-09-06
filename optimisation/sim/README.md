@@ -25,6 +25,14 @@ writer change. No full-model or serving adoption follows from this layer gate.
 
 ## Verified first pass, 2026-09-06
 
+Fused GDN publication has a separate `run-gdn-commit.sh --rows 16 --seed 1`
+entry point. T2 seed0 (`20260906T120611Z-321`) and T16 seed1
+(`20260906T120814Z-316`) passed every prefix for two synthetic layers on both
+chips, including native inactive-slot canaries, external checkpoints, immutable
+entry/history buffers, clean close and exit0. Runtime publication uses two
+workers per layer;48 real layers would use96 workers per chip, which these
+two-layer simulator fixtures do not certify. No commit timing claim is made.
+
 - Norm/gate T2 (`20260906T064618Z-338`): both serial T1 calls completed; T2
   readback stalled until timeout. Generated hashes match the failing hardware case.
 - Recurrence-only T2 (`20260906T064957Z-301`): exact output and every prefix state

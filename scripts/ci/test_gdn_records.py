@@ -55,6 +55,25 @@ class RecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             block.commit(2)
 
+    def test_dma_publishes_all_records_in_one_launch(self):
+        block = self.fixture()
+        mesh = object()
+        for state, result, checkpoint in block.records:
+            state.gdn.mesh = mesh
+            result['packed_conv_states'] = [object() for slot in range(4)]
+        with patch('gdn_commit_dma.publish') as publish, patch('gdn_records.restore_prefix') as restore:
+            block.commit(2, dma=True)
+            publish.assert_called_once()
+            self.assertIs(publish.call_args.args[0], mesh)
+            self.assertEqual(len(publish.call_args.args[1]), 48)
+            self.assertTrue(all(len(layer) == 20 for layer in publish.call_args.args[1]))
+            self.assertEqual(publish.call_args.args[2], 2)
+            restore.assert_not_called()
+            for state, result, checkpoint in block.records:
+                state.active.restore.assert_not_called()
+        with self.assertRaises(ValueError):
+            block.commit(2, dma=True)
+
     def test_duplicate_or_unpacked_record_rejected(self):
         block = self.fixture(1)
         state, result, checkpoint = block.records[0]

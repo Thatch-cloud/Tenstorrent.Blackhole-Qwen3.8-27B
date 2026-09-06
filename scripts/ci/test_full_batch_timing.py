@@ -18,6 +18,12 @@ class TimingTests(unittest.TestCase):
                    zip(("serial", "batch", "batch", "serial"), (10, 3, 5, 14))]
         self.assertEqual(summarize(samples), dict(serial_ms=12, batch_ms=4, speedup=3))
 
+    def test_ordered_cache_control_preserves_all_gdn_flags(self):
+        flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                     hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
+                     batch_conv=True, packed_checkpoints=True)
+        self.assertEqual(paired_control_flags(**flags, ordered_cache=True), flags)
+
     def test_rejects_incomplete_or_reordered_blocks(self):
         for arms in (("serial",), ("serial", "serial", "batch", "batch")):
             with self.assertRaises(ValueError):

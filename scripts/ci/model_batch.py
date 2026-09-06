@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 
-from attention_batch import SerialAttentionReader, SerialCacheWriter, serial_tail
+from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
 
 
@@ -47,13 +47,21 @@ class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
-                 retain_records=False):
+                 retain_records=False, ordered_cache=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if ordered_cache and (not serial_sdpa or profiler is not None):
+            raise ValueError('Ordered cache requires the unprofiled exact B1 SDPA path')
+        self.ordered_cache = ordered_cache and self.rows > 1
+        cache_kernels = None
+        if self.ordered_cache:
+            import os
+            from ordered_cache import load_kernels
+            cache_kernels = load_kernels(os.environ['TT_METAL_HOME'])
         self.compact_gdn = compact_gdn_enabled(self.rows, compact_gdn, serial_sdpa, profiler)
         if reuse_gdn_input and not compact_gdn:
             raise ValueError("Input reuse requires the exact compact GDN control")
@@ -114,6 +122,8 @@ class ModelBatch:
             if layer.is_full_attention:
                 writer = SerialCacheWriter(ttnn, singleton_positions, [singleton_pages] * self.rows,
                                            attention._kv_shard_cfg(1))
+                if self.ordered_cache:
+                    writer = OrderedCacheWriter(model.mesh_device, ttnn, cache_kernels)
                 self.writers.append(writer)
                 reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
                 if reader is not None:

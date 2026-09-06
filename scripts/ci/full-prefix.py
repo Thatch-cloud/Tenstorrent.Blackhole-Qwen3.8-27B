@@ -65,6 +65,8 @@ def main():
     parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--packed-checkpoints', action='store_true')
     parser.add_argument('--deferred-commit', action='store_true')
+    parser.add_argument('--ordered-cache', action='store_true')
+    parser.add_argument('--commit-dma', action='store_true')
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -90,6 +92,13 @@ def main():
         raise ValueError('Packed checkpoints require batched convolution')
     if options.deferred_commit and not options.packed_checkpoints:
         raise ValueError('Deferred commit requires packed checkpoints')
+    if options.commit_dma and not options.deferred_commit:
+        raise ValueError('Fused commit requires post-verification retained records')
+    if options.ordered_cache and not (options.packed_checkpoints and options.serial_sdpa):
+        raise ValueError('Ordered cache requires the packed-history B1 SDPA control')
+    if options.ordered_cache:
+        from ordered_cache import HASHES as CACHE_HASHES, load_kernels as load_cache_kernels
+        cache_kernels = load_cache_kernels('/opt/tt-metal')
     if options.deferred_commit:
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
@@ -106,6 +115,13 @@ def main():
     report["batched_candidate"] = options.batch
     report["serial_sdpa"] = options.serial_sdpa
     report["compact_gdn"] = options.compact_gdn
+    if options.ordered_cache:
+        report.update(ordered_cache=True, cache_native_hashes=CACHE_HASHES,
+                      cache_generated_hashes={role: hashlib.sha256(source.encode()).hexdigest() for role, source in cache_kernels.items()},
+                      cache_adapter_sha256=hashlib.sha256(Path(__file__).with_name('ordered_cache.py').read_bytes()).hexdigest())
+    if options.commit_dma:
+        report.update(commit_dma=True, commit_workers_per_chip=96,
+            commit_dma_hashes={suffix: hashlib.sha256(Path(__file__).with_name(f'gdn_commit_dma.{suffix}').read_bytes()).hexdigest() for suffix in ('py', 'cpp')})
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
     if options.coding_cost:
         output_path = root / "full-coding-cost.json"
@@ -305,7 +321,8 @@ def main():
                                  reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                  hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                                  compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                                 packed_checkpoints=options.packed_checkpoints, retain_records=deferred)
+                                 packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
+                                 ordered_cache=options.ordered_cache)
             captured = None
             output = None
             try:
@@ -322,6 +339,7 @@ def main():
                     started = time.perf_counter()
                 actual = [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
                 if deferred:
+                    readback_finished = time.perf_counter()
                     if len(actual) != 2 or not torch.equal(actual[0], actual[1]):
                         raise AssertionError('Both chips must agree before committing')
                     if not abort and tokens[0] != known_seed:
@@ -329,12 +347,17 @@ def main():
                     decision = None if abort else select_prefix(tokens[1:], actual[0].float().argmax(dim=-1).tolist(),
                                                                  vocab_size=model.args.vocab_size)
                     selected = 0 if abort else decision.state_rows
-                    fixture.retained.commit(selected)
+                    selection_finished = time.perf_counter()
+                    fixture.retained.commit(selected, dma=options.commit_dma)
                     ttnn.synchronize_device(mesh)
+                    commit_finished = time.perf_counter()
                     report['dynamic_commits'].append(dict(length=length, trace=trace, selected_state_rows=selected,
                         accepted_proposals=0 if abort else decision.accepted, abort=abort,
                         emitted=[] if abort else list(decision.emitted), next_input=known_seed if abort else decision.next_input,
-                        readback_select_commit_ms=(time.perf_counter() - started) * 1000,
+                        readback_select_commit_ms=(commit_finished - started) * 1000,
+                        readback_ms=(readback_finished - started) * 1000,
+                        selection_ms=(selection_finished - readback_finished) * 1000,
+                        commit_ms=(commit_finished - selection_finished) * 1000,
                         retained_layers=len(fixture.retained.records)))
                 return actual
             finally:
@@ -362,7 +385,7 @@ def main():
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                          hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                                          compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                                         packed_checkpoints=options.packed_checkpoints)
+                                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -516,7 +539,7 @@ def main():
                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                        packed_checkpoints=options.packed_checkpoints)
+                        packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
