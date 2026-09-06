@@ -44,6 +44,23 @@ throughput pass. The next pilot preserves the complete chat template using the
 existing bounded prompt builder rather than truncating its generation marker;
 actual context lengths are reported. Zero-decode fixtures now fail the pilot.
 
+Complete-chat retry34043482490 (`a09c0c6`) reached engine capture, then failed
+with a static circular-buffer/L1 allocation clash (buffer start736512 versus
+CB end742272). Retained records unnecessarily held projection scratch across
+layers and buckets. The fix retains only recurrent plus four convolution
+histories, transfers layer output ownership to its caller, and releases other
+temporaries during capture just like the non-retained path. Both-chip alias
+guards precede any free. Kernel arithmetic is unchanged; simulator ownership/
+all-prefix continuation and hardware replay recertification are required.
+
+Simulator retention first pass `20260906T155420Z-326` passed T2/seed1 outputs,
+all histories,3 restored continuations and one stale-state control. The stricter
+both-chip independence guard then passed T32/seed2 run `20260906T155706Z-301`:
+all32 outputs/recurrent/convolution prefixes and32 prefix copies, retaining
+exactly5 history buffers per layer after scratch release. Both runs closed
+cleanly. The oracle is serial T1 of the same recurrence kernel with native
+convolution, not an independent full-model reference or timing result.
+
 ### Full-verifier device selection (hardware gate passed)
 
 Run `34040918809` at `613a591` passed all12 width/context fixtures and1440

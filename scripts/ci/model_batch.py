@@ -177,7 +177,8 @@ class ModelBatch:
                 finish_output(layer, result, operations, tt_all_reduce)
                 output = result['layer_output']
                 if self.retained is not None:
-                    result['owned'] = [value for value in result['owned'] if value is not output]
+                    from gdn_records import retain_checkpoint_histories
+                    retain_checkpoint_histories(operations, result, output)
                     self.retained.append(state, result, checkpoint)
                 else:
                     release_owned(operations, [value for value in result['owned'] if value is not output])

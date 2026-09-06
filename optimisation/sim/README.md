@@ -1,5 +1,16 @@
 # Simulator-first device-loop GDN gate
 
+## Retained history ownership
+
+`--retain-histories --conv --norm-gate --batch-conv --dma-windows
+--packed-checkpoints --window-prefix` exercises early projection/temporary
+release while preserving exactly five commit-history buffers and caller-owned
+output. T2/seed1 run `20260906T155420Z-326` also used `--continuation` and passed
+all3 restored continuations plus a stale-state control. T32/seed2 run
+`20260906T155706Z-301` passed all32 outputs, recurrent/convolution prefixes and
+prefix-copy checks with the stricter both-chip ownership guard. Both closed
+cleanly. These gates do not certify multi-bucket hardware capture or performance.
+
 ## T32 static-verifier prerequisites
 
 The wider experiment fills a complete 32-row tile; it does not change serving

@@ -3,6 +3,26 @@
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix
 
 
+def retain_checkpoint_histories(operations, result, output):
+    histories = [result['states'], *result.get('packed_conv_states', [])]
+    if not result.get('packed_checkpoints') or len(histories) != 5:
+        raise ValueError('Packed recurrent and four convolution histories required')
+    bindings = [addresses(operations, value) for value in [*histories, output]]
+    if any(len({binding[chip] for binding in bindings}) != len(bindings) for chip in range(2)):
+        raise ValueError('Histories and caller-owned output must be independent on both chips')
+    protected = set(bindings)
+    owned = {addresses(operations, value): value for value in result['owned']}
+    history_addresses = {addresses(operations, value) for value in histories}
+    if len(history_addresses) != 5 or not history_addresses.issubset(owned):
+        raise ValueError('Every independent history must have retained ownership')
+    for binding in owned:
+        if binding not in protected and any(any(current == saved for current, saved in zip(binding, keep, strict=True))
+                                            for keep in protected):
+            raise ValueError('Scratch partially aliases a protected history or output')
+    release_owned(operations, [value for binding, value in owned.items() if binding not in protected])
+    result['owned'] = [value for binding, value in owned.items() if binding in history_addresses]
+
+
 class RetainedGDNBlock:
     def __init__(self, rows, operations):
         if type(rows) is not int or rows not in (2, 4, 8, 16, 32):

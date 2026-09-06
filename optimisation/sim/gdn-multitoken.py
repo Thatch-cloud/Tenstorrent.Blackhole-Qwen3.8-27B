@@ -38,7 +38,10 @@ def main():
     parser.add_argument('--output-projection', action='store_true')
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
+    parser.add_argument('--retain-histories', action='store_true')
     args = parser.parse_args()
+    if args.retain_histories and not args.packed_checkpoints:
+        parser.error('--retain-histories requires packed checkpoints')
     if args.rows == 32 and args.model_adapter:
         parser.error('T32 model integration requires the wider packed-history prerequisites')
     if args.packed_checkpoints and (not args.dma_windows or args.rows == 1):
@@ -142,10 +145,17 @@ def main():
                 stage('conv-multitoken-submit')
                 candidate = run_batched_projected if args.batch_conv else run_projected
                 candidate_projected = upload(projected)
-                result = candidate(mesh, candidate_projected, initial, candidate_conv,
+                projected_scratch = ttnn.to_memory_config(candidate_projected, ttnn.L1_MEMORY_CONFIG) if args.retain_histories else candidate_projected
+                result = candidate(mesh, projected_scratch, initial, candidate_conv,
                                        taps, dt_bias, neg_exp_A, norm_w, kernels,
                                        **(dict(packed_checkpoints=True) if args.packed_checkpoints else {}),
                                        **(dict(dma_windows=True) if args.dma_windows else {}))
+                if args.retain_histories:
+                    from gdn_records import retain_checkpoint_histories
+                    result['owned'].append(projected_scratch)
+                    retain_checkpoint_histories(ttnn, result, result['output'])
+                    report['retained_history_buffers'] = len(result['owned'])
+                    report['retention_sha256'] = hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci/gdn_records.py').read_bytes()).hexdigest()
                 stage('conv-multitoken-readback')
                 outputs, states = host(result['output']), host(result['states'])
                 for token in range(args.rows):
