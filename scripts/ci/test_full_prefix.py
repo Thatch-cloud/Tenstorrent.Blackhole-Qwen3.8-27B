@@ -11,6 +11,19 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_t32_requires_static_packed_history_control(self):
+        flags = dict(packed_checkpoints=True, ordered_cache=True, deferred_commit=False, attribution=False)
+        self.assertEqual(full_prefix.verification_widths(16, **flags), (1, 2, 4, 8, 16))
+        self.assertEqual(full_prefix.verification_widths(32, **flags), (1, 2, 4, 8, 16, 32))
+        for name in flags:
+            invalid = dict(flags)
+            invalid[name] = not flags[name]
+            with self.assertRaises(ValueError):
+                full_prefix.verification_widths(32, **invalid)
+        for width in (True, 16.0, 64):
+            with self.assertRaises(ValueError):
+                full_prefix.verification_widths(width, **flags)
+
     def test_chunked_long_prefix_covers_all_heads_and_pages(self):
         values = torch.arange(257 * 2 * 64 * 3).reshape(257, 2, 64, 3)
         for length in (4095, 4096, 4097, 16383, 16401):

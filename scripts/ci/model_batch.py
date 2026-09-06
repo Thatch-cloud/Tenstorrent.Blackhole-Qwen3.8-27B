@@ -23,8 +23,8 @@ def instance_overrides(bindings):
 
 
 def validate_checkpoint(rows, prefix):
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
-        raise ValueError("Expected T=1/2/4/8/16")
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
+        raise ValueError("Expected T=1/2/4/8/16/32")
     if type(prefix) is not int or not 0 <= prefix <= rows:
         raise ValueError("Checkpoint must be in [0, T]")
 

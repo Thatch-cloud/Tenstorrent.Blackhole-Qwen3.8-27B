@@ -40,7 +40,9 @@ engine-level dynamic acceptance/commit and executable coding evaluation remain o
 Packed histories passed34028729821 and ordered cache writes passed34034319922:
 T16 is now89.552/98.325ms at4K/16K. All multirow widths improved; T1 stays native.
 Post-verification greedy commit passed34029984214. Fused96-worker publication
-passed34034469074, including every inactive native slot. These are still forced-draft
+passed34034469074, including every inactive native slot. Captured commit passed
+34036778172: selected publication plus binding guards/synchronization costs
+1.852-4.571ms, with setup separately recorded. These are still forced-draft
 correctness fixtures, not a measured end-to-end speculative coding engine.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
@@ -54,7 +56,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Packed histories, ordered cache writes and96-worker commit passed full-model gates; T16 costs89.552/98.325ms at4K/16K | Captured commit and device selection; remaining-cost attribution; FP32-preserving wider GDN worker mappings |
+| E4 fusion/pipeline | Packed histories, ordered cache writes and captured96-worker commit passed full-model gates; T16 costs89.552/98.325ms at4K/16K | T32 simulator prerequisites and native hardware cost curve; device selection; FP32-preserving wider GDN worker mappings |
 | E5 drafting | Request-local lookup and greedy session/accounting host tests; historical MTP groundwork | Reusable card-backed verifier and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

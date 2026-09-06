@@ -6,6 +6,12 @@ from attention_batch import OrderedCacheWriter, Overlay, SerialAttentionReader, 
 
 
 class AttentionBatchTests(unittest.TestCase):
+    def test_t32_serial_control_keeps_all_singleton_positions(self):
+        operations, writer = self.fixture(32)
+        writer('cache', SimpleNamespace(shape=(1, 32, 32, 256)), update_idxs_tensor='packed', page_table='packed')
+        self.assertEqual([call.kwargs['update_idxs_tensor'] for call in operations.experimental.paged_update_cache.call_args_list], list(range(32)))
+        SerialAttentionReader(None, list(range(32)), ['page'] * 32)
+
     def test_capture_closes_and_releases_on_operation_failure(self):
         events = []
         operations = SimpleNamespace(begin_trace_capture=Mock(return_value=17),

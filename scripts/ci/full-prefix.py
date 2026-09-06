@@ -47,6 +47,14 @@ def logical_kv_chunk(host, first_page, valid_tokens):
     return host.permute(1, 0, 2, 3).reshape(host.shape[1], -1, host.shape[3])[:, :count]
 
 
+def verification_widths(max_rows, *, packed_checkpoints, ordered_cache, deferred_commit, attribution):
+    if type(max_rows) is not int or max_rows not in (16, 32):
+        raise ValueError('Maximum verification width must be 16 or 32')
+    if max_rows == 32 and (not packed_checkpoints or not ordered_cache or deferred_commit or attribution):
+        raise ValueError('T32 requires the static packed-history ordered-cache gate without deferred decisions or attribution')
+    return (1, 2, 4, 8, 16, 32) if max_rows == 32 else (1, 2, 4, 8, 16)
+
+
 def main():
     if os.environ.get("QWEN_HARDWARE_TESTS") != "1" or os.environ.get("QWEN_CARDS_ALLOCATED") != "1":
         raise RuntimeError("Explicit hardware allocation required")
@@ -69,7 +77,10 @@ def main():
     parser.add_argument('--ordered-cache', action='store_true')
     parser.add_argument('--commit-dma', action='store_true')
     parser.add_argument('--captured-commit', action='store_true')
+    parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
     options = parser.parse_args()
+    widths = verification_widths(options.max_rows, packed_checkpoints=options.packed_checkpoints,
+        ordered_cache=options.ordered_cache, deferred_commit=options.deferred_commit, attribution=options.attribution)
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
     if options.serial_sdpa and not options.batch:
@@ -107,14 +118,14 @@ def main():
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
-    prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
+    prefixes = (0, 1, options.max_rows // 2, options.max_rows) if options.coding_cost else tuple(range(options.max_rows + 1))
     import torch
     import ttnn
     from transformers import AutoConfig, AutoTokenizer
     from models.demos.blackhole.qwen36.tt.qwen36_vllm import Qwen36ForCausalLM
 
     root = Path("/experiment/results")
-    report = dict(passed=False, checks=[], negative_controls=[], rows=16,
+    report = dict(passed=False, checks=[], negative_controls=[], rows=options.max_rows,
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
     report["batched_candidate"] = options.batch
     report["serial_sdpa"] = options.serial_sdpa
@@ -407,8 +418,8 @@ def main():
             save(replay_initial)
             restore(replay_initial)
             for length in lengths:
-                kv_digest(length + 18)
-                for rows in (1, 2, 4, 8, 16):
+                kv_digest(length + options.max_rows + 2)
+                for rows in widths:
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
@@ -429,7 +440,7 @@ def main():
                 raise AssertionError("Insufficient fixed prompt tokens")
             oracle = [prefill(prompt)]
             oracle_logits = []
-            for position in range(18):
+            for position in range(options.max_rows + 2):
                 logits = decode(oracle[-1], length + position, False)
                 oracle_logits.append(logits)
                 oracle.append(argmax(logits))
@@ -456,7 +467,7 @@ def main():
                         raise AssertionError("Native eager/trace baseline differs")
                 report.setdefault("mode_checks", []).append(dict(length=length, trace=trace, logits_exact=True))
                 if options.batch:
-                    for rows in (1, 2, 4, 8, 16):
+                    for rows in widths:
                         prefill(prompt)
                         reference_logits = [decode(oracle[index], length + index, trace) for index in range(rows)]
                         expected = torch.cat([active_serial_logits(value, model.args.vocab_size) for value in reference_logits], dim=0)
@@ -496,7 +507,7 @@ def main():
                         raise AssertionError("Candidate prefill seed changed")
                     expected_inactive = inactive_digest() if options.commit_dma else None
                     if options.batch:
-                        proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
+                        proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, options.max_rows)]
                         actual = batched(proposals, length, prefix, trace, deferred=options.deferred_commit,
                                          abort=prefix == 0, known_seed=oracle[0])
                         if prefix:
@@ -516,7 +527,7 @@ def main():
                     else:
                         for index in range(prefix):
                             decode(oracle[index], length + index, trace)
-                        for index in range(prefix, 16):
+                        for index in range(prefix, options.max_rows):
                             decode((oracle[index] + 137) % model.args.vocab_size, length + index, trace)
                         restore()
                     if live_digest() != expected_state or kv_digest(length + prefix) != expected_kv:
@@ -535,7 +546,7 @@ def main():
                         logits_exact=True, all_gdn_states_exact=True, valid_kv_exact=True, correction_steps=2))
                     if prefix == 0:
                         prefill(prompt)
-                        for index in range(16):
+                        for index in range(options.max_rows):
                             decode((oracle[index] + 137) % model.args.vocab_size, length + index, trace)
                         stale = decode(oracle[0], length, trace)
                         stale_detected = not torch.equal(stale, expected_logits[0])
@@ -555,7 +566,7 @@ def main():
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")
-        if options.batch and not options.attribution and len(report.get("batch_checks", [])) != len(lengths) * 10:
+        if options.batch and not options.attribution and len(report.get("batch_checks", [])) != len(lengths) * 2 * len(widths):
             raise AssertionError("Missing batched width/mode checks")
         if not options.attribution and len(report["checks"]) != len(lengths) * 2 * len(prefixes):
             raise AssertionError("Missing rollback cases")
@@ -565,7 +576,7 @@ def main():
             from full_batch_timing import measure
             report["timing_scope"] = "Captured full-logit blocks with one preselected end checkpoint; no drafter, dynamic selection or complete speculative commit pipeline"
             for prompt, oracle in timing_fixtures:
-                for rows in (1, 2, 4, 8, 16):
+                for rows in widths:
                     measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,

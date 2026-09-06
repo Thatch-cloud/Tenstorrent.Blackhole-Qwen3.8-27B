@@ -5,7 +5,7 @@ from gdn_prefix import independent_row
 
 
 def validate_projected(shape, states):
-    if len(shape) != 3 or shape[0] != 1 or shape[1] not in (1, 2, 4, 8, 16) or shape[2] not in (8240, 8256):
+    if len(shape) != 3 or shape[0] != 1 or shape[1] not in (1, 2, 4, 8, 16, 32) or shape[2] not in (8240, 8256):
         raise ValueError('Expected projected TP2 rows [1,T,8240/8256]')
     if len(states) != 4 or any(tuple(state.shape) != (1, 1, 5120) for state in states):
         raise ValueError('Four compact B1 convolution states required')
@@ -29,7 +29,7 @@ def restore_prefix(operations, result, entry, destinations, accepted):
     rows = result['states'].shape[0]
     packed_checkpoints = result.get('packed_checkpoints', False)
     windows = result.get('packed_conv_states', []) if packed_checkpoints else []
-    if rows not in (1, 2, 4, 8, 16) or tuple(result['states'].shape) != (rows, 24, 128, 128):
+    if rows not in (1, 2, 4, 8, 16, 32) or tuple(result['states'].shape) != (rows, 24, 128, 128):
         raise ValueError('Supported recurrent prefix geometry required')
     if type(accepted) is not int or not 0 <= accepted <= rows:
         raise ValueError('Accepted prefix must lie within the candidate block')

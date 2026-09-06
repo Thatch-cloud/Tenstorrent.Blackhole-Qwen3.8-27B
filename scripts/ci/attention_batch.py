@@ -30,8 +30,8 @@ class Overlay:
 
 class SerialCacheWriter:
     def __init__(self, operations, singleton_positions, singleton_pages, shard_config):
-        if len(singleton_positions) not in (1, 2, 4, 8, 16) or len(singleton_pages) != len(singleton_positions):
-            raise ValueError("Expected T=1/2/4/8/16 singleton position/page pairs")
+        if len(singleton_positions) not in (1, 2, 4, 8, 16, 32) or len(singleton_pages) != len(singleton_positions):
+            raise ValueError("Expected T=1/2/4/8/16/32 singleton position/page pairs")
         self.operations = operations
         self.positions = singleton_positions
         self.pages = singleton_pages
@@ -81,7 +81,7 @@ class OrderedCacheWriter:
 
 class SerialAttentionReader:
     def __init__(self, operations, singleton_positions, singleton_pages):
-        if len(singleton_positions) not in (1, 2, 4, 8, 16) or len(singleton_pages) != len(singleton_positions):
+        if len(singleton_positions) not in (1, 2, 4, 8, 16, 32) or len(singleton_pages) != len(singleton_positions):
             raise ValueError("Expected paired singleton attention metadata")
         self.operations = operations
         self.positions = singleton_positions

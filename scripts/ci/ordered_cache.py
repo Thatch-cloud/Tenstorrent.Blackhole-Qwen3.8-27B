@@ -46,8 +46,8 @@ def load_kernels(root):
 
 def validate_shapes(cache, packed, positions, pages):
     rows = packed[1] if len(packed) == 4 else 0
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16) or tuple(packed) != (1, rows, 32, 256):
-        raise ValueError('Native prepared T=1/2/4/8/16 KV tiles required')
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or tuple(packed) != (1, rows, 32, 256):
+        raise ValueError('Native prepared T=1/2/4/8/16/32 KV tiles required')
     if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (2, 64, 256):
         raise ValueError('Expected two-head 64-row BF8 paged cache')
     if tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows or not 1 <= pages[1] <= min(1024, cache[0]):

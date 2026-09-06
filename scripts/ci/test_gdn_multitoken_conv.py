@@ -89,10 +89,10 @@ class ConvIntegrationTests(unittest.TestCase):
 
     def test_compact_single_sequence_geometry(self):
         states = [SimpleNamespace(shape=(1, 1, 5120)) for index in range(4)]
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             for width in (8240, 8256):
                 self.assertEqual(validate_projected((1, rows, width), states), rows)
-        for shape in ((1, 32, 8256), (2, 2, 8256), (1, 2, 8192)):
+        for shape in ((1, 64, 8256), (2, 2, 8256), (1, 2, 8192)):
             with self.assertRaises(ValueError):
                 validate_projected(shape, states)
         with self.assertRaises(ValueError):
@@ -162,7 +162,7 @@ class ConvIntegrationTests(unittest.TestCase):
             self.assertEqual(copies, [])
 
     def test_restore_all_supported_widths(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             for accepted in range(rows + 1):
                 operations, result, entry, destinations, copies, slices, freed = self.restore_fixture(rows)
                 restore_prefix(operations, result, entry, destinations, accepted)

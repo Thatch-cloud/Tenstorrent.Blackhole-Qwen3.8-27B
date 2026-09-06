@@ -6,7 +6,7 @@ from ordered_cache import load_kernels, replace_once, validate_shapes
 
 class OrderedCacheTests(unittest.TestCase):
     def test_supported_geometry(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             self.assertEqual(validate_shapes((8, 2, 64, 256), (1, rows, 32, 256), (rows,), (rows, 4)), rows)
             self.assertEqual(validate_shapes((8200, 2, 64, 256), (1, rows, 32, 256), (rows,), (rows, 1024)), rows)
 

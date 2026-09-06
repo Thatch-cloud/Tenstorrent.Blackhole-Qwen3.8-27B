@@ -1,5 +1,25 @@
 # Simulator-first device-loop GDN gate
 
+## T32 static-verifier prerequisites
+
+The wider experiment fills a complete 32-row tile; it does not change serving
+or request-level proposal limits. Recurrence/norm run `20260906T134145Z-324`
+(seed0) passed every output and recurrent prefix against serial T1 of the same
+generated kernel, including rows 16-31. This is not an independent native oracle.
+
+Run `20260906T134609Z-603` (seed1, T32) passed the batched convolution/DMA-window
+chain, all packed recurrent/convolution histories, all 32 prefix-copy checks,
+all 33 restored two-token continuations and one stale-state negative control.
+Immutable entry/projected inputs, final convolution state and clean mesh close
+also passed. These are functional simulator results, not timing evidence.
+
+Ordered shared-page cache run `20260906T140728Z-1111` passed T32/seed2/start16383
+with 1024 page-table columns: complete native BF8 cache equality on both chips,
+unchanged input, omitted-write detection and repeat-after-restore. Hardware now
+runs independent native full-layer correctness before full-model exactness,
+rollback and the static cost curve. Host suites: 223 CI, 55 simulator-support,
+40 speculative tests passed; shell syntax and whitespace checks passed.
+
 ## Reusable verifier input staging
 
 `run-verifier-inputs.sh --rows 16` checks in-place host token, packed/singleton

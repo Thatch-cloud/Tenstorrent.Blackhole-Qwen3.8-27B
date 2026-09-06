@@ -32,8 +32,8 @@ def gated_decode(gdn, profiler=None):
 
 
 def validate_rows(shape):
-    if len(shape) != 3 or shape[0] != 1 or shape[2] != 5120 or shape[1] not in (1, 2, 4, 8, 16):
-        raise ValueError("Expected [1, T, 5120], T=1/2/4/8/16")
+    if len(shape) != 3 or shape[0] != 1 or shape[2] != 5120 or shape[1] not in (1, 2, 4, 8, 16, 32):
+        raise ValueError("Expected [1, T, 5120], T=1/2/4/8/16/32")
     return shape[1]
 
 

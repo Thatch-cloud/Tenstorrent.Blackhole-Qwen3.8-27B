@@ -115,7 +115,7 @@ def load_kernels(root=Path('/opt/tt-metal'), fuse_norm_gate=False):
 
 def validate_geometry(qkv, beta, gate, initial):
     rows = qkv[1] if len(qkv) == 3 else 0
-    if rows not in (1, 2, 4, 8, 16) or tuple(qkv) != (1, rows, 5120):
+    if rows not in (1, 2, 4, 8, 16, 32) or tuple(qkv) != (1, rows, 5120):
         raise ValueError('Expected packed TP2 QKV [1,T,5120]')
     if tuple(beta) != (1, rows, 24) or tuple(gate) != (1, rows, 24) or tuple(initial) != (1, 24, 128, 128):
         raise ValueError('Expected T sequential rows sharing one 24-head initial state')

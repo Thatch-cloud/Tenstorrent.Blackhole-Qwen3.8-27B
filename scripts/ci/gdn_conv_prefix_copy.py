@@ -5,7 +5,7 @@ from pathlib import Path
 
 def validate_prefix(source_shapes, destination_shapes, prefix):
     rows = source_shapes[0][1] if len(source_shapes) == 4 and len(source_shapes[0]) == 3 else 0
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Supported packed convolution width required')
     if any(tuple(shape) != (1, rows, 5120) for shape in source_shapes):
         raise ValueError('Four identically shaped packed convolution states required')

@@ -5,7 +5,7 @@ from gdn_conv_prefix_copy import validate_prefix
 
 class PrefixCopyTests(unittest.TestCase):
     def test_every_supported_prefix(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             for prefix in range(1, rows + 1):
                 self.assertEqual(validate_prefix([(1, rows, 5120)] * 4, [(1, 1, 5120)] * 4, prefix), rows)
 

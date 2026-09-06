@@ -5,6 +5,12 @@ from model_batch import compact_gdn_enabled, device_loop_enabled, instance_overr
 
 
 class ModelBatchTests(unittest.TestCase):
+    def test_t32_static_fixture_has_all_prefixes_and_device_loop(self):
+        for prefix in range(33):
+            validate_checkpoint(32, prefix)
+        self.assertTrue(device_loop_enabled(32, True, True, True, True, True))
+        self.assertTrue(compact_gdn_enabled(32, True, True, None))
+
     def test_packed_checkpoint_experiment_probes_every_multirow_width(self):
         for rows in (1, 2, 4, 8, 16):
             self.assertEqual(device_loop_enabled(rows, True, True, True, True, True), rows > 1)

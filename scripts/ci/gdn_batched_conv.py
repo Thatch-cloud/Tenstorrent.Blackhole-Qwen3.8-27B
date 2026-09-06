@@ -6,7 +6,7 @@ from gdn_prefix import independent_row
 
 
 def history_windows(rows):
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Supported single-sequence token width required')
     return tuple((slot, slot + rows) for slot in range(4))
 

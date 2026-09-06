@@ -63,11 +63,16 @@ class MultiTokenTests(unittest.TestCase):
         self.assertIn('noc.async_write_barrier();', result)
 
     def test_frozen_geometry_is_a_single_sequence_not_independent_batch(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             self.assertEqual(validate_geometry((1, rows, 5120), (1, rows, 24), (1, rows, 24), (1, 24, 128, 128)), rows)
         for initial in ((16, 24, 128, 128), (1, 12, 128, 128)):
             with self.assertRaises(ValueError):
                 validate_geometry((1, 16, 5120), (1, 16, 24), (1, 16, 24), initial)
+
+    def test_recurrence_does_not_exceed_single_tile_row_capacity(self):
+        for rows in (17, 31, 33, 64):
+            with self.assertRaises(ValueError):
+                validate_geometry((1, rows, 5120), (1, rows, 24), (1, rows, 24), (1, 24, 128, 128))
 
     def test_feedback_is_io_bf16_and_has_own_ring(self):
         io, fp32 = cb_plan()

@@ -13,7 +13,7 @@ class BatchedConvolutionTests(unittest.TestCase):
         self.assertIn('source_tiles + 5 * 2048', source)
 
     def test_parallel_windows_equal_serial_shift_for_every_prefix(self):
-        for rows in (1, 2, 4, 8, 16):
+        for rows in (1, 2, 4, 8, 16, 32):
             history = ['entry0', 'entry1', 'entry2', 'entry3'] + list(range(rows))
             windows = [history[start:end] for start, end in history_windows(rows)]
             serial = history[:4]
@@ -24,6 +24,6 @@ class BatchedConvolutionTests(unittest.TestCase):
                 self.assertEqual(shifted, serial)
 
     def test_invalid_widths(self):
-        for rows in (0, 3, 32, True, 2.0):
+        for rows in (0, 3, 64, True, 2.0):
             with self.assertRaises(ValueError):
                 history_windows(rows)

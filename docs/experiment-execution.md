@@ -16,7 +16,7 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Captured prefix publication (hardware gate pending)
+### Captured prefix publication (hardware gate passed)
 
 Prebind and warm all prefix-specific DMA programs, then capture each publication
 outside the decision interval. Report this setup separately from readback,
@@ -29,6 +29,35 @@ all three prefixes, exact native/checkpoint values and untouched inactive slots.
 Kernel C++ remains `ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019`;
 Python binding is `257f7b13899737b4d507024c7a77281b6925528e9ecdf94f7fe1600667f62ecb`.
 Host suites pass: 219 CI, 55 simulator-support and 40 speculative tests.
+
+Run [34036778172](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34036778172),
+code `ac9608b`, passed 20 width/mode cases, 16 selected-prefix rollback cases,
+four negative-control pairs and all inactive-slot checks on both chips. Selected
+commit execution including binding guards and synchronization measured
+1.852-4.571 ms; complete readback/selection/commit measured 9.852-14.092 ms.
+These are unpaired component observations, not a committed-throughput claim.
+Per-fixture program preparation, warmup and capture cost 80.581-472.999 ms,
+reported separately and not yet amortized by a reusable request executor.
+The native serial cache writer remains the independent control in this gate.
+Health preflight and mesh close passed; no reset or serving change occurred.
+
+### T32 verifier prerequisites (simulator work in progress)
+
+The T16 cost ceiling remains below 200 tokens/s even at perfect acceptance and
+zero overhead. T32 tests whether filling the existing 32-row matmul tile can
+amortize weight reads further; it does not assume a drafter will accept 31 tokens.
+Recurrence plus fused norm/gate passed simulator run `20260906T134145Z-324`,
+T32/seed0, every token output and recurrent prefix exact against serial T1 of
+the same generated kernel on both chips. This is not an independent native
+oracle certification. It also exercises the second vertical tile face (rows 16-31).
+Convolution/packed histories passed `20260906T134609Z-603` (seed1): all 32
+prefix copies, 33 restored two-token continuations and a stale-state control,
+with immutable entry/projected inputs and clean close. Ordered-cache T32 passed
+`20260906T140728Z-1111`, seed2/start16383 with 1024 page-table columns,
+complete native BF8 cache equality, immutable input and negative/replay checks.
+Hardware next runs the native full-layer prerequisite, then full-model T32.
+Serving and host
+proposal bucket limits remain at T16 until the required integration gates.
 
 ### Request-scoped speculative accounting (host tests passed)
 

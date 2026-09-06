@@ -26,7 +26,7 @@ def require_simulator(environment):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source-root', type=Path, required=True)
-    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16), default=2)
+    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16, 32), default=2)
     parser.add_argument('--norm-gate', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--conv', action='store_true')
@@ -39,6 +39,8 @@ def main():
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
     args = parser.parse_args()
+    if args.rows == 32 and args.model_adapter:
+        parser.error('T32 model integration requires the wider packed-history prerequisites')
     if args.packed_checkpoints and (not args.dma_windows or args.rows == 1):
         parser.error('--packed-checkpoints requires --dma-windows with T>1')
     if args.window_prefix and (not args.batch_conv or args.rows == 1):

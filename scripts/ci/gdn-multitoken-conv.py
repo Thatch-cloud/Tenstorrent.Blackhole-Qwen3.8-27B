@@ -22,7 +22,9 @@ def main():
     parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--dma-windows', action='store_true')
     parser.add_argument('--packed-checkpoints', action='store_true')
+    parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
     options = parser.parse_args()
+    widths = (1, 2, 4, 8, 16, 32) if options.max_rows == 32 else (1, 2, 4, 8, 16)
     if options.dma_windows and not options.batch_conv:
         parser.error('--dma-windows requires --batch-conv')
     if options.packed_checkpoints and not options.dma_windows:
@@ -107,7 +109,7 @@ def main():
 
             for seed in (0, 1, 2):
                 torch.manual_seed(seed)
-                for rows in (1, 2, 4, 8, 16):
+                for rows in widths:
                     context.update(seed=seed, rows=rows)
                     stage('fixture-initialize')
                     live = [gdn.rec_state, *gdn.conv_states]
@@ -300,7 +302,7 @@ def main():
                                          *([packed_input] if packed_input is not None else []),
                                          *[state for prefix in oracle_prefixes for state in prefix]])
                     stage('fixture-complete')
-            if len(report['checks']) != 30 or report['projection_calls'] != 93:
+            if len(report['checks']) != 6 * len(widths) or report['projection_calls'] != 3 * sum(widths):
                 raise AssertionError('Incomplete real-weight integration gate')
             if options.continuation and (len(report['continuation_checks']) != 216 or len(report['stale_controls']) != 15):
                 raise AssertionError('Incomplete composed-prefix continuation gate')
