@@ -86,6 +86,14 @@ Both build directories contain Ninja files with `clang++-20` recorded as compile
 compiler availability under that exact name still needs checking before a build.
 Long-context scratch-round TTsim `20260906T222729Z-298` also passed exactly:
 T16/start16383/seed0, groups1/8/7, host layout only.
+Larger-group stock device packing/unpacking now passes TTsim too:
+`20260906T223545Z-304` (T8/start4096/seed2) and `20260906T223905Z-308`
+(T16/start16383/seed1, groups1/8/7). The native-tree hardware experiment builds
+the audited allocation-only patch inside a disposable, network-isolated test
+container, then compares four-row versus eight-row groups with the same compact
+allocation in both arms. It does not overwrite the serving image or host runtime.
+Full-model DMA gate `34064443450` (`21aa767`) is running separately on the
+unchanged hardware runtime.
 
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.

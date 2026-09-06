@@ -14,7 +14,7 @@ from attention_head_fold import causal_mask, chunk_groups, device_layout
 from gdn_multitoken_conv import addresses, release_owned
 
 
-def validate_matrix(fixtures):
+def validate_matrix(fixtures, *, tree_scratch=False):
     expected = {(seed, rows, start) for seed in (0, 1, 2) for rows in (1, 2, 4, 8, 16, 32)
                 for start in (4095, 16383)}
     if len(fixtures) != len(expected) or {(value['seed'], value['rows'], value['start']) for value in fixtures} != expected:
@@ -22,6 +22,13 @@ def validate_matrix(fixtures):
     if any(value['exact'] is not True or value['timed_replays'] != 120 or value['refreshed_checks'] != 2 for value in fixtures):
         raise AssertionError('Missing correctness, timing or changed-input checks')
     for value in fixtures:
+        if tree_scratch:
+            for key, limit in (('groups', 4), ('candidate_groups', 8)):
+                actual = [(group['offset'], group['rows'], tuple(group['signature'])) for group in value.get(key, [])]
+                expected_plan = [(group['offset'], group['rows'], group['signature'])
+                    for group in chunk_groups(value['start'], value['rows'], max_group_rows=limit)]
+                if actual != expected_plan:
+                    raise AssertionError('Tree experiment must compare complete T4 and T8 group plans')
         samples = value['samples']
         if [sample['arm'] for sample in samples] != ['control', 'candidate', 'candidate', 'control'] * 3:
             raise AssertionError('Incomplete ABBA samples')
@@ -33,7 +40,12 @@ def validate_matrix(fixtures):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dma-layout', action='store_true')
+    parser.add_argument('--tree-scratch', action='store_true')
     options = parser.parse_args()
+    if options.tree_scratch and options.dma_layout:
+        parser.error('Tree grouping and DMA are separate experiments')
+    if options.tree_scratch and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+        raise RuntimeError('Tree experiment requires the process-fixed native scratch override')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -47,6 +59,14 @@ def main():
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                  for name in ('attention-group-timing.py', 'attention_head_fold.py', 'attention_batch.py')})
     report['dma_layout'] = options.dma_layout
+    report['tree_scratch'] = options.tree_scratch
+    if options.tree_scratch:
+        from sdpa_tree_scratch import audit
+        report['native_sources'] = audit('/opt/tt-metal', patched=True)
+        report['scope'] = 'Matched grouped attention T4 versus T8 groups; both use compact tree scratch and stock device layout; no model throughput'
+        report['simulator_prerequisites'] = ['20260906T221933Z-382', '20260906T222729Z-298',
+                                            '20260906T223545Z-304', '20260906T223905Z-308']
+        report['worker_cap_per_head'] = 16
     if options.dma_layout:
         report['simulator_prerequisites'] = ['20260906T215257Z-312', '20260906T215411Z-605', '20260906T220602Z-302']
         report['scope'] = 'Matched grouped attention: stock layout chain versus direct tile DMA; synthetic static inputs, no model throughput'
@@ -104,6 +124,10 @@ def main():
                         metadata = [(group, upload(page_ids[:, :group['signature'][1] // 64].contiguous(), ttnn.int32),
                                      upload(causal_mask(group['rows'], start + group['offset'], group['signature'][1])))
                                     for group in groups]
+                        candidate_groups = chunk_groups(start, rows, max_group_rows=8) if options.tree_scratch else groups
+                        candidate_metadata = [(group, upload(page_ids[:, :group['signature'][1] // 64].contiguous(), ttnn.int32),
+                            upload(causal_mask(group['rows'], start + group['offset'], group['signature'][1])))
+                            for group in candidate_groups] if options.tree_scratch else metadata
 
                         def gold(source):
                             tokens = []
@@ -124,7 +148,7 @@ def main():
                         reader = SerialAttentionReader(ttnn, positions, [pages] * rows)
 
                         def operation(arm, owned):
-                            if arm == 'control' and not options.dma_layout:
+                            if arm == 'control' and not (options.dma_layout or options.tree_scratch):
                                 if rows == 1:
                                     result = ttnn.transformer.paged_scaled_dot_product_attention_decode(query, keys, values,
                                         page_table_tensor=pages, cur_pos_tensor=positions[0], scale=0.0625,
@@ -141,7 +165,8 @@ def main():
                                     return device_layout_dma(mesh, tensor, count, owned, inverse=inverse, offset=offset)
                                 return device_layout(ttnn, tensor, count, owned, inverse=inverse, offset=offset)
 
-                            for group, group_pages, mask in metadata:
+                            selected_metadata = candidate_metadata if arm == 'candidate' else metadata
+                            for group, group_pages, mask in selected_metadata:
                                 count = group['rows']
                                 packed = layout(query, count, offset=group['offset'])
                                 result = ttnn.transformer.paged_scaled_dot_product_attention_decode(packed, keys, values,
@@ -191,7 +216,8 @@ def main():
                         if any(not torch.equal(before, after) for tensor, saved in zip((keys, values), immutable, strict=True)
                                for before, after in zip(saved, host(tensor), strict=True)):
                             raise AssertionError('Read-only attention changed KV data')
-                        report['fixtures'].append(dict(start=start, rows=rows, seed=seed, groups=groups, exact=True,
+                        report['fixtures'].append(dict(start=start, rows=rows, seed=seed, groups=groups,
+                            candidate_groups=candidate_groups, exact=True,
                             timed_replays=120, refreshed_checks=2, samples=samples))
                         stage('fixture-passed', start=start, rows=rows, seed=seed)
                     finally:
@@ -199,7 +225,7 @@ def main():
                             ttnn.release_trace(mesh, trace)
                         release_scratch([tensor for owned in temporaries.values() for tensor in owned])
                         release_owned(ttnn, inputs)
-        validate_matrix(report['fixtures'])
+        validate_matrix(report['fixtures'], tree_scratch=options.tree_scratch)
         report['passed'] = True
     finally:
         if mesh is not None:

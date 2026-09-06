@@ -9,6 +9,16 @@ spec.loader.exec_module(gate)
 
 
 class AttentionTimingTests(unittest.TestCase):
+    def test_tree_matrix_requires_distinct_bounded_group_plans(self):
+        fixtures = self.fixtures()
+        for fixture in fixtures:
+            fixture['groups'] = gate.chunk_groups(fixture['start'], fixture['rows'])
+            fixture['candidate_groups'] = gate.chunk_groups(fixture['start'], fixture['rows'], max_group_rows=8)
+        gate.validate_matrix(fixtures, tree_scratch=True)
+        fixtures[-1]['candidate_groups'] = fixtures[-1]['groups']
+        with self.assertRaises(AssertionError):
+            gate.validate_matrix(fixtures, tree_scratch=True)
+
     def fixtures(self):
         return [dict(seed=seed, rows=rows, start=start, exact=True, timed_replays=120, refreshed_checks=2,
                      samples=[dict(arm=arm, replay_ms=[0.1] * 10)

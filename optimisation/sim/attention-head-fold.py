@@ -32,12 +32,12 @@ def main():
     args = parser.parse_args()
     if args.dma_layout and not args.device_layout:
         parser.error('DMA layout requires the device-layout oracle checks')
-    if args.device_layout and args.max_group_rows > 4:
-        parser.error('Device layout currently supports groups up to four rows')
+    if args.device_layout and args.max_group_rows > (4 if args.dma_layout else 8):
+        parser.error('Group exceeds the selected device layout implementation')
     if args.start + args.rows > args.capacity or args.capacity % args.chunk_size:
         parser.error('Candidate cache view must cover positions and contain complete chunks')
-    if args.device_layout and not args.grouped and args.rows > 4:
-        parser.error('Device layout requires groups of at most four queries')
+    if args.device_layout and not args.grouped and args.rows > (4 if args.dma_layout else 8):
+        parser.error('Device layout exceeds its supported group width')
     if args.grouped and any(group['signature'][1] % 64 for group in chunk_groups(args.start, args.rows, max_group_rows=args.max_group_rows)):
         parser.error('Grouped probe requires complete native cache-page views')
     path = Path(os.environ['QWEN_SIM_REPORT'])
@@ -143,7 +143,7 @@ def main():
         stage('comparison')
         if any(not check['exact'] for check in report['checks']):
             raise AssertionError('Folded attention differs from native causal B1')
-        if args.device_layout and args.grouped and args.rows >= 8:
+        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4:
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')
             positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)

@@ -49,8 +49,8 @@ def chunk_groups(start, rows, *, max_chunk_tiles=8, max_group_rows=4):
 
 
 def device_layout(operations, tensor, rows, owned, *, inverse=False, offset=0):
-    if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 4:
-        raise ValueError('Explicit direction and one to four query rows required')
+    if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 8:
+        raise ValueError('Explicit direction and one to eight query rows required')
     if type(offset) is not int or offset < 0 or (inverse and offset):
         raise ValueError('Valid input-row offset required')
     shape = tuple(tensor.shape)

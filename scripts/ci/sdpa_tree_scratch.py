@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path('ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device')
+PATCHED_FACTORY_SHA256 = '3e0a69af9563ae8899db1363286d6dc6cdc1744e0154887dc91a630b16084a4a'
 HASHES = {
     'sdpa_decode_program_factory.cpp': '05708e6d9ddeddfdf13303d8f8fa391941d73b742ea3a380beeb0883ce8d4792',
     'kernels/dataflow/writer_decode_all.cpp': '734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8',
@@ -12,9 +13,12 @@ HASHES = {
 }
 
 
-def audit(root):
+def audit(root, *, patched=False):
     found = {name: hashlib.sha256((Path(root) / ROOT / name).read_bytes()).hexdigest() for name in HASHES}
-    if found != HASHES:
+    expected = dict(HASHES)
+    if patched:
+        expected['sdpa_decode_program_factory.cpp'] = PATCHED_FACTORY_SHA256
+    if found != expected:
         raise ValueError('SDPA tree allocation or reduction source differs from the audited baseline')
     return found
 
