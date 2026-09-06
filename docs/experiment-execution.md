@@ -16,6 +16,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Next recurrence experiment: value-axis partitioning (not implemented)
+
+The current device-loop recurrence still assigns one worker to each of24 local
+heads. A candidate can split each128-wide value axis into four32-wide partitions,
+using96 workers while duplicating the128-wide Q/K norm inputs. State pages would
+remain in native `[head,K,V]` order: each partition owns every fourth value tile,
+not a contiguous quarter of the recurrent tensor. Beta/g indices must continue
+to use the original head, rather than the96-way worker index.
+
+Important precision boundary from the audited native compute source: fused
+norm/gate consumes the FP32 `qn @ new_h` result before RMS reduction. Routing
+partition output through the ordinary BF16 recurrence output and then a separate
+norm op would introduce an extra rounding point, so it is not an exact fusion.
+A valid prototype must preserve FP32 partial outputs and reassemble all four
+value tiles in the native RMS reduction order, then preserve the existing BF16
+rounding after norm-weight multiplication, SiLU and the final multiplication.
+The extra synchronization/traffic must be timed, not assumed free. Simulator
+native-oracle output/state/continuation checks precede any hardware trial.
+
 ### Fused retained-state publication (simulator first pass)
 
 `gdn_commit_dma` publishes an arbitrary selected prefix for all48 GDN layers in
