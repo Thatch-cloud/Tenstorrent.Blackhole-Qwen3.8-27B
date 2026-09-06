@@ -16,6 +16,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Request-scoped speculative accounting (host tests passed)
+
+`GreedySession` now coordinates actual lookup proposals, bucket selection, target
+argmax decisions and caller-synchronized publication. Output/history advances
+only after device publication succeeds. The prefill seed is excluded from decode
+token counts; stale tickets, cross-request calls, reentrancy and failed commits
+are guarded. Generation budgets and EOS cannot over-emit. Fourteen coordinator
+tests bring the speculative host suite to40 tests. Device trace reuse and a real
+coding-throughput executor are still required; this is not a speed claim.
+
 ### Next recurrence experiment: value-axis partitioning (not implemented)
 
 The current device-loop recurrence still assigns one worker to each of24 local
