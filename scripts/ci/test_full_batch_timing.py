@@ -4,6 +4,12 @@ from full_batch_timing import paired_control_flags, summarize
 
 
 class TimingTests(unittest.TestCase):
+    def test_norm_control_keeps_ordered_cache_and_all_other_flags(self):
+        flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                     hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
+                     batch_conv=True, packed_checkpoints=True, ordered_cache=True)
+        self.assertEqual(paired_control_flags(**flags, norm_batch=True), dict(flags, norm_batch=False))
+
     def test_batched_convolution_control_preserves_previous_device_loop(self):
         flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
                      hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True)

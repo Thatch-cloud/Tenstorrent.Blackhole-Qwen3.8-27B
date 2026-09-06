@@ -47,7 +47,7 @@ class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
-                 retain_records=False, ordered_cache=False):
+                 retain_records=False, ordered_cache=False, norm_batch=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -83,6 +83,11 @@ class ModelBatch:
         if packed_checkpoints and not batch_conv:
             raise ValueError('Packed checkpoints require batched convolution')
         self.packed_checkpoints = packed_checkpoints and self.device_loop_gdn
+        from gdn_batched_conv import norm_batch_enabled
+        if norm_batch and not packed_checkpoints:
+            raise ValueError('Norm batching requires packed checkpoints')
+        self.norm_batch = norm_batch_enabled(self.rows, norm_batch)
+        self.norm_batch_calls = 0
         if retain_records and not self.packed_checkpoints:
             raise ValueError('Retained records require active packed checkpoints')
         from gdn_records import RetainedGDNBlock
@@ -165,7 +170,8 @@ class ModelBatch:
             from gdn_multitoken import load_kernels
             from gdn_multitoken_conv import finish_output, release_owned
             state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True),
-                                    self.compact_prologue, self.batch_conv, self.batch_conv, self.packed_checkpoints)
+                                    self.compact_prologue, self.batch_conv, self.batch_conv, self.packed_checkpoints,
+                                    norm_batch=self.norm_batch)
             self.working_states.append(state)
 
             def device_forward(value):
@@ -183,6 +189,7 @@ class ModelBatch:
                 else:
                     release_owned(operations, [value for value in result['owned'] if value is not output])
                 self.gdn_calls += 1
+                self.norm_batch_calls += int(result.get('norm_batch', False))
                 return output
 
             return device_forward
@@ -238,6 +245,7 @@ class ModelBatch:
         if self.retained is not None and (self.retained.closed or self.retained.records):
             raise ValueError('A retained fixture owns exactly one captured or eager block')
         before_gdn = self.gdn_calls
+        before_norm_batch = self.norm_batch_calls
         before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
         before_clones = [state.skipped_clones for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
@@ -249,6 +257,8 @@ class ModelBatch:
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):
             raise AssertionError("All 48 GDN and 16 attention adapters must engage")
+        if self.norm_batch_calls - before_norm_batch != (48 if self.norm_batch else 0):
+            raise AssertionError('Selected row-parallel norm must engage in all48 GDN layers')
         if any(reader.calls - before != 1 for reader, before in zip(self.readers, before_reads, strict=True)):
             raise AssertionError("Every selected B1 SDPA adapter must engage")
         if len(self.working_states) != (48 if self.compact_gdn else 0) or any(

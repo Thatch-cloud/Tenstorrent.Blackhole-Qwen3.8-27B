@@ -16,6 +16,35 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Row-parallel norm: real-weight layer gain passed
+
+Run34051597269 (`ccd51ff`) passed36 eager/trace fixtures,414 restored-prefix
+two-token continuations,18 stale controls and720 paired timing replays. It used
+real TP2 GDN weights, batched input/output projections, fabric reduction, all
+packed recurrent/convolution prefixes and native final-state commit. The arms
+differed only in recurrence/norm for T>=8; T1/2/4 retained the control path.
+
+| T | Control ms | Candidate ms | Median paired ratio |
+| --- | ---: | ---: | ---: |
+|1|0.332933|0.332789|1.000x|
+|2|0.435132|0.434923|1.001x|
+|4|0.500165|0.500006|1.001x|
+|8|0.631487|0.568535|1.112x|
+|16|0.893762|0.721702|1.240x|
+|32|1.417266|1.015059|1.396x|
+
+Timing used seed0; exactness used all three seeds. These are one-layer results,
+not full-model gains. The next opt-in `--norm-batch` full-model gate preserves
+all attention, precision, checkpoint and commit behavior. All48 GDN layers must
+report engagement for T>=8, with zero engagements below8. Actual request-pilot
+integration is rejected until its separate lifecycle gate is explicitly wired.
+The first `full-norm-batch` gate is static full-logit coding-context verification;
+selection and deferred/replayed/request combinations explicitly reject the flag
+rather than silently using old helpers. Its paired control keeps ordered cache,
+B1 SDPA, every packed history and selected checkpoint identical, disabling only
+the new norm path. All333 CI,55 simulator-support and51 speculative host tests
+passed before dispatch, along with shell syntax, workflow YAML and diff checks.
+
 ### Row-parallel norm/gate: first useful split-kernel gain
 
 Run34050458771 (`7db0198`) passed18 independent native fixtures,2160 paired

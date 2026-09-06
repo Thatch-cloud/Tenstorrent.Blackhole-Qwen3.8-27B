@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,6 +12,8 @@ class ModelBatchTests(unittest.TestCase):
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
         fixture.gdn_calls = 0
+        fixture.norm_batch_calls = 0
+        fixture.norm_batch = False
         fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
         fixture.compact_gdn = False
         fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
@@ -23,6 +27,23 @@ class ModelBatchTests(unittest.TestCase):
         self.assertEqual(fixture.model._forward_decode.call_args.kwargs, {})
         self.assertEqual(fixture.run(sharded_logits=True), 'logits')
         self.assertEqual(fixture.model._forward_decode.call_args.kwargs, {'sharded_lm_head': True})
+        fixture.norm_batch = True
+        with self.assertRaisesRegex(AssertionError, 'all48 GDN'):
+            fixture.run()
+
+    def test_full_prefix_propagates_norm_option_to_every_model_fixture(self):
+        tree = ast.parse(Path(__file__).with_name('full-prefix.py').read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'ModelBatch']
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            options = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
+            self.assertEqual(options.get('norm_batch'), 'options.norm_batch')
+        timing = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name) and node.func.id == 'measure'
+                  and any(keyword.arg == 'packed_checkpoints' for keyword in node.keywords)]
+        self.assertEqual(len(timing), 1)
+        self.assertIn('norm_batch', [keyword.arg for keyword in timing[0].keywords])
 
     def test_t32_static_fixture_has_all_prefixes_and_device_loop(self):
         for prefix in range(33):

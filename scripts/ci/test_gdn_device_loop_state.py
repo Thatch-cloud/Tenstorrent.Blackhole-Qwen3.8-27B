@@ -6,6 +6,24 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_norm_batch_uses_same_publication_and_checks_engagement(self):
+        adapter, active = self.fixture()
+        adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.norm_batch = True
+        with patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[], norm_batch=True)) as run, \
+                patch('gdn_device_loop_state.restore_prefix') as restore:
+            adapter.decode(SimpleNamespace(shape=(1, 8, 5120)), [], 3)
+        self.assertEqual(run.call_args.kwargs, dict(dma_windows=True, packed_checkpoints=True, norm_batch=True))
+        self.assertEqual([call.args[-1] for call in restore.call_args_list], [3, 8])
+        active.restore.assert_called_once_with(adapter.state)
+        active.restore.reset_mock()
+        with patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[])), \
+                patch('gdn_device_loop_state.release_owned'):
+            with self.assertRaisesRegex(AssertionError, 'did not engage'):
+                adapter.decode(SimpleNamespace(shape=(1, 8, 5120)), [], 3)
+        active.restore.assert_not_called()
+
     def test_packed_checkpoints_are_opt_in(self):
         adapter, active = self.fixture()
         self.assertFalse(adapter.packed_checkpoints)

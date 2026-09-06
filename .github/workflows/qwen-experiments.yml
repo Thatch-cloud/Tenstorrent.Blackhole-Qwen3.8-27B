@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-gdn-device-loop, full-verifier-replay, full-verifier-selection, full-verifier-engine, full-batch-attribution, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, gdn-value-split, gdn-value-split-timing, gdn-value-split-prefetch, gdn-value-split-norm-batch, gdn-norm-batch-layer, gdn-multitoken-conv, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-gdn-device-loop, full-norm-batch, full-verifier-replay, full-verifier-selection, full-verifier-engine, full-batch-attribution, attention-batch, attention-timing, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, gdn-value-split, gdn-value-split-timing, gdn-value-split-prefetch, gdn-value-split-norm-batch, gdn-norm-batch-layer, gdn-multitoken-conv, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -118,7 +118,7 @@ jobs:
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 4800 bash scripts/ci/run-baseline.sh
       - name: Full-model prefix correctness and verification cost
-        if: inputs.suite == 'full-prefix' || inputs.suite == 'full-batch' || inputs.suite == 'full-coding-cost' || inputs.suite == 'full-compact-gdn' || inputs.suite == 'full-gdn-input-reuse' || inputs.suite == 'full-gdn-row-clones' || inputs.suite == 'full-gdn-row-layout' || inputs.suite == 'full-gdn-device-loop' || inputs.suite == 'full-verifier-replay' || inputs.suite == 'full-verifier-selection' || inputs.suite == 'full-verifier-engine'
+        if: inputs.suite == 'full-prefix' || inputs.suite == 'full-batch' || inputs.suite == 'full-coding-cost' || inputs.suite == 'full-compact-gdn' || inputs.suite == 'full-gdn-input-reuse' || inputs.suite == 'full-gdn-row-clones' || inputs.suite == 'full-gdn-row-layout' || inputs.suite == 'full-gdn-device-loop' || inputs.suite == 'full-norm-batch' || inputs.suite == 'full-verifier-replay' || inputs.suite == 'full-verifier-selection' || inputs.suite == 'full-verifier-engine'
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}

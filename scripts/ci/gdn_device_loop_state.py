@@ -3,12 +3,14 @@
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_projected
 from gdn_prefix import validate_rows
 from gdn_state_copy import copy_compact
-from gdn_batched_conv import run_batched_projected
+from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 
 
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
-                 packed_checkpoints=False):
+                 packed_checkpoints=False, norm_batch=False):
+        if type(norm_batch) is not bool or (norm_batch and not packed_checkpoints):
+            raise ValueError('Norm batching requires explicit bool and packed checkpoints')
         if dma_windows and not batch_conv:
             raise ValueError('DMA windows require batched convolution')
         if packed_checkpoints and not dma_windows:
@@ -19,6 +21,7 @@ class DeviceLoopState:
         self.compact_prologue = compact_prologue
         self.batch_conv, self.dma_windows = batch_conv, dma_windows
         self.packed_checkpoints = packed_checkpoints
+        self.norm_batch = norm_batch
         self.entry = active.allocate()
         self.state = active.allocate()
         self.calls = self.checkpoint_calls = self.skipped_clones = 0
@@ -40,10 +43,13 @@ class DeviceLoopState:
             operation = run_batched_projected if self.batch_conv else run_projected
             result = operation(layer.mesh, projected, self.entry[0], self.state[1:],
                 list(layer.tw['conv_taps']), layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels,
+                **(dict(norm_batch=True) if self.norm_batch else {}),
                 **(dict(dma_windows=True) if self.dma_windows else {}),
                 **(dict(packed_checkpoints=True) if self.packed_checkpoints else {}),
                 **(dict(conv_checkpoints=tuple(sorted({prefix, rows} - {0})), hoist_input=True) if self.compact_prologue else {}))
             result['owned'].append(projected)
+            if result.get('norm_batch', False) != norm_batch_enabled(rows, self.norm_batch):
+                raise AssertionError('Norm-batch recurrence adapter did not engage as selected')
             restore_prefix(operations, result, self.entry, checkpoint, prefix)
             restore_prefix(operations, result, self.entry, self.state, rows)
             self.active.restore(self.state)

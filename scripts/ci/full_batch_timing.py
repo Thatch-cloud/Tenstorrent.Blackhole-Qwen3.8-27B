@@ -17,7 +17,13 @@ def summarize(samples):
 
 
 def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
-                         device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False):
+                         device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False,
+                         norm_batch=False):
+    if norm_batch:
+        return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                    hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                    compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
+                    ordered_cache=ordered_cache, norm_batch=False)
     if ordered_cache:
         return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                     hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
@@ -36,7 +42,8 @@ def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-            device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False):
+            device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False,
+            norm_batch=False):
     import torch
     import ttnn
 
@@ -50,13 +57,14 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                            compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                            hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                            compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
-                           ordered_cache=ordered_cache)
+                           ordered_cache=ordered_cache, norm_batch=norm_batch)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
                              reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                              hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                              compact_prologue=compact_prologue, batch_conv=batch_conv,
-                             packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache)) if compact_gdn else None
+                             packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache,
+                             norm_batch=norm_batch)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -100,6 +108,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     if ordered_cache:
         report.update(ordered_cache_enabled=candidate.ordered_cache,
                       paired_control='Same packed GDN histories and exact B1 SDPA, with previous serial cache writer')
+    if norm_batch:
+        report.update(norm_batch_enabled=candidate.norm_batch,
+                      paired_control='Identical ordered cache, B1 SDPA and packed GDN histories;24-worker recurrence/norm')
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -186,6 +197,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                     report['compact_comparison']['scope'] = 'Full-model packed convolution histories versus previous DMA-window candidate at T8/T16 and previous compact path below T8; same selected external checkpoint; no committed tok/s'
             if ordered_cache:
                 report['compact_comparison']['scope'] = 'Full-model ordered versus serial shared-page cache writer; identical packed GDN histories, B1 SDPA and selected external checkpoint; no committed tok/s'
+            if norm_batch:
+                report['compact_comparison']['scope'] = 'Full-model24-worker versus96-worker recurrence with row-parallel norm at T>=8; identical ordered cache, B1 SDPA, packed histories and selected checkpoint; no committed tok/s'
 
         restore_initial()
         trace, unused = capture_operation(ttnn, mesh, restore_initial)

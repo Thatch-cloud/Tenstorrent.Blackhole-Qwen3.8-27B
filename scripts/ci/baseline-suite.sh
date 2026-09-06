@@ -107,6 +107,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-replay ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-batch ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-device-loop ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --max-rows 32 --continuation --full-layer --batch-conv --dma-windows --packed-checkpoints

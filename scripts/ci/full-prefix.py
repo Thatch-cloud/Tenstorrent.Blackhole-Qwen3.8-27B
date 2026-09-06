@@ -81,7 +81,12 @@ def main():
     parser.add_argument('--replay-inputs', action='store_true')
     parser.add_argument('--device-selection', action='store_true')
     parser.add_argument('--request-pilot', action='store_true')
+    parser.add_argument('--norm-batch', action='store_true')
     options = parser.parse_args()
+    if options.norm_batch and (not options.packed_checkpoints or not options.coding_cost or not options.ordered_cache
+            or options.request_pilot or options.attribution or options.device_selection or options.deferred_commit
+            or options.replay_inputs):
+        raise ValueError('Norm batching first gate requires packed static full-logit coding verification')
     if options.request_pilot and (not options.device_selection or options.max_rows != 32):
         raise ValueError('Request pilot requires the T32 device-selection configuration')
     if options.device_selection and (not options.coding_cost or not options.packed_checkpoints or not options.ordered_cache
@@ -173,6 +178,11 @@ def main():
         report.update(hoist_row_layout=True, layout_prerequisite=34009858516)
     if options.device_loop_gdn:
         output_path = root / 'full-gdn-device-loop.json'
+        if options.norm_batch:
+            from gdn_vsplit_norm_batch import audit as norm_batch_audit
+            report['norm_batch'] = norm_batch_audit(Path('/opt/tt-metal'))
+            report['norm_batch_min_rows'] = 8
+            report['norm_batch_layer_prerequisite'] = 34051597269
         report.update(device_loop_gdn=True, native_t1_retained=True,
                       device_loop_min_rows=8 if options.compact_prologue and not options.packed_checkpoints else 2,
                       legacy_gdn_flags_describe_paired_control=True,
@@ -370,6 +380,7 @@ def main():
                                  hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                                  compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                                  packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
+                                 norm_batch=options.norm_batch,
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
@@ -453,7 +464,8 @@ def main():
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                          hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                                          compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache)
+                                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
+                                         norm_batch=options.norm_batch)
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
@@ -664,7 +676,8 @@ def main():
                         reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                        packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache)
+                        packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
+                        norm_batch=options.norm_batch)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
