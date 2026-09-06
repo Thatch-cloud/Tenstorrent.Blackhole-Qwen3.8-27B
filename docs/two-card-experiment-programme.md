@@ -45,6 +45,14 @@ passed34034469074, including every inactive native slot. Captured commit passed
 1.852-4.571ms, with setup separately recorded. These are still forced-draft
 correctness fixtures, not a measured end-to-end speculative coding engine.
 
+T32 now has full-model exactness/timing evidence in34038451865:128.738ms at4K
+and146.288ms at16K, with24 width/mode checks and16 corrected rollback cases.
+The workflow failed only its final outdated10-versus12 timing-fixture counter;
+that bookkeeping check is fixed, but the original workflow is not a green run.
+Ideal perfect-acceptance/no-overhead ceilings are248.57/218.75 tok/s. Actual
+committed throughput and coding-quality evaluation remain open; target200 is
+not yet achieved. T32 dynamic publication and request-trace reuse are next.
+
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
 `Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
 of this programme. The [execution ledger](experiment-execution.md) records individual

@@ -22,6 +22,11 @@ rollback and the static cost curve. Host suites: 223 CI, 55 simulator-support,
 
 ## Reusable verifier input staging
 
+T32 publication run `20260906T143759Z-322` passed all33 prefix selections for
+two synthetic layers (seed2), with exact native/checkpoint contents, unchanged
+inactive slots and immutable sources. The C++ DMA kernel is unchanged; this
+widens only the audited shape guard. Clean close/exit0; no hardware timing claim.
+
 `run-verifier-inputs.sh --rows 16` checks in-place host token, packed/singleton
 position and RoPE updates at31/4095/16383, without changing captured buffer
 addresses or page ownership. The RoPE output must exactly match the native

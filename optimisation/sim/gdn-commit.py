@@ -18,7 +18,7 @@ def main():
     spec.loader.exec_module(guard)
     guard.require_simulator(os.environ)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rows', type=int, choices=(2, 4, 8, 16), default=2)
+    parser.add_argument('--rows', type=int, choices=(2, 4, 8, 16, 32), default=2)
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--layers', type=int, choices=(2, 48), default=2)
     args = parser.parse_args()

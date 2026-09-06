@@ -79,7 +79,11 @@ def main():
     parser.add_argument('--captured-commit', action='store_true')
     parser.add_argument('--max-rows', type=int, choices=(16, 32), default=16)
     parser.add_argument('--replay-inputs', action='store_true')
+    parser.add_argument('--device-selection', action='store_true')
     options = parser.parse_args()
+    if options.device_selection and (not options.coding_cost or not options.packed_checkpoints or not options.ordered_cache
+                                    or options.deferred_commit or options.attribution or options.replay_inputs):
+        raise ValueError('Device selection requires the standalone static ordered-cache coding-cost gate')
     if options.replay_inputs and (options.max_rows != 16 or not options.deferred_commit or not options.ordered_cache):
         raise ValueError('Replay gate requires T16 retained histories and ordered cache')
     widths = verification_widths(options.max_rows, packed_checkpoints=options.packed_checkpoints,
@@ -196,8 +200,13 @@ def main():
     if options.attribution:
         report["scope"] = "In-situ fenced eager stage attribution at coding contexts; not critical-path device timing or a throughput gain"
         report["attribution_prerequisite"] = 34002876975
+    if options.device_selection:
+        report.update(device_selection=True, scope='Paired verifier plus selection/readback; no drafting or dynamic commit',
+            selection_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                               for name in ('full_device_selection.py', 'force_argmax.py', 'model_batch.py')})
     mesh = None
     generator = None
+    sampler = None
     try:
         source = Path("/opt/tt-metal")
         if options.device_loop_gdn:
@@ -254,6 +263,13 @@ def main():
         model = generator.model[0]
         if len(model.layers) != 64 or model.args.vocab_size != 248320:
             raise ValueError("Expected frozen 64-layer target")
+        if options.device_selection:
+            import inspect
+            from models.common.sampling.generator import SamplingGenerator
+            from models.tt_transformers.tt.ccl import TT_CCL
+            sampler = SamplingGenerator(args=model.args, mesh_device=mesh, tt_ccl=TT_CCL(mesh))
+            sampler.set_trace_bucket(1)
+            report['sampling_generator_sha256'] = hashlib.sha256(Path(inspect.getsourcefile(SamplingGenerator)).read_bytes()).hexdigest()
         kv_cache = generator.allocate_kv_cache((8200, model.args.n_local_kv_heads, 64, model.args.head_dim),
                                                ttnn.bfloat16, len(model.layers))
         page_table = torch.arange(1024, dtype=torch.int32).reshape(1, 1024)
@@ -455,6 +471,16 @@ def main():
             report.setdefault("prompts", []).append(dict(length=length,
                 tokens_sha256=hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
                 kind="Truncated deterministic repeated-code fixture, not a coding-quality benchmark"))
+            if options.device_selection:
+                from full_device_selection import measure_selection
+                for rows in widths:
+                    result = measure_selection(model, sampler, prompt, oracle, page_table, helpers, candidate_saved, replay_initial,
+                        rows=rows, prefill=prefill, decode=decode, save=save, restore=restore,
+                        live_digest=live_digest, kv_digest=kv_digest, local_host=local_host)
+                    report.setdefault('selection_checks', []).append(result)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(result), flush=True)
+                continue
             if options.attribution:
                 from full_batch_attribution import measure
                 for rows in (1, 16):
@@ -571,6 +597,11 @@ def main():
                             raise AssertionError("Full-model negative control was not detected")
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
+        if options.device_selection:
+            if addresses() != original_addresses or len(report.get('selection_checks', [])) != len(lengths) * len(widths):
+                raise AssertionError('Incomplete stable-state device-selection matrix')
+            report['passed'] = True
+            return
         if options.replay_inputs:
             from full_replay import verify_replay
             for prompt, oracle in timing_fixtures:
@@ -612,6 +643,9 @@ def main():
                     print(json.dumps(measurement), flush=True)
             if len(report.get("timings", [])) != len(lengths) * len(widths):
                 raise AssertionError("Missing full-model timing fixtures")
+            if options.batch:
+                from full_matrix import validate_static_matrix
+                validate_static_matrix(report, options.max_rows)
         if options.attribution and (len(report.get("attribution", [])) != 4 or
                                    not all(value["exact"] for value in report["attribution"])):
             raise AssertionError("Missing exact attribution fixtures")
@@ -621,6 +655,8 @@ def main():
         raise
     finally:
         output_path.write_text(json.dumps(report, indent=2))
+        if sampler is not None:
+            sampler.reset_trace()
         if mesh is not None:
             if generator is not None:
                 for store in getattr(generator, "_bucket_trace_store", {}).values():

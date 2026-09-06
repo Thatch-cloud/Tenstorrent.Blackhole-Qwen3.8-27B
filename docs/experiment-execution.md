@@ -16,7 +16,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Changed-metadata verifier replay (hardware gate pending)
+### Full-verifier device selection (hardware gate pending)
+
+`full-verifier-selection` compares the same packed-history/ordered-cache verifier
+with full-vocabulary gather plus host argmax versus pre-gather logits plus native
+TTSampling force-argmax. The sampler's own trace is disabled inside the outer
+verifier trace. Warm both arms before capture; compare complete native logits,
+token IDs and active GDN/valid KV on both chips. Timed ABBA replays read only the
+first chip in both arms, avoiding a diagnostic extra-read bias. Setup/restore
+are excluded and explicitly reported; drafting and dynamic publication remain
+outside this component measurement. The original sampler prerequisite is rerun
+before the full model. No serving sampling default changes.
+
+### Changed-metadata verifier replay (hardware gate passed)
 
 `full-verifier-replay` reuses one captured verifier across two blocks at4K/16K,
 T2/T16. First decisions0/1/T and second decisions1/T cover abort, partial and
@@ -32,6 +44,15 @@ poisons reuse. Exactly one decision follows each successful replay epoch.
 Input staging already passed simulator T2/T16 at31/4095/16383; no new kernel math
 is introduced by this gate. Trace lifetime remains owned by the fixture and
 traces are released before their retained buffers.
+
+Run [34039074595](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34039074595),
+code `4ed8814`, passed all24 changed-metadata replay cases, in addition to20
+width/mode checks,16 dynamic commits/corrected rollbacks and four negative-control
+pairs. All refreshed prefix histories, full logits, active GDN, valid KV, inactive
+slots and corrected continuations matched. `full_replay.py` SHA256:
+`6cec770ae90c37801410166e2a9443c6963fc7f5847513a681ba4140a60fb8a8`.
+This establishes the tested two-block trace lifecycle, not an actual drafter,
+multi-request serving lifecycle, or measured committed-token rate.
 
 ### Captured prefix publication (hardware gate passed)
 
@@ -80,6 +101,37 @@ the selected width matrix and includes regression coverage for missing cases.
 This is a harness rejection, not a numerical or kernel-liveness failure.
 Serving and host
 proposal bucket limits remain at T16 until the required integration gates.
+
+Retry [34038451865](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34038451865),
+code `59e8940`, passed the independent native GDN layer prerequisite (36 exact
+eager/trace cases,414 corrected continuations,18 stale-state controls). Full-model
+artifacts contain24 exact width/mode cases,16 corrected rollback cases, four
+negative-control pairs and all12 exact timing fixtures (2880 paired replays).
+The workflow nevertheless failed its final obsolete `len(lengths)*5` timing-count
+assertion: T32 correctly produced12 fixtures rather than10. This last bookkeeping
+check is corrected in `4ed8814`; do not describe the original workflow as green.
+
+Paired full-model means, identical packed GDN/B1 SDPA in both arms:
+
+| Context | T | Serial cache writer ms | Ordered cache writer ms |
+| ---: | ---: | ---: | ---: |
+| 4095 | 16 | 91.584565 | 89.559871 |
+| 4095 | 32 | 132.931733 | 128.738358 |
+| 16383 | 16 | 100.371342 | 98.328946 |
+| 16383 | 32 | 150.487581 | 146.287526 |
+
+T32 ideal ceilings are248.57/218.75 tokens/s at4K/16K, assuming perfect acceptance
+and zero drafting, selection, input-staging or commit overhead. These are not
+committed throughput. The32-row path now has theoretical room above the target,
+but high actual acceptance and low cycle overhead are still necessary.
+T32 dynamic prefix publication passed simulator `20260906T143759Z-322`, seed2,
+two synthetic layers, all33 prefixes, exact native/checkpoint state and every
+inactive slot/source unchanged. Python binding SHA256:
+`2674e657b10125be456b1a1eb948ca8b06a613978fd36c92bcba09dfb020830e`;
+C++ remains `ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019`.
+The stricter `full_matrix.py` checker independently validated complete exact
+coverage in the original T32 artifact; its original CI status remains failure.
+No serving defaults or precision settings changed.
 
 ### Request-scoped speculative accounting (host tests passed)
 

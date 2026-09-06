@@ -17,7 +17,7 @@ class CommitDmaTests(unittest.TestCase):
         return compact + [(rows, 24, 128, 128)] + [(1, rows, 5120)] * 4 + [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4 + compact
 
     def test_all_widths_prefixes_and_layer_counts(self):
-        for rows in (2, 4, 8, 16):
+        for rows in (2, 4, 8, 16, 32):
             for prefix in range(rows + 1):
                 for count in (1, 2, 48):
                     self.assertEqual(validate_shapes([self.fixture(rows)] * count, prefix), rows)

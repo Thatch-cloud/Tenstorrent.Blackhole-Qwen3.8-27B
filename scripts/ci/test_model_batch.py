@@ -1,10 +1,29 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
-from model_batch import compact_gdn_enabled, device_loop_enabled, instance_overrides, validate_checkpoint
+from model_batch import ModelBatch, compact_gdn_enabled, device_loop_enabled, instance_overrides, validate_checkpoint
 
 
 class ModelBatchTests(unittest.TestCase):
+    def test_raw_vocabulary_shards_require_explicit_forward_opt_in(self):
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = None
+        fixture.gdn_calls = 0
+        fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
+        fixture.compact_gdn = False
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        self.assertEqual(fixture.run(), 'logits')
+        self.assertEqual(fixture.model._forward_decode.call_args.kwargs, {})
+        self.assertEqual(fixture.run(sharded_logits=True), 'logits')
+        self.assertEqual(fixture.model._forward_decode.call_args.kwargs, {'sharded_lm_head': True})
+
     def test_t32_static_fixture_has_all_prefixes_and_device_loop(self):
         for prefix in range(33):
             validate_checkpoint(32, prefix)

@@ -233,7 +233,7 @@ class ModelBatch:
 
         return forward
 
-    def run(self):
+    def run(self, *, sharded_logits=False):
         if self.retained is not None and (self.retained.closed or self.retained.records):
             raise ValueError('A retained fixture owns exactly one captured or eager block')
         before_gdn = self.gdn_calls
@@ -242,7 +242,8 @@ class ModelBatch:
         before_writes = [writer.calls for writer in self.writers]
         before_reads = [reader.calls for reader in self.readers]
         with instance_overrides(self.bindings):
-            result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages)
+            result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages,
+                **({'sharded_lm_head': True} if sharded_logits else {}))
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):

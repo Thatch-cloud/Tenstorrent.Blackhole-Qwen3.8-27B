@@ -7,7 +7,7 @@ def validate_shapes(layers, prefix):
     if not 1 <= len(layers) <= 48:
         raise ValueError('One to 48 complete layer records required')
     rows = layers[0][5][0] if len(layers[0]) == 20 and len(layers[0][5]) == 4 else 0
-    if type(rows) is not int or rows not in (2, 4, 8, 16):
+    if type(rows) is not int or rows not in (2, 4, 8, 16, 32):
         raise ValueError('Multirow packed history required')
     compact = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
     expected = compact + [(rows, 24, 128, 128)] + [(1, rows, 5120)] * 4
