@@ -53,12 +53,15 @@ def main():
     parser.add_argument("--batch", action="store_true")
     parser.add_argument("--coding-cost", action="store_true")
     parser.add_argument("--serial-sdpa", action="store_true")
+    parser.add_argument("--attribution", action="store_true")
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
     if options.serial_sdpa and not options.batch:
         raise ValueError("Serial SDPA requires the batched candidate")
-    lengths = (4095, 16383) if options.coding_cost else (63, 64, 65)
+    if options.attribution and (not options.batch or not options.serial_sdpa or options.coding_cost):
+        raise ValueError("Attribution requires batch/B1-SDPA and is separate from the cost matrix")
+    lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
     import ttnn
@@ -73,11 +76,16 @@ def main():
     output_path = root / ("full-batch.json" if options.batch else "full-prefix.json")
     if options.coding_cost:
         output_path = root / "full-coding-cost.json"
+    if options.attribution:
+        output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
     if options.batch:
         report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
     if options.coding_cost:
         report["scope"] = "64-layer static coding-context correctness and full-logit block costs; no committed-token throughput"
+    if options.attribution:
+        report["scope"] = "In-situ fenced eager stage attribution at coding contexts; not critical-path device timing or a throughput gain"
+        report["attribution_prerequisite"] = 34002876975
     mesh = None
     generator = None
     try:
@@ -238,7 +246,7 @@ def main():
         generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=True)
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
-        base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost else baseline.make_prompt(tokenizer, 128, 0)
+        base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost or options.attribution else baseline.make_prompt(tokenizer, 128, 0)
         timing_fixtures = []
         for length in lengths:
             prompt = base_prompt[:length]
@@ -254,6 +262,18 @@ def main():
             report.setdefault("prompts", []).append(dict(length=length,
                 tokens_sha256=hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
                 kind="Truncated deterministic repeated-code fixture, not a coding-quality benchmark"))
+            if options.attribution:
+                from full_batch_attribution import measure
+                for rows in (1, 16):
+                    result = measure(model, oracle[:rows], length, page_table, helpers, candidate_saved,
+                        prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
+                        state_digest=live_digest, kv_digest=kv_digest, local_host=local_host)
+                    report.setdefault("attribution", []).append(result)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(dict(length=length, rows=rows, exact=result["exact"],
+                                          trace_median_ms=result["trace_median_ms"],
+                                          totals=result["passes"][-1]["totals"])), flush=True)
+                continue
             for trace in (False, True):
                 prefill(prompt)
                 for index, expected in enumerate(oracle_logits):
@@ -345,9 +365,9 @@ def main():
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
         if addresses() != original_addresses:
             raise AssertionError("Persistent state addresses changed")
-        if options.batch and len(report.get("batch_checks", [])) != len(lengths) * 10:
+        if options.batch and not options.attribution and len(report.get("batch_checks", [])) != len(lengths) * 10:
             raise AssertionError("Missing batched width/mode checks")
-        if len(report["checks"]) != len(lengths) * 2 * len(prefixes):
+        if not options.attribution and len(report["checks"]) != len(lengths) * 2 * len(prefixes):
             raise AssertionError("Missing rollback cases")
         if options.coding_cost:
             from full_batch_timing import measure
@@ -362,6 +382,9 @@ def main():
                     print(json.dumps(measurement), flush=True)
             if len(report.get("timings", [])) != len(lengths) * 5:
                 raise AssertionError("Missing full-model timing fixtures")
+        if options.attribution and (len(report.get("attribution", [])) != 4 or
+                                   not all(value["exact"] for value in report["attribution"])):
+            raise AssertionError("Missing exact attribution fixtures")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"

@@ -30,7 +30,7 @@ def validate_checkpoint(rows, prefix):
 
 
 class ModelBatch:
-    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False):
+    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -42,6 +42,7 @@ class ModelBatch:
         self.model = model
         self.operations = ttnn
         self.prefix = prefix
+        self.profiler = profiler
         self.buffers = []
         self.bindings = []
         self.writers = []
@@ -74,17 +75,39 @@ class ModelBatch:
                 reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
                 if reader is not None:
                     self.readers.append(reader)
-                self.bindings.append((attention, "_decode_from_prep", serial_tail(attention, writer, ttnn, reader)))
+                write = profiler.wrap("attention.kv_write", writer) if profiler else writer
+                read = profiler.wrap("attention.sdpa_and_row_packing", reader) if profiler and reader else reader
+                self.bindings.append((attention, "_decode_from_prep", serial_tail(attention, write, ttnn, read)))
+                if profiler:
+                    for name, category in (("forward_decode", "attention.block"),
+                                           ("_qkv_raw_decode", "attention.input_projection"),
+                                           ("_wo_proj", "attention.output_projection")):
+                        self.bindings.append((attention, name, profiler.wrap(category, getattr(attention, name))))
             else:
                 if helpers[gdn_index].gdn is not attention:
                     raise ValueError("GDN checkpoint layer order mismatch")
                 forward = self.gdn_forward(attention, helpers[gdn_index], checkpoints[gdn_index])
+                if profiler:
+                    forward = profiler.wrap("gdn.block", forward)
+                    for name, category in (("_project_qkvzab_raw", "gdn.input_projection"),
+                                           ("_row_proj", "gdn.output_projection")):
+                        self.bindings.append((attention, name, profiler.wrap(category, getattr(attention, name))))
                 self.bindings.append((attention, "forward_decode", forward))
                 gdn_index += 1
+        if profiler:
+            from stage_profile import decoder_bindings
+            for index, layer in enumerate(model.layers):
+                self.bindings.extend(decoder_bindings(layer, index, profiler))
+            for name, category in (("embd", "embedding"), ("_final_norm_decode", "final_norm"), ("_lm_head", "lm_head")):
+                self.bindings.append((model, name, profiler.wrap(category, getattr(model, name))))
 
     def gdn_forward(self, layer, helper, checkpoint):
         operations = self.operations
         native_gated = gated_decode(layer)
+        snapshot = helper.save
+        if self.profiler:
+            native_gated = self.profiler.wrap("gdn.native_row", native_gated)
+            snapshot = self.profiler.wrap("gdn.checkpoint", snapshot)
 
         def forward(value):
             from models.tt_transformers.tt.ccl import tt_all_reduce
@@ -97,7 +120,7 @@ class ModelBatch:
 
             def save(prefix):
                 if prefix == self.prefix:
-                    helper.save(checkpoint)
+                    snapshot(checkpoint)
 
             save(0)
             outputs = decode_projected(layer, packed, tokens, save, operations, forward=native_gated)

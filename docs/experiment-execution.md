@@ -16,6 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### E3 remaining-work attribution (hardware result pending)
+
+`full-batch-attribution` targets the remaining 235-244 ms T16 path with a bounded,
+JSON-only in-situ profiler, avoiding the historic multi-GB raw profiler exports.
+It compares T1/T16 at 4095/16383 tokens, three eager profiling passes each, with
+separate unfenced eager and captured trace controls. Exact full logits, active GDN
+states and the complete valid KV prefix are checked against native serial B1.
+
+Instance-local wrappers distinguish GDN input/output projections, each native
+fused row, selected-prefix checkpoint, attention projections/KV/SDPA with row
+packing, decoder direct-call components, final norm and LM head. Nested exclusive
+times reconcile to the full-model root; call-count gates require all 64 layers,
+48*T GDN rows and all attention paths. The profiler synchronizes the mesh at each
+boundary, so it changes overlap and includes dispatch/CPU overhead. Report fence
+calibration and unfenced/trace controls; do not treat category sums as a decomposition
+of the earlier traced 235-244 ms critical path or as a throughput improvement.
+
 ### E3 coding-context verification cost (passed 34002876975)
 
 `full-coding-cost` extends exactness to 4095/16383-token deterministic repeated-code

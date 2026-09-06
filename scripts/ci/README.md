@@ -128,6 +128,14 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   is not end-to-end speculative throughput or a coding-quality benchmark.
   Following the T4/4K divergence in run 34002210390, this suite selects B1 SDPA
   reads while retaining batched projections, to test native reduction parity.
+- `full-batch-attribution`: bounded JSON-only in-situ stage profiling at T1/T16
+  and 4095/16383-token contexts. Three synchronized eager passes separate GDN
+  native-row work, projections/checkpoints, attention KV/SDPA, native decoder
+  components and LM head. Nested exclusive times reconcile without double counting.
+  Full logits/state/KV must remain exact against native serial B1, including an
+  unfenced captured trace control. Fences change overlap and include dispatch costs;
+  these intervals are not a traced device critical-path decomposition. Export no
+  raw profiler CSVs or tensors. Profiling is off by default in all other suites.
 
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.
