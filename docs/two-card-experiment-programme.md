@@ -20,7 +20,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Compact state/DMA/input/layout optimizations win in full-model tests; BF16 L1-feedback device token loop passed recurrence-only hardware exactness | Measure paired recurrence cost, add norm/gate and real-weight conv, then full-model timing; memory-pipeline prototypes |
+| E4 fusion/pipeline | Compact state/DMA/input/layout wins; device token loop plus fused norm/gate passed simulator and native hardware exactness; recurrence-only timing measured | Real-weight convolution/GDN integration, matched norm/gate cost and full-model timing; memory-pipeline prototypes |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
