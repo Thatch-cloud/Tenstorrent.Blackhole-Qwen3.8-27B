@@ -18,7 +18,12 @@ def summarize(samples):
 
 def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
                          device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False,
-                         norm_batch=False, grouped_attention=False):
+                         norm_batch=False, grouped_attention=False, attention_dma=False):
+    if attention_dma:
+        return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                    hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                    compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
+                    ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=False)
     if grouped_attention:
         return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                     hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
@@ -48,7 +53,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
             device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False,
-            norm_batch=False, grouped_attention=False):
+            norm_batch=False, grouped_attention=False, attention_dma=False):
     import torch
     import ttnn
 
@@ -62,14 +67,15 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                            compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                            hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                            compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
-                           ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention)
+                           ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention,
+                           attention_dma=attention_dma)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
                              reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                              hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                              compact_prologue=compact_prologue, batch_conv=batch_conv,
                              packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache,
-                             norm_batch=norm_batch, grouped_attention=grouped_attention)) if compact_gdn else None
+                             norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=attention_dma)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -119,6 +125,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     if grouped_attention:
         report.update(grouped_attention_enabled=candidate.grouped_attention,
                       paired_control='Identical ordered cache, row-parallel GDN norm and packed histories; native B1 SDPA')
+    if attention_dma:
+        report.update(attention_dma_enabled=candidate.attention_dma,
+                      paired_control='Identical grouped attention and GDN; stock layout chain versus DMA')
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -209,6 +218,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report['compact_comparison']['scope'] = 'Full-model24-worker versus96-worker recurrence with row-parallel norm at T>=8; identical ordered cache, B1 SDPA, packed histories and selected checkpoint; no committed tok/s'
             if grouped_attention:
                 report['compact_comparison']['scope'] = 'Full-model grouped versus B1 attention; identical norm batching, ordered cache, packed histories and selected checkpoint; static positions only, no committed tok/s'
+            if attention_dma:
+                report['compact_comparison']['scope'] = 'Full-model grouped attention with stock layout versus DMA; identical SDPA and GDN; static positions only, no committed tok/s'
 
         restore_initial()
         trace, unused = capture_operation(ttnn, mesh, restore_initial)

@@ -83,7 +83,10 @@ def main():
     parser.add_argument('--request-pilot', action='store_true')
     parser.add_argument('--norm-batch', action='store_true')
     parser.add_argument('--grouped-attention', action='store_true')
+    parser.add_argument('--attention-dma', action='store_true')
     options = parser.parse_args()
+    if options.attention_dma and not options.grouped_attention:
+        raise ValueError('Attention DMA requires grouped attention')
     if options.grouped_attention and (not options.norm_batch or options.deferred_commit or options.replay_inputs
             or options.device_selection or options.request_pilot or options.attribution):
         raise ValueError('Grouped attention is limited to static norm-batch correctness and timing')
@@ -151,6 +154,11 @@ def main():
     report["batched_candidate"] = options.batch
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention
+    report['attention_dma'] = options.attention_dma
+    if options.attention_dma:
+        report.update(attention_dma_layer_prerequisite=34064053339,
+            attention_dma_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                for name in ('attention_fold_dma.py', 'attention_fold_dma.cpp')})
     if options.grouped_attention:
         report.update(grouped_attention_layer_prerequisite=34061952468,
             grouped_attention_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -390,6 +398,7 @@ def main():
                                  compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                                  packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
                                  norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
+                                 attention_dma=options.attention_dma,
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
@@ -704,7 +713,8 @@ def main():
                         hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
-                        norm_batch=options.norm_batch, grouped_attention=options.grouped_attention)
+                        norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
+                        attention_dma=options.attention_dma)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

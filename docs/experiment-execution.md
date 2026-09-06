@@ -78,6 +78,14 @@ Prepared DMA reader lifetime check `20260906T222439Z-296` passed in TTsim
 (T8/start4095/seed1, native scratch allocation mode). The borrowed query remains
 intact after temporary-buffer cleanup. The next real-layer run also collects a
 read-only native source/compiler audit before considering a hardware runtime build.
+DMA real-layer run `34064053339` (`cf3b11a`) passed48 mode checks,24 negative
+control pairs and72 matched timing blocks. T32 stock grouped->DMA layer means:
+4K1.599494->1.349729ms;16K2.012371->1.763004ms. The read-only source audit
+matches all three native SDPA pins and confirms the16-worker-per-head cap.
+Both build directories contain Ninja files with `clang++-20` recorded as compiler;
+compiler availability under that exact name still needs checking before a build.
+Long-context scratch-round TTsim `20260906T222729Z-298` also passed exactly:
+T16/start16383/seed0, groups1/8/7, host layout only.
 
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.
