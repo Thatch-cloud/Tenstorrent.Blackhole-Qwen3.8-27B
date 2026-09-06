@@ -252,7 +252,31 @@ missing optional roots rather than assuming them. This audit uses no cards and
 does not execute model code. The existing clone path remains unchanged until its
 aliasing and deallocation behavior can be established from the actual image.
 
-### E3 projected-row layout hoisting (hardware pending)
+### E3 projected-row layout hoisting (passed 34011273093)
+
+Run 34011273093 (`6ded69e`) passed 20 width/mode checks, 16 corrected rollback
+cases, four negative-control pairs and ten exact timing fixtures / 2400 timed
+decode replays. Full active logits, GDN state, selected end checkpoints and valid
+KV matched the native serial oracle. T1 did not enable the optimization.
+
+| Context | T | Selective-clone control ms | Hoisted-layout candidate ms | Median paired speedup |
+| --- | --- | --- | --- | --- |
+| 4095 | 2 | 57.554 | 56.142 | 1.026x |
+| 4095 | 4 | 76.834 | 72.868 | 1.054x |
+| 4095 | 8 | 116.988 | 106.337 | 1.100x |
+| 4095 | 16 | 197.494 | 173.065 | 1.141x |
+| 16383 | 2 | 58.635 | 57.281 | 1.024x |
+| 16383 | 4 | 79.062 | 75.086 | 1.053x |
+| 16383 | 8 | 121.388 | 110.716 | 1.096x |
+| 16383 | 16 | 206.296 | 181.846 | 1.135x |
+
+Every T>1 paired block favored layout hoisting. T16 saves about 24.4 ms against
+the contemporaneous selective-clone control. This is a full-model verification
+gain, not committed-token throughput. Perfect acceptance with zero drafting/commit
+overhead gives only 92.45/87.99 tok/s at T16; the 200 goal remains unmet.
+The bounded layout arm is complete. Retain the opt-in candidate as the next control
+and prioritize E4's true multi-token state-retaining recurrence. No serving defaults
+are changed and no new hardware experiment is dispatched by recording this result.
 
 `full-gdn-row-layout` converts the packed projection to row-major once per T>1
 block rather than allowing each nonzero TILE row slice to repeat that conversion.
@@ -570,7 +594,7 @@ commit cost at realistic contexts before introducing a drafter.
 | E0 baseline | Benchmarked: run 33943034757 | 19.45 to 18.39 client-estimated tok/s at B=1; no-logprobs and engine timing still required |
 | E1 cache | Occupancy observed, no active-zero recurrence | 0-12.4893% occupancy; full-model cache lifecycle gate remains required |
 | E2 interleaving | Boundary and three-request mixed-traffic gates passed at all ratios | Repeated workload/long-context/load/cancellation sweeps; full device KV lifecycle remains unverified |
-| E3 verifier | Exact full-model compact/DMA/input-reuse/selective-clone candidate passed 34009858516; T16 costs 197.479/206.547 ms at 4K/16K | Resolve layout-hoisting arm, then prioritize multi-token GDN; reach <80 ms before drafting overhead and implement dynamic selection/commit |
+| E3 verifier | Exact full-model layout-hoisted candidate passed 34011273093; T16 costs 173.065/181.846 ms at 4K/16K | Prioritize multi-token GDN; reach <80 ms before drafting overhead and implement dynamic selection/commit |
 | E4 fusion/pipeline | State/copy changes now win in full-model paired tests; earlier 91-core MLP fusion missed repeatability | True multi-token state-retaining recurrent kernel and memory-pipeline experiments; no serving promotion |
 | E5 drafting | Lookup policy host-tested; MTP historical integration; DFlash2/DSpark checkpoint/config review only, not card-tested | Shared E3 verifier/rollback gate, then matched MTP/lookup/DFlash2/DSpark runs; no non-greedy semantic substitution |
 | E6 coding quality | Corpus not frozen | 200 independent executable fixtures, isolated code execution and paired outcomes |

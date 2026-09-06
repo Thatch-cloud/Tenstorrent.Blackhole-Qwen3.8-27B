@@ -21,16 +21,16 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
 | E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
 
-Latest verified full-model T16 block costs (run **34009858516**, `215b933`) are
-**197.479 ms at 4095 tokens** and **206.547 ms at 16383 tokens**, down from the
+Latest verified full-model T16 block costs (run **34011273093**, `6ded69e`) are
+**173.065 ms at 4095 tokens** and **181.846 ms at 16383 tokens**, down from the
 earlier 235-244 ms verifier. Full logits, active GDN state, valid KV and corrected
 rollback passed. These are static verifier costs, not committed-token throughput:
-even perfect acceptance with zero drafting/commit overhead gives only 81.02/77.46
+even perfect acceptance with zero drafting/commit overhead gives only 92.45/87.99
 tok/s for T16. T1 retains native handling. The 200 committed-token/s goal is not met.
 
-Next bounded experiment: hoist repeated projected-row layout conversion, with the
-latest exact candidate as paired control. After resolving that arm, prioritize E4's
-true multi-token recurrent kernel rather than an open-ended sequence of copy tweaks.
+Projected-row layout hoisting passed exactness and paired timing. Next prioritize
+E4's true multi-token recurrent kernel, using the hoisted-layout candidate as control,
+rather than continuing an open-ended sequence of copy tweaks.
 Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
 tests or oracle verification as real coding throughput.
 
