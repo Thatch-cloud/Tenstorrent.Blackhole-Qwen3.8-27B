@@ -42,7 +42,12 @@ one arithmetic-free launch:96 workers per chip, two disjoint page partitions per
 layer. It reads immutable entry or packed-history buffers and writes native slot0
 plus the external checkpoint. Native inactive slots1-7 are untouched. All layers,
 buffer aliases and accessor layouts are checked before submitting any write.
-The existing multi-operation commit remains the default until certification.
+The multi-operation commit remains the helper default; the next explicit hardware
+gate opts into fused publication. It deliberately retains the certified serial
+cache writer, independent of the ordered-writer full-model experiment. A bounded
+two-chip transfer probe must pass before opening the model. In addition to the
+existing exact logits/active state/valid KV/rollback checks, every inactive slot
+of every native GDN tensor is hashed before and after each commit, outside timing.
 
 The simulator fixture checks every prefix against exact BF16 host slices, all
 native inactive-slot canaries, external checkpoints and immutable sources. T2,

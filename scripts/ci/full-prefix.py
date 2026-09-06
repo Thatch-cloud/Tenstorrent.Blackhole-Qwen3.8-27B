@@ -296,6 +296,10 @@ def main():
                     ttnn.deallocate(chunk)
             return result
 
+        def inactive_digest():
+            return [digest(value[1:] if slot == 0 else value[:, 1:])
+                    for helper in helpers for slot, tensor in enumerate(helper.live) for value in local_host(tensor)]
+
         def decode(token, position, trace, pages=None):
             result = generator.decode_forward(tokens=torch.tensor([[token]], dtype=torch.int32),
                 start_pos=torch.tensor([position], dtype=torch.int32), page_table=page_table if pages is None else pages,
@@ -466,6 +470,7 @@ def main():
 
                     if prefill(prompt) != oracle[0]:
                         raise AssertionError("Candidate prefill seed changed")
+                    expected_inactive = inactive_digest() if options.commit_dma else None
                     if options.batch:
                         proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
                         actual = batched(proposals, length, prefix, trace, deferred=options.deferred_commit,
@@ -492,6 +497,10 @@ def main():
                         restore()
                     if live_digest() != expected_state or kv_digest(length + prefix) != expected_kv:
                         raise AssertionError(f"Rollback state/KV prefix mismatch: {length=} {prefix=} {trace=}")
+                    if options.commit_dma:
+                        if inactive_digest() != expected_inactive:
+                            raise AssertionError('Fused commit changed an inactive native GDN slot')
+                        report['dynamic_commits'][-1]['all_inactive_slots_exact'] = True
                     for index, expected in zip(range(prefix, prefix + 2), expected_logits, strict=True):
                         actual = decode(oracle[index], length + index, trace)
                         if not torch.equal(actual, expected):
