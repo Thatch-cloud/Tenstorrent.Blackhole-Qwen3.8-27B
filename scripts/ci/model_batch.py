@@ -90,7 +90,9 @@ class ModelBatch:
                 if profiler:
                     forward = profiler.wrap("gdn.block", forward)
                     for name, category in (("_project_qkvzab_raw", "gdn.input_projection"),
-                                           ("_row_proj", "gdn.output_projection")):
+                                           ("_row_proj", "gdn.output_projection"),
+                                           ("_slice_along", "gdn.active_state_slice"),
+                                           ("_write_recurrent_state_prefix", "gdn.active_state_write")):
                         self.bindings.append((attention, name, profiler.wrap(category, getattr(attention, name))))
                 self.bindings.append((attention, "forward_decode", forward))
                 gdn_index += 1
@@ -103,7 +105,7 @@ class ModelBatch:
 
     def gdn_forward(self, layer, helper, checkpoint):
         operations = self.operations
-        native_gated = gated_decode(layer)
+        native_gated = gated_decode(layer, profiler=self.profiler)
         snapshot = helper.save
         if self.profiler:
             native_gated = self.profiler.wrap("gdn.native_row", native_gated)
@@ -123,7 +125,8 @@ class ModelBatch:
                     snapshot(checkpoint)
 
             save(0)
-            outputs = decode_projected(layer, packed, tokens, save, operations, forward=native_gated)
+            outputs = decode_projected(layer, packed, tokens, save, operations, forward=native_gated,
+                                       profiler=self.profiler)
             gated = outputs[0] if self.rows == 1 else operations.concat(outputs, dim=1)
             partial = layer._row_proj(gated, layer.tw["out"])
             if self.rows != 1:

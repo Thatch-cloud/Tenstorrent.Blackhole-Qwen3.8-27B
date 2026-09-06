@@ -40,6 +40,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                  for index, token in enumerate(tokens)]
     report = dict(length=length, rows=rows, exact=False, passes=[], trace_ms=[], eager_ms=[],
                   scope="Fenced eager host+device stage intervals; not a traced device critical-path decomposition",
+                  instrumentation_version=2,
                   decoder_types=[dict(index=index, full_attention=layer.is_full_attention) for index, layer in enumerate(model.layers)])
     trace = None
     trace_output = None
@@ -96,6 +97,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             totals = aggregate(records)
             counts = {value["category"]: value["calls"] for value in totals}
             required = {"gdn.native_row": 48 * rows, "gdn.input_projection": 48,
+                        "gdn.projected_row_copy": 48 * rows, "gdn.conv_gates": 48 * rows,
+                        "gdn.recurrence_norm_gate": 48 * rows, "gdn.active_state_slice": 48 * rows,
+                        "gdn.active_state_write": 48 * rows,
                         "gdn.output_projection": 48, "gdn.checkpoint": 48,
                         "attention.input_projection": 16, "attention.output_projection": 16,
                         "attention.kv_write": 32, "attention.sdpa_and_row_packing": 16,

@@ -21,9 +21,12 @@ def split_gated_source(source):
     return ast.fix_missing_locations(tree)
 
 
-def gated_decode(gdn):
+def gated_decode(gdn, profiler=None):
     native = type(gdn).forward_decode
     namespace = dict(native.__globals__)
+    if profiler:
+        from stage_profile import gdn_namespace
+        namespace = gdn_namespace(namespace, profiler)
     exec(compile(split_gated_source(inspect.getsource(native)), "<audited-native-gdn-prefix>", "exec"), namespace)
     return MethodType(namespace["forward_gated"], gdn)
 
@@ -34,7 +37,7 @@ def validate_rows(shape):
     return shape[1]
 
 
-def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None):
+def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, forward=None, profiler=None):
     rows = validate_rows(tuple(packed_input.shape))
     if len(token_inputs) != rows or any(tuple(token.shape) != (1, 1, 5120) for token in token_inputs):
         raise ValueError("Expected one B1 input per verification row")
@@ -54,7 +57,7 @@ def decode_projected(gdn, packed_input, token_inputs, checkpoint, operations, fo
 
     outputs = []
     try:
-        gdn._project_qkvzab_raw = projected_row
+        gdn._project_qkvzab_raw = profiler.wrap("gdn.projected_row_copy", projected_row) if profiler else projected_row
         for index, token in enumerate(token_inputs):
             outputs.append((forward or gdn.forward_decode)(token))
             checkpoint(index + 1)

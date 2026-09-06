@@ -16,7 +16,41 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### E3 remaining-work attribution (hardware result pending)
+### E3 remaining-work attribution (passed 34004475100)
+
+Run 34004475100 (`f4443cf`) passed all four T1/T16 context fixtures, including
+three fenced passes, unfenced eager controls and three captured replays each.
+All checked full logits, active GDN state and complete valid KV prefixes matched
+native serial B1 exactly. The artifact is 167635 bytes, without raw profiler dumps.
+
+| Context | T | Trace median ms | Unfenced eager median ms | Fenced root median ms | GDN native-row exclusive median ms |
+| --- | --- | --- | --- | --- | --- |
+| 4095 | 1 | 44.997 | 95.125 | 127.052 | 18.613 |
+| 4095 | 16 | 235.188 | 670.426 | 783.768 | 421.565 |
+| 16383 | 1 | 45.589 | 145.552 | 264.602 | 33.916 |
+| 16383 | 16 | 243.955 | 828.717 | 1006.306 | 563.365 |
+
+Each stage median is computed independently across three passes. Fences and host
+dispatch substantially inflate and vary these intervals: do not divide the GDN
+numbers by trace time or interpret them as device critical-path percentages.
+The repeated trace controls corroborate the previous 235/244 ms block costs;
+this run does not demonstrate a speed improvement or committed-token throughput.
+
+The pinned native GDN source shows that B1 input with Bmax8 slices recurrent state
+and invokes `_write_recurrent_state_prefix` for every token. Consequently
+`QWEN_GDN_FUSED_INPLACE=1` does not request in-place recurrence on this path:
+the native guard requires B == Bmax. The prefix writer already avoids idle rows
+using a sharded active-prefix write, so this is **not** a whole-B8 copy finding.
+Conv/gates and recurrence/norm/gate math are already fused; the remaining question
+is how much redundant movement surrounds them.
+
+Next bounded attribution revision (hardware pending) adds separate coverage for
+projected-row slice/clone, fused conv/gates, packed recurrence/norm/gate, active
+state slicing and active-prefix writeback. Each must engage exactly 48*T times.
+It uses only cloned function namespaces and reversible instance wrappers, preserving
+native state geometry, precision, kernels and execution order. An active-B1
+working-state/in-place candidate remains a hypothesis, not an implemented speedup;
+it will need exact rollback, continuation, idle-slot and trace-address gates.
 
 `full-batch-attribution` targets the remaining 235-244 ms T16 path with a bounded,
 JSON-only in-situ profiler, avoiding the historic multi-GB raw profiler exports.

@@ -1,10 +1,33 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from stage_profile import StageProfile, direct_calls
+from stage_profile import StageProfile, direct_calls, gdn_namespace
 from full_batch_attribution import aggregate
 
 
 class StageAttributionTests(unittest.TestCase):
+    def test_gdn_namespace_preserves_globals_arguments_and_returns(self):
+        conv = Mock(return_value=("conv", "beta", "gate"))
+        recurrence = Mock(return_value=("output", "state"))
+        transformer = SimpleNamespace(gdn_decode_conv_gates=conv, sentinel=object())
+        operations = SimpleNamespace(transformer=transformer, sentinel=object())
+        namespace = dict(ttnn=operations, recurrent_gated_delta_rule_decode_packed_ttnn=recurrence)
+        profiler = StageProfile(lambda: None)
+        local = gdn_namespace(namespace, profiler)
+        profiler.begin()
+        self.assertEqual(local["ttnn"].transformer.gdn_decode_conv_gates("input", batch=1), ("conv", "beta", "gate"))
+        self.assertEqual(local["recurrent_gated_delta_rule_decode_packed_ttnn"]("input", inplace_state=False), ("output", "state"))
+        self.assertEqual({record["category"] for record in profiler.finish()}, {"gdn.conv_gates", "gdn.recurrence_norm_gate"})
+        conv.assert_called_once_with("input", batch=1)
+        recurrence.assert_called_once_with("input", inplace_state=False)
+        self.assertIs(namespace["ttnn"], operations)
+        self.assertIs(operations.transformer, transformer)
+        self.assertIs(transformer.gdn_decode_conv_gates, conv)
+        self.assertIs(namespace["recurrent_gated_delta_rule_decode_packed_ttnn"], recurrence)
+        self.assertIs(local["ttnn"].sentinel, operations.sentinel)
+        self.assertIs(local["ttnn"].transformer.sentinel, transformer.sentinel)
+
     def test_aggregation_reconciles_exclusive_categories(self):
         records = [dict(category="model.block", layer=None, calls=1, inclusive_ms=10, exclusive_ms=1),
                    dict(category="row", layer=0, calls=2, inclusive_ms=4, exclusive_ms=4),

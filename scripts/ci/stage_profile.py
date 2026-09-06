@@ -66,6 +66,21 @@ class StageProfile:
         return list(self.records.values())
 
 
+def gdn_namespace(namespace, profiler):
+    from attention_batch import Overlay
+
+    result = dict(namespace)
+    operations = namespace["ttnn"]
+    recurrence = namespace["recurrent_gated_delta_rule_decode_packed_ttnn"]
+    conv = operations.transformer.gdn_decode_conv_gates
+    if not callable(recurrence) or not callable(conv):
+        raise ValueError("Expected pinned packed recurrence and fused conv/gates")
+    result["ttnn"] = Overlay(operations, transformer=Overlay(
+        operations.transformer, gdn_decode_conv_gates=profiler.wrap("gdn.conv_gates", conv)))
+    result["recurrent_gated_delta_rule_decode_packed_ttnn"] = profiler.wrap("gdn.recurrence_norm_gate", recurrence)
+    return result
+
+
 def decoder_bindings(layer, index, profiler):
     bindings = [(layer, "forward", profiler.wrap("decoder.block", layer.forward, index))]
     for name in direct_calls(inspect.getsource(type(layer).forward)):

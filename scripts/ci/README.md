@@ -129,6 +129,8 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   Following the T4/4K divergence in run 34002210390, this suite selects B1 SDPA
   reads while retaining batched projections, to test native reduction parity.
 - `full-batch-attribution`: bounded JSON-only in-situ stage profiling at T1/T16
+  (revision 2 also separates GDN projected-row copying, fused conv/gates,
+  recurrence/norm/gate, active-state slicing and active-prefix writeback).
   and 4095/16383-token contexts. Three synchronized eager passes separate GDN
   native-row work, projections/checkpoints, attention KV/SDPA, native decoder
   components and LM head. Nested exclusive times reconcile without double counting.
