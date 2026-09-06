@@ -9,13 +9,18 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
   the200 target is not achieved. New attention changes are not in that request path.
 - Grouped attention full-model34062230310 passed: T32 verification103.31/109.92ms,
   versus110.02/127.56ms with the same norm batching and serial B1 attention.
-- Direct attention DMA passed micro34063065156 and real-layer34064053339;
-  matched full-model DMA34064443450 is running on the original runtime.
-- Allocation-only native tree scratch34064917232 is queued after simulator
-  correctness at larger groups. This build is isolated to a disposable container.
-- Parallel group scheduling now passes TTsim: three groups preserve16 workers
-  per KV head and fit96 workers on the110-core grid, without changing the native
-  scratch allocation. Actual hardware latency/worker participation remain unmeasured.
+- Direct attention DMA passed micro34063065156, real-layer34064053339 and
+  full-model34064443450. Matched T32 costs106.98->102.99ms at4K and
+  109.94->105.94ms at16K; compare within runs because the4K control shifted.
+- Allocation-only native tree scratch34064917232 timed out during compilation,
+  at976/1091 build steps after600s, before hardware testing. Retry allows1800s
+  for the disposable-container build; this is not evidence of a device hang.
+- Parallel group scheduling passed hardware34065899606:36 exact fixtures,
+  4320 timed replays and72 changed-query checks. T32 attention microbenchmarks
+  improve0.853514->0.640465ms at4K and1.268948->1.026474ms at16K, including DMA
+  layouts. T16 improves0.463693->0.355681ms and0.690229->0.568410ms.
+  Three groups preserve16 workers per KV head and allow96 SDPA workers on the
+  110-core grid. These are component timings, not committed request throughput.
 
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and

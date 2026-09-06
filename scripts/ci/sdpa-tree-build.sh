@@ -12,7 +12,7 @@ patch=/experiment-optimisation/sim/sdpa-tree-scratch.patch
 git -C /opt/tt-metal apply --check "$patch"
 git -C /opt/tt-metal apply "$patch"
 PYTHONPATH=/experiment-scripts/ci python3 -c 'from sdpa_tree_scratch import audit; audit("/opt/tt-metal", patched=True)'
-timeout -k 30 600 ninja -C /opt/tt-metal/build_Release -j 2 ttnncpp
+timeout -k 30 1800 ninja -C /opt/tt-metal/build_Release -j 2 ttnncpp
 source=/opt/tt-metal/build_Release/ttnn/_ttnncpp.so
 destination=/opt/tt-metal/build_Release/lib/_ttnncpp.so
 test -f "$source"

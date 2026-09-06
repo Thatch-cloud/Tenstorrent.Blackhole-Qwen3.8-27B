@@ -87,7 +87,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = attention-parallel-groups ]; then
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = attention-tree-scratch ]; then
-    timeout -k 30 720 bash /experiment-scripts/ci/sdpa-tree-build.sh
+    timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
     export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --tree-scratch
