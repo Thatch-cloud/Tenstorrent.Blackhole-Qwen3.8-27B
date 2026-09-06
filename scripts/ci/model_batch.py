@@ -46,7 +46,8 @@ def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout, compact_
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-                 device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False):
+                 device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
+                 retain_records=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -74,6 +75,10 @@ class ModelBatch:
         if packed_checkpoints and not batch_conv:
             raise ValueError('Packed checkpoints require batched convolution')
         self.packed_checkpoints = packed_checkpoints and self.device_loop_gdn
+        if retain_records and not self.packed_checkpoints:
+            raise ValueError('Retained records require active packed checkpoints')
+        from gdn_records import RetainedGDNBlock
+        self.retained = RetainedGDNBlock(self.rows, ttnn) if retain_records else None
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -160,7 +165,11 @@ class ModelBatch:
                 result = state.decode(packed, checkpoint, self.prefix)
                 finish_output(layer, result, operations, tt_all_reduce)
                 output = result['layer_output']
-                release_owned(operations, [value for value in result['owned'] if value is not output])
+                if self.retained is not None:
+                    result['owned'] = [value for value in result['owned'] if value is not output]
+                    self.retained.append(state, result, checkpoint)
+                else:
+                    release_owned(operations, [value for value in result['owned'] if value is not output])
                 self.gdn_calls += 1
                 return output
 
@@ -214,6 +223,8 @@ class ModelBatch:
         return forward
 
     def run(self):
+        if self.retained is not None and (self.retained.closed or self.retained.records):
+            raise ValueError('A retained fixture owns exactly one captured or eager block')
         before_gdn = self.gdn_calls
         before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
         before_clones = [state.skipped_clones for state in self.working_states]
@@ -238,6 +249,8 @@ class ModelBatch:
         return result
 
     def close(self):
+        if self.retained is not None:
+            self.retained.close()
         for state in self.working_states:
             state.close()
         self.working_states.clear()

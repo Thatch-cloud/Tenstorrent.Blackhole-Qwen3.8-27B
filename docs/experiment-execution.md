@@ -16,6 +16,30 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Post-verification GDN commit (host tests passed; hardware next)
+
+`RetainedGDNBlock` keeps all48 packed histories alive through logit readback and
+permits one commit decision. Every owner binding is checked before writes; a
+partial device failure poisons the decision rather than permitting a fresh retry.
+Record buffers are released only when the owning fixture closes, after trace
+release. Downstream-owned layer outputs are excluded from record ownership.
+
+The next full-model gate uses the existing `greedy_verify.select_prefix` helper
+on actual target argmax rows. The already-emitted seed is not emitted twice:
+accepted draft proposals plus the correction/bonus determine `state_rows`.
+An explicit abort exercises prefix0. Inputs are forced-rejection fixtures, not
+an actual drafter, and acceptance is selected after the full verifier output.
+The candidate is no longer given the selected checkpoint in advance for these
+rollback cases. It must publish the selected native state itself; an external
+restore is deliberately omitted so it cannot hide publication errors.
+
+All earlier full-logit/state/KV/negative-control checks remain. The experiment
+adds16 post-verification decisions and readback/selection/commit component times,
+not end-to-end throughput. It skips redundant static verifier timing, already
+measured in34028729821. The tested kernels are unchanged.200 CI,55 simulator
+and26 speculative host tests pass; retained full-model lifetimes need hardware
+validation. No serving settings change.
+
 ### Packed convolution checkpoints (hardware layer passed 34028407207)
 
 The next isolated experiment retains the four post-convolution `[1,T,5120]`
@@ -68,6 +92,28 @@ The19213-byte artifact confirms matching adapter, restore and prefix-copy hashes
 The next full-model gate probes packed histories at every T>1, versus the previous
 DMA-window full-model candidate atT8/T16 and its retained compact path atT2/T4.
 T1 remains native. These layer ratios are not extrapolated to full-model speed.
+
+Full-model run34028729821 (`46ec864`) passed20 width/mode cases,16 corrected
+rollbacks,4 negative-control pairs and10 timing fixtures (2400 model replays).
+The84522-byte artifact confirms simulator/hardware kernel hashes. Results:
+
+| Context | T | Previous best control ms | Packed-history ms | Median paired ratio |
+| --- | --- | --- | --- | --- |
+| 4095 | 1 | 45.013186 | 45.012427 | 1.000035 |
+| 4095 | 2 | 56.134482 | 55.574778 | 1.010103 |
+| 4095 | 4 | 72.867452 | 60.740132 | 1.199637 |
+| 4095 | 8 | 74.180274 | 70.989847 | 1.044967 |
+| 4095 | 16 | 94.920985 | 91.546888 | 1.036916 |
+| 16383 | 1 | 45.593229 | 45.583486 | 0.999956 |
+| 16383 | 2 | 57.248886 | 56.679426 | 1.010053 |
+| 16383 | 4 | 75.076121 | 62.958131 | 1.192472 |
+| 16383 | 8 | 78.589817 | 75.390329 | 1.042499 |
+| 16383 | 16 | 103.710163 | 100.335609 | 1.033609 |
+
+Every multirow width improved, though T2's gain is small. T16 ideal acceptance
+without any drafting or commit cost still permits only about174.77/159.46 tokens/s,
+so200 committed tokens/s remains unachieved. The full-model gate still preselected
+an external checkpoint; the next gate removes that requirement for rollback.
 
 ### Parallel causal convolution windows (hardware passed 34026768263)
 

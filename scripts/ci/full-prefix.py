@@ -7,6 +7,8 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+import time
 
 from gdn_snapshot import ActiveSnapshot
 
@@ -62,6 +64,7 @@ def main():
     parser.add_argument('--compact-prologue', action='store_true')
     parser.add_argument('--batch-conv', action='store_true')
     parser.add_argument('--packed-checkpoints', action='store_true')
+    parser.add_argument('--deferred-commit', action='store_true')
     options = parser.parse_args()
     if options.coding_cost and not options.batch:
         raise ValueError("Coding cost requires the batched candidate")
@@ -85,6 +88,11 @@ def main():
         raise ValueError('Batched convolution requires compact-prologue control')
     if options.packed_checkpoints and not options.batch_conv:
         raise ValueError('Packed checkpoints require batched convolution')
+    if options.deferred_commit and not options.packed_checkpoints:
+        raise ValueError('Deferred commit requires packed checkpoints')
+    if options.deferred_commit:
+        sys.path.insert(0, '/experiment-speculative')
+        from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     prefixes = (0, 1, 8, 16) if options.coding_cost else tuple(range(17))
     import torch
@@ -131,6 +139,12 @@ def main():
             report.update(packed_convolution_checkpoints=True, prior_full_model_run=34027510486,
                           packed_checkpoint_prerequisite=34028407207,
                           checkpoint_materialization='all recurrent prefixes; all convolution prefixes in packed windows; selected external checkpoint')
+        if options.deferred_commit:
+            report.update(deferred_gdn_commit=True, dynamic_commits=[],
+                          commit_scope='Post-readback greedy decision or explicit abort, then retained GDN history restore; forced proposal fixtures, not an end-to-end drafter benchmark',
+                          component_timing_scope='Readback, greedy selection and GDN commit only; excludes verification, construction and capture',
+                          records_sha256=hashlib.sha256(Path(__file__).with_name('gdn_records.py').read_bytes()).hexdigest(),
+                          selector_sha256=hashlib.sha256(Path('/experiment-speculative/greedy_verify.py').read_bytes()).hexdigest())
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
@@ -138,6 +152,8 @@ def main():
         report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
     if options.coding_cost:
         report["scope"] = "64-layer static coding-context correctness and full-logit block costs; no committed-token throughput"
+    if options.deferred_commit:
+        report['scope'] = '64-layer forced-draft post-verification acceptance and commit correctness; no actual drafter or committed-throughput measurement'
     if options.attribution:
         report["scope"] = "In-situ fenced eager stage attribution at coding contexts; not critical-path device timing or a throughput gain"
         report["attribution_prerequisite"] = 34002876975
@@ -281,15 +297,15 @@ def main():
                 raise AssertionError("Prefill replaced persistent decode state")
             return argmax(logits)
 
-        def batched(tokens, length, prefix, trace):
+        def batched(tokens, length, prefix, trace, *, deferred=False, abort=False, known_seed=None):
             from model_batch import ModelBatch
 
-            fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix,
+            fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, len(tokens) if deferred else prefix,
                                  serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                  reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
                                  hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
                                  compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                                 packed_checkpoints=options.packed_checkpoints)
+                                 packed_checkpoints=options.packed_checkpoints, retain_records=deferred)
             captured = None
             output = None
             try:
@@ -301,7 +317,26 @@ def main():
                     ttnn.end_trace_capture(mesh, captured, cq_id=0)
                     restore(replay_initial)
                     ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True)
-                return [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
+                if deferred:
+                    ttnn.synchronize_device(mesh)
+                    started = time.perf_counter()
+                actual = [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
+                if deferred:
+                    if len(actual) != 2 or not torch.equal(actual[0], actual[1]):
+                        raise AssertionError('Both chips must agree before committing')
+                    if not abort and tokens[0] != known_seed:
+                        raise ValueError('Greedy verification must consume the already-emitted seed')
+                    decision = None if abort else select_prefix(tokens[1:], actual[0].float().argmax(dim=-1).tolist(),
+                                                                 vocab_size=model.args.vocab_size)
+                    selected = 0 if abort else decision.state_rows
+                    fixture.retained.commit(selected)
+                    ttnn.synchronize_device(mesh)
+                    report['dynamic_commits'].append(dict(length=length, trace=trace, selected_state_rows=selected,
+                        accepted_proposals=0 if abort else decision.accepted, abort=abort,
+                        emitted=[] if abort else list(decision.emitted), next_input=known_seed if abort else decision.next_input,
+                        readback_select_commit_ms=(time.perf_counter() - started) * 1000,
+                        retained_layers=len(fixture.retained.records)))
+                return actual
             finally:
                 if captured is not None:
                     ttnn.release_trace(mesh, captured)
@@ -409,12 +444,22 @@ def main():
                         raise AssertionError("Candidate prefill seed changed")
                     if options.batch:
                         proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
-                        actual = batched(proposals, length, prefix, trace)
+                        actual = batched(proposals, length, prefix, trace, deferred=options.deferred_commit,
+                                         abort=prefix == 0, known_seed=oracle[0])
                         if prefix:
                             expected = torch.cat([active_serial_logits(value, model.args.vocab_size) for value in oracle_logits[:prefix]], dim=0)
                             if any(not torch.equal(value[:prefix], expected) for value in actual):
                                 raise AssertionError("Rejected future rows changed accepted-prefix logits")
-                        restore(candidate_saved)
+                        if options.deferred_commit:
+                            decision = report['dynamic_commits'][-1]
+                            if decision['selected_state_rows'] != prefix or decision['next_input'] != oracle[prefix]:
+                                raise AssertionError('Post-verification decision differs from forced-rejection oracle')
+                            if decision['emitted'] != oracle[1:prefix + 1]:
+                                raise AssertionError('Post-verification emission accounting differs from oracle')
+                            if state_digest(candidate_saved) != expected_state:
+                                raise AssertionError('Deferred external checkpoint differs from selected state')
+                        else:
+                            restore(candidate_saved)
                     else:
                         for index in range(prefix):
                             decode(oracle[index], length + index, trace)
@@ -457,7 +502,9 @@ def main():
             raise AssertionError("Missing batched width/mode checks")
         if not options.attribution and len(report["checks"]) != len(lengths) * 2 * len(prefixes):
             raise AssertionError("Missing rollback cases")
-        if options.coding_cost:
+        if options.deferred_commit and len(report['dynamic_commits']) != len(lengths) * 2 * len(prefixes):
+            raise AssertionError('Missing post-verification commits')
+        if options.coding_cost and not options.deferred_commit:
             from full_batch_timing import measure
             report["timing_scope"] = "Captured full-logit blocks with one preselected end checkpoint; no drafter, dynamic selection or complete speculative commit pipeline"
             for prompt, oracle in timing_fixtures:

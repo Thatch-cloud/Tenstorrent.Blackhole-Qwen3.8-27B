@@ -54,5 +54,6 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
 docker cp optimisation "$test_id:/experiment-optimisation"
+docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
