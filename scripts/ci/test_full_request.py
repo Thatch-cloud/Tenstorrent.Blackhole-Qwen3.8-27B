@@ -20,13 +20,13 @@ class RequestPilotTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     terminal_ids('/frozen-weights', 100)
 
-    def run_fixture(self, *, seed=0, eos_ids=(), wrong=False):
+    def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
             return logits
 
-        def factory(model, session, pages, helpers, sampler):
+        def factory(model, session, pages, helpers, sampler, norm_batch):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock())
 
             def verify(ticket):
@@ -44,8 +44,14 @@ class RequestPilotTests(unittest.TestCase):
             result = measure_request(SimpleNamespace(args=SimpleNamespace(vocab_size=100)), None,
                 [0, 1, 2] * 12, None, [], prefill=lambda prompt: seed, decode=decode,
                 live_digest=lambda: 'state', kv_digest=lambda position: position,
-                inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33)
+                inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch)
         return result, constructor
+
+    def test_norm_batch_selection_is_forwarded_and_recorded(self):
+        for enabled in (False, True):
+            result, constructor = self.run_fixture(norm_batch=enabled)
+            self.assertIs(result['norm_batch'], enabled)
+            self.assertIs(constructor.call_args.kwargs['norm_batch'], enabled)
 
     def test_actual_lookup_accounting_and_setup_are_separate(self):
         result, constructor = self.run_fixture()

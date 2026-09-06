@@ -16,6 +16,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Request-path preparation while the static gate runs
+
+Run34052200159 (`397fa9d`) is the pending full-model static norm-batch gate.
+The selection, retained replay and request helpers now accept and forward an
+explicit `norm_batch` option, including warm and captured verifier buckets.
+The CLI still rejects these combinations until the static gate is inspected;
+this wiring is not a hardware request-path certification. Host validation passes
+337 CI tests,55 simulator-support tests and51 speculative-session tests.
+Serving defaults remain unchanged.
+
+Attention token-to-head folding is a source-level hypothesis only. The pinned
+SDPA factory allocates reduction cores from batch and KV-head counts, suggesting
+that keeping batch one might preserve the native reduction topology. However,
+explicit per-query masks require non-causal mode, head growth increases circular
+buffer storage, and causal half-tile selection can change. These are unresolved
+exactness and memory gates, not evidence that ordinary batched SDPA is safe.
+
 ### Row-parallel norm: real-weight layer gain passed
 
 Run34051597269 (`ccd51ff`) passed36 eager/trace fixtures,414 restored-prefix

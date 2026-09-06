@@ -15,7 +15,8 @@ def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
 
 
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
-                  prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host):
+                  prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
+                  norm_batch=False):
     validate_fixture(rows, first_prefix, second_prefix, len(oracle))
     import torch
     import ttnn
@@ -39,7 +40,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
     fixture = ModelBatch(model, oracle[:rows], length, pages, helpers, checkpoints, rows,
         serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
         hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
-        packed_checkpoints=True, retain_records=True, ordered_cache=True)
+        packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=norm_batch)
     captured, output = None, None
     try:
         save(initial)

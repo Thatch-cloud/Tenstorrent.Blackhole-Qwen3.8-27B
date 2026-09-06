@@ -484,7 +484,8 @@ def main():
                 report['terminal_ids'] = eos_ids
                 report['generation_config_sha256'] = hashlib.sha256((Path(weights) / 'generation_config.json').read_bytes()).hexdigest()
                 result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
-                    live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids)
+                    live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
+                    norm_batch=options.norm_batch)
                 report.update(scope='Actual lookup request pilot on synthetic repeated code; not a coding-quality benchmark')
                 report.setdefault('request_checks', []).append(result)
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -509,7 +510,7 @@ def main():
                 for rows in widths:
                     result = measure_selection(model, sampler, prompt, oracle, page_table, helpers, candidate_saved, replay_initial,
                         rows=rows, prefill=prefill, decode=decode, save=save, restore=restore,
-                        live_digest=live_digest, kv_digest=kv_digest, local_host=local_host)
+                        live_digest=live_digest, kv_digest=kv_digest, local_host=local_host, norm_batch=options.norm_batch)
                     report.setdefault('selection_checks', []).append(result)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(result), flush=True)
@@ -650,7 +651,8 @@ def main():
                             result = verify_replay(model, prompt, oracle, page_table, helpers, candidate_saved, replay_initial,
                                 rows=rows, first_prefix=first_prefix, second_prefix=second_prefix,
                                 prefill=prefill, decode=decode, save=save, restore=restore, state_digest=state_digest,
-                                live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host)
+                                live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host,
+                                norm_batch=options.norm_batch)
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)

@@ -8,7 +8,7 @@ from model_batch import ModelBatch
 
 
 def measure_selection(model, sampler, prompt, oracle, pages, helpers, checkpoints, initial, *, rows,
-                      prefill, decode, save, restore, live_digest, kv_digest, local_host):
+                      prefill, decode, save, restore, live_digest, kv_digest, local_host, norm_batch=False):
     import torch
     import ttnn
 
@@ -64,7 +64,7 @@ def measure_selection(model, sampler, prompt, oracle, pages, helpers, checkpoint
             fixtures[arm] = ModelBatch(model, oracle[:rows], length, pages, helpers, checkpoints, rows,
                 serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
                 hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
-                batch_conv=True, packed_checkpoints=True, ordered_cache=True)
+                batch_conv=True, packed_checkpoints=True, ordered_cache=True, norm_batch=norm_batch)
             restore(initial)
             result = operation(arm)
             try:

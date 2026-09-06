@@ -19,7 +19,9 @@ def terminal_ids(weights, vocab_size):
 
 
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
-                    kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129):
+                    kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False):
+    if type(norm_batch) is not bool:
+        raise ValueError('Explicit boolean norm-batch selection required')
     started = time.perf_counter()
     gold = [prefill(prompt)]
     native_prefill_ms = (time.perf_counter() - started) * 1000
@@ -43,7 +45,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     setup_ms = decode_ms = 0.0
     try:
         if not session.finished:
-            engine = VerifierEngine(model, session, pages, helpers, sampler=sampler)
+            engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
             while not session.finished:
@@ -70,7 +72,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         if live_digest() != gold_state or kv_digest(session.position) != gold_kv or inactive_digest() != inactive_before:
             raise AssertionError('Actual request final active GDN, valid KV or inactive slots differ')
         return dict(length=len(prompt), kind='Synthetic repeated-code lookup pilot; not a coding-quality benchmark',
-            exact=True, state_exact=True, inactive_exact=True, blocks=blocks,
+            exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
             emitted=gold, output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
             committed_decode_tokens=session.committed_decode_tokens, proposed=session.committed_block_proposals,
             accepted=session.accepted_proposals, prefill_ms=prefill_ms, engine_setup_ms=setup_ms,

@@ -12,6 +12,25 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_norm_batch_is_forwarded_to_warm_and_retained_fixtures(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.model, engine.pages, engine.helpers = object(), object(), []
+        engine.position = 4095
+        for enabled in (False, True):
+            engine.norm_batch = enabled
+            for rows in (1, 2, 4, 8, 16, 32):
+                for retain in (False, True):
+                    with patch('verifier_engine.ModelBatch') as factory:
+                        engine.fixture(rows, [], retain=retain)
+                    self.assertIs(factory.call_args.kwargs['norm_batch'], enabled)
+                    self.assertIs(factory.call_args.kwargs['retain_records'], retain)
+
+    def test_invalid_norm_batch_fails_before_request_or_device_access(self):
+        with patch.dict(sys.modules, ttnn=SimpleNamespace()):
+            for enabled in (None, 0, 1, 'true'):
+                with self.assertRaisesRegex(ValueError, 'boolean'):
+                    VerifierEngine(None, None, None, None, norm_batch=enabled)
+
     def test_capture_geometry_respects_budget_and_capacity_before_device_work(self):
         self.assertEqual(capture_widths(65535, 65536, 32, 1), (1,))
         self.assertEqual(capture_widths(65531, 65536, 32, 5), (1, 2, 4))
