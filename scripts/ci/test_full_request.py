@@ -61,6 +61,11 @@ class RequestPilotTests(unittest.TestCase):
         self.assertEqual(result['engine_setup_ms'], 12)
         self.assertEqual(result['post_seed_including_setup_ms'], result['decode_ms'] + 12)
         self.assertEqual(result['emitted'], [index % 3 for index in range(33)])
+        self.assertEqual(result['prompt_tokens'], [0, 1, 2] * 12)
+        for block in result['blocks']:
+            self.assertEqual(len(block['input_tokens']), block['rows'])
+            self.assertGreaterEqual(block['position'], len(result['prompt_tokens']))
+            self.assertEqual(block['match_length'] > 0, block['source'] == 'lookup')
         constructor.assert_called_once()
 
     def test_terminal_prefill_has_no_decode_throughput(self):

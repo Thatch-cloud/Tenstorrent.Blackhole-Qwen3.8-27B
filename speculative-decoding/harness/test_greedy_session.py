@@ -6,6 +6,16 @@ from greedy_session import GreedySession
 
 
 class SessionTests(unittest.TestCase):
+    def test_ticket_match_telemetry_does_not_leak_into_target_only_steps(self):
+        session = self.fixture()
+        ticket = session.propose('request')
+        self.assertEqual(ticket.source, 'lookup')
+        self.assertGreater(ticket.match_length, 0)
+        session.abort('request', ticket, lambda prefix: None)
+        target = session.propose('request', max_rows=1)
+        self.assertEqual(target.source, 'target')
+        self.assertEqual(target.match_length, 0)
+
     def test_device_preparation_excludes_proposals_and_poisoned_retry(self):
         for fail in (False, True):
             session = self.fixture()

@@ -13,6 +13,7 @@ class BlockTicket:
     position: int
     tokens: tuple
     source: str
+    match_length: int = 0
 
 
 class GreedySession:
@@ -78,7 +79,7 @@ class GreedySession:
         rows = max(width for width in (1, 2, 4, 8, 16, 32) if width <= min(limit, len(tokens) + 1))
         self.epoch += 1
         ticket = BlockTicket(request_id, self.epoch, self.position, (self.seed, *tokens[:rows - 1]),
-                             proposal.source if rows > 1 else 'target')
+                             proposal.source if rows > 1 else 'target', proposal.match_length if rows > 1 else 0)
         self.pending, self.phase = ticket, 'pending'
         return ticket
 

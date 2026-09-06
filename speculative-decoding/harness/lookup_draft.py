@@ -34,12 +34,15 @@ class LookupDraft:
         self.history = (self.history + tokens)[-self.history_limit:]
 
     def propose(self, request_id, count):
+        return self.propose_with_match(request_id, count)[0]
+
+    def propose_with_match(self, request_id, count):
         self.check_owner(request_id)
         if type(count) is not int or not 1 <= count <= self.max_proposals:
             raise ValueError('Proposal count exceeds the configured verifier capacity')
         history = self.history
         if len(history) < 2:
-            return []
+            return [], 0
         best_length, best_end = 0, None
         limit = min(self.match_limit, len(history) - 1)
         for end in range(len(history) - 2, -1, -1):
@@ -54,7 +57,7 @@ class LookupDraft:
                 best_length, best_end = length, end
                 if length == limit and (not self.prefer_full_suffix or len(history) - end - 1 >= count):
                     break
-        return [] if best_end is None else history[best_end + 1:best_end + 1 + count]
+        return ([], 0) if best_end is None else (history[best_end + 1:best_end + 1 + count], best_length)
 
     def close(self, request_id):
         self.check_owner(request_id)

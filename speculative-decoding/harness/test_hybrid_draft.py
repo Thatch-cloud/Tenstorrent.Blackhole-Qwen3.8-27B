@@ -16,7 +16,7 @@ class HybridTests(unittest.TestCase):
     def test_lookup_skips_all_neural_work(self):
         adapter = Mock(side_effect=AssertionError("Must not run"))
         draft = self.make((1, 2, 3, 1, 2), neural={"mtp": adapter})
-        self.assertEqual(self.propose(draft, selected="mtp"), Proposal("lookup", (3, 1, 2)))
+        self.assertEqual(self.propose(draft, selected="mtp"), Proposal("lookup", (3, 1, 2), 2))
         adapter.assert_not_called()
 
     def test_only_selected_adapter_runs(self):

@@ -57,6 +57,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 decision = session.commit(session.request_id, ticket, predictions, engine.publish)
                 finished = time.perf_counter()
                 blocks.append(dict(rows=len(ticket.tokens), source=ticket.source, accepted=decision.accepted,
+                    match_length=ticket.match_length, position=ticket.position, input_tokens=list(ticket.tokens),
                     committed=len(decision.emitted), draft_ms=(drafted - block_started) * 1000,
                     select_commit_ms=(finished - verified) * 1000,
                     cycle_ms=(finished - block_started) * 1000, **components))
@@ -73,7 +74,9 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             raise AssertionError('Actual request final active GDN, valid KV or inactive slots differ')
         return dict(length=len(prompt), kind='Synthetic repeated-code lookup pilot; not a coding-quality benchmark',
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
-            emitted=gold, output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
+            prompt_tokens=list(prompt), emitted=gold,
+            prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),
+            output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
             committed_decode_tokens=session.committed_decode_tokens, proposed=session.committed_block_proposals,
             accepted=session.accepted_proposals, prefill_ms=prefill_ms, engine_setup_ms=setup_ms,
             decode_ms=decode_ms, native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,

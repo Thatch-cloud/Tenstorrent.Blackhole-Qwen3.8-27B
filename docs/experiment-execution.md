@@ -16,6 +16,29 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
+### Lookup acceptance bottleneck and next-request telemetry
+
+Re-inspection of actual request run34045603132 separates accepted proposal
+tokens from committed correction/bonus tokens. At4078 tokens, ten T32 blocks
+accepted29 proposals and committed39 tokens in1345.410ms. At16363 tokens,
+twelve T32 blocks accepted25 and committed37 in1831.929ms. Thus those wide
+blocks averaged only3.9/3.083 committed tokens, not32. T8 accepted zero
+proposals in all13 blocks across the two contexts. T1 accounted for54/58
+committed tokens and2615.003/2862.787ms respectively.
+
+Even the improved static T32 verifier costs require about22.0/25.5 committed
+tokens per cycle to reach200tok/s before drafting, selection and publication
+overhead. This is an economic lower bound, not a predicted request result.
+Kernel acceleration alone has not resolved the lookup acceptance gap.
+
+The next synthetic request report records prompt tokens/hash, proposal input
+tokens, position and lookup match length. Match metadata is derived only from
+committed history and propagates with the immutable proposal/ticket; target-only
+steps report zero, with no stale previous-match state. This changes telemetry,
+not routing, verification or serving defaults. Host coverage passes337 CI and53
+speculative-session tests. These traces will allow deterministic offline policy
+comparisons without presenting oracle-scored acceptance as measured throughput.
+
 ### Full-model norm-batch exactness and static timing passed
 
 Run34052200159 (`397fa9d`) passed24 eager/trace width fixtures,16 rollback

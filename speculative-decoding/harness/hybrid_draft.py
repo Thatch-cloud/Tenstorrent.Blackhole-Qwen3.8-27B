@@ -9,6 +9,7 @@ from lookup_draft import LookupDraft
 class Proposal:
     source: str
     tokens: tuple
+    match_length: int = 0
 
 
 class HybridDraft:
@@ -36,9 +37,9 @@ class HybridDraft:
             raise ValueError('Proposal count exceeds the configured verifier capacity')
         if greedy is not True or verifier_ready is not True:
             return Proposal("target", ())
-        tokens = self.lookup.propose(request_id, count)
+        tokens, match_length = self.lookup.propose_with_match(request_id, count)
         if tokens:
-            return Proposal("lookup", tuple(tokens))
+            return Proposal("lookup", tuple(tokens), match_length)
         adapter = self.neural.get(selected)
         if adapter is None:
             return Proposal("target", ())
