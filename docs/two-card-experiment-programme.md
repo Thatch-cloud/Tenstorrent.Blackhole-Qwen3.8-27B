@@ -3,10 +3,17 @@
 Current request-engine checkpoint: T32 changed-input replay and synchronized
 publication passed run34041390068 (36 two-block fixtures). Device force-argmax
 passed34040918809; T32 verification plus readback is131.190/148.752ms at4K/16K.
-These component results do not establish200 committed tokens/s. The next pilot
+These component results do not establish200 committed tokens/s. The request pilot
 uses actual lookup proposals, exact native token/state comparison, complete
 proposal-to-commit timing and separately reported per-request capture cost.
 Repeated-code pilot prompts cannot establish representative coding quality.
+
+Actual lookup pilot34045603132 now passes exact native token/state/KV checks
+but yields only21.415/17.741 committed decode tok/s at4078/16363-token contexts,
+with3.701/3.234s request-specific setup excluded from those rates. Acceptance
+is39/537 and30/658 proposed tokens. This confirms the reusable request pipeline,
+not a useful general lookup speedup or200 tok/s. Further kernel work and better
+proposal economics are required; defaults remain unchanged.
 
 External-drafter width audit (2026-09-07): the official
 [DFlash2 config](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/raw/main/config.json)
@@ -83,9 +90,9 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E0 baseline | Pinned runtime and card-backed endpoint benchmarks | Complete engine-commit accounting and gateway comparison |
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
-| E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Packed histories, ordered cache writes and captured96-worker commit passed full-model gates; T16 costs89.552/98.325ms at4K/16K | T32 simulator prerequisites and native hardware cost curve; device selection; FP32-preserving wider GDN worker mappings |
-| E5 drafting | Request-local lookup and greedy session/accounting host tests; historical MTP groundwork | Reusable card-backed verifier and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
+| E3 verifier | Exact T32 verification, dynamic commit and reused request pipeline | Substantially lower V(T), multi-request trace lifecycle and representative repeatability |
+| E4 fusion/pipeline | Packed histories, ordered writes, captured96-worker commit and force-argmax passed full-model gates | FP32-preserving96-worker recurrence prototype; independent native correctness and performance |
+| E5 drafting | Actual lookup request pilot exact but only21.415/17.741 tok/s; historical MTP groundwork | Better acceptance/routing and matched evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
 | E8 precomputation | Planning and cost investigation | Measured table/precomputation candidate; no LUT gain established |

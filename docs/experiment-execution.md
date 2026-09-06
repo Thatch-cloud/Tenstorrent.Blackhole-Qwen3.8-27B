@@ -16,7 +16,48 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Execution queue
 
-### Actual request engine (pilot pending)
+###96-worker recurrence: simulator first pass passed, hardware gate next
+
+The opt-in `gdn_vsplit` prototype splits each128-wide value head into four32-wide
+partitions (96 recurrence workers/chip), preserving native state tile order.
+It exports an FP32 pre-norm bridge to a24-worker stage using the unchanged native
+full128-wide RMS/norm-weight/SiLU arithmetic and BF16 rounding points. It does
+not normalize partitions independently or round the bridge to BF16. Static CB
+storage is282624 bytes/recurrence worker and204800/norm worker, versus630784
+for the existing fused recurrence/norm kernel.
+
+TTSim `20260906T163210Z-322` (T1/seed0), `20260906T163314Z-319` (T2/seed1)
+and `20260906T163345Z-499` (T32/seed2) passed every output and recurrent prefix,
+finite FP32 bridge and immutable inputs, with clean close. Oracle: serial T1
+of the already-certified24-worker generated FNG kernel, not independent native
+hardware. No value-split continuation or timing result is claimed yet.
+
+`gdn-value-split` next checks three seeds andT1/2/4/8/16/32 against the independent
+native packed FNG operation:18 eager fixtures,207 restored-prefix continuations
+and18 stale controls. It is intentionally fenced/eager only. Trace-safe prepared
+programs, paired timing, real-layer integration and model performance follow
+only if this correctness gate passes. No default or serving integration exists.
+
+### Actual request engine: correctness passed, speed target missed
+
+After ownership replay recertification34044312880 (`1798fc8`:24 width/mode,
+16 rollback,36 two-block replay and4 negative-control cases), actual request
+pilot34045603132 (`800d13c`) passed exact native autoregressive tokens, final
+active GDN, valid KV and inactive-slot checks for128 post-seed tokens per case.
+
+| Actual context | Committed decode tok/s | Decode ms | Per-request setup ms | Accepted/proposed drafts |
+| --- | ---: | ---: | ---: | ---: |
+| 4078 | 21.415362 | 5977.017801 | 3700.997702 | 39/537 |
+| 16363 | 17.741310 | 7214.799911 | 3233.698956 | 30/658 |
+
+These complete-chat repeated-code fixtures are not a representative coding
+benchmark. Rates include actual lookup, input updates, verification/readback,
+selection and synchronized publication, but exclude the separately reported
+request-specific setup. T32 lookup blocks often accept zero drafts, wasting
+verification work; blindly widening lookup is not an adoption candidate.
+The 200 committed tok/s target remains unmet. No serving changes are approved.
+
+### Actual request engine design and retry history
 
 The opt-in `full-verifier-engine` pilot connects real request-local lookup
 proposals to T1/2/4/8/16/32 captured verifiers, force-argmax and synchronized

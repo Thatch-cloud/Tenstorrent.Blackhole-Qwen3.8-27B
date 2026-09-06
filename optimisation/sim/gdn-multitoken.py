@@ -39,7 +39,10 @@ def main():
     parser.add_argument('--model-adapter', action='store_true')
     parser.add_argument('--compact-prologue', action='store_true')
     parser.add_argument('--retain-histories', action='store_true')
+    parser.add_argument('--value-split', action='store_true')
     args = parser.parse_args()
+    if args.value_split and (not args.norm_gate or args.conv):
+        parser.error('--value-split first pass requires --norm-gate without convolution')
     if args.retain_histories and not args.packed_checkpoints:
         parser.error('--retain-histories requires packed checkpoints')
     if args.rows == 32 and args.model_adapter:
@@ -302,7 +305,16 @@ def main():
                 expected_states.append(host(state))
                 stage('serial-t1-complete', token=token)
             stage('multitoken-submit')
-            output, states = run(packed, initial)
+            if args.value_split:
+                import gdn_vsplit
+                report['value_split'] = gdn_vsplit.audit(args.source_root)
+                output, states, bridge = gdn_vsplit.execute(mesh, *packed[:3], initial,
+                    z=packed[3], norm_w=norm_w, root=args.source_root, experimental=True)
+                if not all(torch.isfinite(value).all() for value in host(bridge)):
+                    raise AssertionError('Nonfinite FP32 pre-norm bridge')
+                report['fp32_bridge_finite'] = True
+            else:
+                output, states = run(packed, initial)
             stage('multitoken-readback')
             actual_outputs = [value.reshape(args.rows, 1, 24, 128) for value in host(output)]
             actual_states = host(states)
@@ -314,6 +326,10 @@ def main():
                         raise AssertionError(f'State mismatch {token=} {chip=}')
             if not all(torch.equal(value, initial_host) for value in host(initial)):
                 raise AssertionError('Initial state modified')
+            if args.value_split:
+                for tensor, expected in zip(packed, values, strict=True):
+                    if not all(torch.equal(value, expected) for value in host(tensor)):
+                        raise AssertionError('Value-split modified immutable input')
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None

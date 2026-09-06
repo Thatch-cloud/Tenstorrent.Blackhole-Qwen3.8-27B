@@ -1,5 +1,15 @@
 # Simulator-first device-loop GDN gate
 
+##96-worker value partitioning
+
+`--norm-gate --value-split` replaces only the candidate recurrence/norm path
+with96 value-partition workers and a24-head FP32-preserving normalization stage.
+T1/seed0 `20260906T163210Z-322`, T2/seed1 `20260906T163314Z-319` and T32/seed2
+`20260906T163345Z-499` passed all outputs, recurrent prefixes, finite bridge and
+input immutability checks against serial T1 of the existing24-worker generated
+FNG control. All closed cleanly. These are not independent native hardware or
+performance results; the prototype is eager/fenced and not model-integrated.
+
 ## Retained history ownership
 
 `--retain-histories --conv --norm-gate --batch-conv --dma-windows

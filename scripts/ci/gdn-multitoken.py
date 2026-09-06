@@ -14,7 +14,12 @@ from gdn_multitoken_timing import measure
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--norm-gate', action='store_true')
+    parser.add_argument('--value-split', action='store_true')
     args = parser.parse_args()
+    if args.value_split and not args.norm_gate:
+        parser.error('--value-split requires native norm/gate comparison')
+    widths = (1, 2, 4, 8, 16, 32) if args.value_split else (1, 2, 4, 8, 16)
+    modes = ('eager',) if args.value_split else ('eager', 'trace')
     if os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1':
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
@@ -36,6 +41,15 @@ def main():
                       output_layout='[1,T,3072] TILE L1; head-local assembly, zero padded rows',
                       state_placement='Candidate all-prefix DRAM; native oracle state L1; correctness only')
     path = Path('/experiment/results/gdn-multitoken-norm.json' if args.norm_gate else '/experiment/results/gdn-multitoken.json')
+    if args.value_split:
+        import gdn_vsplit
+        report.update(value_split=gdn_vsplit.audit(Path('/opt/tt-metal')), cores_per_chip=96,
+            norm_gate_cores_per_chip=24, feedback_ring='CB30 compute-only BF16 recurrence feedback',
+            feedback_bytes_per_core=8192, cb_bytes_per_core=282624,
+            output_layout='[1,T,3072] TILE DRAM; FP32 pre-norm bridge',
+            scope='Eager synthetic96-worker recurrence plus24-worker native FNG; independent native oracle, no timing',
+            modes=modes, widths=widths)
+        path = Path('/experiment/results/gdn-value-split.json')
     stack_file = None
     context = {}
 
@@ -81,6 +95,8 @@ def main():
                 **(dict(z=values[3], norm_w=norm_w) if args.norm_gate else {}))
 
         def execute(values, state):
+            if args.value_split:
+                return gdn_vsplit.execute(mesh, *values[:3], state, z=values[3], norm_w=norm_w, experimental=True)
             return execute_kernel(mesh, *values[:3], state, kernels,
                                   **(dict(z=values[3], norm_w=norm_w) if args.norm_gate else {}))
 
@@ -89,7 +105,7 @@ def main():
 
         for seed in (0, 1, 2):
             torch.manual_seed(seed)
-            for rows in (1, 2, 4, 8, 16):
+            for rows in widths:
                 context.update(seed=seed, rows=rows)
                 stage('fixture-upload')
                 values = [torch.randn(1, rows, 5120).bfloat16(), torch.rand(1, rows, 24).bfloat16(),
@@ -129,12 +145,14 @@ def main():
                 release(warm)
                 ttnn.synchronize_device(mesh)
                 stage('candidate-warm-complete')
-                stage('candidate-capture')
-                trace = ttnn.begin_trace_capture(mesh, cq_id=0)
-                captured = execute(packed, initial)
-                ttnn.end_trace_capture(mesh, trace, cq_id=0)
-                stage('candidate-captured')
-                for mode in ('eager', 'trace'):
+                captured = ()
+                if not args.value_split:
+                    stage('candidate-capture')
+                    trace = ttnn.begin_trace_capture(mesh, cq_id=0)
+                    captured = execute(packed, initial)
+                    ttnn.end_trace_capture(mesh, trace, cq_id=0)
+                    stage('candidate-captured')
+                for mode in modes:
                     stage('candidate-evaluate', mode=mode)
                     if mode == 'trace':
                         ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
@@ -142,6 +160,12 @@ def main():
                     else:
                         actual = execute(packed, initial)
                     output_host, states_host = host_output(actual[0]), host(actual[1])
+                    if args.value_split:
+                        if not all(torch.isfinite(value).all() for value in host(actual[2])):
+                            raise AssertionError('Nonfinite FP32 bridge')
+                        for tensor, expected in zip(packed, values, strict=True):
+                            if not all(torch.equal(value, expected) for value in host(tensor)):
+                                raise AssertionError('Value-split modified immutable input')
                     stage('candidate-readback-complete', mode=mode)
                     if not exact(host(initial), expected_state[0]):
                         raise AssertionError('Kernel modified initial state')
@@ -172,7 +196,8 @@ def main():
                 report['negative_controls'].append(dict(seed=seed, rows=rows, stale_state_detected=True))
                 if args.norm_gate:
                     stage('fixture-cleanup')
-                    ttnn.release_trace(mesh, trace)
+                    if trace is not None:
+                        ttnn.release_trace(mesh, trace)
                     trace = None
                     release([*captured, *packed, *reference, *correction, norm_w,
                              *[value for token in tokens for value in token]])
@@ -219,7 +244,9 @@ def main():
                 release([*captured, *packed, *reference, *correction, *[value for token in tokens for value in token]])
                 path.write_text(json.dumps(report, indent=2))
                 print(json.dumps(dict(seed=seed, rows=rows, exact=True)), flush=True)
-        if len(report['checks']) != 30 or len(report['continuations']) != 216 or len(report['negative_controls']) != 15:
+        if (len(report['checks']) != 3 * len(widths) * len(modes)
+                or len(report['continuations']) != 3 * len(modes) * sum(rows + 1 for rows in widths)
+                or len(report['negative_controls']) != 3 * len(widths)):
             raise AssertionError('Incomplete recurrence gate')
         if not args.norm_gate and (len(report['timings']) != 15 or sum(timing['timed_replays'] for timing in report['timings']) != 1800):
             raise AssertionError('Incomplete paired recurrence timing')
