@@ -22,6 +22,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
 
     rows = len(tokens)
     mesh = model.mesh_device
+    prefill()
+    save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa)
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
@@ -47,8 +49,6 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             for value, reference in zip(actual, expected, strict=True))
 
     try:
-        prefill()
-        save_initial()
         initial_state = state_digest()
         expected_outputs = serial()
         expected = read(expected_outputs)

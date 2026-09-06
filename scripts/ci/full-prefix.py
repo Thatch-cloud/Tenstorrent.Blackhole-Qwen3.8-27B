@@ -124,8 +124,9 @@ def main():
         saved = [helper.allocate() for helper in helpers]
         scratch = [helper.allocate() for helper in helpers]
         candidate_saved = [helper.allocate() for helper in helpers] if options.batch else []
+        replay_initial = [helper.allocate() for helper in helpers] if options.batch else []
         report["snapshot_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
-                                                 for state in saved + scratch + candidate_saved for tensor in state)
+                                                 for state in saved + scratch + candidate_saved + replay_initial for tensor in state)
         report["kv_dtypes"] = [str(tensor.dtype) for tensor in caches]
 
         def addresses():
@@ -194,7 +195,7 @@ def main():
                 raise AssertionError("Prefill replaced persistent decode state")
             return argmax(logits)
 
-        def batched(tokens, length, prefix, trace, prompt):
+        def batched(tokens, length, prefix, trace):
             from model_batch import ModelBatch
 
             fixture = ModelBatch(model, tokens, length, page_table, helpers, candidate_saved, prefix, serial_sdpa=options.serial_sdpa)
@@ -202,11 +203,12 @@ def main():
             output = None
             try:
                 if trace:
+                    save(replay_initial)
                     captured = ttnn.begin_trace_capture(mesh, cq_id=0)
                 output = fixture.run()
                 if captured is not None:
                     ttnn.end_trace_capture(mesh, captured, cq_id=0)
-                    prefill(prompt)
+                    restore(replay_initial)
                     ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True)
                 return [value.reshape(len(tokens), model.args.vocab_size).clone() for value in local_host(output)]
             finally:
@@ -224,6 +226,8 @@ def main():
         kv_digest(128)
         if options.batch:
             from model_batch import ModelBatch
+            save(replay_initial)
+            restore(replay_initial)
             for length in lengths:
                 kv_digest(length + 18)
                 for rows in (1, 2, 4, 8, 16):
@@ -264,10 +268,12 @@ def main():
                         expected_state = live_digest()
                         expected_kv = kv_digest(length + rows)
                         prefill(prompt)
-                        actual = batched(oracle[:rows], length, rows, trace, prompt)
+                        actual = batched(oracle[:rows], length, rows, trace)
                         if any(not torch.equal(value, expected) for value in actual):
                             differences = [dict(chip=chip, unequal=int((value != expected).sum()),
-                                                max_abs=float((value.float() - expected.float()).abs().max()))
+                                                nonfinite_actual=int((~torch.isfinite(value)).sum()),
+                                                max_abs=float((value.float() - expected.float()).abs().max())
+                                                if torch.isfinite(value).all() and torch.isfinite(expected).all() else None)
                                            for chip, value in enumerate(actual)]
                             report["logit_difference"] = dict(length=length, rows=rows, trace=trace, differences=differences)
                             raise AssertionError("Full-model batched logits differ from native B1")
@@ -295,7 +301,7 @@ def main():
                         raise AssertionError("Candidate prefill seed changed")
                     if options.batch:
                         proposals = oracle[:prefix] + [(oracle[index] + 137) % model.args.vocab_size for index in range(prefix, 16)]
-                        actual = batched(proposals, length, prefix, trace, prompt)
+                        actual = batched(proposals, length, prefix, trace)
                         if prefix:
                             expected = torch.cat([active_serial_logits(value, model.args.vocab_size) for value in oracle_logits[:prefix]], dim=0)
                             if any(not torch.equal(value[:prefix], expected) for value in actual):

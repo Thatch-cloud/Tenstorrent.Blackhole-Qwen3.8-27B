@@ -47,6 +47,20 @@ This is an isolation hypothesis until hardware passes; the exactness gate is not
 relaxed. `full-coding-cost` now explicitly selects `--serial-sdpa`; other suites
 retain their original batching policy.
 
+Retry 34002555664 (`c74b2be`) passed all five 4K eager widths, with exact logits,
+active GDN states and complete valid KV prefixes, plus the four eager rollback
+cases. This controlled result isolates the earlier eager drift to the batched SDPA
+read path. The first T1 traced candidate then produced non-finite logits after the
+harness replayed long prefill between candidate capture and execution. This is a
+separate trace-lifetime problem, not a reason to relax arithmetic comparison.
+
+The next retry saves candidate-entry GDN state in a fourth preallocated compact set
+and restores it in-place after capture, without replaying prefill while candidate
+trace buffers are live. KV writes touch only candidate/future positions, which the
+position mask excludes until rewritten; exact KV checks remain mandatory. Timing
+also prefills before allocating candidate fixtures. Snapshot allocation is now
+384 MiB/chip. Structural regression tests guard both trace/prefill boundaries.
+
 ### E3 full-model batch integration (passed 34001403540)
 
 The `full-batch` suite reuses the serial oracle without changing its default path.
