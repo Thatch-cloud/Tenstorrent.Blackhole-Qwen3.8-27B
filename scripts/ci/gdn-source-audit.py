@@ -7,6 +7,29 @@ import shutil
 import subprocess
 
 
+def ownership_sources(source):
+    paths = []
+    missing = []
+    for name in ('slice', 'copy', 'clone'):
+        root = source / 'ttnn/cpp/ttnn/operations/data_movement' / name
+        if root.is_dir():
+            paths.extend(path for path in root.rglob('*') if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h'))
+        else:
+            missing.append(root.relative_to(source).as_posix())
+    if not any('/slice/' in path.as_posix() for path in paths):
+        raise RuntimeError('Pinned slice implementation absent')
+    for root_name in ('ttnn/cpp/ttnn/tensor', 'ttnn/api/ttnn/tensor'):
+        root = source / root_name
+        if root.is_dir():
+            paths.extend(path for path in root.rglob('*') if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h'))
+        else:
+            missing.append(root_name)
+    paths = sorted(set(paths))
+    if len(paths) > 200 or sum(path.stat().st_size for path in paths) > 4 * 1024 * 1024:
+        raise RuntimeError('Ownership source export exceeds bounded budget')
+    return paths, missing
+
+
 def main():
     source = Path('/opt/tt-metal')
     destination = Path('/results')
@@ -22,7 +45,10 @@ def main():
         'models/demos/blackhole/qwen36/tt/qwen36_vllm.py',
         'ttnn/cpp/ttnn/operations/experimental/paged_cache/device/update_cache/paged_update_cache_device_operation.cpp',
     )]
-    manifest = dict(scope='Source parity only, not binary equivalence or performance', files=[])
+    ownership, missing = ownership_sources(source)
+    paths = sorted(set(paths + ownership))
+    manifest = dict(scope='Source parity and slice/copy ownership audit only, not binary equivalence or performance',
+                    files=[], missing_optional_ownership_roots=missing)
     manifest['revision'] = subprocess.check_output(
         ['git', '-c', 'safe.directory=/opt/tt-metal', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     for path in paths:

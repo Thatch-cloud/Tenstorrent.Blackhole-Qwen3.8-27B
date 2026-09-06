@@ -223,7 +223,34 @@ per-token work using the new candidate as a contemporaneous control. Keep attent
 numerics and GDN precision unchanged, and require full-model paired gains rather
 than extrapolating layer timing or fenced attribution.
 
-### E3 redundant GDN input preparation (hardware pending)
+### E3 redundant GDN input preparation (passed 34007693367)
+
+Run 34007693367 (`8b6f429`) passed 20 width/mode exact checks, 16 rollback cases,
+four negative-control pairs and ten timing fixtures with 2400 timed decode replays.
+The contemporaneous control already uses compact GDN state and checkpoint DMA.
+
+| Context | T | Compact control ms | Reused-input candidate ms | Median paired speedup |
+| --- | --- | --- | --- | --- |
+| 4095 | 4 | 82.033 | 77.671 | 1.056x |
+| 4095 | 8 | 130.708 | 118.293 | 1.105x |
+| 4095 | 16 | 227.118 | 201.741 | 1.126x |
+| 16383 | 4 | 84.396 | 80.090 | 1.053x |
+| 16383 | 8 | 135.122 | 122.758 | 1.101x |
+| 16383 | 16 | 235.884 | 210.584 | 1.120x |
+
+Every T16 paired block favored input reuse. T2 showed no meaningful median gain;
+T1 remained unchanged. T16 saves about 25.3 ms versus the compact-state control.
+These full-model verification gains preserve exact logits, state, valid KV and
+corrected rollback but do not include drafting or a complete commit pipeline.
+Idealized perfect-acceptance/zero-overhead T16 bounds are now 79.31/75.98 tok/s,
+still well short of 200. No serving defaults are changed.
+
+Next, inspect pinned slice/copy and tensor ownership code before attempting to
+remove the projected-row clone. The `gdn-source` exporter now includes bounded
+source-only ownership roots (maximum 200 files / 4 MiB additional source), recording
+missing optional roots rather than assuming them. This audit uses no cards and
+does not execute model code. The existing clone path remains unchanged until its
+aliasing and deallocation behavior can be established from the actual image.
 
 `full-gdn-input-reuse` isolates input-row preparation against the exact full-model
 compact/DMA control from 34006233354. Batched projection already consumes the full
