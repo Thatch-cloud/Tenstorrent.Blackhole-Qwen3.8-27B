@@ -46,7 +46,7 @@ def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout, compact_
 class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-                 device_loop_gdn=False, compact_prologue=False):
+                 device_loop_gdn=False, compact_prologue=False, batch_conv=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -67,6 +67,9 @@ class ModelBatch:
         if compact_prologue and not device_loop_gdn:
             raise ValueError('Compact prologue requires device-loop GDN')
         self.compact_prologue = compact_prologue and self.device_loop_gdn
+        if batch_conv and not compact_prologue:
+            raise ValueError('Batched convolution requires compact-prologue control')
+        self.batch_conv = batch_conv and self.device_loop_gdn
         self.working_states = []
         if len(helpers) != 48 or len(checkpoints) != 48 or len(model.layers) != 64:
             raise ValueError("Expected all 64 model layers and 48 GDN checkpoints")
@@ -141,7 +144,8 @@ class ModelBatch:
             from gdn_device_loop_state import DeviceLoopState
             from gdn_multitoken import load_kernels
             from gdn_multitoken_conv import finish_output, release_owned
-            state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True), self.compact_prologue)
+            state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True),
+                                    self.compact_prologue, self.batch_conv, self.batch_conv)
             self.working_states.append(state)
 
             def device_forward(value):

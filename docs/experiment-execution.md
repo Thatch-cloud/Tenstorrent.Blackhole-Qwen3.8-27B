@@ -67,6 +67,26 @@ the stale-state control and clean close. T16/seed1 fixture `20260906T101946Z-516
 also passed every output/state/history prefix and synthetic local output projection.
 Model-adapter coverage follows; no full-model routing is changed by this kernel gate.
 
+Aligned-DMA run34027345128 (`5759def`) passed30 native-oracle eager/trace cases,
+216 two-step prefix continuations,15 stale controls and600 paired layer replays.
+The19241-byte artifact's adapter/DMA hashes match simulator evidence:
+
+| T | Serial-conv control ms | DMA-window batched-conv ms | Median paired ratio |
+| --- | --- | --- | --- |
+| 1 | 0.333619 | 0.332588 | 1.000039 |
+| 2 | 0.573486 | 0.663122 | 0.864568 |
+| 4 | 0.973454 | 0.996604 | 0.977645 |
+| 8 | 1.770995 | 1.659346 | 1.067371 |
+| 16 | 3.370352 | 3.004254 | 1.121892 |
+
+The full-model experiment therefore changes only T8/T16; T1/T2/T4 retain their
+previous paths. Its paired control retains compact-prologue device-loop recurrence
+with serial convolution, not the older row-layout-only candidate. Simulator
+fixture `20260906T102349Z-322` passed the actual DeviceLoopState adapter atT2/seed2:
+all3 prefix selections, final native-slot publication and inactive-slot preservation.
+This validates adapter plumbing, not full-model logits or timing. Full-model
+eager/trace/rollback/valid-KV and paired4K/16K costs are the next hardware gate.
+
 ### Projected-input convolution integration (passed 34019928513)
 
 The shared `gdn_multitoken_conv.run_projected` adapter composes native serial

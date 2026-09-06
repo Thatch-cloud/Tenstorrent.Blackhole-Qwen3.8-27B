@@ -92,7 +92,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-row-layout ]; then
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-device-loop ]; then
-    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-batch-attribution ]; then

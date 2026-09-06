@@ -15,10 +15,20 @@ def summarize(samples):
     return dict(serial_ms=serial, batch_ms=batch, speedup=serial / batch)
 
 
+def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
+                         device_loop_gdn, compact_prologue, batch_conv):
+    return dict(compact_gdn=compact_gdn if reuse_gdn_input else False,
+                reuse_gdn_input=reuse_gdn_input if skip_row_clones else False,
+                skip_row_clones=skip_row_clones if hoist_row_layout else False,
+                hoist_row_layout=hoist_row_layout if device_loop_gdn else False,
+                device_loop_gdn=device_loop_gdn if batch_conv else False,
+                compact_prologue=compact_prologue if batch_conv else False)
+
+
 def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save_initial,
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
-            device_loop_gdn=False, compact_prologue=False):
+            device_loop_gdn=False, compact_prologue=False, batch_conv=False):
     import torch
     import ttnn
 
@@ -30,12 +40,13 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     save_initial()
     candidate = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows, serial_sdpa=serial_sdpa,
                            compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
-                           hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn, compact_prologue=compact_prologue)
+                           hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                           compact_prologue=compact_prologue, batch_conv=batch_conv)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
-                         serial_sdpa=serial_sdpa, compact_gdn=compact_gdn if reuse_gdn_input else False,
-                         reuse_gdn_input=reuse_gdn_input if skip_row_clones else False,
-                         skip_row_clones=skip_row_clones if hoist_row_layout else False,
-                         hoist_row_layout=hoist_row_layout if device_loop_gdn else False) if compact_gdn else None
+                         serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
+                             reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                             hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                             compact_prologue=compact_prologue, batch_conv=batch_conv)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -67,6 +78,10 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
         import math
         report["working_state_bytes_per_chip"] = sum(math.prod(tensor.padded_shape) * 2
             for state in candidate.working_states for tensor in state.state)
+    if batch_conv:
+        report.update(batched_convolution_enabled=candidate.batch_conv,
+                      paired_control='compact-prologue device-loop with native serial convolution; same width routing',
+                      candidate_internal_checkpoints='same selected/final convolution prefixes; parallel causal windows built by aligned DMA' if candidate.batch_conv else 'unchanged previous compact path at this width')
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -148,6 +163,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report['compact_comparison']['scope'] = 'Full-model device-loop GDN versus previous compact/input-reuse/selective-clone/row-layout control; candidate materializes all internal prefixes; same selected external checkpoint; no committed tok/s'
                 if compact_prologue:
                     report['compact_comparison']['scope'] = 'Full-model compact-prologue device-loop GDN versus previous optimized row-layout control; same selected external checkpoint; no committed tok/s'
+                if batch_conv:
+                    report['compact_comparison']['scope'] = 'Full-model parallel causal convolution with DMA windows versus compact-prologue serial convolution; same recurrence, width routing and selected checkpoint; no committed tok/s'
 
         restore_initial()
         trace = ttnn.begin_trace_capture(mesh, cq_id=0)

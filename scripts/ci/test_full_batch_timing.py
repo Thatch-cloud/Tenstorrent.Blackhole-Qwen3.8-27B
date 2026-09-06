@@ -1,9 +1,16 @@
 import unittest
 
-from full_batch_timing import summarize
+from full_batch_timing import paired_control_flags, summarize
 
 
 class TimingTests(unittest.TestCase):
+    def test_batched_convolution_control_preserves_previous_device_loop(self):
+        flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                     hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True)
+        self.assertEqual(paired_control_flags(**flags, batch_conv=True), flags)
+        self.assertEqual(paired_control_flags(**flags, batch_conv=False),
+                         dict(flags, device_loop_gdn=False, compact_prologue=False))
+
     def test_paired_means_not_mixed_sample_ratio(self):
         samples = [dict(arm=arm, milliseconds=value) for arm, value in
                    zip(("serial", "batch", "batch", "serial"), (10, 3, 5, 14))]
