@@ -58,8 +58,10 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             paired_control='previous compact/input-reuse/selective-clone/row-layout full-model control',
             candidate_internal_checkpoints='all prefixes materialized; one selected prefix copied to external checkpoint',
             extra_initial_state_bytes_per_chip=sum(math.prod(tensor.padded_shape) * 2
-                for state in candidate.working_states for tensor in state.entry))
-        if compact_prologue:
+                for state in candidate.working_states for tensor in getattr(state, 'entry', ())))
+        if not candidate.device_loop_gdn:
+            report['candidate_internal_checkpoints'] = 'previous compact/DMA selected-checkpoint path; device loop disabled at this width'
+        elif compact_prologue:
             report['candidate_internal_checkpoints'] = 'all recurrent prefixes; selected/final convolution prefixes only; hoisted projected-row layout'
     if compact_gdn:
         import math

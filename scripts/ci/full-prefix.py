@@ -112,6 +112,7 @@ def main():
     if options.device_loop_gdn:
         output_path = root / 'full-gdn-device-loop.json'
         report.update(device_loop_gdn=True, native_t1_retained=True,
+                      device_loop_min_rows=8 if options.compact_prologue else 2,
                       legacy_gdn_flags_describe_paired_control=True,
                       checkpoint_materialization='all internal prefixes; selected external checkpoint')
         if options.compact_prologue:

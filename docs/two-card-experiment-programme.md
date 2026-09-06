@@ -20,8 +20,11 @@ also passed native output projection/fabric reduction and all correctness checks
 T16 mean layer time improved5.176 to3.372ms against native serial; T1 regressed and
 remains native. Full-model run34023117059 (`6a2ca23`) passed logits/state/KV/rollback
 but regressed at every T>1 width: T16 was210.138/218.918ms versus173.072/181.859ms
-at4K/16K. It is not adopted. Next reduce convolution checkpoint copies and restore
-hoisted projected-row layout before another simulator-first paired comparison.
+at4K/16K. It is not adopted. Compact-prologue follow-up34024642720 (`8cb31c8`)
+passed the full correctness matrix and reduced T16 to163.227/172.023ms against
+173.067/181.856ms paired controls. T8 also improved; T2 regressed and T4 was marginal.
+Experimental routing now keeps the previous path below T8. These are fixed verifier
+blocks with a preselected checkpoint, not dynamic speculative committed throughput.
 This is not convolution token-loop fusion or a committed-throughput result.
 
 Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
@@ -35,7 +38,7 @@ passes, failures and timing evidence. No serving defaults have been promoted.
 | E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
 | E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
 | E3 verifier | Exact 4K/16K multi-token verification, corrected rollback and paired timing | Dynamic acceptance/commit pipeline and substantially lower V(T) |
-| E4 fusion/pipeline | Device-loop full-model correctness passed; layer speedup did not survive optimized full-model comparison; previous row-layout baseline retained | Remove composition overhead, rerun paired4K/16K timing; memory-pipeline prototypes |
+| E4 fusion/pipeline | Compact-prologue device-loop full-model correctness passed; T16 paired ratios1.060/1.057 at4K/16K; route experimental T8/T16 only | Further convolution/packing/export attribution and fusion; dynamic checkpoint lifecycle; memory-pipeline prototypes |
 | E5 drafting | Request-local lookup host tests; historical MTP groundwork | Card-backed MTP/lookup/external-drafter integration and matched end-to-end evaluation; no DFlash2/DSpark/EAGLE3 TT adapter certified |
 | E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
 | E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |

@@ -57,6 +57,9 @@ Add `--compact-prologue` to that adapter gate to test selected/final convolution
 checkpoints and hoisted projected-row layout. T2/seed0 `20260906T092329Z-324`
 passed all three checkpoint choices, final state and inactive-slot preservation.
 Recurrent prefixes are still all materialized; no kernel math changed.
+Full-model hardware follow-up34024642720 passed correctness and improved T8/T16
+paired timings, but not T2. The experimental full-model selector retains the
+previous path below T8; standalone simulator fixtures can still exercise T2.
 
 Run new kernel changes here before dispatching hardware experiments. This entry
 point requires the simulator library and slow dispatch, refuses hardware-allocation

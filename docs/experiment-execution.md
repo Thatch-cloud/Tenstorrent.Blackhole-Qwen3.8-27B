@@ -180,6 +180,37 @@ and exit0. The standard all-prefix path is also exercised as its control. Local
 validation:75 GDN,184 CI and55 simulator unit tests pass; Python/shell syntax and
 diff checks pass. Full-model compact-prologue hardware results are pending.
 
+Run [34024642720](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34024642720)
+(`8cb31c8`) passed20 width/mode checks,16 corrected rollbacks, four stale-state/
+wrong-page negative-control pairs and10 timing fixtures (2400 timed model replays).
+Both adapter hashes matched simulation. All logits, GDN state and valid KV checks
+were exact; device close and CI completed successfully.
+
+| Context | T | Previous optimized mean ms | Compact-prologue mean ms | Median paired ratio |
+| --- | --- | --- | --- | --- |
+| 4095 | 2 | 56.134 | 58.244 | 0.9638 |
+| 4095 | 4 | 72.860 | 72.552 | 1.0044 |
+| 4095 | 8 | 106.304 | 103.774 | 1.0245 |
+| 4095 | 16 | 173.067 | 163.227 | 1.0604 |
+| 16383 | 2 | 57.244 | 59.348 | 0.9644 |
+| 16383 | 4 | 75.063 | 74.780 | 1.0036 |
+| 16383 | 8 | 110.692 | 108.155 | 1.0234 |
+| 16383 | 16 | 181.856 | 172.023 | 1.0572 |
+
+All three paired blocks favored T8/T16 at both contexts. T2 regressed; T4's gain
+was marginal. The follow-up experimental routing policy therefore uses compact
+device-loop GDN only at T8/T16, retaining native T1 and the previous optimized
+compact/row-layout path at T2/T4. This routing-only follow-up has185 CI +55 simulator
+unit tests passing; the timings above belong to `8cb31c8`, before that selector.
+No serving defaults changed and the200 committed-tok/s target is not demonstrated.
+
+These are fixed verifier blocks with a preselected checkpoint, not a dynamic
+speculative acceptance/commit pipeline. Next: attribute remaining convolution,
+packing and recurrent-prefix export costs; test a true convolution/gates token loop
+that writes packed outputs directly. Dynamic acceptance still needs arbitrary-prefix
+state recovery (for example, validated reconstruction of convolution history from
+retained projected rows), plus drafter/commit and executable coding-quality gates.
+
 ### Multi-token norm/gate hardware exactness (passed 34019033933)
 
 Run [34019033933](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34019033933)

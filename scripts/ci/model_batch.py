@@ -36,11 +36,11 @@ def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
     return bool(requested and rows > 1)
 
 
-def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout):
+def device_loop_enabled(rows, requested, compact_gdn, hoist_row_layout, compact_prologue=False):
     validate_checkpoint(rows, rows)
     if requested and not (compact_gdn and hoist_row_layout):
         raise ValueError('Device loop requires the exact compact row-layout control')
-    return bool(requested and rows > 1)
+    return bool(requested and rows >= (8 if compact_prologue else 2))
 
 
 class ModelBatch:
@@ -63,7 +63,7 @@ class ModelBatch:
         if hoist_row_layout and not skip_row_clones:
             raise ValueError("Layout hoisting requires the selective-clone control")
         self.hoist_row_layout = hoist_row_layout and self.rows > 1
-        self.device_loop_gdn = device_loop_enabled(self.rows, device_loop_gdn, compact_gdn, hoist_row_layout)
+        self.device_loop_gdn = device_loop_enabled(self.rows, device_loop_gdn, compact_gdn, hoist_row_layout, compact_prologue)
         if compact_prologue and not device_loop_gdn:
             raise ValueError('Compact prologue requires device-loop GDN')
         self.compact_prologue = compact_prologue and self.device_loop_gdn

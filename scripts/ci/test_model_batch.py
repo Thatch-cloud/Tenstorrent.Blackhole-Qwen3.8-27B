@@ -17,6 +17,12 @@ class ModelBatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 device_loop_enabled(4, True, compact, layout)
 
+    def test_compact_prologue_uses_previous_control_for_short_blocks(self):
+        for rows in (1, 2, 4):
+            self.assertFalse(device_loop_enabled(rows, True, True, True, compact_prologue=True))
+        for rows in (8, 16):
+            self.assertTrue(device_loop_enabled(rows, True, True, True, compact_prologue=True))
+
     def test_compact_path_never_changes_t1_or_default(self):
         self.assertFalse(compact_gdn_enabled(1, True, True, None))
         for rows in (1, 2, 4, 8, 16):
