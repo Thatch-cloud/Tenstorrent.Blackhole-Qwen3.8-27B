@@ -1,6 +1,12 @@
 """Experimental same-address causal mask refresh within one native chunk family."""
 
 from pathlib import Path
+import hashlib
+
+
+def source_hashes():
+    return {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('attention_mask_replay.py', 'attention_mask_replay.cpp')}
 
 
 def validate_ticket(start, rows, capacity):
@@ -68,4 +74,3 @@ def execute(positions, mask, program):
     import ttnn
 
     ttnn.generic_op([positions, mask], program)
-

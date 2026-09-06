@@ -1,6 +1,5 @@
 """Simulator-only same-address mask refresh, including backwards rollback positions."""
 
-import hashlib
 import importlib.util
 import json
 import os
@@ -9,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from attention_head_fold import causal_mask
-from attention_mask_replay import execute, prepare, validate_ticket
+from attention_mask_replay import execute, prepare, source_hashes, validate_ticket
 
 
 def main(*, hardware=False):
@@ -29,8 +28,7 @@ def main(*, hardware=False):
     path = Path('/experiment/results/attention-mask-replay.json' if hardware else os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, checks=[], backend='hardware' if hardware else 'ttsim',
         trace_replays=0, scope='Same-address causal masks only; no attention or speed claim',
-        sources={name: hashlib.sha256((Path(__file__).resolve().parents[2] / 'scripts/ci' / name).read_bytes()).hexdigest()
-                 for name in ('attention_mask_replay.py', 'attention_mask_replay.cpp')})
+        sources=source_hashes())
     mesh = None
     try:
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=16777216 if hardware else 0)
