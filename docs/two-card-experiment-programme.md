@@ -1501,3 +1501,16 @@ remain. Integrated long-context configurations are still rejected on hardware.
 The separate current attention CI34138908364 is not cancelled or modified.
 This completes only the simulator layer-zero gate, not the five-layer drafter,
 coding acceptance or200 committed tokens/s objective.
+
+Hardware34138908364 completed successfully; its downloaded integrated-attention
+report confirms both ranks' convolution/residual and attention/output checks,
+including exact fabric sums and attention maximum errors2.0980835e-5 and
+1.5258789e-5. Complete-layer hardware34140315007 is now in progress.
+
+The next active simulator gate155120Z-300 exercises the complete layer at
+context2048, with cached110-worker QK and split-column PV. It retains every
+valid2056-row K/V reference and both connected-MLP rank checks. Its5400-second
+whole-process deadline accommodates the previously measured CPU reference cost;
+no check is sampled away or tolerance relaxed. This run has no final result yet.
+The remaining-layer download continues independently; neither active process is
+restarted. Integrated long-context hardware remains blocked until this gate passes.
