@@ -159,7 +159,19 @@ def main():
             if distance > 2:
                 raise AssertionError(f'SwiGLU activation differs by {distance} BF16 ULPs')
             expected_down = grouped_projection_reference(actual_activation[..., :8, :], shards[chip][2], destination_rounding=True)
-            torch.testing.assert_close(partials[chip][..., :8, :].double(), expected_down, rtol=1e-4, atol=1e-4)
+            actual_down = partials[chip][..., :8, :].double()
+            mismatched = ~torch.isclose(actual_down, expected_down, rtol=1e-4, atol=1e-4)
+            if mismatched.any():
+                ideal_down = actual_activation[..., :8, :].double() @ shards[chip][2].double()
+                failure_path = options.output.with_suffix(f'.rank{chip}-down-failure.pt')
+                torch.save(dict(activation=actual_activation[..., :8, :].contiguous(), actual=actual_down,
+                    reference=expected_down, ideal=ideal_down, chip=chip, checkpoint=manifest), failure_path)
+                indices = mismatched.nonzero().tolist()
+                report['down_failure'] = dict(chip=chip, activation_ulps=distance, capture=str(failure_path),
+                    mismatched_elements=len(indices), samples=[dict(index=index, actual=float(actual_down[tuple(index)]),
+                        reference=float(expected_down[tuple(index)]), ideal=float(ideal_down[tuple(index)])) for index in indices[:16]])
+                checkpoint('down_projection_mismatch', chip=chip)
+            torch.testing.assert_close(actual_down, expected_down, rtol=1e-4, atol=1e-4)
             if not torch.equal(host(output, chip), partials[0] + partials[1]):
                 raise AssertionError('MLP fabric sum must be exact')
             report['checks'].append(dict(chip=chip, stage='activation/down', activation_ulps=distance, sum_exact=True,

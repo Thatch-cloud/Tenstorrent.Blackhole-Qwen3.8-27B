@@ -1390,3 +1390,19 @@ Run `20260907T145919Z-495` is active; no numerical pass is claimed yet.
 Hardware rejects this integrated option until simulator validation. All538 host
 tests pass, including the pre-fixture hardware rejection check. The standalone
 MLP hardware gate34135694410 remains queued behind long-attention34134992019.
+
+Hardware run34134992019 completed successfully. The downloaded
+`learned-attention-long-wide.json` confirms all2056 K/V rows on both ranks,
+normalization within one BF16 ULP, unchanged projection/RoPE checks and exact
+fabric sums. Attention maximum absolute errors are1.9073486e-5 and1.5258789e-5.
+This is a real two-card long-context component correctness pass, not committed
+coding tokens/s. The standalone MLP hardware run is now in progress.
+
+Integrated MLP simulator145919Z-495 failed its down-projection reference check:
+four of40960 valid rank0 values exceeded the existing combined rtol/atol1e-4
+bound, with greatest failing absolute difference0.000457763671875. Prior
+convolution/residual, gate/up and activation checks passed. The bound remains
+unchanged and integrated hardware remains blocked. A failure capture now saves
+actual activation/output, ISA-aware and ideal FP64 references plus checkpoint
+identity for bounded local replay; the diagnostic retry is intended to locate
+the numerical cause rather than declare the discrepancy acceptable.
