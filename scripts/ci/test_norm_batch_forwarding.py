@@ -15,6 +15,7 @@ class NormBatchForwardingTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             options = {keyword.arg: ast.unparse(keyword.value) for keyword in calls[0].keywords}
             self.assertEqual(options['attention_mask_once'], expression)
+            self.assertEqual(options['replay_group_rows'], expression.replace('attention_mask_once', 'replay_group_rows'))
 
     def test_all_harness_boundaries_forward_the_explicit_option(self):
         root = Path(__file__).resolve().parent

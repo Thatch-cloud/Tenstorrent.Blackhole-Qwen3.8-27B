@@ -16,7 +16,7 @@ def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
 
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
                   prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
-                  norm_batch=False, attention_replay=False, attention_mask_once=False):
+                  norm_batch=False, attention_replay=False, attention_mask_once=False, replay_group_rows=4):
     validate_fixture(rows, first_prefix, second_prefix, len(oracle))
     import torch
     import ttnn
@@ -41,7 +41,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
         serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
         hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
         packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=norm_batch,
-        attention_replay=attention_replay, attention_mask_once=attention_mask_once)
+        attention_replay=attention_replay, attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
     captured, output = None, None
     try:
         save(initial)
@@ -76,6 +76,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             replay_epoch=fixture.retained.replay_epoch, logits_exact=True, refreshed_prefixes_exact=True,
             attention_replay_enabled=fixture.attention_replay,
             attention_mask_once_enabled=fixture.attention_mask_once,
+            replay_group_rows=fixture.replay_group_rows,
             captured_mask_programs_per_forward=(len(fixture.replay_reader.metadata) *
                 (1 if fixture.attention_mask_once else 16)) if fixture.attention_replay else 0,
             valid_kv_exact=True, inactive_slots_exact=True, correction_steps=2,

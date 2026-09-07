@@ -12,6 +12,13 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_wide_replay_requires_attention_and_compact_native_scratch(self):
+        for flags in ([], ['--attention-replay']):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--replay-group-rows', '8', *flags]):
+                with self.assertRaisesRegex(ValueError, 'replay attention and process-fixed'):
+                    full_prefix.main()
+
     def test_shared_masks_require_retained_replay_before_hardware_import(self):
         with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                 'sys.argv', ['full-prefix.py', '--attention-mask-once']):

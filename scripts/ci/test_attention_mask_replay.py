@@ -23,7 +23,7 @@ class MaskReplayTests(unittest.TestCase):
             self.assertEqual({group['signature'] for group in chunk_groups(start, 32)}, {(256, 4352)})
 
     def test_all_folded_heads_match_static_native_mask(self):
-        for rows in (1, 2, 3, 4):
+        for rows in range(1, 9):
             for batch in range(3):
                 for start in (4096, 4103, 4320):
                     expected = causal_mask(rows, start + 4 + batch * rows, 4352)

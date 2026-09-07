@@ -88,8 +88,11 @@ def main():
     parser.add_argument('--attention-tree', action='store_true')
     parser.add_argument('--attention-replay', action='store_true')
     parser.add_argument('--attention-mask-once', action='store_true')
+    parser.add_argument('--replay-group-rows', type=int, choices=(4, 8), default=4)
     parser.add_argument('--attention-engine', action='store_true')
     options = parser.parse_args()
+    if options.replay_group_rows == 8 and (not options.attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
+        raise ValueError('Eight-row replay requires replay attention and process-fixed compact scratch')
     if options.attention_mask_once and not options.attention_replay:
         raise ValueError('Shared attention masks require retained replay certification')
     if options.attention_tree and not options.attention_parallel:
@@ -182,9 +185,10 @@ def main():
         report['attention_tree_scope'] = 'Static T4 versus T8 parallel groups; identical native scratch, DMA and GDN'
     report['attention_replay'] = options.attention_replay
     report['attention_mask_once'] = options.attention_mask_once
+    report['replay_group_rows'] = options.replay_group_rows
     if options.attention_mask_once:
         report['attention_mask_once_simulator_prerequisite'] = '20260907T030808Z-298'
-        report['attention_mask_once_scope'] = 'One shared mask refresh per sixteen-layer forward; four-row reader and native math unchanged'
+        report['attention_mask_once_scope'] = f'One shared mask refresh per sixteen-layer forward; {options.replay_group_rows}-row reader, native math unchanged'
     report['attention_engine'] = options.attention_engine
     if options.attention_engine:
         from sdpa_tree_scratch import audit
@@ -196,7 +200,7 @@ def main():
                          'attention_mask_replay.cpp', 'model_batch.py', 'verifier_engine.py', 'verifier_inputs.py')}
     if options.attention_replay:
         from sdpa_tree_scratch import audit
-        report['attention_replay_native_sources'] = audit('/opt/tt-metal')
+        report['attention_replay_native_sources'] = audit('/opt/tt-metal', patched=options.replay_group_rows == 8)
         report['attention_replay_prerequisite'] = 34069798251
         report['attention_replay_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('attention_replay.py', 'attention_mask_replay.py', 'attention_mask_replay.cpp', 'attention_parallel.py')}
@@ -453,6 +457,7 @@ def main():
                                  attention_tree=options.attention_tree,
                                  attention_replay=options.attention_replay,
                                  attention_mask_once=options.attention_mask_once,
+                                 replay_group_rows=options.replay_group_rows,
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
@@ -742,7 +747,7 @@ def main():
                                 prefill=prefill, decode=decode, save=save, restore=restore, state_digest=state_digest,
                                 live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host,
                                 norm_batch=options.norm_batch, attention_replay=options.attention_replay,
-                                attention_mask_once=options.attention_mask_once)
+                                attention_mask_once=options.attention_mask_once, replay_group_rows=options.replay_group_rows)
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)

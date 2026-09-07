@@ -1,6 +1,7 @@
 """Experimental fixed-family attention reader; not wired into request serving."""
 
 from contextlib import contextmanager
+import os
 
 from attention_head_fold import parallel_groups
 from attention_mask_replay import execute as refresh_mask, prepare, validate_ticket
@@ -9,18 +10,22 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class ReplayAttentionReader:
-    def __init__(self, operations, mesh, rows, capacity, pages_host, upload):
+    def __init__(self, operations, mesh, rows, capacity, pages_host, upload, *, max_group_rows=4):
         import torch
 
         if type(rows) is not int or rows not in (8, 16, 32):
             raise ValueError('Replay reader requires an explicit T8/T16/T32 bucket')
+        if type(max_group_rows) is not int or max_group_rows not in (4, 8):
+            raise ValueError('Replay group width must be explicitly four or eight')
+        if max_group_rows == 8 and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+            raise ValueError('Eight-row replay requires process-fixed compact native scratch')
         if type(capacity) is not int:
             raise ValueError('Integer capacity required')
         validate_ticket(capacity - 256, rows, capacity)
         if pages_host.ndim != 2 or pages_host.shape[0] != 1 or pages_host.shape[1] < capacity // 64:
             raise ValueError('One complete native cache page table required')
         self.operations, self.mesh = operations, mesh
-        self.rows, self.capacity = rows, capacity
+        self.rows, self.capacity, self.max_group_rows = rows, capacity, max_group_rows
         self.owned, self.metadata, self.programs = [], [], []
         self.closed = False
         self.failed = False
@@ -33,7 +38,7 @@ class ReplayAttentionReader:
             words[0] = self.start
             self.positions = upload(words, operations.int32)
             self.owned.append(self.positions)
-            for bundle in parallel_groups(self.start, rows):
+            for bundle in parallel_groups(self.start, rows, max_group_rows=max_group_rows):
                 count = bundle[0]['rows']
                 pages = upload(pages_host[:, :capacity // 64].repeat(len(bundle), 1).contiguous(), operations.int32)
                 self.owned.append(pages)

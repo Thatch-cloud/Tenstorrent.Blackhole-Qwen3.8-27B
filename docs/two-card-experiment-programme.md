@@ -88,10 +88,24 @@ alone cannot masquerade as an executed fix. The host CI-script suite passes407
 tests in WSL. These patches are not wired into hardware CI or serving defaults;
 Ethernet firmware sizing and fabric coexistence remain prerequisites.
 
-- D1: matched WORKER/ETH dispatch health, trace replay, fabric collectives, actual
-  core-grid enumeration and exact results; then same-grid versus expanded-grid
-  model measurements. Audit Ethernet resource assignments; do not assume idle
-  Ethernet dispatch resources are interchangeable with active fabric channels.
+- D1a: resolve Ethernet firmware sizing, then matched WORKER/ETH dispatch health,
+  trace replay, fabric collectives and actual per-chip core-grid enumeration.
+  Audit Ethernet resource assignments; do not assume idle dispatch resources
+  are interchangeable with active fabric channels. No kernel grid expansion
+  is eligible until this prerequisite passes on the actual cards.
+- D1b: spare-column kernel work starts immediately after D1a, independently of
+  weight-loading D2. Compare WORKER/110, ETH/110 and ETH/120 using measured
+  available grids: first isolate dispatch placement at the same compute grid,
+  then isolate the extra column under identical dispatch. Prioritize MLP and
+  QKV matmuls atB1/T8/T32. Compare extra compute workers with dedicated DRAM
+  prefetch workers and double buffering, preserving precision and operation
+  ordering. Check DRAM bandwidth, L1 footprint, worker utilization and complete
+  layer latency; do not assume a larger grid helps a bandwidth-bound kernel.
+- D1c: promote a D1b winner only after native-exact model/state/KV and rollback
+  checks, then matched actual-request timing and held-out coding quality.
+  Keep drafter policy, weights, sampling, context and trace setup identical.
+  Report setup separately from committed decode throughput. Simulator timings
+  do not certify physical DRAM bandwidth or a decode-rate improvement.
 - D2: independently compare direct per-card PCIe uploads with x16-card staging
   followed by fabric distribution into the final TP weight shards. Verify
   byte-exact destination shards and measure PCIe/fabric traffic, bandwidth,

@@ -8,14 +8,29 @@ from attention_replay import ReplayAttentionReader
 
 
 class ReplayReaderTests(unittest.TestCase):
-    def fixture(self, rows=16):
+    def fixture(self, rows=16, *, max_group_rows=4):
         operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock())
         mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
         upload = Mock(side_effect=lambda value, dtype=None: value)
         with patch('attention_replay.prepare', return_value='program'):
             reader = ReplayAttentionReader(operations, mesh, rows, 4352,
-                torch.arange(68).reshape(1, 68), upload)
+                torch.arange(68).reshape(1, 68), upload, max_group_rows=max_group_rows)
         return reader, upload
+
+    def test_wide_replay_requires_explicit_compact_scratch_and_preserves_defaults(self):
+        with patch.dict('os.environ', {}, clear=True):
+            with self.assertRaisesRegex(ValueError, 'compact native scratch'):
+                self.fixture(max_group_rows=8)
+        for width in (True, 8.0, 16, 3):
+            with self.assertRaisesRegex(ValueError, 'explicitly four or eight'):
+                self.fixture(max_group_rows=width)
+        with patch.dict('os.environ', {'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1'}):
+            wide, _ = self.fixture(rows=32, max_group_rows=8)
+            control, _ = self.fixture(rows=32)
+        self.assertEqual([len(entry[0]) for entry in wide.metadata], [3, 1])
+        self.assertEqual([len(entry[0]) for entry in control.metadata], [3, 3, 2])
+        self.assertTrue(all(group['rows'] == 8 for entry in wide.metadata for group in entry[0]))
+        self.assertEqual([tuple(entry[2].shape) for entry in wide.metadata], [(3, 1, 96, 4352), (1, 1, 96, 4352)])
 
     def test_prepared_family_has_zero_masks_and_bounded_parallel_pages(self):
         reader, upload = self.fixture()

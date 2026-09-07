@@ -19,7 +19,7 @@ def validate_ticket(start, rows, capacity):
 
 
 def mask_position(start, rows, batch, head, offset=0):
-    if not 1 <= rows <= 4 or not 0 <= batch < 3 or not 0 <= head < rows * 12:
+    if not 1 <= rows <= 8 or not 0 <= batch < 3 or not 0 <= head < rows * 12:
         raise ValueError('Bounded folded query head required')
     return start + offset + batch * rows + (head % (rows * 6)) // 6
 
@@ -29,7 +29,7 @@ def prepare(mesh, positions, mask, *, rows, batches, offset, capacity):
 
     if any(type(value) is not int for value in (rows, batches, offset, capacity)):
         raise ValueError('Integer mask geometry required')
-    if not 1 <= rows <= 4 or not 1 <= batches <= 3 or offset < 0 or offset + rows * batches > 32:
+    if not 1 <= rows <= 8 or not 1 <= batches <= 3 or offset < 0 or offset + rows * batches > 32:
         raise ValueError('At most three bounded contiguous query groups required')
     validate_ticket(capacity - 256, offset + rows * batches, capacity)
     if tuple(positions.shape) != (8,) or positions.dtype != ttnn.int32 or positions.layout != ttnn.ROW_MAJOR_LAYOUT:

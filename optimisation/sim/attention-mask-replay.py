@@ -1,6 +1,7 @@
 """Simulator-only same-address mask refresh, including backwards rollback positions."""
 
 import importlib.util
+import argparse
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from attention_head_fold import causal_mask
 from attention_mask_replay import execute, prepare, source_hashes, validate_ticket
 
 
-def main(*, hardware=False):
+def main(*, hardware=False, wide=False):
     spec = importlib.util.spec_from_file_location('guard', Path(__file__).with_name('gdn-multitoken.py'))
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
@@ -28,14 +29,17 @@ def main(*, hardware=False):
     path = Path('/experiment/results/attention-mask-replay.json' if hardware else os.environ['QWEN_SIM_REPORT'])
     report = dict(passed=False, checks=[], backend='hardware' if hardware else 'ttsim',
         trace_replays=0, scope='Same-address causal masks only; no attention or speed claim',
-        sources=source_hashes())
+        sources=source_hashes(), wide=wide)
+    geometries = ((1, 1, 0), (3, 2, 1), (4, 3, 4))
+    if wide:
+        geometries += ((5, 3, 1), (7, 3, 3), (8, 3, 0), (8, 1, 24))
     mesh = None
     try:
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=16777216 if hardware else 0)
         if hardware:
             mesh.enable_program_cache()
         for capacity in (4352, 16640):
-            for rows, batches, offset in ((1, 1, 0), (3, 2, 1), (4, 3, 4)):
+            for rows, batches, offset in geometries:
                 report['last_stage'] = dict(capacity=capacity, rows=rows, batches=batches)
                 path.write_text(json.dumps(report, indent=2))
                 print(json.dumps(report['last_stage']), flush=True)
@@ -86,9 +90,9 @@ def main(*, hardware=False):
                         ttnn.release_trace(mesh, captured)
                     ttnn.deallocate(mask)
                     ttnn.deallocate(positions)
-        if len(report['checks']) != 48:
+        if len(report['checks']) != len(geometries) * 16:
             raise AssertionError('Incomplete mask replay matrix')
-        if hardware and report['trace_replays'] != 24:
+        if hardware and report['trace_replays'] != len(geometries) * 8:
             raise AssertionError('Incomplete captured mask refresh coverage')
         report['passed'] = True
     finally:
@@ -98,4 +102,6 @@ def main(*, hardware=False):
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--wide', action='store_true')
+    main(wide=parser.parse_args().wide)

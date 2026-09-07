@@ -5,6 +5,20 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Wide replay masks pass TTsim20260907T031904Z-311:112 exact checks across
+  capacities4352/16640, rows1/3/4/5/7/8, up to three batches and tail offset24,
+  including forward, family-end and rollback positions at unchanged addresses.
+  The existing C++ mask arithmetic is unchanged; host launch bounds now permit
+  eight-row groups (at most72 workers). The replay reader accepts explicit
+  `max_group_rows=8` only with process-fixed compact native scratch; default4
+  remains unchanged. Full-model retained-replay helpers forward the same explicit
+  width and audit patched native sources for8. Host CI-script tests pass416.
+  T32 composition20260907T032057Z-302 is running at4K/seed2 with shared-mask
+  scope and native B1 comparisons. No wide replay hardware promotion yet.
+- Shared-mask full-model hardware gate34079160602 (`d4a5df5`) is running.
+  It retains the four-row reader; do not mix its result with the separate
+  eight-row grouping work. Spare-column kernels are scheduled asD1b after
+  dispatch/fabric correctness D1a, independently of weight-loading D2.
 - TTsim20260907T030808Z-298 passes the shared-mask scope experiment atT8,
   start4096/capacity4352, seed1. Forward/rollback positions4103->4096 each
   execute two native-exact attention calls with one mask refresh, preserving

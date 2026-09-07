@@ -41,8 +41,10 @@ def main():
         parser.error('Replay reader requires dynamic-mask composition checks')
     if args.dynamic_mask:
         from attention_mask_replay import validate_ticket
-        if not args.dma_layout or args.parallel_groups != 3 or args.max_group_rows != 4:
-            parser.error('Dynamic mask composition requires three four-row DMA groups')
+        if not args.dma_layout or args.parallel_groups != 3 or args.max_group_rows not in (4, 8):
+            parser.error('Dynamic mask composition requires three four/eight-row DMA groups')
+        if args.max_group_rows == 8 and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+            parser.error('Eight-row dynamic attention requires process-fixed compact native scratch')
         validate_ticket(args.start, args.rows, args.capacity)
         validate_ticket(args.start + 7, args.rows, args.capacity)
     if args.parallel_groups > 1 and (not args.grouped or args.max_group_rows not in (4, 8) or args.finite_mask):
@@ -242,7 +244,7 @@ def main():
                                 layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
                                 memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
                         replay_reader = ReplayAttentionReader(ttnn, mesh, args.rows, args.capacity,
-                            torch.tensor([page_ids], dtype=torch.int32), upload_replay)
+                            torch.tensor([page_ids], dtype=torch.int32), upload_replay, max_group_rows=args.max_group_rows)
                     for delta in (7, 0):
                         start = args.start + delta
                         validate_ticket(start, args.rows, args.capacity)

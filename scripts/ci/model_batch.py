@@ -48,7 +48,8 @@ class ModelBatch:
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
-                 attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False):
+                 attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
+                 replay_group_rows=4):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -61,6 +62,9 @@ class ModelBatch:
         if attention_replay and (not ordered_cache or not serial_sdpa or not norm_batch or profiler is not None or grouped_attention):
             raise ValueError('Replay attention requires standalone ordered-cache norm-batch verification')
         self.attention_replay = bool(attention_replay and self.rows >= 8)
+        if type(replay_group_rows) is not int or replay_group_rows not in (4, 8) or (replay_group_rows == 8 and not attention_replay):
+            raise ValueError('Eight-row replay grouping requires explicit replay attention')
+        self.replay_group_rows = replay_group_rows
         if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
             raise ValueError('Shared attention masks require explicit replay attention')
         self.attention_mask_once = attention_mask_once and self.attention_replay
@@ -155,7 +159,8 @@ class ModelBatch:
                     layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
 
-            self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages, upload_replay)
+            self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
+                upload_replay, max_group_rows=self.replay_group_rows)
             self.grouped_readers.append(self.replay_reader)
             if self.replay_reader.start != start:
                 self.replay_reader.stage(start)
