@@ -76,7 +76,8 @@ def main():
         from sdpa_tree_scratch import audit
         report['native_sources'] = audit('/opt/tt-metal', patched=True)
         report['scope'] = 'Parallel T4 versus T8 groups, both with compact native scratch and DMA layout; no model throughput'
-        report['simulator_prerequisites'] = ['20260907T011925Z-426', '20260907T012041Z-303']
+        report['simulator_prerequisites'] = ['20260907T011925Z-426', '20260907T012041Z-303',
+                                            '20260907T012644Z-300', '20260907T013817Z-304']
         report['worker_cap_per_head'] = 16
         report['maximum_sdpa_workers'] = 96
         report['sources'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()

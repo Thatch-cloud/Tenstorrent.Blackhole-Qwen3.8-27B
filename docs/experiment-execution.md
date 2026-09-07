@@ -5,6 +5,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Legacy four-row TTsim20260907T013817Z-304 passed T16/start4096 with the
+  compact scratch flag unset: native, grouped, parallel and reusable adapter
+  outputs are exact on both chips, including prepared-reader ownership checks.
+  All planned simulator prerequisites for `attention-tree-parallel` now pass.
+- TTsim20260907T012644Z-300 passed T32/start16383 with compact scratch and
+  eight-row DMA groups. Native B1, serial grouped, three-way parallel and the
+  reusable adapter are bitwise exact on both chips. The boundary produces
+  groups1/8/8/8/7, exercising nonzero offsets and partial final groups. Simulator
+  execution completed normally; only the legacy four-row regression remains
+  before the prepared hardware microbenchmark.
 - Prepared `attention-tree-parallel`: both arms use native compact scratch,
   direct DMA layout and up to three parallel groups; only the maximum group
   width changes4->8. The36-fixture gate requires native-exact original and
