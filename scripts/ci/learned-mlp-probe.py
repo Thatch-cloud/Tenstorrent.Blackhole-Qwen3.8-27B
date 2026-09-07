@@ -19,9 +19,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
-    if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+    require_projection_environment(os.environ, options.hardware)
+    if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required')
     import torch
     import ttnn
@@ -30,6 +31,7 @@ def main():
     manifest, weights = load_mlp(options.fixture)
     shards = split_mlp_weights(*(weights[f'layers.0.mlp.{name}_proj.weight'] for name in ('gate', 'up', 'down')))
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, checks=[], block_rows=8,
+        backend='hardware' if options.hardware else 'simulator',
         tolerance=dict(projection_rtol=1e-4, projection_atol=1e-4, activation_ulps=2),
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('learned-mlp-probe.py', 'draft_mlp.py', 'draft_mlp_fixture.py', 'feature_collective.py', 'projection_rounding.py')})

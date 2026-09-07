@@ -1359,3 +1359,20 @@ configuration, with3600 seconds for its complete CPU references inside the
 existing4800-second suite deadline. Short-context controls remain intact.
 No long-context hardware result is claimed yet. The separate learned MLP
 simulator gate has started after the attention process terminated.
+
+The learned MLP simulator `20260907T144652Z-388` completed with both
+`passed=true` and wrapper exit-status0. All learned gate/up and down values
+for eight valid rows pass the unchanged ISA-aware projection rtol/atol1e-4
+checks on both ranks. SwiGLU has zero BF16 ULP difference on all32 padded
+rows, and fabric sums are exact. Maximum gate/up absolute error is4.7683716e-6;
+maximum down absolute error is0.0001220703125 (within the combined relative
+and absolute tolerance). The7.5-minute simulator wall time is not hardware
+latency. Convolution/residual integration, complete learned draft layers and
+coding acceptance/committed-throughput validation remain outstanding.
+
+The isolated `learned-mlp` hardware suite now checks transfer health before
+the same learned projection/activation/fabric diagnostic. It downloads only
+the pinned three layer-zero matrices with full hash validation, uses a1800s
+probe limit, and retains the existing allocation/no-reset requirements.
+No MLP hardware result is claimed yet. Long-attention hardware run34134992019
+is in progress at commit7d0287f.
