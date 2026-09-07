@@ -39,7 +39,7 @@ def draft_sdpa(operations, query, key, value, mask, *, streaming=False):
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask):
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
@@ -68,6 +68,8 @@ def composed_draft_attention(operations, mesh, query, key, value, mask):
         output = retain(operations.matmul(probabilities, values, dtype=operations.float32,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         operations.synchronize_device(mesh)
+        if inspect is not None:
+            inspect(query, keys, values, scores, masked, probabilities, output)
     except BaseException:
         release_owned(operations, owned)
         raise

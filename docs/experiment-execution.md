@@ -5,6 +5,22 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Integrated learned attention simulator now exercises Q/K/V, per-head learned
+  RMSNorm, absolute-position RoPE (start4096, context31, T8), composed attention,
+  O projection and FP32 fabric reduction without an intermediate host handoff.
+  It does NOT pass yet. `20260907T112703Z-309` stopped at native BF16 RoPE:
+  one element exceeded the fixed relative/absolute .01 bound (absolute .010376).
+  FP32 RoPE operands/caches with final BF16 cast pass that gate (`113001Z-300`),
+  with first-rank Q/K/V projection errors <=1.526e-5 and head norms within one ULP.
+  That run instead fails learned attention:30/16384 valid first-rank elements,
+  max failing absolute error .0306664. Output projection/reduction are executed
+  but not certified because validation stops earlier.
+- Stage isolation `20260907T113235Z-303` confirms remaining arithmetic errors
+  (max across complete tensors): QK .048759/.049358, softmax .001514/.002160,
+  PV .011904/.012318 for ranks0/1. These are diagnostics, not relaxed acceptance
+  thresholds. Synthetic attention hardware timings remain valid for their narrower
+  scope, not proof of learned-attention accuracy. All512 host tests pass; this
+  integrated learned path remains simulator-only pending the numerical fix.
 - Hardware `34115875438` (`6b8fb71`) PASSED composed draft attention and the
   learned convolution control. Five warm attention-only samples per context
   have median0.632663ms (context0),0.825215ms (31),1.637039ms (2048) on the
