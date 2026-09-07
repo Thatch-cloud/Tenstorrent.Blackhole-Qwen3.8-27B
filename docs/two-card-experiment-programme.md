@@ -1489,3 +1489,15 @@ executed and these new tensors are not yet accepted by a loader: complete
 download, hash pinning and finite BF16 verification remain required. All545
 host tests pass, including exact tensor counts/bytes and invalid-selection
 rejection before network access. No five-layer runtime pass is claimed.
+
+Complete layer-zero simulator153623Z-521 passed on both ranks with wrapper
+exit-status0. Attention retains all previous gates; connected MLP convolution,
+gate/up/down projections have zero reference error, activation/convolution/
+residual/fabric checks are exact, and normalization is within one BF16 ULP.
+The attention-to-MLP handoff is the same device tensor, with no host reconstruction.
+The hardware suite now adds this validated short-context complete-layer gate
+with1800s timeout and all three hash-verified fixtures. Existing branch controls
+remain. Integrated long-context configurations are still rejected on hardware.
+The separate current attention CI34138908364 is not cancelled or modified.
+This completes only the simulator layer-zero gate, not the five-layer drafter,
+coding acceptance or200 committed tokens/s objective.

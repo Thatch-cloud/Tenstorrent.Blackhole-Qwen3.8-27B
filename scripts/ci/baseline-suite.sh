@@ -61,6 +61,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
         --hardware --fp32-rope --explicit-softmax --fused-row-sum --fused-dots --cache-dot-tiles \
         --fixture /experiment-projection-fixture --convolution-fixture /experiment-convolution-fixture \
         --output /experiment/results/learned-attention-integrated.json
+    OMP_NUM_THREADS=1 timeout -k 30 1800 python3 /experiment-scripts/ci/learned-attention-probe.py \
+        --hardware --fp32-rope --explicit-softmax --fused-row-sum --fused-dots --cache-dot-tiles \
+        --fixture /experiment-projection-fixture --convolution-fixture /experiment-convolution-fixture \
+        --mlp-fixture /experiment-mlp-fixture --output /experiment/results/learned-layer-complete.json
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-convolution ]; then

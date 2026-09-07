@@ -40,8 +40,8 @@ def main():
     parser.add_argument('--mlp-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.mlp_fixture and (options.hardware or not options.convolution_fixture):
-        parser.error('Complete draft layer requires simulator mode and convolution fixture')
+    if options.mlp_fixture and not options.convolution_fixture:
+        parser.error('Complete draft layer requires convolution fixture')
     if options.hardware and options.convolution_fixture and not (
             options.context == 31 and options.cache_dot_tiles and options.fused_dots
             and options.fused_row_sum and not options.wide_dot_placement):

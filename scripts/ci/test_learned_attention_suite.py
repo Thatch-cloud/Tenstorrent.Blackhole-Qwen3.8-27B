@@ -6,16 +6,16 @@ import unittest
 
 
 class LearnedAttentionSuiteTests(unittest.TestCase):
-    def test_complete_layer_rejects_hardware_before_fixture_load(self):
+    def test_complete_layer_requires_convolution_fixture(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
         environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
         result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('learned-attention-probe.py')),
-            '--hardware', '--fixture', '/not-a-fixture', '--convolution-fixture', '/not-a-fixture',
+            '--hardware', '--fixture', '/not-a-fixture',
             '--mlp-fixture', '/not-a-fixture', '--output', '/not-an-output'],
             env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn('Complete draft layer requires simulator mode and convolution fixture', result.stderr)
+        self.assertIn('Complete draft layer requires convolution fixture', result.stderr)
 
     def test_unvalidated_integrated_attention_configuration_is_rejected(self):
         environment = {name: value for name, value in os.environ.items()
@@ -46,7 +46,7 @@ timeout() {
         result = self.run_suite()
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 16)
+        self.assertEqual(len(lines), 17)
         self.assertIn('device-readback.py', lines[0])
         for argument in ('learned-attention-probe.py', '--hardware', '--fp32-rope',
                 '--explicit-softmax', '--pairwise-softmax', '--pairwise-dots'):
@@ -79,6 +79,11 @@ timeout() {
                 '--explicit-softmax', '--fused-row-sum', '--fused-dots', '--cache-dot-tiles',
                 '--convolution-fixture /experiment-convolution-fixture', 'learned-attention-integrated.json'):
             self.assertIn(argument, lines[15])
+        for argument in ('1800', 'learned-attention-probe.py', '--hardware', '--fp32-rope',
+                '--explicit-softmax', '--fused-row-sum', '--fused-dots', '--cache-dot-tiles',
+                '--convolution-fixture /experiment-convolution-fixture', '--mlp-fixture /experiment-mlp-fixture',
+                'learned-layer-complete.json'):
+            self.assertIn(argument, lines[16])
 
     def test_failed_health_stops_probe(self):
         result = self.run_suite(True)
