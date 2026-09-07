@@ -30,8 +30,11 @@ def reduce_projection(operations, mesh, collectives, value):
 
 
 def gather_add_projection(operations, mesh, collectives, value):
-    if list(mesh.shape) != [1, 2] or tuple(value.shape) != (1, 1, 1, 5120) or value.dtype != operations.float32:
-        raise ValueError('Single-row full-width FP32 TP2 projection required')
+    shape = tuple(value.shape)
+    if (list(mesh.shape) != [1, 2] or len(shape) != 4 or shape[:2] != (1, 1)
+            or shape[2] not in (1, 8, 32) or shape[3] != 5120 or value.dtype != operations.float32):
+        raise ValueError('One, eight or 32 rows of full-width FP32 TP2 projection required')
+    rows = shape[2]
     temporaries = []
     output = None
     try:
@@ -43,7 +46,7 @@ def gather_add_projection(operations, mesh, collectives, value):
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
         temporaries.append(gathered)
         for chip in range(2):
-            temporaries.append(operations.slice(gathered, (chip, 0, 0, 0), (chip + 1, 1, 1, 5120)))
+            temporaries.append(operations.slice(gathered, (chip, 0, 0, 0), (chip + 1, 1, rows, 5120)))
         output = operations.add(temporaries[1], temporaries[2], dtype=operations.float32,
             memory_config=operations.DRAM_MEMORY_CONFIG)
         operations.synchronize_device(mesh)

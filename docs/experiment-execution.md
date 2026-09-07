@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware `34111774033` (`731a3ea`) PASSED the live device-resident one-row
+  projection/fabric gather-add/BF16/RMSNorm path: both sums exact, normalization
+  at most one BF16 ULP. All 10,240 saved projection values match the retained
+  host-reduction control. Transfer health and standalone normalization also pass.
+  The artifact is 403,827 bytes with the pinned manifest, not duplicated weights.
+  Eight-row integrated simulator `20260907T103148Z-411` is running; the batching
+  change has 497 passing host tests but is not yet promoted to hardware.
 - Integrated shared-BDF simulator `20260907T102134Z-309` PASSED full learned
   projection -> raw FP32 fabric gather/add -> device BF16 cast -> learned RMSNorm,
   without a host tensor handoff. Both ranks have exact sums and normalization

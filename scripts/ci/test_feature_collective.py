@@ -44,3 +44,22 @@ class FeatureCollectiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reduce_projection(operations, mesh, collectives, value)
         operations.experimental.reduce_scatter_minimal_async.assert_not_called()
+
+    def test_batched_gather_add_keeps_every_row(self):
+        for rows in (8, 32):
+            with self.subTest(rows=rows):
+                operations, mesh, collectives, value, reduced, gathered = self.fixture()
+                value.shape = (1, 1, rows, 5120)
+                operations.slice = Mock(side_effect=[object(), object()])
+                operations.add = Mock(return_value=object())
+                gather_add_projection(operations, mesh, collectives, value)
+                self.assertEqual([call.args[1:] for call in operations.slice.call_args_list],
+                    [((0, 0, 0, 0), (1, 1, rows, 5120)), ((1, 0, 0, 0), (2, 1, rows, 5120))])
+
+    def test_gather_add_rejects_unsupported_geometry_before_dispatch(self):
+        for shape in ((1, 1, 2, 5120), (1, 1, 8, 2560), (1, 8, 5120), (2, 1, 8, 5120)):
+            operations, mesh, collectives, value, reduced, gathered = self.fixture()
+            value.shape = shape
+            with self.assertRaises(ValueError):
+                gather_add_projection(operations, mesh, collectives, value)
+            operations.experimental.all_gather_async.assert_not_called()

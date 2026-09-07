@@ -29,8 +29,8 @@ def main():
     parser.add_argument('--reference', choices=('float64', 'blackhole-accumulation'), default='float64')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.device_tail and (not options.full_projection or options.rows != 1):
-        parser.error('Device tail requires full projection and one explicit row')
+    if options.device_tail and (not options.full_projection or options.rows is None):
+        parser.error('Device tail requires full projection and an explicit row count')
     if options.device_tail and not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Device tail simulator requires shared BDF loading')
     if options.full_projection and options.rows is None:
