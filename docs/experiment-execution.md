@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- TTsim20260907T032057Z-302 passed T32/start4096/capacity4352, seed2, with
+  compact native scratch, eight-row DMA groups and shared-mask scopes. Native,
+  grouped, parallel, prepared-reader and forward/rollback4103->4096 outputs are
+  exact on both chips. Four prepared-reader calls use four mask refreshes across
+  two scopes; borrowed queries remain intact. No simulator speed claim is made.
+  Prepared `attention-tree-replay` cold-builds audited native scratch, checks
+  transfer health, then112 wide-mask trace checks and96 changed-query/position
+  attention checks with immutable KV. It requires the same-source wide-mask
+  hardware report before opening the attention mesh. Host tests pass418.
 - Wide replay masks pass TTsim20260907T031904Z-311:112 exact checks across
   capacities4352/16640, rows1/3/4/5/7/8, up to three batches and tail offset24,
   including forward, family-end and rollback positions at unchanged addresses.

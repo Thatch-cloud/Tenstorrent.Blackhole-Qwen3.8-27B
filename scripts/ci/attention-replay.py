@@ -1,6 +1,7 @@
 """Hardware trace composition gate for same-address, fixed-family attention replay."""
 
 import hashlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -15,18 +16,35 @@ def main():
         raise RuntimeError('Explicit hardware allocation required')
     if os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
         raise RuntimeError('Fast-dispatch hardware required')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--max-group-rows', type=int, choices=(4, 8), default=4)
+    options = parser.parse_args()
+    wide = options.max_group_rows == 8
+    if wide and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+        raise ValueError('Eight-row replay requires process-fixed compact native scratch')
     import torch
     import ttnn
     from sdpa_tree_scratch import audit
 
     output_path = Path('/experiment/results/attention-replay.json')
     report = dict(passed=False, fixtures=[], scope='Read-only KV attention replay only; no full-model or committed-rate claim',
-        native_sources=audit('/opt/tt-metal'), simulator_prerequisite='20260907T001643Z-681',
-        mask_hardware_prerequisite=34068177963,
+        native_sources=audit('/opt/tt-metal', patched=wide),
+        simulator_prerequisite='20260907T032057Z-302' if wide else '20260907T001643Z-681',
+        max_group_rows=options.max_group_rows,
+        mask_hardware_prerequisite='same-run wide attention-mask-replay.json' if wide else 34068177963,
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                  for name in ('attention_replay.py', 'attention_mask_replay.py', 'attention_mask_replay.cpp',
                               'attention_parallel.py', 'attention_fold_dma.py', 'attention_fold_dma.cpp')})
     mesh = None
+    if wide:
+        from attention_mask_replay import source_hashes
+        mask_report = json.loads(Path('/experiment/results/attention-mask-replay.json').read_text())
+        if not (mask_report.get('passed') is True and mask_report.get('wide') is True
+                and mask_report.get('backend') == 'hardware' and mask_report.get('trace_replays') == 56
+                and len(mask_report.get('checks', [])) == 112
+                and all(check.get('exact') is True for check in mask_report['checks'])
+                and mask_report.get('sources') == source_hashes()):
+            raise ValueError('Same-source wide-mask hardware trace gate must pass first')
 
     def stage(name, **details):
         report['last_stage'] = dict(name=name, **details)
@@ -86,7 +104,8 @@ def main():
                                 finally:
                                     release_owned(ttnn, [token_query, position] + ([result] if result is not None else []))
                             expected.append([torch.cat([value[chip] for value in outputs], dim=1) for chip in range(2)])
-                        reader = ReplayAttentionReader(ttnn, mesh, rows, capacity, pages_host, upload)
+                        reader = ReplayAttentionReader(ttnn, mesh, rows, capacity, pages_host, upload,
+                            max_group_rows=options.max_group_rows)
                         warm = reader(query, keys, values, scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)
                         ttnn.synchronize_device(mesh)
                         if any(not torch.equal(actual, target) for actual, target in zip(host(warm), expected[0], strict=True)):
