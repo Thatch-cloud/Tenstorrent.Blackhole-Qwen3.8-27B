@@ -6,7 +6,7 @@ import unittest
 
 
 class LearnedAttentionSuiteTests(unittest.TestCase):
-    def test_integrated_attention_is_simulator_only_before_fixture_load(self):
+    def test_unvalidated_integrated_attention_configuration_is_rejected(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
         environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
@@ -14,7 +14,7 @@ class LearnedAttentionSuiteTests(unittest.TestCase):
             '--hardware', '--fixture', '/not-a-fixture', '--convolution-fixture', '/not-a-fixture',
             '--output', '/not-an-output'], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn('Integrated attention branch requires simulator validation', result.stderr)
+        self.assertIn('Integrated attention hardware requires the validated short cached fused path', result.stderr)
 
     def run_suite(self, fail_health=False, mode='learned-attention'):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
@@ -35,7 +35,7 @@ timeout() {
         result = self.run_suite()
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 15)
+        self.assertEqual(len(lines), 16)
         self.assertIn('device-readback.py', lines[0])
         for argument in ('learned-attention-probe.py', '--hardware', '--fp32-rope',
                 '--explicit-softmax', '--pairwise-softmax', '--pairwise-dots'):
@@ -64,6 +64,10 @@ timeout() {
                 '--explicit-softmax', '--fused-row-sum', '--fused-dots', '--cache-dot-tiles',
                 '--wide-dot-placement', 'learned-attention-long-wide.json'):
             self.assertIn(argument, lines[14])
+        for argument in ('900', 'learned-attention-probe.py', '--hardware', '--fp32-rope',
+                '--explicit-softmax', '--fused-row-sum', '--fused-dots', '--cache-dot-tiles',
+                '--convolution-fixture /experiment-convolution-fixture', 'learned-attention-integrated.json'):
+            self.assertIn(argument, lines[15])
 
     def test_failed_health_stops_probe(self):
         result = self.run_suite(True)

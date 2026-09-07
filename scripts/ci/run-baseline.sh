@@ -14,6 +14,8 @@ if [ "$mode" = learned-mlp ]; then
     projection_fixture=/home/thatch/.cache/qwen-experiments/dflash2-mlp-dedf8df68adfb1afeaf7b7480c0a0243108177b4
     timeout -k 10 1200 python3 scripts/ci/draft_mlp_fixture.py --reuse-verified --output "$projection_fixture"
     cp "$projection_fixture/manifest.json" "$output/draft-mlp-manifest.json"
+fi
+if [[ "$mode" = learned-mlp || "$mode" = learned-attention ]]; then
     convolution_fixture=/home/thatch/.cache/qwen-experiments/dflash2-convolution-dedf8df68adfb1afeaf7b7480c0a0243108177b4
     timeout -k 10 600 python3 scripts/ci/draft_convolution_fixture.py --reuse-verified --output "$convolution_fixture"
     cp "$convolution_fixture/manifest.json" "$output/draft-convolution-manifest.json"
@@ -81,7 +83,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
-if [ "$mode" = learned-mlp ]; then
+if [[ "$mode" = learned-mlp || "$mode" = learned-attention ]]; then
     docker cp "$convolution_fixture" "$test_id:/experiment-convolution-fixture"
 fi
 if [[ "$mode" = learned-mlp || "$mode" = learned-attention || "$mode" = learned-convolution || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then

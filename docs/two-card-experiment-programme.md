@@ -1449,3 +1449,17 @@ retained; integrated projections select the corrected32-wide fidelity schedule.
 The first context31 gate152816Z-525 is running, not yet passed. Hardware rejects
 this option before fixture/device access. All541 host tests pass. This is not yet
 a full attention-plus-MLP layer, five-layer drafter or request-history adapter.
+
+Integrated MLP hardware34138213690 passed on both cards: gate/up/down
+reference errors are zero, SwiGLU and convolution/residual/fabric arithmetic
+are exact, and normalization is within one BF16 ULP. The downloaded report
+confirms the actual integrated option, not only the standalone control.
+
+Integrated attention simulator152816Z-525 also completed with exit-status0
+and passed=true. Both ranks have exact Q/K/V projections, context/proposal
+assembly, convolution, residual and fabric sums. Attention maximum absolute
+errors are2.0980835e-5 and1.5258789e-5 within unchanged bounds. The hardware
+suite now includes only this short-context cached fused integration, retaining
+the existing non-integrated long-context test. Integrated long-context/wide
+hardware combinations remain rejected pending their simulator gate. Neither
+branch has yet been connected to the other as a complete learned draft layer.

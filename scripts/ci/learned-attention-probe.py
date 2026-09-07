@@ -37,8 +37,10 @@ def main():
     parser.add_argument('--convolution-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.hardware and options.convolution_fixture:
-        parser.error('Integrated attention branch requires simulator validation')
+    if options.hardware and options.convolution_fixture and not (
+            options.context == 31 and options.cache_dot_tiles and options.fused_dots
+            and options.fused_row_sum and not options.wide_dot_placement):
+        parser.error('Integrated attention hardware requires the validated short cached fused path')
     if options.hardware and (options.context != 31 or options.wide_dot_placement) and not (
             options.context == 2048 and options.wide_dot_placement and options.cache_dot_tiles
             and options.fused_dots and options.fused_row_sum):
