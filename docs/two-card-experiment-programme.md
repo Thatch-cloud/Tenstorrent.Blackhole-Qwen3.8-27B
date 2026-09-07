@@ -2018,3 +2018,28 @@ packing equality and replaces only device-weight readback validation with this
 byte-exact check. Simulator195732Z tests full5120x8704 geometry and the corrected
 native gate-linear fused-SiLU control. It uses the audited upstream packer graft;
 the local header must again be restored when this active run terminates.
+
+Simulator195732Z failed before any fused projection: the device comparator
+found one mismatched word in the chip1 gate and host source packing equality
+also failed for that same chip/projection. The other three comparisons covered
+all43520 pages each with zero mismatches. This rules out treating the issue as
+only bulk output readback; local source/data integrity remains unresolved.
+No retry was accepted as success. The local packer header was restored and
+its original87b9c251... hash verified after the process exited1 cleanly.
+
+### Five-layer and selector hardware gates passed
+
+Hardware34157187322, commit062fedd, passed after verified staging recovery.
+The five-layer report contains62 checks, including all10 chip/layer connected
+MLP checks with zero gate/up/down/conv projection errors. All five distinct
+learned layers completed on hardware at context31/block8. Final normalization
+is within one BF16 ULP and final selector projection has zero error/exact cast
+on both chips. The selector codebook dot gate matches simulator errors and
+exact proposal paths; five isolated dispatch samples are0.39884,0.33107,
+0.31394,0.30609,0.30485ms (median0.31394ms). These include dispatch/allocation/
+synchronization, not codebook gathering, shared LM head or complete selection.
+
+Artifacts are retained under hardware-evidence.local/34157187322. This proves
+the short synthetic-input mathematical gates, not real target feature history,
+learned drafting acceptance, complete request latency or coding quality. The
+200 committed-token/s objective is still open; serving defaults are unchanged.
