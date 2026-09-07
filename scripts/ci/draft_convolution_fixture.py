@@ -28,9 +28,7 @@ TENSOR_SHA256 = dict(zip(TENSORS, (
 ), strict=True))
 
 
-def load_convolution(output):
-    import torch
-
+def verified_bytes(output):
     manifest = json.loads((output / 'manifest.json').read_text())
     if (manifest['model'] != MODEL or manifest['revision'] != REVISION
             or manifest['header_sha256'] != HEADER_SHA256 or manifest['checkpoint_bytes'] != 3848817896):
@@ -48,10 +46,26 @@ def load_convolution(output):
         data = (output / filename).read_bytes()
         if hashlib.sha256(data).hexdigest() != TENSOR_SHA256[name]:
             raise ValueError('Audited convolution content required')
-        tensors[name] = torch.frombuffer(bytearray(data), dtype=torch.bfloat16).reshape(shape)
+        tensors[name] = data
+    return manifest, tensors
+
+
+def load_convolution(output):
+    import torch
+
+    manifest, data = verified_bytes(output)
+    tensors = {}
+    for name, (shape, filename) in TENSORS.items():
+        tensors[name] = torch.frombuffer(bytearray(data[name]), dtype=torch.bfloat16).reshape(shape)
         if not torch.isfinite(tensors[name]).all():
             raise ValueError('Finite learned convolution weights required')
     return manifest, tensors
+
+
+def ensure_fixture(output):
+    if not (output / 'manifest.json').exists():
+        fetch(output)
+    return verified_bytes(output)[0]
 
 
 def fetch(output):
@@ -84,4 +98,6 @@ def fetch(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
-    print(json.dumps(fetch(parser.parse_args().output), indent=2))
+    parser.add_argument('--reuse-verified', action='store_true')
+    options = parser.parse_args()
+    print(json.dumps(ensure_fixture(options.output) if options.reuse_verified else fetch(options.output), indent=2))

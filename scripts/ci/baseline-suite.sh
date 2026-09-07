@@ -10,6 +10,13 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_RUN_MODE:-baseline}" = learned-convolution ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/learned-convolution-probe.py \
+        --hardware --fp32-intermediates --fixture /experiment-projection-fixture \
+        --output /experiment/results/learned-convolution.json
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = feature-projection-full ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/feature-projection-probe.py \

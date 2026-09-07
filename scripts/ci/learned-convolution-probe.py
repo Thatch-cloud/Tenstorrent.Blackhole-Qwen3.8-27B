@@ -16,16 +16,17 @@ from projection_rounding import grouped_projection_reference
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--fp32-intermediates', action='store_true')
     parser.add_argument('--inspect-arithmetic', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
+    require_projection_environment(os.environ, options.hardware)
     import torch
     import ttnn
 
     manifest, weights = load_convolution(options.fixture)
-    report = dict(passed=False, scope=__doc__, backend='simulator', checkpoint=manifest, checks=[],
+    report = dict(passed=False, scope=__doc__, backend='hardware' if options.hardware else 'simulator', checkpoint=manifest, checks=[],
         fp32_intermediates=options.fp32_intermediates,
         arithmetic_checks=[],
         tolerance=dict(rtol=1e-4, atol=1e-4, max_bf16_ulps=2), sources={name:
@@ -33,7 +34,7 @@ def main():
             for name in ('learned-convolution-probe.py', 'draft_convolution.py', 'draft_convolution_fixture.py', 'projection_rounding.py')})
     mesh = None
     try:
-        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware else ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,

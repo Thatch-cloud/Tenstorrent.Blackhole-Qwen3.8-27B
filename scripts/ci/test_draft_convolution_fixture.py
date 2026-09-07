@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_convolution_fixture import load_convolution, MODEL, REVISION, HEADER_SHA256
+from draft_convolution_fixture import load_convolution, ensure_fixture, MODEL, REVISION, HEADER_SHA256
 
 
 class ConvolutionFixtureTests(unittest.TestCase):
@@ -21,6 +21,9 @@ class ConvolutionFixtureTests(unittest.TestCase):
             (root / 'manifest.json').write_text(json.dumps(manifest))
             (root / 'test.bf16').write_bytes(data)
             self.assertEqual(load_convolution(root)[1]['test'].item(), 1)
+            with patch('draft_convolution_fixture.read_range') as reader:
+                self.assertEqual(ensure_fixture(root), manifest)
+                reader.assert_not_called()
             (root / 'test.bf16').write_bytes(b'xx')
             with self.assertRaises(ValueError):
                 load_convolution(root)

@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added opt-in `learned-convolution` hardware suite: allocation/runtime audit,
+  transfer health, then learned T8 convolution with explicit FP32 operands and
+  outputs, BF16 rounding per operation, and no intermediate host inspections.
+  This is still the prepare/finish plumbing gate, not a whole draft layer.
+  A dedicated 26 MB revision-pinned fixture cache is fully rehashed on reuse;
+  only its manifest is attached to artifacts. Host502 tests and shell syntax
+  checks pass. Hardware result is pending; no reset or serving changes requested.
 - Learned layer-zero convolution simulator `20260907T105950Z-754` PASSED
   attention/MLP prepare and finish arithmetic on both ranks, T8 width5120,
   with zero intermediate host inspections. Both convolution phases match
