@@ -2101,3 +2101,11 @@ internal host waits and frees only in the opt-in trace-safe MLP path. Existing
 eager callers remain unchanged. Captured temporaries stay alive until trace
 release;620 host tests pass, including deferred ownership checks. A fresh
 simulator gate must pass before this path can be promoted to hardware.
+
+Simulator230240Z on5a7d576 passed with exit0 and clean mesh close: four eager
+stage validations, six exact changing-input trace comparisons and two stale-input
+negative controls. The trace-safe ownership path is now eligible for opt-in
+learned-stack hardware testing. That suite retains eager timing and adds the same
+captured MLP gate with one warmup and five blocking trace timings. Input copies,
+weight uploads, capture and output validation remain outside timed regions.
+This is an isolated branch cost, not paired full-drafter or committed throughput.

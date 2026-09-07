@@ -3,8 +3,10 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import time
 
 from attention_batch import capture_operation
 from draft_convolution_fixture import load_convolution
@@ -19,9 +21,13 @@ def main():
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--convolution-fixture', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--timing', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
-    if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+    require_projection_environment(os.environ, options.hardware)
+    if options.timing and not options.hardware:
+        parser.error('Latency measurements require allocated hardware')
+    if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required')
     import torch
     import ttnn
@@ -30,6 +36,8 @@ def main():
     manifest, weights = load_mlp(options.fixture)
     convolution_manifest, convolution = load_convolution(options.convolution_fixture)
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, convolution_checkpoint=convolution_manifest,
+        backend='hardware' if options.hardware else 'simulator', timings_ms=[],
+        timing_scope='Post-warmup blocking MLP trace execution; excludes input and weight uploads, capture and validation; not full drafter or committed throughput',
         eager_checks=[], trace_checks=[], negative_controls=[], sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('draft_mlp_branch.py', 'draft-mlp-trace-probe.py', 'draft_convolution.py',
                 'draft_mlp.py', 'feature_collective.py', 'attention_batch.py')})
@@ -90,10 +98,19 @@ def main():
         progress('capturing')
         trace, captured = capture_operation(ttnn, mesh, execute)
         output_addresses = addresses(ttnn, captured['output'])
-        for repetition, pattern in enumerate((0, 1, 0)):
+        patterns = (0, 1, 0, 1, 0, 1) if options.timing else (0, 1, 0)
+        for repetition, pattern in enumerate(patterns):
             ttnn.copy_host_to_device_tensor(host_inputs[pattern], device_hidden)
             ttnn.synchronize_device(mesh)
+            if options.timing:
+                started = time.perf_counter()
             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+            if options.timing:
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if not math.isfinite(elapsed_ms) or elapsed_ms <= 0:
+                    raise AssertionError('Positive hardware latency required')
+                if repetition:
+                    report['timings_ms'].append(elapsed_ms)
             if ([addresses(ttnn, value) for value in persistent] != original_addresses
                     or addresses(ttnn, captured['output']) != output_addresses):
                 raise AssertionError('Trace input, parameters or output moved')
@@ -122,7 +139,8 @@ def main():
             release_owned(ttnn, persistent)
             ttnn.close_mesh_device(mesh)
         options.output.write_text(json.dumps(report, indent=2))
-    report['passed'] = len(report['eager_checks']) == 4 and len(report['trace_checks']) == 6 and len(report['negative_controls']) == 2
+    report['passed'] = (len(report['eager_checks']) == 4 and len(report['trace_checks']) == 2 * len(patterns)
+        and len(report['negative_controls']) == 2 and len(report['timings_ms']) == (5 if options.timing else 0))
     options.output.write_text(json.dumps(report, indent=2))
 
 

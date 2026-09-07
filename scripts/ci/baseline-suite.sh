@@ -31,6 +31,9 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
         OMP_NUM_THREADS=1 timeout -k 15 900 python3 /experiment-scripts/ci/draft-mlp-replay-probe.py \
             --hardware --timing --fixture /experiment-mlp-fixture \
             --convolution-fixture /experiment-convolution-fixture --output /experiment/results/learned-mlp-replay.json
+        OMP_NUM_THREADS=1 timeout -k 15 900 python3 /experiment-scripts/ci/draft-mlp-trace-probe.py \
+            --hardware --timing --fixture /experiment-mlp-fixture \
+            --convolution-fixture /experiment-convolution-fixture --output /experiment/results/learned-mlp-trace.json
         OMP_NUM_THREADS=1 timeout -k 15 300 python3 /experiment-scripts/ci/draft-dot-probe.py \
             --hardware --timing --keys 32 --width 256 --cache-tiles \
             --selector-fixture /experiment-selector-fixture --output /experiment/results/learned-selector-dot.json

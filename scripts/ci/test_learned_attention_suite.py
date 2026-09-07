@@ -129,18 +129,22 @@ timeout() {
         result = self.run_suite(stack=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 5)
         self.assertIn('device-readback.py', lines[0])
         for argument in ('draft-mlp-replay-probe.py', '--hardware --timing',
                 '--fixture /experiment-mlp-fixture', '--convolution-fixture /experiment-convolution-fixture',
                 'learned-mlp-replay.json'):
             self.assertIn(argument, lines[1])
+        for argument in ('draft-mlp-trace-probe.py', '--hardware --timing',
+                '--fixture /experiment-mlp-fixture', '--convolution-fixture /experiment-convolution-fixture',
+                'learned-mlp-trace.json'):
+            self.assertIn(argument, lines[2])
         for argument in ('draft-dot-probe.py', '--hardware --timing --keys 32 --width 256 --cache-tiles',
                 '--selector-fixture /experiment-selector-fixture', 'learned-selector-dot.json'):
-            self.assertIn(argument, lines[2])
+            self.assertIn(argument, lines[3])
         for argument in ('--stack-layers 5', '--selector-fixture /experiment-selector-fixture',
                 '--stack-fixtures /experiment-stack-fixture', '--cache-dot-tiles', 'learned-five-layers.json'):
-            self.assertIn(argument, lines[3])
+            self.assertIn(argument, lines[4])
         failed = self.run_suite(fail_health=True, stack=True)
         self.assertEqual(failed.returncode, 17)
         self.assertNotIn('learned-attention-probe.py', failed.stdout)
