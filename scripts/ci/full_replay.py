@@ -16,6 +16,23 @@ def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
         raise ValueError('Oracle must include the replay block and corrected continuation')
 
 
+def warm_feature_fixture(fixture, features, operations, mesh):
+    output = None
+    try:
+        with features.capture():
+            output = fixture.run()
+        operations.synchronize_device(mesh)
+    finally:
+        try:
+            features.close()
+        finally:
+            try:
+                if output is not None:
+                    operations.deallocate(output)
+            finally:
+                fixture.close()
+
+
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
                   prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
                   norm_batch=False, attention_replay=False, attention_mask_once=False, replay_group_rows=4,
@@ -59,11 +76,21 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
     expected_final_state, expected_final_kv = live_digest(), kv_digest(length + first_prefix + second_prefix + 2)
     prefill(prompt)
     expected_inactive = inactive_digest()
-    fixture = ModelBatch(model, oracle[:rows], length, pages, helpers, checkpoints, rows,
-        serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
-        hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
-        packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=norm_batch,
-        attention_replay=attention_replay, attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
+    def make_fixture(retain):
+        return ModelBatch(model, oracle[:rows], length, pages, helpers, checkpoints, rows,
+            serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+            hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
+            packed_checkpoints=True, retain_records=retain, ordered_cache=True, norm_batch=norm_batch,
+            attention_replay=attention_replay, attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
+
+    if feature_taps:
+        save(initial)
+        warm = make_fixture(False)
+        try:
+            warm_feature_fixture(warm, new_feature_capture(), ttnn, mesh)
+        finally:
+            restore(initial)
+    fixture = make_fixture(True)
     captured, output = None, None
     features = None
     feature_checks = []

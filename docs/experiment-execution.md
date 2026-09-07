@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Feature replay34090337389 failed on the first captured batched feature copy:
+  TT-Metal rejected loading a new clone binary during trace capture. Native B1
+  feature warmup did not cover batched copy signatures. The gate now runs the
+  instrumented batch through a disposable non-retained fixture, synchronizes,
+  releases its feature/output buffers and restores initial state before making
+  the retained capture fixture. No native cache guard is bypassed. All450 host
+  tests pass, including warmup ordering/failure cleanup. Fast-dispatch simulator
+  20260907T063815Z-306 uses the same warmup helper and passes30 changed-input
+  feature checks with current hashes. Hardware traced freshness remains unproven.
 - Added opt-in `target-feature-replay` to the existing two-block retained replay
   oracle. It captures owned feature copies inside the verifier trace, compares
   initial and changed-input features against serial B1 rows, asserts allocation

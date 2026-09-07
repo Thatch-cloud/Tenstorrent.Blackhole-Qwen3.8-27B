@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from attention_batch import capture_operation
 from gdn_multitoken_conv import addresses
+from full_replay import warm_feature_fixture
 from target_features import LayerOutputCapture
 
 
@@ -24,7 +25,7 @@ def main():
     taps = (5, 19, 33, 47, 61)
     report = dict(passed=False, scope=__doc__, checks=[], backend='ttsim-fast-dispatch',
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                 for name in ('feature-trace-probe.py', 'target_features.py')})
+                 for name in ('feature-trace-probe.py', 'target_features.py', 'full_replay.py')})
     mesh = tensor = output = trace = features = None
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
@@ -58,13 +59,8 @@ def main():
                 release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
 
         features = capture_features()
-        with features.capture():
-            output = operation()
-        ttnn.synchronize_device(mesh)
-        features.close()
+        warm_feature_fixture(SimpleNamespace(run=operation, close=lambda: None), features, ttnn, mesh)
         features = None
-        ttnn.deallocate(output)
-        output = None
         features = capture_features()
         with features.capture():
             trace, output = capture_operation(ttnn, mesh, operation)
