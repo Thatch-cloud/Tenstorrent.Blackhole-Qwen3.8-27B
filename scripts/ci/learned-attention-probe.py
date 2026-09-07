@@ -13,6 +13,7 @@ from draft_convolution_fixture import load_convolution
 from draft_mlp_fixture import load_mlp
 from draft_mlp_branch import execute_mlp_branch, validate_mlp_branch
 from draft_remaining_layers_fixture import load_layer
+from draft_selector_fixture import load_selector
 from draft_head_preparation import rope_tables, rope_reference, head_norm_reference
 from feature_collective import gather_add_projection
 from feature_normalization import bf16_ulp_distance, rms_reference
@@ -41,8 +42,11 @@ def main():
     parser.add_argument('--mlp-fixture', type=Path)
     parser.add_argument('--stack-fixtures', type=Path)
     parser.add_argument('--stack-layers', type=int, choices=(2, 3, 4, 5), default=2)
+    parser.add_argument('--selector-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.selector_fixture and (options.hardware or not options.mlp_fixture or not options.convolution_fixture):
+        parser.error('Selector projection requires simulator and complete layer fixtures')
     if options.stack_fixtures and (options.hardware or not options.mlp_fixture or not options.convolution_fixture):
         parser.error('Multi-layer stack requires simulator and complete layer fixtures')
     if options.mlp_fixture and not options.convolution_fixture:
@@ -71,6 +75,7 @@ def main():
     manifest, weights = load_attention(options.fixture)
     conv_manifest, conv_weights = load_convolution(options.convolution_fixture) if options.convolution_fixture else (None, None)
     mlp_manifest, mlp_weights = load_mlp(options.mlp_fixture) if options.mlp_fixture else (None, None)
+    selector_manifest, selector_weights = load_selector(options.selector_fixture) if options.selector_fixture else (None, None)
     stack_entries = []
     if options.stack_fixtures:
         for layer in range(1, options.stack_layers):
@@ -85,6 +90,7 @@ def main():
         convolution_checkpoint=conv_manifest, integrated_branch=bool(options.convolution_fixture),
         mlp_checkpoint=mlp_manifest, complete_layer=bool(options.mlp_fixture),
         stack_checkpoints=[entry[0] for entry in stack_entries], stack_layers=1 + len(stack_entries), layers_completed=0,
+        selector_checkpoint=selector_manifest, selector_projection_only=bool(options.selector_fixture),
         projection_fidelity_span=32 if options.convolution_fixture else 16,
         wide_dot_placement=options.wide_dot_placement,
         backend='hardware' if options.hardware else 'simulator',
@@ -105,6 +111,7 @@ def main():
                     'draft_convolution.py', 'draft_convolution_fixture.py',
                     'draft_mlp_branch.py', 'draft_mlp.py', 'draft_mlp_fixture.py',
                     'draft_remaining_layers_fixture.py',
+                    'draft_selector_fixture.py',
                     'draft_row_sum.py', 'draft_row_sum_io.cpp', 'draft_row_sum_compute.cpp',
                     'draft_dot.py', 'draft_dot_io.cpp', 'draft_dot_compute.cpp')})
     mesh = None
@@ -340,6 +347,37 @@ def main():
                 check['layer'] = active_layer
             report['layers_completed'] = active_layer + 1
             checkpoint('layer_complete')
+        if selector_weights is not None:
+            final_norm_weight = selector_weights['norm.weight']
+            selector_weight = selector_weights['candidate_selector.hidden_projection.weight'].T.contiguous()
+            final_kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+            device_final_norm = upload(final_norm_weight.reshape(1, 1, 160, 32), layout=ttnn.ROW_MAJOR_LAYOUT)
+            final_normalized = retain(ttnn.rms_norm(layer_output, epsilon=1e-6, weight=device_final_norm,
+                compute_kernel_config=final_kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            selector_program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 1),
+                in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
+                fuse_batch=True, fused_activation=None, mcast_in0=True)
+            selector_projected = retain(ttnn.matmul(final_normalized, upload(selector_weight), dtype=ttnn.float32,
+                program_config=selector_program, compute_kernel_config=final_kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            selector_rounded = retain(ttnn.typecast(selector_projected, ttnn.bfloat16))
+            ttnn.synchronize_device(mesh)
+            for chip in range(2):
+                actual_norm = host(final_normalized, chip)
+                expected_norm = rms_reference(host(layer_output, chip), final_norm_weight)
+                norm_ulps = int(bf16_ulp_distance(actual_norm, expected_norm).max())
+                if norm_ulps > 2:
+                    raise AssertionError('Final normalization exceeds two BF16 ULPs')
+                expected_projection = grouped_projection_reference(actual_norm[..., :8, :], selector_weight,
+                    destination_rounding=True, fidelity_span=32)
+                actual_projection = host(selector_projected, chip)[..., :8, :].double()
+                torch.testing.assert_close(actual_projection, expected_projection, rtol=1e-4, atol=1e-4)
+                if not torch.equal(host(selector_rounded, chip), host(selector_projected, chip).bfloat16()):
+                    raise AssertionError('Selector projection BF16 cast must be exact')
+                report['checks'].append(dict(chip=chip, stage='final_norm/selector_projection', norm_ulps=norm_ulps,
+                    projection_max_error=float((actual_projection - expected_projection).abs().max()), cast_exact=True,
+                    proposal_rows=list(range(1, 8))))
+            checkpoint('selector_projection_complete')
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise

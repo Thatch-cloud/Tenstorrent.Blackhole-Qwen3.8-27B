@@ -1571,3 +1571,17 @@ WSL. Reuse rejects corrupted content without overwriting or redownloading it.
 All556 host tests pass. These verified weights enable the forthcoming learned
 selector numerical gate; no selector device implementation, LM-head integration
 or measured proposal/coding throughput is implied by fixture validation.
+
+The simulator-only selector fixture option now attaches final learned RMSNorm
+and the256-rank hidden projection to the actual device output of a complete
+layer/stack. Checks retain the two-ULP norm bound,32-wide ISA-aware projection
+reference and exact BF16 cast, identifying proposal positions1-7 separately
+from the anchor row. This is implemented but has not run in TTSim; it neither
+produces LM-head candidates nor executes the selector codebook path yet.
+Hardware rejects the new option before fixture access. All557 host tests pass.
+
+Remaining layer2 completed downloading and all15 tensors (665948672 bytes)
+were independently rehashed, pinned and verified as finite BF16 in WSL.
+Layers0-2 and selector/final norm are now available as verified fixtures;
+layers3-4 continue downloading. No layer2 or selector device pass is claimed.
+The existing long-context simulation and queued two-layer test are unchanged.

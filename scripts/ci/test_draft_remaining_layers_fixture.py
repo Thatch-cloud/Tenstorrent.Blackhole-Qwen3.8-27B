@@ -13,7 +13,7 @@ from draft_convolution_fixture import MODEL, REVISION, HEADER_SHA256
 class RemainingLayerFixtureTests(unittest.TestCase):
     def test_unpinned_layer_is_rejected_before_reading_files(self):
         with self.assertRaisesRegex(ValueError, 'not been audited'):
-            load_layer(Path('missing'), 2)
+            load_layer(Path('missing'), 3)
 
     def test_loader_rehashes_pinned_content(self):
         data = b'\x80\x3f'
