@@ -119,6 +119,17 @@ before opening devices and records dynamic-library resolution. It still applies
 the simulator-certified allocation-only scratch patch and uses the same paired
 T4/T8 group microbenchmark; it does not alter the serving image or host runtime.
 
+Host-only request capture plan now specifies all mask-family buckets before any
+trace is captured. At request start4078 with128 tokens remaining, it prepares
+native T1/2/4 once, T8/T16 for capacity4096, and T8/T16/T32 for capacity4352.
+Large tickets cannot cross their captured256-token family; native small-width
+tickets may cross using the already certified native dynamic positions. Four
+tests enumerate every possible ticket position across representative4K/16K
+budgets, reject unprepared widths/ranges and refuse unsupported long-context mask
+families. This plan is not yet wired into `VerifierEngine`; retained replay and
+request-owner/commit gates must pass first. No allocations under active traces or
+new request throughput claims are authorized by these host tests.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,
