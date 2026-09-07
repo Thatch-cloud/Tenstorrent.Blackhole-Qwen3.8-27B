@@ -21,9 +21,15 @@ def main():
     parser.add_argument('--prefix-copy', action='store_true')
     parser.add_argument('--rows', type=int, choices=(2, 16, 32), default=32)
     parser.add_argument('--two-publications', action='store_true')
+    parser.add_argument('--prior-trace', action='store_true')
+    parser.add_argument('--late-prefix-pool', action='store_true')
     options = parser.parse_args()
     if options.two_publications and not options.prefix_copy:
         parser.error('--two-publications requires --prefix-copy')
+    if options.prior_trace and not (options.prefix_copy and options.two_publications):
+        parser.error('--prior-trace requires --prefix-copy --two-publications')
+    if options.late_prefix_pool and not options.prior_trace:
+        parser.error('--late-prefix-pool requires --prior-trace')
     import torch
     import ttnn
 
@@ -34,10 +40,23 @@ def main():
     mesh = tensor = output = trace = features = None
     published = []
     second_published = []
+    prefix_pool = {}
+    prior_trace = prior_output = None
+    prefixes = tuple(dict.fromkeys((0, 1, min(17, options.rows), options.rows)))
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
         mesh.enable_program_cache()
+
+        def create_pool():
+            from feature_prefix import allocate_prefix_pool
+            return allocate_prefix_pool(ttnn, lambda prefix: ttnn.from_torch(
+                torch.zeros((1, 1, prefix, 5120), dtype=torch.bfloat16), dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=-1)), prefixes=prefixes[1:])
+
+        if options.prior_trace and not options.late_prefix_pool:
+            prefix_pool = create_pool()
         expected = []
         for pattern in range(3):
             value = torch.arange(options.rows).reshape(1, 1, options.rows, 1).expand(1, 1, options.rows, 5120).clone().bfloat16() + pattern * 3
@@ -65,12 +84,21 @@ def main():
                 snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                 release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
 
+        if options.prior_trace:
+            warm_output = operation()
+            ttnn.synchronize_device(mesh)
+            ttnn.deallocate(warm_output)
+            prior_trace, prior_output = capture_operation(ttnn, mesh, operation)
+            if options.late_prefix_pool:
+                prefix_pool = create_pool()
+
         features = capture_features()
         from feature_prefix import allocate_prefixes
-        prefixes = (0, 1, min(17, options.rows), options.rows)
         buffers = warm_feature_fixture(SimpleNamespace(run=operation, close=lambda: None), features, ttnn, mesh,
             prepare_features=(lambda values: allocate_prefixes(ttnn, values,
-                prefixes * (2 if options.two_publications else 1))) if options.prefix_copy else None)
+                prefixes * (2 if options.two_publications else 1))) if options.prefix_copy and not prefix_pool else None)
+        if prefix_pool:
+            buffers = tuple(prefix_pool[epoch, prefix] for epoch in range(2) for prefix in prefixes)
         if buffers is not None:
             published = list(zip(prefixes, buffers[:len(prefixes)], strict=True))
             if options.two_publications:
@@ -108,6 +136,12 @@ def main():
                         for prefix, copies in second_published:
                             publish_prefix(ttnn, features.outputs(), copies, prefix)
                         ttnn.synchronize_device(mesh)
+                    if options.prior_trace and pattern == 2:
+                        ttnn.release_trace(mesh, trace)
+                        trace = None
+                        features.close()
+                        features = None
+                        ttnn.execute_trace(mesh, prior_trace, cq_id=0, blocking=True)
                     for prefix, copies in published:
                         for layer, value in zip(taps if prefix else (), copies, strict=True):
                             for chip, part in enumerate(ttnn.get_device_tensors(value)):
@@ -129,24 +163,31 @@ def main():
         if len(report['checks']) != 30:
             raise AssertionError('Complete changed-input matrix required')
         if options.prefix_copy:
-            if len(report.get('prefix_checks', [])) != 60:
+            if len(report.get('prefix_checks', [])) != (len(prefixes) - 1) * 20:
                 raise AssertionError('Complete retained-prefix matrix required')
-            if options.two_publications and len(report.get('second_prefix_checks', [])) != 30:
+            if options.two_publications and len(report.get('second_prefix_checks', [])) != (len(prefixes) - 1) * 10:
                 raise AssertionError('Complete second retained-prefix matrix required')
             report['rows'] = options.rows
             report['two_publications'] = options.two_publications
+            report['prior_trace'] = options.prior_trace
+            report['late_prefix_pool'] = options.late_prefix_pool
             report['sources']['feature_prefix.py'] = hashlib.sha256(Path(__file__).with_name('feature_prefix.py').read_bytes()).hexdigest()
     finally:
         if mesh is not None:
             if trace is not None:
                 ttnn.release_trace(mesh, trace)
-            for prefix, copies in published + second_published:
+            if prior_trace is not None:
+                ttnn.release_trace(mesh, prior_trace)
+            groups = prefix_pool.values() if prefix_pool else [copies for prefix, copies in published + second_published]
+            for copies in groups:
                 for value in copies:
                     ttnn.deallocate(value)
             if features is not None:
                 features.close()
             if output is not None:
                 ttnn.deallocate(output)
+            if prior_output is not None:
+                ttnn.deallocate(prior_output)
             if tensor is not None:
                 ttnn.deallocate(tensor)
             ttnn.close_mesh_device(mesh)

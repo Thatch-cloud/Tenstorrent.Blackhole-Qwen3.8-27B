@@ -38,10 +38,14 @@ def warm_feature_fixture(fixture, features, operations, mesh, *, prepare_feature
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
                   prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
                   norm_batch=False, attention_replay=False, attention_mask_once=False, replay_group_rows=4,
-                  feature_taps=(), feature_publication=False):
+                  feature_taps=(), feature_publication=False, feature_prefix_buffers=None):
     validate_fixture(rows, first_prefix, second_prefix, len(oracle))
     if type(feature_publication) is not bool or (feature_publication and not feature_taps):
         raise ValueError('Feature prefix publication requires explicit captured taps')
+    if feature_publication and (feature_prefix_buffers is None or len(feature_prefix_buffers) != 2):
+        raise ValueError('Feature publication requires two destination groups allocated before all model traces')
+    if not feature_publication and feature_prefix_buffers is not None:
+        raise ValueError('Prefix buffers require feature publication')
     import torch
     import ttnn
 
@@ -87,15 +91,12 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             packed_checkpoints=True, retain_records=retain, ordered_cache=True, norm_batch=norm_batch,
             attention_replay=attention_replay, attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
 
-    prefix_buffers = ()
+    prefix_buffers = feature_prefix_buffers or ()
     if feature_taps:
         save(initial)
         warm = make_fixture(False)
         try:
-            from feature_prefix import allocate_prefixes
-            prefix_buffers = warm_feature_fixture(warm, new_feature_capture(), ttnn, mesh,
-                prepare_features=(lambda values: allocate_prefixes(ttnn, values, (first_prefix, second_prefix)))
-                    if feature_publication else None) or ()
+            warm_feature_fixture(warm, new_feature_capture(), ttnn, mesh)
         finally:
             restore(initial)
     fixture = make_fixture(True)
@@ -209,9 +210,6 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             ttnn.release_trace(mesh, captured)
         if features is not None:
             features.close()
-        for copies in prefix_buffers:
-            for value in copies:
-                ttnn.deallocate(value)
         if output is not None:
             ttnn.deallocate(output)
         fixture.close()

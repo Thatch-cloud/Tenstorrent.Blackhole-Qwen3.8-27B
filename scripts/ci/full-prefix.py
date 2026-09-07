@@ -322,6 +322,7 @@ def main():
     mesh = None
     generator = None
     sampler = None
+    feature_prefix_pool = {}
     try:
         source = Path("/opt/tt-metal")
         if options.device_loop_gdn:
@@ -371,6 +372,14 @@ def main():
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=1073741824)
         mesh.enable_program_cache()
+        if options.target_feature_prefix:
+            from feature_prefix import allocate_prefix_pool
+            feature_prefix_pool = allocate_prefix_pool(ttnn, lambda prefix: ttnn.from_torch(
+                torch.zeros((1, 1, prefix, 5120), dtype=torch.bfloat16), dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=-1)))
+            report['feature_prefix_allocation'] = 'Mesh-open pool before model initialization or any trace capture'
+            report['feature_prefix_pool_tensors'] = sum(len(group) for group in feature_prefix_pool.values())
         weights = os.environ["MODEL_WEIGHTS_DIR"]
         config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)
         tokenizer = AutoTokenizer.from_pretrained(weights, local_files_only=True, trust_remote_code=False)
@@ -821,7 +830,9 @@ def main():
                                 norm_batch=options.norm_batch, attention_replay=options.attention_replay,
                                 attention_mask_once=options.attention_mask_once, replay_group_rows=options.replay_group_rows,
                                 feature_taps=(5, 19, 33, 47, 61) if options.target_feature_replay else (),
-                                feature_publication=options.target_feature_prefix)
+                                feature_publication=options.target_feature_prefix,
+                                feature_prefix_buffers=(feature_prefix_pool[0, first_prefix],
+                                    feature_prefix_pool[1, second_prefix]) if options.target_feature_prefix else None)
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)
@@ -877,6 +888,9 @@ def main():
                         if per_device:
                             for trace in per_device.values():
                                 ttnn.release_trace(mesh, trace)
+            for group in feature_prefix_pool.values():
+                for value in group:
+                    ttnn.deallocate(value)
             ttnn.close_mesh_device(mesh)
 
 

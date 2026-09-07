@@ -21,8 +21,10 @@ chip-local shape[1,1,T,2560] and unchanged logits/state/KV. Changed-input traced
 feature gate34091904236 passes720 exact matrices and24 stale-snapshot controls,
 including rollback and corrected continuation. Accepted-prefix publication
 gate34094867083 fails retained feature exactness at layer19/chip0 in the first
-nonempty-first-prefix fixture. T2 two-publication simulator coverage passes;
-stage-by-stage hardware diagnostics are needed before claiming a fix. Publication
+nonempty-first-prefix fixture. Diagnostic34097205308 isolates overwrite by the
+first native correction trace, not the verifier or publication copy. A pool
+allocated before all traces passes simulator with a failing late-allocation
+control; hardware certification of that lifetime fix remains required. Publication
 and prefill feature coverage remain prerequisites; this is not yet a neural
 drafter port or an acceptance result.
 

@@ -4,10 +4,43 @@ from unittest.mock import Mock
 
 import torch
 
-from feature_prefix import allocate_prefixes, copy_prefix, publish_prefix
+from feature_prefix import allocate_prefix_pool, allocate_prefixes, copy_prefix, publish_prefix
 
 
 class FeaturePrefixTests(unittest.TestCase):
+    def test_pool_allocates_both_epochs_upfront_and_publishes_without_clones(self):
+        features, operations, freed = self.fixture()
+        factory = Mock(side_effect=lambda prefix: torch.zeros((1, 1, prefix, 2560), dtype=torch.bfloat16))
+        pool = allocate_prefix_pool(operations, factory)
+        self.assertEqual(factory.call_count, 40)
+        self.assertEqual(pool[0, 0], ())
+        self.assertEqual(pool[1, 0], ())
+        first = pool[0, 1]
+        second = pool[1, 1]
+        publish_prefix(operations, features, first, 1)
+        for feature in features:
+            feature.add_(100)
+        publish_prefix(operations, features, second, 1)
+        for before, after in zip(first, second):
+            self.assertTrue(torch.equal(after, before + 100))
+        self.assertEqual(factory.call_count, 40)
+        operations.clone.assert_not_called()
+        self.assertEqual(freed, [])
+
+    def test_pool_rejects_aliases_geometry_and_releases_partial_allocation(self):
+        features, operations, freed = self.fixture()
+        allocated = torch.zeros((1, 1, 1, 2560), dtype=torch.bfloat16)
+        with self.assertRaisesRegex(ValueError, 'independent chip storage'):
+            allocate_prefix_pool(operations, lambda prefix: allocated)
+        self.assertEqual(freed, [allocated.data_ptr()])
+        freed.clear()
+        with self.assertRaisesRegex(ValueError, 'geometry'):
+            allocate_prefix_pool(operations, lambda prefix: features[0])
+        self.assertEqual(freed, [features[0].data_ptr()])
+        for prefixes in ((0,), (True,), (1, 1), ()):
+            with self.assertRaises(ValueError):
+                allocate_prefix_pool(operations, Mock(), prefixes=prefixes)
+
     def fixture(self, allocated_slice=False):
         features = [torch.arange(32).reshape(1, 1, 32, 1).expand(1, 1, 32, 2560).clone().bfloat16() + tap
                     for tap in range(5)]

@@ -3,6 +3,35 @@
 from gdn_multitoken_conv import addresses, release_owned
 
 
+def allocate_prefix_pool(operations, allocate, *, prefixes=(1, 2, 16, 32), tap_count=5):
+    prefixes = tuple(prefixes)
+    if (not prefixes or len(set(prefixes)) != len(prefixes)
+            or any(type(prefix) is not int or prefix not in (1, 2, 4, 8, 16, 17, 32) for prefix in prefixes)
+            or type(tap_count) is not int or tap_count < 1):
+        raise ValueError('Explicit bounded prefix pool geometry required')
+    pool = {(epoch, 0): () for epoch in range(2)}
+    owned, protected = [], []
+    try:
+        for epoch in range(2):
+            for prefix in prefixes:
+                group = []
+                for tap in range(tap_count):
+                    value = allocate(prefix)
+                    current = addresses(operations, value)
+                    if any(any(left == right for left, right in zip(current, other, strict=True)) for other in protected):
+                        raise ValueError('Prefix pool allocations must own independent chip storage')
+                    owned.append(value)
+                    protected.append(current)
+                    if tuple(value.shape) != (1, 1, prefix, 2560):
+                        raise ValueError('Prefix pool must use chip-local [1,1,prefix,2560] geometry')
+                    group.append(value)
+                pool[epoch, prefix] = tuple(group)
+        return pool
+    except BaseException:
+        release_owned(operations, owned)
+        raise
+
+
 def copy_prefix(operations, features, prefix):
     features = tuple(features)
     if not features:

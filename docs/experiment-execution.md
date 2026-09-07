@@ -5,6 +5,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Diagnostic hardware34097205308 (`c341149`) isolates the publication failure:
+  both published epochs remain exact after verifier replay, second publication
+  and source release. The first native traced correction overwrites the second
+  prefix at layer19/chip0: all2560 values differ (first3.4375 versus0.3359375).
+  Allocating before only the custom verifier trace was insufficient because
+  native decode traces already existed. TT-Metal's allocator explicitly warns
+  that new allocations must not survive replay of an already-active trace.
+  Publication now borrows a40-tensor pool allocated immediately after mesh open,
+  before model initialization or any native/custom trace capture. Its two epochs
+  and prefixes1/2/16/32 persist through the entire gate; abort0 stays empty.
+  Simulator20260907T080424Z-318 reproduces corruption by intentionally allocating
+  the pool after a prior trace (30 feature checks and20 retention checks pass,
+  then the prior trace replay destroys a published prefix). The otherwise matched
+  early-pool run20260907T080637Z-304 passes30 feature and60 retention checks,
+  including source release and prior-trace replay. T32 early-pool simulator
+  20260907T080830Z-296 also passes30 feature and90 retention checks, including
+  partial prefix17. Hashes match. All460 host
+  tests pass. Native traces remain enabled; this is not an eager-only workaround.
+  Hardware certification of the early pool remains required.
 - Accepted-prefix hardware34094867083 (`aa7a516`) failed, not timed out.
   Two T2/context4095 fixtures with first-prefix0 passed; the next fixture
   (first-prefix1, second-prefix1) failed the final retained-feature comparison
