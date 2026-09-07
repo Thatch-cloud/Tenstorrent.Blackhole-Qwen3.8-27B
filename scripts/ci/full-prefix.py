@@ -92,7 +92,12 @@ def main():
     parser.add_argument('--attention-engine', action='store_true')
     parser.add_argument('--attention-engine-wide', action='store_true')
     parser.add_argument('--target-features', action='store_true')
+    parser.add_argument('--target-feature-batch', action='store_true')
     options = parser.parse_args()
+    if options.target_feature_batch and (not options.batch or not options.norm_batch or options.max_rows != 32 or any(
+            (options.target_features, options.request_pilot, options.replay_inputs, options.deferred_commit,
+             options.grouped_attention, options.attention_replay, options.attribution, options.device_selection))):
+        raise ValueError('Batched target features require standalone T32 static norm-batch verification')
     if options.target_features and (options.max_rows != 16 or options.replay_group_rows != 4 or any(
             value for name, value in vars(options).items() if name not in ('target_features', 'max_rows', 'replay_group_rows'))):
         raise ValueError('Target feature gate requires standalone eager native settings')
@@ -170,6 +175,8 @@ def main():
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
+    if options.target_feature_batch:
+        lengths = (63, 64, 65)
     if options.attention_replay:
         lengths = (4096, 16384)
     prefixes = (0, 1, options.max_rows // 2, options.max_rows) if options.coding_cost else tuple(range(options.max_rows + 1))
@@ -448,7 +455,7 @@ def main():
         def prefill(prompt):
             generator.prev_page_table = None
             logits, _ = generator.prefill_forward(torch.tensor([prompt], dtype=torch.int32), page_table,
-                kv_cache, [len(prompt)], empty_slots=[0], enable_trace=not options.target_features)
+                kv_cache, [len(prompt)], empty_slots=[0], enable_trace=not (options.target_features or options.target_feature_batch))
             if addresses() != original_addresses:
                 raise AssertionError("Prefill replaced persistent decode state")
             return argmax(logits)
@@ -556,9 +563,31 @@ def main():
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
-        generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not options.target_features)
-        generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not options.target_features, max_batch_size=1,
+        generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
+        generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch), max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
+        if options.target_feature_batch:
+            from full_batched_features import verify_batched_features
+            from full_target_features import feature_prompts
+            from gdn_multitoken_conv import addresses as tensor_addresses
+            output_path = root / 'target-feature-batch.json'
+            report.update(scope='Real target serial versus batched feature rows; no drafter or throughput claim',
+                feature_checks=[], feature_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in ('full_batched_features.py', 'full_target_features.py', 'target_features.py', 'model_batch.py')})
+            for prompt in feature_prompts(tokenizer, baseline.make_prompt, lengths):
+                for rows in (8, 16, 32):
+                    result = verify_batched_features(model, prompt, (5, 19, 33, 47, 61), rows,
+                        prefill=prefill, decode=decode,
+                        batch_decode=lambda tokens, position: batched(tokens, position, len(tokens), False),
+                        live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
+                        snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                        release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(tensor_addresses(ttnn, value))),
+                        local_host=local_host)
+                    report['feature_checks'].append(result)
+                    output_path.write_text(json.dumps(report, indent=2))
+                    print(json.dumps(result), flush=True)
+            report['passed'] = True
+            return
         if options.target_features:
             from full_target_features import feature_prompts, verify_features
             from gdn_multitoken_conv import addresses as tensor_addresses

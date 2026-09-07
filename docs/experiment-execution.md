@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added `target-feature-batch`: serial greedy B1 features versus the same input
+  tokens in the certified static norm-batch verifier atT8/T16/T32 and contexts
+  63/64/65. It checks full logits, active GDN, valid KV, inactive slots and exact
+  token-row alignment at all five taps on both chips, retaining owned snapshots
+  after intermediate buffers are released. TTsim20260907T060405Z-308 passes10
+  serial-versus-T8 feature comparisons with current source hashes; layers and
+  state in that simulator fixture are synthetic, not Qwen. All445 host tests
+  and shell syntax checks pass, including reordered-row rejection. Hardware
+  alignment and later traced feature reuse remain unproven.
 - Real-target feature retry34088626033 (`d69022a`) passed. All30 comparisons
   (contexts63/64/65, taps5/19/33/47/61, both chips) match independent next-layer
   input snapshots exactly. Every observed eager B1 chip-local feature has

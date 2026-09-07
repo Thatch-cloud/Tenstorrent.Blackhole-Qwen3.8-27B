@@ -217,9 +217,11 @@ if [[ "${QWEN_RUN_MODE:-baseline}" = full-attention-engine || "${QWEN_RUN_MODE:-
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot --norm-batch --attention-engine "${engine_options[@]}"
     exit 0
 fi
-if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-batch ]; then
+if [[ "${QWEN_RUN_MODE:-baseline}" = full-norm-batch || "${QWEN_RUN_MODE:-baseline}" = target-feature-batch ]]; then
+    feature_options=()
+    if [ "$QWEN_RUN_MODE" = target-feature-batch ]; then feature_options+=(--target-feature-batch); fi
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
-    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch "${feature_options[@]}"
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-groups ]; then

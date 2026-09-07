@@ -12,6 +12,13 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_batched_feature_gate_requires_static_norm_batch(self):
+        for flags in ([], ['--batch'], ['--batch', '--norm-batch', '--max-rows', '32', '--request-pilot']):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--target-feature-batch', *flags]):
+                with self.assertRaisesRegex(ValueError, 'standalone T32 static norm-batch'):
+                    full_prefix.main()
+
     def test_target_feature_gate_rejects_mixed_experiments(self):
         for flags in (['--batch'], ['--max-rows', '32'], ['--attention-engine'], ['--coding-cost']):
             with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
