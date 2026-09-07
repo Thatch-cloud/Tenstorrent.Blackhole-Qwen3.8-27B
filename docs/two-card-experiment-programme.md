@@ -1874,3 +1874,10 @@ This remains a synthetic-input31-context mathematical gate, not real target
 feature history, full shared-head/selector token selection, acceptance, coding
 quality or throughput validation. The independent full-vocabulary shared-head
 simulator test started only after this process terminated.
+
+Shared-head simulator184946Z also passed, with exit0 and clean closure: all
+eight chip/chunk combinations return exact local top16 scores with in-range
+IDs, and the merged seven proposal rows match full-vocabulary global IDs and
+scores exactly. This tests candidate extraction from synthetic logits, not the
+borrowed LM-head multiplication. Multi-row fused projection is the next simulator
+gate; the existing fast-dispatch wrapper now explicitly allows both probe names.
