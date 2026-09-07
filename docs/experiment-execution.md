@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Warmed real-target feature replay34091904236 (`d6a0aff`) passed. Artifact
+  inspection verifies720 exact initial/replayed feature matrices across36
+  fixtures: contexts4095/16383, rows2/16/32, first commits0/1/full and second
+  commits1/full. All24 shifted-input fixtures distinguish stale feature
+  snapshots; unchanged-input abort fixtures intentionally do not claim this
+  negative control. All logits, refreshed GDN prefixes, valid KV, inactive
+  slots and two corrected continuation steps pass, alongside24 batch checks,
+  16 rollback checks and4 negative-control pairs. Feature helper hashes match
+  the worktree. This certifies copied feature freshness in the retained
+  norm-batch trace, not publication into a drafter cache, prefill-feature
+  coverage, trained-drafter parity, acceptance or a decode-speed improvement.
 - Feature replay34090337389 failed on the first captured batched feature copy:
   TT-Metal rejected loading a new clone binary during trace capture. Native B1
   feature warmup did not cover batched copy signatures. The gate now runs the
