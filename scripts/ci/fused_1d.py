@@ -77,10 +77,13 @@ def mapping(pairs_per_worker=7):
 
 
 class FusedProjection:
-    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7):
+    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7, *, token_rows=1, source_root=Path('/opt/tt-metal')):
+        if type(token_rows) is not int or token_rows not in (1, 2, 4, 8, 16, 32):
+            raise ValueError('Explicit single-tile token row count required')
+        self.token_rows = token_rows
         self.mesh = mesh
         self.weights = weights
-        self.source = Path("/opt/tt-metal") / COMPUTE
+        self.source = Path(source_root) / COMPUTE
         original = self.source.read_text()
         self.intermediates = intermediates
         self.pairs_per_worker = pairs_per_worker
@@ -92,17 +95,17 @@ class FusedProjection:
                              reader_sha256={filename: hashlib.sha256(Path(__file__).with_name(filename).read_bytes()).hexdigest()
                                             for filename in ("fused_1d_input.cpp", "fused_1d_weights.cpp")},
                              workers=len(self.workers), grid=[11, self.rows], pairs_per_worker=pairs_per_worker, k_block=8,
-                             intermediates=intermediates, input_noc=1, weight_noc=0,
+                             intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")
 
     def __call__(self, value):
         import ttnn
-        if list(value.shape) != [1, 1, 1, 5120] or value.dtype != ttnn.bfloat16:
-            raise ValueError("Only frozen BF16 B1 projection input is supported")
+        if list(value.shape) != [1, 1, self.token_rows, 5120] or value.dtype != ttnn.bfloat16:
+            raise ValueError("BF16 projection input must match the explicitly selected token rows")
         if self.weights.dtype != ttnn.bfloat4_b or list(self.weights.shape)[-2:] != [5120, 17408]:
             raise ValueError("Expected local TP2 pair-packed BF4 weights")
         output_tiles = 2 if self.intermediates else 1
-        output = ttnn.empty((1, 1, 1, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+        output = ttnn.empty((1, 1, self.token_rows, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                             device=self.mesh, memory_config=ttnn.L1_MEMORY_CONFIG)
         pairs_per_worker = self.pairs_per_worker
         all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, self.rows - 1))])

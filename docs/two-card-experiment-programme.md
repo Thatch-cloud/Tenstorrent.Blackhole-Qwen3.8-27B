@@ -1851,3 +1851,13 @@ The full-model zero-reuse A/B run34150091732 is now active on the stronger
 attention configuration. Its result, not the copy microbenchmark or instrumented
 kernel sums, must establish any verifier-level improvement. The separate
 five-layer learned simulation continues; no learned-request rate is certified.
+
+The prior91-worker fused gate/up kernel was measured only at B1 and missed
+repeatable full-model improvement. A new simulator-only gate prepares explicit
+T1/2/4/8/16/32 inputs without changing its generated compute or reader kernels;
+the default callable still accepts only T1. It uses pinned draft MLP weights as
+geometry-matched operands, checks separate versus pair-packed BF4 quantization,
+and requires exact native separate-projection/SwiGLU output on both chips.
+This is prepared, not yet executed, and does not validate target-model weights,
+coding quality, or batched performance. It follows the active learned-stack and
+queued shared-head gates rather than contending for simulator devices.

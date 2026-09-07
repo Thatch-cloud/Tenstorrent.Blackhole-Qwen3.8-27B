@@ -1,9 +1,23 @@
 import unittest
+from unittest.mock import patch
 
-from fused_1d import BF16_PRODUCT, fused_compute, mapping
+from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping
 
 
 class Fused1DTests(unittest.TestCase):
+    def test_token_rows_are_explicit_and_do_not_change_compute(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            self.assertEqual(control.token_rows, 1)
+            for rows in (2, 4, 8, 16, 32):
+                candidate = FusedProjection(None, None, token_rows=rows)
+                self.assertEqual(candidate.compute, control.compute)
+                self.assertEqual(candidate.manifest['token_rows'], rows)
+        for rows in (0, 3, 33, True, 8.0):
+            with self.assertRaisesRegex(ValueError, 'single-tile'):
+                FusedProjection(None, None, token_rows=rows)
+
     def test_pair_mapping_matches_39_worker_control(self):
         workers = mapping()
         self.assertEqual(len(workers), 39)

@@ -1,0 +1,102 @@
+"""Simulator-only multi-row fusion check using pinned draft MLP weights as geometry-matched operands."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+from draft_mlp_fixture import load_mlp
+from feature_projection import require_projection_environment
+from fused_1d import FusedProjection
+from gdn_multitoken_conv import release_owned
+
+
+def pair_pack(gate, up):
+    import torch
+
+    if gate.shape != (17408, 5120) or up.shape != gate.shape or gate.dtype != torch.bfloat16 or up.dtype != gate.dtype:
+        raise ValueError('Pinned BF16 17408-by-5120 gate/up weights required')
+    gate_parts = [part.T.contiguous() for part in gate.chunk(2, dim=0)]
+    up_parts = [part.T.contiguous() for part in up.chunk(2, dim=0)]
+    packed = [torch.stack((first.reshape(5120, 272, 32), second.reshape(5120, 272, 32)), dim=2).reshape(5120, 17408)
+        for first, second in zip(gate_parts, up_parts, strict=True)]
+    return tuple(torch.stack(parts).unsqueeze(1) for parts in (gate_parts, up_parts, packed))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--fixture', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    options = parser.parse_args()
+    require_projection_environment(os.environ, False)
+    import torch
+    import ttnn
+
+    manifest, weights = load_mlp(options.fixture)
+    gate, up, packed = pair_pack(weights['layers.0.mlp.gate_proj.weight'], weights['layers.0.mlp.up_proj.weight'])
+    report = dict(passed=False, scope=__doc__, fixture=manifest, checks=[],
+        precision='BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality')
+    mesh, owned = None, []
+    try:
+        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        mesh.enable_program_cache()
+
+        def upload(value, dtype, sharded=False):
+            result = ttnn.from_torch(value, device=mesh, dtype=dtype, layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG if sharded else ttnn.L1_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=0) if sharded else ttnn.ReplicateTensorToMesh(mesh))
+            owned.append(result)
+            return result
+
+        device_gate, device_up, device_packed = [upload(value, ttnn.bfloat4_b, True) for value in (gate, up, packed)]
+        for chip in range(2):
+            unpacked = ttnn.to_torch(ttnn.get_device_tensors(device_packed)[chip]).reshape(5120, 272, 2, 32)
+            for offset, value in enumerate((device_gate, device_up)):
+                if not torch.equal(unpacked[:, :, offset].reshape(5120, 8704),
+                        ttnn.to_torch(ttnn.get_device_tensors(value)[chip]).reshape(5120, 8704)):
+                    raise AssertionError('Pair packing changed BF4 quantization')
+        kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
+            math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)
+        program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),
+            in0_block_w=8, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=7,
+            fuse_batch=True, fused_activation=None, mcast_in0=True)
+        for rows in (1, 2, 4, 8, 16, 32):
+            generator = torch.Generator().manual_seed(3891 + rows)
+            inputs = upload(torch.randn((1, 1, rows, 5120), generator=generator).bfloat16(), ttnn.bfloat16)
+            projections = [ttnn.linear(inputs, value, program_config=program, compute_kernel_config=kernel,
+                memory_config=ttnn.L1_MEMORY_CONFIG) for value in (device_gate, device_up)]
+            owned.extend(projections)
+            activated = ttnn.silu(projections[0])
+            owned.append(activated)
+            expected = ttnn.multiply(activated, projections[1])
+            owned.append(expected)
+            operation = FusedProjection(mesh, device_packed, pairs_per_worker=3, token_rows=rows,
+                source_root=os.environ['TT_METAL_HOME'])
+            actual = operation(inputs)
+            owned.append(actual)
+            report.setdefault('kernels', []).append(operation.manifest)
+            for chip in range(2):
+                observed = ttnn.to_torch(ttnn.get_device_tensors(actual)[chip])
+                reference = ttnn.to_torch(ttnn.get_device_tensors(expected)[chip])
+                if not torch.equal(observed, reference):
+                    raise AssertionError(f'Fused multi-row output differs: rows={rows}, chip={chip}, mismatches={int((observed != reference).sum())}')
+                report['checks'].append(dict(rows=rows, chip=chip, exact=True))
+            options.output.write_text(json.dumps(report, indent=2))
+            print(json.dumps(dict(rows=rows, both_chips_exact=True)), flush=True)
+    except BaseException as error:
+        report['error'] = f'{type(error).__name__}: {error}'
+        raise
+    finally:
+        if mesh is not None:
+            release_owned(ttnn, owned)
+            ttnn.close_mesh_device(mesh)
+        options.output.write_text(json.dumps(report, indent=2))
+    if len(report['checks']) != 12:
+        raise AssertionError('All six widths and both chips required')
+    report['passed'] = True
+    options.output.write_text(json.dumps(report, indent=2))
+
+
+if __name__ == '__main__':
+    main()
