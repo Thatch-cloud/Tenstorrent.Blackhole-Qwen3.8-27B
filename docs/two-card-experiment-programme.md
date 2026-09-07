@@ -1154,3 +1154,23 @@ dispatch and synchronization, excluding uploads/readback/output release. This
 measures the new dot implementation's absolute cost, not a matched speedup over
 the earlier outer-product reference. Existing pairwise learned-attention and
 fused-denominator controls remain in the suite. Host tests:522 passed.
+
+Hardware `34123851597` on `290b6d8` passes all three dot shapes, fifteen timed
+repeat checks and the fused learned-attention integration. Reported numerical
+errors match the corresponding simulator checks; short-context learned attention
+errors are1.383e-5/1.193e-5, with exact head order and fabric sums.
+
+| Dot shape | Five-sample median ms | Min ms | Max ms |
+| --- | ---: | ---: | ---: |
+| QK, width128/keys32 | 0.314661 | 0.306142 | 0.489972 |
+| QK, width128/keys2080 | 3.879600 | 3.820399 | 4.029841 |
+| PV, width2080/outputs128 | 3.379377 | 3.249936 | 3.402227 |
+
+The sum of the two long-context component medians is7.259ms, not a measured
+combined attention latency. This is too costly to treat as a completed fast
+drafter: five layers also need projections, normalization, softmax, convolution,
+MLP and selection, followed by target verification. The next kernel experiment
+should reuse left/right tiles in L1 instead of rereading them for every output
+column, explicitly measuring the L1-capacity versus DRAM-traffic tradeoff. The
+bounded streaming implementation remains the correctness control. No new
+end-to-end throughput result or200 committed tokens/s claim follows from this run.
