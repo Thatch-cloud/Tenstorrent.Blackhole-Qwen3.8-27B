@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from draft_projection_fixture import MODEL, REVISION
-from feature_projection import concatenate_local_features, projection_shards
+from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation
 
 
 def main():
@@ -18,7 +18,11 @@ def main():
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--k-block', type=int, choices=(4, 100), default=4)
     parser.add_argument('--active-k', type=int, choices=(1, 2, 4, 8, 16, 32, 128, 12800), default=12800)
+    parser.add_argument('--k-stride', type=int, choices=(1, 4, 8, 16, 32), default=1)
+    parser.add_argument('--fidelity', choices=('LoFi', 'HiFi2', 'HiFi3', 'HiFi4'), default='HiFi4')
     options = parser.parse_args()
+    if (options.active_k - 1) * options.k_stride >= 12800:
+        parser.error('Active terms with the selected stride exceed the local input width')
     import torch
     import ttnn
 
@@ -33,8 +37,11 @@ def main():
     if not torch.isfinite(weight).all():
         raise ValueError('Finite learned weights required')
     packed = projection_shards(weight)
+    permutation = torch.tensor(sparse_input_permutation(12800, options.active_k, options.k_stride))
+    packed = [shard[permutation].contiguous() for shard in packed]
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, checks=[],
-        tolerance=dict(rtol=1e-4, atol=1e-4), active_k=options.active_k, packer_l1_acc=False, sources={name:
+        tolerance=dict(rtol=1e-4, atol=1e-4), active_k=options.active_k, k_stride=options.k_stride,
+        fidelity=options.fidelity, matched_operands=True, packer_l1_acc=False, sources={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('feature-projection-probe.py', 'feature_projection.py', 'draft_projection_fixture.py')})
     mesh = device_weight = None
@@ -47,7 +54,7 @@ def main():
         for chip, value in enumerate(ttnn.get_device_tensors(device_weight)):
             if not torch.equal(ttnn.to_torch(value), packed[chip]):
                 raise AssertionError('Projection weight sharding changed the learned coefficients')
-        kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
+        kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, options.fidelity),
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(1, 1),
             in0_block_w=options.k_block, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
@@ -59,6 +66,11 @@ def main():
             for tap, value in enumerate(features):
                 local_mask = torch.arange(2560) + tap * 2560 < options.active_k
                 value.mul_(local_mask.repeat(2))
+            reference = torch.cat(features, dim=-1).double() @ weight.T.double()
+            local_features = [torch.cat([value[..., chip * 2560:(chip + 1) * 2560] for value in features], dim=-1)
+                              [..., permutation] for chip in range(2)]
+            features = [torch.cat([value[..., tap * 2560:(tap + 1) * 2560] for value in local_features], dim=-1)
+                        for tap in range(5)]
             tensors = []
             joined = output = None
             try:
@@ -79,7 +91,6 @@ def main():
                 if len(actual) != 2:
                     raise AssertionError('Two partial projections required')
                 partials = [value.double() @ shard.double() for value, shard in zip(local_inputs, packed, strict=True)]
-                reference = torch.cat(features, dim=-1).double() @ weight.T.double()
                 torch.testing.assert_close(partials[0] + partials[1], reference, rtol=1e-12, atol=1e-12)
                 wrong = torch.cat(local_inputs, dim=-1).double() @ weight.T.double()
                 if torch.allclose(wrong, reference, rtol=1e-4, atol=1e-4):

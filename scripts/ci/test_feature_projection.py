@@ -3,10 +3,26 @@ import unittest
 
 import torch
 
-from feature_projection import concatenate_local_features, projection_shards
+from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation
 
 
 class FeatureProjectionTests(unittest.TestCase):
+    def test_sparse_controls_preserve_identical_operands(self):
+        features = torch.arange(64, dtype=torch.float64).reshape(2, 32)
+        features[:, 2:] = 0
+        weight = torch.arange(96, dtype=torch.float64).reshape(32, 3) % 11
+        for stride in (1, 4, 8, 16):
+            permutation = torch.tensor(sparse_input_permutation(32, 2, stride))
+            self.assertEqual(sorted(permutation.tolist()), list(range(32)))
+            self.assertTrue(torch.equal(features[:, permutation] @ weight[permutation], features @ weight))
+            self.assertTrue(torch.equal(features[:, permutation][:, [0, stride]], features[:, :2]))
+        self.assertEqual(sparse_input_permutation(32, 32, 1), tuple(range(32)))
+
+    def test_sparse_controls_reject_invalid_geometry(self):
+        for args in ((32, 3, 16), (32, 33, 1), (0, 1, 1), (32, 0, 1), (32, 1, 0), (True, 1, 1)):
+            with self.assertRaises(ValueError):
+                sparse_input_permutation(*args)
+
     def test_tp2_preserves_tap_order_and_full_projection(self):
         taps, hidden, outputs, rows = 5, 64, 32, 8
         features = torch.arange(taps * rows * hidden, dtype=torch.float64).reshape(taps, 1, 1, rows, hidden) % 19

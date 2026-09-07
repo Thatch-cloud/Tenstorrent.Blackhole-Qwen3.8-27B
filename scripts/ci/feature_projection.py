@@ -1,6 +1,15 @@
 """Pack a tap-major learned projection for TP2 hidden-sharded target features."""
 
 
+def sparse_input_permutation(width, active_terms, stride):
+    if (any(type(value) is not int or value < 1 for value in (width, active_terms, stride))
+            or (active_terms - 1) * stride >= width):
+        raise ValueError('Positive dimensions and in-bounds sparse terms required')
+    destinations = set(range(0, active_terms * stride, stride))
+    remaining = iter(range(active_terms, width))
+    return tuple(index // stride if index in destinations else next(remaining) for index in range(width))
+
+
 def projection_shards(weight, *, tap_count=5, hidden_size=5120):
     if (type(tap_count) is not int or tap_count < 1 or type(hidden_size) is not int
             or hidden_size < 2 or hidden_size % 2 or weight.ndim != 2

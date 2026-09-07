@@ -7,6 +7,13 @@ is exact across both chips and rows1/8/32, but two terms already fail three of
 six checks at the unchanged float32 tolerance. The sparse controls retain the
 full tensor layout and checkpoint coefficients; they narrow the arithmetic
 investigation, not certify a drafter or demonstrate a throughput improvement.
+Matched operand permutations now locate this discrepancy within eight-product
+groups, consistent with the pinned TTsim MVMUL shared-exponent rounding code.
+Separating the same two terms by eight positions passes the unchanged gate;
+separating by four fails. This is not a viable dense-projection optimization
+by itself. Next distinguish ISA-expected error from implementation error, then
+measure trained-drafter acceptance with exact target verification rather than
+treating an arbitrary float64 comparison tolerance as coding quality.
 
 Actual matched request run34084598829 passes native token/state/KV checks at
 **23.883 committed decode tok/s at4078 tokens and20.608 at16363 tokens**

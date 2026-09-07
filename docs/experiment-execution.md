@@ -5,6 +5,32 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Numerical root narrowed to TTsim's grouped product alignment, not simply
+  missing HiFi4 phases or FP32 output truncation. The installed simulator is
+  v1.10.3; its source commit is `8cad2b0c48340f5de6f6ab9b80be13a85ce16b2d`.
+  Its [MVMUL implementation](https://github.com/tenstorrent/ttsim/blob/8cad2b0c48340f5de6f6ab9b80be13a85ce16b2d/src/tensix.cpp#L1355)
+  aligns products to a shared exponent in groups of eight and rounds each
+  product before summing, even with FP32 destination accumulation.
+  Matched controls now permute BOTH feature columns and weight rows: the
+  mathematical operands and answer remain identical across stride settings.
+  HiFi4 two-term stride4 (`20260907T092956Z-301`) fails3/6 checks with
+  max error0.000244140625, like adjacent terms. Stride8
+  (`20260907T092915Z-303`) and stride16 (`20260907T092711Z-312`) pass6/6,
+  max error4.470348358154297e-8. This boundary agrees with the source's
+  eight-product grouping. HiFi3 adjacent terms (`20260907T092808Z-422`)
+  fail4/6, max error0.0003509521484375: reducing fidelity does not fix it.
+  Earlier stride16 run `20260907T092540Z-385` used different operands and
+  is superseded by the matched controls. Sparse separation is a diagnostic,
+  NOT a production proposal to expand dense projection work eightfold.
+  Next establish an ISA-aware numerical reference and hardware diagnostic
+  comparison, retaining the float64 error report. The arbitrary1e-4 probe
+  threshold is not itself a trained-drafter quality specification; actual
+  acceptance and exact target verification must govern end-to-end adoption.
+  No hardware projection or drafter speed/quality certification yet.
+  Final helper extraction repeats stride8 successfully in
+  `20260907T093120Z-418`; all473 host tests pass, including bijective
+  permutation, identical dot-product and invalid sparse-geometry checks.
+
 - Sparse learned-projection controls now isolate the numerical failure without
   changing tensor dimensions, learned coefficients, HiFi4/FP32 configuration or
   the `rtol=atol=1e-4` gate. `--active-k` masks each rank's tap-major input
