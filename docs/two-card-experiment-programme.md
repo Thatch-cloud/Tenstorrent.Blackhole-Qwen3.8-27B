@@ -1610,3 +1610,25 @@ matched T8 verifier-cost attribution/optimization gate, not reliance on a T32
 timing or a selector speedup as proof of200 committed tokens/s. Wider proposal
 experiments must separately establish acceptance and target-state correctness;
 the trained block-eight contract is not silently widened.
+
+### Matched T8 trace instrumentation preparation
+
+`full-prefix.py --device-profile` now supports the existing packed-GDN,
+ordered-cache static configuration only, with operation/device/trace-tracking
+profilers explicitly enabled. It does not enable the legacy fenced attribution
+path or alter the `ModelBatch` kernels. At T8 and contexts4095/16383 it replays
+the already captured native, paired-control and candidate traces three times,
+with uniquely named Tracy begin/end signposts. Initial-state restoration,
+profiler dumps and exact logits/GDN/KV/end-checkpoint validation are outside
+the marked interval. All existing correctness matrices remain required.
+
+This is instrumentation preparation, not a hardware-validated profile yet.
+The CI Tracy launcher and device-report extraction still need a dedicated gate
+before interpreting attribution. Instrumented timings are explicitly marked and
+rejected by `verification_budget.py`; throughput must be measured separately
+without profiler overhead. No serving configuration changes are involved.
+
+Remaining learned layer3 is now pinned: all15 tensors (665,948,672 bytes)
+were independently SHA256-checked on Windows, then rehashed and verified finite
+as BF16 by the WSL loader. Layer4 continues downloading. This fixture audit is
+not a multi-layer execution or coding-quality result.

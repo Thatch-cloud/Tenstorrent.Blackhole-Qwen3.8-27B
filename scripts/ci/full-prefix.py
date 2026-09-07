@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--coding-cost", action="store_true")
     parser.add_argument("--serial-sdpa", action="store_true")
     parser.add_argument("--attribution", action="store_true")
+    parser.add_argument('--device-profile', action='store_true')
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
     parser.add_argument("--skip-row-clones", action="store_true")
@@ -97,6 +98,17 @@ def main():
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.device_profile:
+        required = ('batch', 'coding_cost', 'serial_sdpa', 'compact_gdn', 'reuse_gdn_input',
+                    'skip_row_clones', 'hoist_row_layout', 'device_loop_gdn', 'compact_prologue',
+                    'batch_conv', 'packed_checkpoints', 'ordered_cache')
+        allowed = (*required, 'device_profile', 'max_rows', 'replay_group_rows')
+        if not all(getattr(options, name) for name in required) or any(
+                value for name, value in vars(options).items() if name not in allowed):
+            raise ValueError('Device profiling requires the matched static packed-GDN ordered-cache configuration')
+        if not all(os.environ.get(name) == '1' for name in (
+                'TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER', 'TT_METAL_PROFILER_TRACE_TRACKING')):
+            raise ValueError('Device profiling requires operation, device and trace tracking profilers')
     if options.target_feature_prefill and not options.target_features:
         raise ValueError('Prefill features require the standalone eager target feature gate')
     if options.target_feature_prefix and not options.target_feature_replay:
@@ -201,6 +213,7 @@ def main():
     report = dict(passed=False, checks=[], negative_controls=[], rows=options.max_rows,
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
     report["batched_candidate"] = options.batch
+    report['instrumented_timing'] = options.device_profile
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
@@ -875,7 +888,7 @@ def main():
                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
                         norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
                         attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
-                        attention_tree=options.attention_tree)
+                        attention_tree=options.attention_tree, device_profile=options.device_profile)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

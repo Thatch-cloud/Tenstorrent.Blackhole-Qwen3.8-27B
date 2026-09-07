@@ -12,6 +12,21 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_device_profile_rejects_unmatched_configuration_before_import(self):
+        with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                'sys.argv', ['full-prefix.py', '--device-profile']):
+            with self.assertRaisesRegex(ValueError, 'matched static'):
+                full_prefix.main()
+
+    def test_device_profile_requires_enabled_runtime_profilers(self):
+        flags = ['--batch', '--coding-cost', '--serial-sdpa', '--compact-gdn', '--reuse-gdn-input',
+                 '--skip-row-clones', '--hoist-row-layout', '--device-loop-gdn', '--compact-prologue',
+                 '--batch-conv', '--packed-checkpoints', '--ordered-cache']
+        with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                'sys.argv', ['full-prefix.py', '--device-profile', *flags]):
+            with self.assertRaisesRegex(ValueError, 'trace tracking profilers'):
+                full_prefix.main()
+
     def test_prefill_features_require_standalone_eager_feature_gate(self):
         for flags, message in (([], 'standalone eager target feature'),
                 (['--target-features', '--batch'], 'standalone eager native')):

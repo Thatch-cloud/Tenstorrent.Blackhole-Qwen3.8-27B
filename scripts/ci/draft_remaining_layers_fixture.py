@@ -9,6 +9,23 @@ from draft_convolution_fixture import TENSORS as CONVOLUTION, fetch as fetch_sub
 from draft_mlp_fixture import TENSORS as MLP
 
 TENSOR_SHA256 = {
+    "3": {
+        "layers.3.self_attn.k_norm.weight": "4fa4496a9505b1a05ec10760dfeedcb551ba8a4ef5131b0b2a60c717038be1c1",
+        "layers.3.self_attn.k_proj.weight": "484f44745b097cf2f926b68643b794591a17ea4221a17ccac6c6890f9230599d",
+        "layers.3.self_attn.o_proj.weight": "298082223ab6e04aed2f5e684492016e878a6e3a9005465392b73e405594166b",
+        "layers.3.self_attn.q_norm.weight": "44e76c602b3ab0061775ccb948ac572e3436429a0870f9aff4c46a92fb4f3ed3",
+        "layers.3.self_attn.q_proj.weight": "388cb8174c2be8de5c33a870229d1989d304edea38f830b0f5a13299c3fca544",
+        "layers.3.self_attn.v_proj.weight": "477f444bc083feef7024ae4700a787163c93663f479f4b94fd82e901e9b2a508",
+        "layers.3.attention_conv.base_kernel": "8603058c019f4828246ade8d76d1714a6e7d2e5e030120ef91f1e2e97d357347",
+        "layers.3.attention_conv.kernel_projection.weight": "73338963cdcc0c131d2d0f2c108d071f7beeb75ec650dc514ad09f9b0216a62e",
+        "layers.3.input_layernorm.weight": "b5a2bd5b747665b4ae5fa81327bbea5f3ab4725cc004b29254c8f5687dda6a8e",
+        "layers.3.mlp_conv.base_kernel": "af60ac3b5c08dd5f6c6e7a200d28c4fce905e38c1673f80698ca3a4586993204",
+        "layers.3.mlp_conv.kernel_projection.weight": "897e21db07a8771ff5225ec15d36e62a7fad03b9f198b9bc74a8c430c160d5cb",
+        "layers.3.post_attention_layernorm.weight": "a5d7481e3e2386642660afe3e7dee0da98b2d597b8e52f165265b36fb3019e4b",
+        "layers.3.mlp.down_proj.weight": "c7438d31dbbb0240a4cb4a6ab642ed8f6e8354b29167d258b63bbc6bed6a4a92",
+        "layers.3.mlp.gate_proj.weight": "27e00617e2a68014d8a6a9af5044050e264804a7caa4d5f9868723aaf57c88f6",
+        "layers.3.mlp.up_proj.weight": "f38d436fb1ce3775d53e3eefcff281ef8de2ac91019e503eef3a88e04daaf16c"
+    },
     "2": {
         "layers.2.self_attn.k_norm.weight": "20e8572d4363420f61c2a4dd4180fc021a8e848ef6e8d2ef9a4308824f53e183",
         "layers.2.self_attn.k_proj.weight": "905943a8428b8948293b22f496b918b20746e481f267686cac7d7e6d0c583227",

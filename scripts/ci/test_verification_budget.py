@@ -25,3 +25,14 @@ class VerificationBudgetTests(unittest.TestCase):
                 verification_budget(report)
         with self.assertRaises(ValueError):
             verification_budget(self.report(), rows=16)
+
+    def test_instrumented_runs_cannot_supply_throughput_bounds(self):
+        report = self.report()
+        report['instrumented_timing'] = True
+        with self.assertRaisesRegex(ValueError, 'Uninstrumented'):
+            verification_budget(report)
+        for key, value in (('instrumented_timing', True), ('device_profile', {'records': [1]})):
+            report = self.report()
+            report['timings'][0][key] = value
+            with self.assertRaisesRegex(ValueError, 'Uninstrumented'):
+                verification_budget(report)

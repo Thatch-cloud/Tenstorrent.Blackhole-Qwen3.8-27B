@@ -13,10 +13,14 @@ def verification_budget(report, *, rows=8, target_tps=200.0):
         raise ValueError('Positive row count and finite target throughput required')
     if report.get('passed') is not True:
         raise ValueError('Passed hardware report required')
+    if report.get('instrumented_timing'):
+        raise ValueError('Uninstrumented verifier timings required for throughput budgeting')
     results = []
     for timing in report.get('timings', []):
         if timing.get('rows') != rows:
             continue
+        if timing.get('instrumented_timing') or timing.get('device_profile'):
+            raise ValueError('Uninstrumented verifier timings required for throughput budgeting')
         samples = [block['batch_ms'] for block in timing['blocks']]
         if not samples or any(not math.isfinite(value) or value <= 0 for value in samples):
             raise ValueError('Positive finite verifier block timings required')

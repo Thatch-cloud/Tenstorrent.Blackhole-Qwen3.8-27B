@@ -67,7 +67,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
             device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False,
-            norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False):
+            norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False,
+            device_profile=False):
     import torch
     import ttnn
 
@@ -197,6 +198,15 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             restore_initial()
             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
             validate(arm)
+
+        if device_profile and rows == 8:
+            from tracy import signpost
+            from verifier_trace_profile import profile_replays
+            report['device_profile'] = profile_replays(rows=rows, length=length, traces=traces,
+                restore=restore_initial, synchronize=lambda: ttnn.synchronize_device(mesh),
+                execute=lambda trace: ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True),
+                validate=validate, dump=lambda: ttnn.ReadDeviceProfiler(mesh), signpost=signpost)
+        report['instrumented_timing'] = device_profile
 
         for block in range(3):
             samples = []
