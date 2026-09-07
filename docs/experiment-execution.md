@@ -5,6 +5,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Real-target feature retry34088626033 (`d69022a`) passed. All30 comparisons
+  (contexts63/64/65, taps5/19/33/47/61, both chips) match independent next-layer
+  input snapshots exactly. Every observed eager B1 chip-local feature has
+  logical shape[1,1,1,2560]; all logits, active GDN, valid KV and inactive slots
+  match the uninstrumented native decode. Artifact helper hashes match the
+  worktree. This proves these eager layer boundaries, not equivalence to an
+  external drafter training implementation, batched token alignment, traced
+  feature reuse or coding quality. Next feature gate must compare serial B1
+  features against batched verifier rows and then trace replay with changed
+  inputs before accepted-prefix features can be published to a neural drafter.
 - Feature gate34087941937 failed before feature capture: the full chat template
   exceeded the63-token prompt budget. It did not report a feature or kernel
   mismatch. Short fixtures now slice a shared128-token template, matching the

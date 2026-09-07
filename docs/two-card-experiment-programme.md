@@ -14,7 +14,10 @@ The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
 Generating128 committed tokens still needs89/99 verifier blocks, including
 54/58 single-row blocks. Better wide-block latency alone cannot compensate for
 this observed low-acceptance lookup workload. Real-target feature boundary
-gate34087941937 is running as a neural-drafter prerequisite, not a drafter port.
+retry34088626033 passes30 exact eager B1 tap/chip comparisons with unchanged
+native logits/state/KV. Observed chip-local features are[1,1,1,2560]. Batched
+alignment, traced feature reuse and accepted-prefix publication remain next
+prerequisites; this is not yet a neural-drafter port or an acceptance result.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch
