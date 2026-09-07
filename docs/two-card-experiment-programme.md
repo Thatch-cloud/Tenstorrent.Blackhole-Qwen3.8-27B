@@ -59,6 +59,34 @@ active-fabric exclusions, and validate differing chip availability in addition
 to the symmetric mock. The bounded probe is `scripts/ci/dispatch-probe.py`, with
 `optimisation/sim/run-dispatch-probe.sh` selecting fast dispatch explicitly.
 
+Native follow-up, simulator only:
+
+- `eth-dispatch-harvesting.patch` filters against actual logical Ethernet cores,
+  uses the Ethernet grid for relative dispatch coordinates, and keys Ethernet
+  descriptors by chip identity. It compiles; worker probe20260907T025320Z-567
+  passes all six checks. Ethernet probe20260907T025332Z-613 instead reaches
+  `Expected logical cores to match across user exposed devices` during mesh
+  opening. Distinct active fabric ports make per-chip idle lists differ.
+- `eth-dispatch-common-pool.patch` intersects availability across user-exposed
+  chips and excludes their combined active Ethernet cores, retaining the runtime
+  consistency guard. Both patches compile together with simulator library hash
+  `dff38587220fdb1a1e651deebe7fba4c85cf63449ea29a41337a43e5f758517b`.
+  Worker probe20260907T025734Z-293 passes all six checks with grid11x10.
+- Ethernet probe20260907T025739Z-413 gets past those mapping checks, but emits
+  native ELF-size errors during mesh opening: idle-ERISC dispatch code0x3594
+  bytes and prefetch code0x47fc bytes exceed the0x2a90-byte region. No Ethernet
+  transfer, trace, expanded-grid or throughput pass is established. Do not
+  enlarge the region or disable its guard without validating the memory map.
+
+`optimisation/sim/build-eth-dispatch.sh` audits source hashes, backs up libraries,
+applies both patches and builds locally. Its `harvesting` argument supports the
+audited intermediate source state only. Install both resulting native libraries:
+the build output and runtime `lib/` copies are distinct in this environment.
+Probe reports include native-library and mock-topology hashes, so source edits
+alone cannot masquerade as an executed fix. The host CI-script suite passes407
+tests in WSL. These patches are not wired into hardware CI or serving defaults;
+Ethernet firmware sizing and fabric coexistence remain prerequisites.
+
 - D1: matched WORKER/ETH dispatch health, trace replay, fabric collectives, actual
   core-grid enumeration and exact results; then same-grid versus expanded-grid
   model measurements. Audit Ethernet resource assignments; do not assume idle

@@ -10,6 +10,14 @@ from attention_batch import capture_operation
 from gdn_multitoken_conv import addresses, release_owned
 
 
+def file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1048576), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def backend(environment):
     if environment.get('TT_METAL_SLOW_DISPATCH_MODE'):
         raise RuntimeError('Dispatch placement must be tested in fast-dispatch mode')
@@ -35,12 +43,18 @@ def main():
     options = parser.parse_args()
     report = dict(passed=False, backend=backend(os.environ), dispatch=options.dispatch, fabric=options.fabric, checks=[],
         scope='Explicit fabric configuration, reported grid, replicated transfers and exact changed-input add trace; no collective or model performance claim')
-    report['probe_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    report['probe_sha256'] = file_hash(__file__)
     root = Path(os.environ['TT_METAL_HOME'])
-    report['source_hashes'] = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in (
+    report['source_hashes'] = {name: file_hash(root / name) for name in (
         'ttnn/core/device.cpp', 'tt_metal/llrt/core_descriptor.cpp',
+        'tt_metal/impl/context/metal_env_impl.hpp',
         'tt_metal/core_descriptors/blackhole_140_arch.yaml',
         'tt_metal/core_descriptors/blackhole_140_arch_eth_dispatch.yaml')}
+    report['runtime_hashes'] = {name: file_hash(root / 'build_Release/lib' / name)
+        for name in ('libtt_metal.so', '_ttnncpp.so')}
+    if os.environ.get('TT_METAL_MOCK_CLUSTER_DESC_PATH'):
+        report['mock_cluster'] = dict(path=os.environ['TT_METAL_MOCK_CLUSTER_DESC_PATH'],
+            sha256=file_hash(os.environ['TT_METAL_MOCK_CLUSTER_DESC_PATH']))
     mesh, trace = None, None
     owned = []
 
@@ -99,6 +113,7 @@ def main():
         if len(report['checks']) != 6:
             raise AssertionError('All six changed-input checks required')
     except BaseException as error:
+        report['failed_stage'] = report.get('last_stage')
         report['error'] = f'{type(error).__name__}: {error}'
         stage('failed')
         raise

@@ -1,5 +1,7 @@
 import importlib.util
+import hashlib
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
@@ -11,6 +13,15 @@ spec.loader.exec_module(probe)
 
 
 class DispatchProbeTests(unittest.TestCase):
+    def test_runtime_hash_handles_multiple_chunks(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.so'
+            payload = b'Qwen' * 600000
+            path.write_bytes(payload)
+            self.assertEqual(probe.file_hash(path), hashlib.sha256(payload).hexdigest())
+            path.write_bytes(b'')
+            self.assertEqual(probe.file_hash(path), hashlib.sha256(b'').hexdigest())
+
     def test_hardware_requires_both_allocation_flags(self):
         for environment in ({}, {'QWEN_HARDWARE_TESTS': '1'}, {'QWEN_CARDS_ALLOCATED': '1'}):
             with self.assertRaises(RuntimeError):
