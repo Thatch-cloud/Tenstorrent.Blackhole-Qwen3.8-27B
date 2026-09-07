@@ -1789,3 +1789,11 @@ uploads/readback; this isolates the copy candidate but is not a model-level
 speedup or a realistic distinct-layer working-set measurement. Existing GDN
 checkpoint diagnostics still run afterward. No production call site enables
 zero-tile reuse. The five-layer simulator and profiler CI remain independent.
+
+The next shared-head simulator gate uses the production candidate-chunk helper
+on synthetic full248320-vocabulary logits, sharded across both chips. It checks
+each local score/index association, top16 scores, exclusion of padded tail IDs,
+and exact global proposal IDs across chunk/chip boundaries, including248319.
+This does not test the borrowed LM-head matrix multiplication or tie-equivalence
+at the learned-model cutoff. It is prepared, not executed; it must wait for the
+active five-layer simulator to terminate before taking the simulator devices.

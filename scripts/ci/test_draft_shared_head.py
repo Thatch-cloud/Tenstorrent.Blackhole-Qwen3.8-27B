@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+import importlib.util
+from pathlib import Path
 import unittest
 
 import torch
@@ -7,6 +9,18 @@ from draft_shared_head import candidate_chunks, merge_chunk_candidates, shared_h
 
 
 class SharedHeadTests(unittest.TestCase):
+    def test_device_probe_fixture_has_unique_winners_across_full_vocabulary(self):
+        spec = importlib.util.spec_from_file_location('draft_head_probe', Path(__file__).with_name('draft-head-probe.py'))
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        logits = probe.candidate_fixture()
+        self.assertEqual(logits.shape, (8, 248320))
+        scores, tokens = logits.float().topk(16, dim=-1)
+        self.assertTrue(torch.equal(scores, torch.arange(16, 0, -1).float().repeat(8, 1)))
+        self.assertIn(248319, tokens[0].tolist())
+        self.assertIn(124160, tokens[0].tolist())
+        self.assertFalse(torch.equal(tokens[0], tokens[1]))
+
     def fixture(self):
         values = -torch.arange(248320, dtype=torch.float32).repeat(8, 1)
         boundaries = [0, 32767, 32768, 65535, 65536, 98303, 98304, 124159,

@@ -13,6 +13,10 @@ def shared_head_candidates(operations, model, normalized, owned):
         raise ValueError('Replicated eight-row learned-normalized input and pinned TP2 vocabulary head required')
     logits = operations.linear(normalized, model.lm_head_weight)
     owned.append(logits)
+    return local_head_candidates(operations, logits, owned)
+
+
+def local_head_candidates(operations, logits, owned):
     if tuple(logits.shape) != (1, 1, 8, 124160):
         raise ValueError('Expected local vocabulary shards, not gathered logits')
     outputs = []

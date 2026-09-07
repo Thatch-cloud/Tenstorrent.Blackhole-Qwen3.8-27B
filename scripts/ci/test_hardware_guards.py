@@ -51,6 +51,12 @@ class HardwareGuardTests(unittest.TestCase):
         self.assertIn('Explicit allocation and non-simulated hardware required',
             self.run_guard(script, ['--hardware'], TT_METAL_SLOW_DISPATCH_MODE=''))
 
+    def test_draft_head_probe_cannot_fall_back_to_hardware(self):
+        script = Path(__file__).with_name('draft-head-probe.py')
+        self.assertIn('Simulator required unless --hardware is explicitly selected',
+            self.run_guard(script, ['--output', '/tmp/unused-head-probe.json'],
+                TT_METAL_SIMULATOR='', TT_METAL_SLOW_DISPATCH_MODE=''))
+
     def allocation_probe(self, device_count=2):
         spec = importlib.util.spec_from_file_location("device_owners", Path(__file__).with_name("device-owners.py"))
         module = importlib.util.module_from_spec(spec)
