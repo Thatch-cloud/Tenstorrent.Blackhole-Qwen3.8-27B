@@ -1221,3 +1221,16 @@ speedup: row-broadcast/compute/output-column serialization remain. Follow-up
 should measure wider worker distribution and/or multiple output columns per
 compute iteration, retaining exact controls and the large PV L1-capacity gate.
 There is still no complete drafter, full request timing, or200tok/s result.
+
+### Wider dot worker distribution (2026-09-08)
+
+The opt-in dot worker cap now supports64/80/110, bounded by actual output-tile
+tasks and the reported compute grid. Full/ragged core rows and strided task
+coverage are tested. Long QK has1040 tasks and can use110 workers (11x10), whereas
+the current long PV geometry has only64 tasks and gains no workers from the cap.
+This uses the existing compute grid; it is not an Ethernet-dispatch column gain.
+
+Simulator `20260907T131006Z-307` passes cached long QK on110 active workers,
+including exact full-output equality against cached64 workers and the unchanged
+FP64 reference bound. The hardware suite adds only this validated110-worker
+shape;80-worker hardware remains gated. Learned-attention defaults still use64.
