@@ -1,4 +1,4 @@
-"""Learned attention with optional convolution/residual integration; no MLP or request-history integration."""
+"""Learned attention with optional complete layer-zero integration; no request-history or full-drafter claim."""
 
 import argparse
 import hashlib
@@ -10,6 +10,8 @@ from draft_attention import draft_attention_mask, composed_draft_attention
 from draft_attention_fixture import load_attention
 from draft_convolution import grouped_causal_convolution, convolution_reference
 from draft_convolution_fixture import load_convolution
+from draft_mlp_fixture import load_mlp
+from draft_mlp_branch import execute_mlp_branch, validate_mlp_branch
 from draft_head_preparation import rope_tables, rope_reference, head_norm_reference
 from feature_collective import gather_add_projection
 from feature_normalization import bf16_ulp_distance, rms_reference
@@ -35,8 +37,11 @@ def main():
     parser.add_argument('--context', type=int, choices=(31, 2048), default=31)
     parser.add_argument('--wide-dot-placement', action='store_true')
     parser.add_argument('--convolution-fixture', type=Path)
+    parser.add_argument('--mlp-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.mlp_fixture and (options.hardware or not options.convolution_fixture):
+        parser.error('Complete draft layer requires simulator mode and convolution fixture')
     if options.hardware and options.convolution_fixture and not (
             options.context == 31 and options.cache_dot_tiles and options.fused_dots
             and options.fused_row_sum and not options.wide_dot_placement):
@@ -60,12 +65,14 @@ def main():
 
     manifest, weights = load_attention(options.fixture)
     conv_manifest, conv_weights = load_convolution(options.convolution_fixture) if options.convolution_fixture else (None, None)
+    mlp_manifest, mlp_weights = load_mlp(options.mlp_fixture) if options.mlp_fixture else (None, None)
     context = options.context
     valid_keys = context + 8
     key_rows = ((valid_keys + 31) // 32) * 32
     query_start = 4096 + context
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, context=context, block_rows=8,
         convolution_checkpoint=conv_manifest, integrated_branch=bool(options.convolution_fixture),
+        mlp_checkpoint=mlp_manifest, complete_layer=bool(options.mlp_fixture),
         projection_fidelity_span=32 if options.convolution_fixture else 16,
         wide_dot_placement=options.wide_dot_placement,
         backend='hardware' if options.hardware else 'simulator',
@@ -84,6 +91,7 @@ def main():
                 for name in ('learned-attention-probe.py', 'draft_head_preparation.py', 'draft_attention.py',
                     'draft_attention_fixture.py', 'feature_collective.py', 'projection_rounding.py',
                     'draft_convolution.py', 'draft_convolution_fixture.py',
+                    'draft_mlp_branch.py', 'draft_mlp.py', 'draft_mlp_fixture.py',
                     'draft_row_sum.py', 'draft_row_sum_io.cpp', 'draft_row_sum_compute.cpp',
                     'draft_dot.py', 'draft_dot_io.cpp', 'draft_dot_compute.cpp')})
     mesh = None
@@ -211,6 +219,9 @@ def main():
             wide_residual = retain(ttnn.typecast(residual, ttnn.float32))
             branch_sum = retain(ttnn.add(wide_finished, wide_residual, dtype=ttnn.float32))
             branch_output = retain(ttnn.typecast(branch_sum, ttnn.bfloat16))
+        if mlp_weights is not None:
+            connected_mlp = execute_mlp_branch(ttnn, mesh, collectives, branch_output, mlp_weights, conv_weights, retain)
+            checkpoint('complete_layer_dispatched')
         ttnn.synchronize_device(mesh)
         checkpoint('device_pipeline_complete')
         partials = [host(partial_output, chip) for chip in range(2)]
@@ -292,6 +303,10 @@ def main():
                 raise AssertionError('Output projection fabric sum must be exact')
             report['checks'].append(dict(chip=chip, stage='attention/output', sum_exact=True,
                 attention_max_error=float((actual_attention[..., :8, :] - expected_attention[..., :8, :]).abs().max())))
+            if mlp_weights is not None:
+                if connected_mlp['hidden'] is not branch_output:
+                    raise AssertionError('Attention output must feed MLP without host reconstruction')
+                report['checks'].append(validate_mlp_branch(connected_mlp, host, chip))
             checkpoint('rank_checks_complete', chip=chip)
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'

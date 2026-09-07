@@ -6,6 +6,17 @@ import unittest
 
 
 class LearnedAttentionSuiteTests(unittest.TestCase):
+    def test_complete_layer_rejects_hardware_before_fixture_load(self):
+        environment = {name: value for name, value in os.environ.items()
+            if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
+        environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('learned-attention-probe.py')),
+            '--hardware', '--fixture', '/not-a-fixture', '--convolution-fixture', '/not-a-fixture',
+            '--mlp-fixture', '/not-a-fixture', '--output', '/not-an-output'],
+            env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Complete draft layer requires simulator mode and convolution fixture', result.stderr)
+
     def test_unvalidated_integrated_attention_configuration_is_rejected(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}

@@ -1463,3 +1463,16 @@ suite now includes only this short-context cached fused integration, retaining
 the existing non-integrated long-context test. Integrated long-context/wide
 hardware combinations remain rejected pending their simulator gate. Neither
 branch has yet been connected to the other as a complete learned draft layer.
+
+The simulator-only `--mlp-fixture` attention option now connects both branches
+as a complete layer-zero diagnostic. `draft_mlp_branch` consumes the actual
+attention residual tensor on the existing TP2 mesh, executes the learned MLP
+branch, and returns device tensors for independent stage checks. No host tensor
+reconstruction lies between the branches. The gate retains attention checks,
+MLP projection/fidelity references, normalization/activation bounds and exact
+convolution/residual/fabric checks, plus the tensor-identity handoff check.
+Run153623Z-521 is active at context31; no complete-layer pass is claimed yet.
+All542 host tests pass, including rejection of complete-layer hardware before
+fixture access. Hardware attention run34138908364 remains a separate gate.
+Five learned layers, projected target-feature inputs, selector, transactional
+history and real coding acceptance/committed throughput remain outstanding.
