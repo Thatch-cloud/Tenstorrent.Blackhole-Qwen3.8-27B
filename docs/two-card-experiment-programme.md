@@ -1521,3 +1521,16 @@ verified as finite BF16 tensors in WSL. The loader rejects layers without
 audited hash pins and rejects corrupted cached content; layers2-4 continue
 downloading and are not accepted yet. All547 host tests pass. This is checkpoint
 readiness only, not a layer1 device or complete five-layer numerical pass.
+
+The complete-layer diagnostic is now factored into a repeatable layer operation
+with simulator-only stacking. `--stack-fixtures` preloads only hash-pinned
+remaining layers, then passes each layer's actual device result into the next;
+host readbacks are validation-only and are never reconstructed as execution
+inputs. Context features remain unchanged across layers, as in the pinned
+DFlash2 contract. Reports identify the original checkpoint for every layer and
+label checks/progress by layer index. The original layer-zero arithmetic and
+all stage checks are retained. All548 host tests pass; this refactor and the
+two-layer path still require device validation. A two-layer test is queued
+behind active long-context155120Z-300, conditional on that run's clean success.
+No second simulator is launched concurrently, and multi-layer hardware remains
+blocked. Layers2-4 are still downloading and cannot load without audited pins.
