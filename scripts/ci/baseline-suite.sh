@@ -126,6 +126,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-prefix ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = target-features ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --target-features
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-batch ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch
     exit 0

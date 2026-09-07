@@ -91,7 +91,11 @@ def main():
     parser.add_argument('--replay-group-rows', type=int, choices=(4, 8), default=4)
     parser.add_argument('--attention-engine', action='store_true')
     parser.add_argument('--attention-engine-wide', action='store_true')
+    parser.add_argument('--target-features', action='store_true')
     options = parser.parse_args()
+    if options.target_features and (options.max_rows != 16 or options.replay_group_rows != 4 or any(
+            value for name, value in vars(options).items() if name not in ('target_features', 'max_rows', 'replay_group_rows'))):
+        raise ValueError('Target feature gate requires standalone eager native settings')
     if options.attention_engine_wide and (not options.attention_engine or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
         raise ValueError('Wide request comparison requires attention engine and process-fixed compact scratch')
     if options.replay_group_rows == 8 and (not options.attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
@@ -330,7 +334,7 @@ def main():
             "models/demos/blackhole/qwen36/tt/qwen36_vllm.py": "cda38c3121b7a61417885469c224c0c69189fda899fbf8361565f4d93125c2fe",
             "models/tt_transformers/tt/generator.py": "4c2633ba8e5e6b0430550ef99409e9a6f0e0a901b4c6627540c579eb9b7d5a3e",
         }
-        if options.batch:
+        if options.batch or options.target_features:
             expected_source.update({
                 "models/demos/blackhole/qwen36/tt/attention/tp.py": "e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a",
                 "models/demos/blackhole/qwen36/tt/model.py": "c977f3808c39c9dacde5a62a1e30c09dbb55b27d272fecaa9ffea09991270391",
@@ -444,7 +448,7 @@ def main():
         def prefill(prompt):
             generator.prev_page_table = None
             logits, _ = generator.prefill_forward(torch.tensor([prompt], dtype=torch.int32), page_table,
-                kv_cache, [len(prompt)], empty_slots=[0], enable_trace=True)
+                kv_cache, [len(prompt)], empty_slots=[0], enable_trace=not options.target_features)
             if addresses() != original_addresses:
                 raise AssertionError("Prefill replaced persistent decode state")
             return argmax(logits)
@@ -552,9 +556,28 @@ def main():
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
-        generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=True)
-        generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
+        generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not options.target_features)
+        generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not options.target_features, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
+        if options.target_features:
+            from full_target_features import verify_features
+            from gdn_multitoken_conv import addresses as tensor_addresses
+            output_path = root / 'target-features.json'
+            report.update(scope='Real target eager B1 feature boundaries; no neural drafter or throughput claim',
+                feature_checks=[], feature_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in ('full_target_features.py', 'target_features.py')})
+            for length in lengths:
+                prompt = baseline.make_prompt(tokenizer, length, 0)
+                result = verify_features(model, prompt, (5, 19, 33, 47, 61), prefill=prefill, decode=decode,
+                    live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
+                    snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                    release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(tensor_addresses(ttnn, value))),
+                    local_host=local_host)
+                report['feature_checks'].append(result)
+                output_path.write_text(json.dumps(report, indent=2))
+                print(json.dumps(result), flush=True)
+            report['passed'] = True
+            return
         base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost or options.attribution else baseline.make_prompt(tokenizer, 128, 0)
         timing_fixtures = []
         for length in lengths:

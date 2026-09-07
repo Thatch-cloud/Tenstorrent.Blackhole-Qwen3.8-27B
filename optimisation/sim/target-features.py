@@ -1,5 +1,6 @@
 """Simulator-only TP-shard feature ownership; synthetic layers, not a Qwen or drafter parity claim."""
 
+import argparse
 import importlib.util
 import hashlib
 import json
@@ -14,6 +15,9 @@ from target_features import LayerOutputCapture
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--boundary-oracle', action='store_true')
+    options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('guard', Path(__file__).with_name('gdn-multitoken.py'))
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
@@ -68,6 +72,36 @@ def main():
                 report['checks'].append(dict(layer=index, chip=chip, exact=True))
         if len(report['checks']) != 10:
             raise AssertionError('All five taps on both chips required')
+        if options.boundary_oracle:
+            from full_target_features import verify_features
+            capture.close()
+            capture = None
+
+            def local_host(value):
+                return [ttnn.to_torch(part) for part in ttnn.get_device_tensors(value)]
+
+            def decode(token, position, trace):
+                if (token, position, trace) != (1, 63, False):
+                    raise ValueError('Fixed eager simulator fixture required')
+                value = ttnn.from_torch(initial, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                    device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=-1))
+                owned.append(value)
+                for layer in model.layers:
+                    value = layer.forward(value, mode='decode')
+                result = torch.cat(local_host(value), dim=-1)
+                release_owned(ttnn, owned)
+                owned.clear()
+                return result
+
+            report['boundary_oracle'] = verify_features(model, [1] * 63, report['tap_ids'],
+                prefill=lambda prompt: 1, decode=decode, live_digest=lambda: 'synthetic-no-state',
+                kv_digest=lambda count: count, inactive_digest=lambda: 'synthetic-no-inactive-slots',
+                snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))),
+                local_host=local_host)
+            source = Path(__file__).resolve().parents[2] / 'scripts/ci/full_target_features.py'
+            report['sources'][source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
     finally:
         if capture is not None:
             capture.close()

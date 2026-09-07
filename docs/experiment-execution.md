@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prepared standalone `target-features`: pinned real Qwen source, eager native
+  prefill/decode, contexts63/64/65 and post-layer taps5/19/33/47/61. Each fixture
+  compares an uninstrumented decode with independent next-layer input snapshots
+  and then owned post-layer snapshots, checking unchanged logits/GDN/valid KV
+  and inactive slots. It records chip-local shapes rather than assuming token
+  layout. TTsim20260907T045549Z-323 passed10 ownership and10 boundary-oracle
+  checks with matching source hashes; those layers are synthetic additions,
+  not Qwen. All440 host tests and shell syntax checks pass. Real-model feature
+  parity, trace capture, token alignment and neural drafting remain unproven.
 - Full-model eight-row/shared-mask replay34081751556 (`20d9afa`) passed and its
   artifacts were inspected:24 exact batch checks,16 rollback checks,4 negative
   control pairs and36 changed-metadata replay cases at4096/16384. T16 captures

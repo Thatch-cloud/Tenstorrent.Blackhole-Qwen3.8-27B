@@ -1,0 +1,74 @@
+from types import SimpleNamespace
+import unittest
+
+import torch
+
+from full_target_features import verify_features
+
+
+class TargetFeatureValidationTests(unittest.TestCase):
+    def fixture(self, *, between_layers=False, corrupt_state=False, missing_shard=False):
+        model = SimpleNamespace(layers=[SimpleNamespace(forward=lambda hidden: hidden + 1) for index in range(4)])
+        state = dict(value=0, calls=0)
+        owned = {}
+
+        def snapshot(value):
+            result = value.clone()
+            owned[id(result)] = result
+            return result
+
+        def release(value):
+            del owned[id(value)]
+
+        def prefill(prompt):
+            state['value'] = 0
+            return 2
+
+        def decode(token, position, trace):
+            self.assertFalse(trace)
+            self.assertEqual((token, position), (2, 63))
+            state['calls'] += 1
+            hidden = torch.arange(64).reshape(1, 1, 8, 8).bfloat16()
+            buffers = []
+            for index, layer in enumerate(model.layers):
+                hidden = layer.forward(hidden)
+                buffers.append(hidden)
+                if between_layers and index == 1:
+                    hidden = hidden + 1
+            logits = hidden.clone()
+            for buffer in buffers:
+                buffer.zero_()
+            state['value'] = 2 if corrupt_state and state['calls'] == 3 else 1
+            return logits
+
+        callbacks = dict(prefill=prefill, decode=decode, live_digest=lambda: state['value'],
+            kv_digest=lambda count: count, inactive_digest=lambda: 'inactive', snapshot=snapshot,
+            release=release, storage_ids=lambda value: (value.data_ptr(),),
+            local_host=lambda value: [part.clone() for part in value.chunk(1 if missing_shard else 2, dim=-1)])
+        return model, callbacks, owned
+
+    def test_owned_features_match_independent_next_layer_inputs(self):
+        model, callbacks, owned = self.fixture()
+        forwards = [layer.forward for layer in model.layers]
+        report = verify_features(model, [1] * 63, [0, 2], **callbacks)
+        self.assertEqual(len(report['checks']), 4)
+        self.assertTrue(all(check['exact'] for check in report['checks']))
+        self.assertEqual([layer.forward for layer in model.layers], forwards)
+        self.assertFalse(hasattr(model, '_qwen_target_feature_capture'))
+        self.assertEqual(owned, {})
+
+    def test_changed_boundary_state_or_missing_chip_cannot_pass(self):
+        for options in (dict(between_layers=True), dict(corrupt_state=True), dict(missing_shard=True)):
+            model, callbacks, owned = self.fixture(**options)
+            forwards = [layer.forward for layer in model.layers]
+            with self.subTest(options=options), self.assertRaises(AssertionError):
+                verify_features(model, [1] * 63, [1, 2], **callbacks)
+            self.assertEqual(owned, {})
+            self.assertEqual([layer.forward for layer in model.layers], forwards)
+            self.assertFalse(hasattr(model, '_qwen_target_feature_capture'))
+
+    def test_final_layer_cannot_be_used_as_next_input_oracle(self):
+        model, callbacks, owned = self.fixture()
+        with self.assertRaises(ValueError):
+            verify_features(model, [1] * 63, [3], **callbacks)
+        self.assertEqual(owned, {})
