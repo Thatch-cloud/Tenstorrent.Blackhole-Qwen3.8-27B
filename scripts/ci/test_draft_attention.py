@@ -8,6 +8,13 @@ from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_att
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_fused_row_sum_rejects_ambiguous_controls(self):
+        for explicit, pairwise in ((False, False), (True, True)):
+            operations, query, key, value, mask = self.operations_fixture()
+            with self.assertRaises(ValueError):
+                composed_draft_attention(operations, object(), query, key, value, mask,
+                    explicit_softmax=explicit, pairwise_sum=pairwise, fused_row_sum=True)
+
     def test_pairwise_dot_matches_batched_product_and_rejects_oversize(self):
         operations = SimpleNamespace(float32=torch.float32,
             slice=lambda value, start, end: value[tuple(slice(begin, stop) for begin, stop in zip(start, end, strict=True))],

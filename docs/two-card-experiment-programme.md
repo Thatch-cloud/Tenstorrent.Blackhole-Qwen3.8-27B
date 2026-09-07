@@ -1077,3 +1077,19 @@ the hardware report contains zero intermediate inspection records. No timing
 was measured for this precise path. Next work must remove the outer-product
 allocation/long-context limitation and integrate complete draft layers; this
 correctness pass alone supplies no new committed-token throughput result.
+
+### Fused SFPU denominator reduction (2026-09-08)
+
+`draft_row_sum` now implements FP32 row summation in one generic-op dispatch,
+with 16 workers per card, two input tiles and one output tile of L1 buffers per
+worker (12KiB), independent of reduction width. The compute kernel accumulates
+column tiles in FP32 DEST through SFPU addition, then performs SFPU row reduction.
+This replaces the explicit softmax denominator's repeated slice/add dispatches;
+it does not fuse QK, PV, exponentiation or the entire attention operation.
+
+Simulator `20260907T122332Z-548` passes positive-input row sums at widths32/64/2080
+on both ranks against FP64 host sums cast to FP32. The inspection-free learned
+attention integration `20260907T122502Z-302` also passes the unchanged gates.
+All 519 host tests pass. Hardware remains disabled for this new option until its
+own promotion; no timing improvement is claimed from simulator wall time.
+The QK/PV outer-product reference remains the next large allocation bottleneck.

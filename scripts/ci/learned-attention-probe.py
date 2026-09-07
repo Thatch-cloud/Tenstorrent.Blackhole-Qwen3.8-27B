@@ -27,12 +27,13 @@ def main():
     parser.add_argument('--wide-attention', action='store_true')
     parser.add_argument('--pairwise-softmax', action='store_true')
     parser.add_argument('--pairwise-dots', action='store_true')
+    parser.add_argument('--fused-row-sum', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
     if options.hardware and (not all((options.fp32_rope, options.explicit_softmax,
-            options.pairwise_softmax, options.pairwise_dots)) or options.inspect_attention or options.wide_attention):
+            options.pairwise_softmax, options.pairwise_dots)) or options.inspect_attention or options.wide_attention or options.fused_row_sum):
         parser.error('Hardware requires the inspection-free simulator-validated precise path')
     import torch
     import ttnn
@@ -46,12 +47,14 @@ def main():
         wide_attention=options.wide_attention,
         pairwise_softmax=options.pairwise_softmax,
         pairwise_dots=options.pairwise_dots,
+        fused_row_sum=options.fused_row_sum,
         attention_diagnostics=[],
         start_position=4096, checks=[], tolerance=dict(projection_rtol=1e-4, projection_atol=1e-4,
             attention_rtol=.01, attention_atol=.01, norm_ulps=2), sources={name:
                 hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ('learned-attention-probe.py', 'draft_head_preparation.py', 'draft_attention.py',
-                    'draft_attention_fixture.py', 'feature_collective.py', 'projection_rounding.py')})
+                    'draft_attention_fixture.py', 'feature_collective.py', 'projection_rounding.py',
+                    'draft_row_sum.py', 'draft_row_sum_io.cpp', 'draft_row_sum_compute.cpp')})
     mesh = None
     tensors = []
 
@@ -122,7 +125,8 @@ def main():
 
         attention = retain(composed_draft_attention(ttnn, mesh, rotated['q'], rotated['k'], heads['v'], upload(mask),
             inspect=inspect_attention if options.inspect_attention else None, explicit_softmax=options.explicit_softmax,
-            wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots))
+            wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots,
+            fused_row_sum=options.fused_row_sum))
         rounded_attention = retain(ttnn.typecast(attention, ttnn.bfloat16))
         transposed = retain(ttnn.transpose(rounded_attention, 1, 2))
         merged = retain(ttnn.reshape(transposed, (1, 1, 32, 2048)))

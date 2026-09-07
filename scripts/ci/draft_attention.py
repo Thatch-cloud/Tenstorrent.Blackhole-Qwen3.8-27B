@@ -70,10 +70,12 @@ def pairwise_dot(operations, left, right, retain):
     return retain(operations.reshape(reduced, (1, heads, rows, key_rows)))
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False):
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
+    if fused_row_sum and (not explicit_softmax or pairwise_sum):
+        raise ValueError('Fused row sum requires explicit softmax and replaces pairwise sum')
     if pairwise_sum and not explicit_softmax:
         raise ValueError('Pairwise reduction requires the explicit softmax control')
     protected = {addresses(operations, tensor) for tensor in (query, key, value, mask)}
@@ -105,7 +107,11 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
             maximum = retain(operations.max(masked, dim=-1, keepdim=True))
             centered = retain(operations.subtract(masked, maximum, dtype=operations.float32))
             exponentials = retain(operations.exp(centered, fast_and_approximate_mode=False))
-            if pairwise_sum:
+            if fused_row_sum:
+                from draft_row_sum import row_sum
+
+                total = row_sum(mesh, exponentials, owned)
+            elif pairwise_sum:
                 total = pairwise_column_sum(operations, exponentials, retain)
             else:
                 total = retain(operations.sum(exponentials, dim=-1, keepdim=True))
