@@ -1003,7 +1003,10 @@ path, retaining its host-reduction control. Hardware run `34111774033` on
 all 10,240 projection values identical to the separate control. Eight-row
 batching now passes simulator validation (`20260907T103148Z-411`): exact
 fabric sums across both complete eight-row outputs and normalization within
-one BF16 ULP. It is added to the hardware suite but is not yet hardware-certified;
-its host test suite passes 497 tests.
+one BF16 ULP. Hardware run `34112856023` on `3cb7381` now passes the same
+eight-row gate. Next, the composed DFlash2 group-16 dynamic causal convolution
+passes exact synthetic T1/T8 simulator checks (`20260907T104613Z-391`);
+learned convolution weights and draft-layer integration remain outstanding.
+The host test suite now passes 500 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.

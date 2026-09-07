@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware `34112856023` (`3cb7381`) PASSED the eight-row integrated path:
+  both full [1,1,8,5120] outputs pass the arithmetic gate, sums are exact and
+  normalization is within one BF16 ULP. This is still not an end-to-end drafter.
+- Began the next DFlash2 layer operation: kernel-two group-16 dynamic causal
+  convolution, following the arithmetic ordering and zero-left-padding contract
+  in [pinned upstream source](https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py).
+  Simulator `20260907T104613Z-391` passes all four rank/row checks (T1/T8,
+  full width 5120) exactly on synthetic dyadic inputs, including unchanged
+  borrowed inputs. It uses composed device operations, not a fused kernel;
+  learned base/kernel-projection weights and prepare/finish integration remain
+  unvalidated. All 500 host tests pass. No hardware convolution gate dispatched.
 - Eight-row integrated simulator `20260907T103148Z-411` PASSED: both complete
   [1,1,8,5120] rank outputs meet the same arithmetic-reference tolerance, fabric
   sums are exact across all rows and normalization is within one BF16 ULP.
