@@ -1653,3 +1653,18 @@ sequential greedy path and selected score rows on bounded randomized tests.
 Finite-precision device equivalence, simulator gating, measured cost versus
 serial selection, shared-LM-head candidate generation and coding acceptance
 remain outstanding. No alternate drafter contract or serving change is implied.
+
+The next simulator-only scoring gate uses `draft-dot-probe.py --keys 32
+--width 256 --cache-tiles --columns-per-task 8 --selector-fixture <pinned path>`.
+It packs learned codebooks into the existing SFPU dot kernel, compares split
+tasks with its whole-tile control, and checks every active transition score and
+the seven-token greedy path. Candidate IDs, hidden states and unary logits
+remain synthetic; gathers, predecessor weighting and final selection are host
+prepared. This isolates device scoring, not an implemented full device selector.
+
+Long-context complete layer0 simulation `20260907T155120Z-300` passed with
+shell exit0 and clean mesh close. Both ranks validated2056 K/V rows, exact
+projection references, exact connected MLP outputs/residuals/fabric sums and
+one-ULP normalization. Attention max errors were1.1444092e-5/1.3828278e-5;
+existing tolerances were unchanged. Two-layer stack simulation
+`20260907T164514Z-3101` is now running, replacing the completed simulator slot.

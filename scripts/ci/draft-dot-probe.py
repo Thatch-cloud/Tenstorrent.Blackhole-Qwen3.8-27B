@@ -22,8 +22,11 @@ def main():
     parser.add_argument('--cache-tiles', action='store_true')
     parser.add_argument('--workers', type=int, choices=(64, 80, 110), default=64)
     parser.add_argument('--columns-per-task', type=int, choices=(8, 32), default=32)
+    parser.add_argument('--selector-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.selector_fixture and (options.hardware or (options.keys, options.width) != (32, 256)):
+        parser.error('Learned selector scoring requires simulator and keys32/width256')
     split_validated = (options.workers == 110 and options.cache_tiles
         and (options.keys, options.width, options.columns_per_task) == (128, 2080, 8))
     if options.hardware and options.columns_per_task != 32 and not split_validated:
@@ -56,6 +59,18 @@ def main():
         generator = torch.Generator().manual_seed(319)
         left = torch.randn((1, 16, 32, options.width), generator=generator)
         right = torch.randn((1, 16, options.keys, options.width), generator=generator)
+        selector = None
+        if options.selector_fixture:
+            from draft_selector_fixture import load_selector
+            from draft_selector_dot_fixture import prepare_selector_dot
+            from draft_selector_transitions import select_transition_scores
+            manifest, weights = load_selector(options.selector_fixture)
+            selector = prepare_selector_dot(weights)
+            left, right = selector['left'], selector['right']
+            report.update(selector_checkpoint=manifest,
+                selector_scope='Learned codebook dot scores with host-prepared synthetic candidates/hidden/unary; host greedy path; no shared LM head or full drafter')
+            report['sources'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                for name in ('draft_selector_dot_fixture.py', 'draft_selector_transitions.py', 'draft_selector.py', 'draft_selector_fixture.py')})
         for host in (left, right):
             tensors.append(ttnn.from_torch(host, device=mesh, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
@@ -70,6 +85,14 @@ def main():
             if control is not None and not torch.equal(actual, ttnn.to_torch(ttnn.get_device_tensors(control)[chip])):
                 raise AssertionError('Dot candidate differs from baseline control')
             report['checks'].append(dict(chip=chip, max_error=float((actual - expected).abs().max())))
+            if selector is not None:
+                scores = actual[:, :7, :16, :16].double() + selector['unary'].double()[:, :, None, :]
+                torch.testing.assert_close(scores, selector['expected_scores'], rtol=1e-5, atol=1e-4)
+                path, _ = select_transition_scores(scores, selector['candidates'])
+                if not torch.equal(path, selector['expected_path']):
+                    raise AssertionError('Learned selector dot scores changed the greedy proposal path')
+                report['checks'][-1].update(selector_score_max_error=float((scores - selector['expected_scores']).abs().max()),
+                    selector_path_exact=True, proposal_ids=path.tolist())
         if options.timing:
             baselines = [ttnn.to_torch(tensor).clone() for tensor in ttnn.get_device_tensors(output)]
             for repetition in range(5):
