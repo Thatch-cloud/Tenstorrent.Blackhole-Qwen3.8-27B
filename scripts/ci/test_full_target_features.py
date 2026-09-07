@@ -3,10 +3,26 @@ import unittest
 
 import torch
 
-from full_target_features import verify_features
+from full_target_features import feature_prompts, verify_features
 
 
 class TargetFeatureValidationTests(unittest.TestCase):
+    def test_short_contexts_slice_a_template_sized_base(self):
+        calls = []
+
+        def make_prompt(tokenizer, length, seed):
+            calls.append((tokenizer, length, seed))
+            if length < 100:
+                raise ValueError('Template exceeds prompt budget')
+            return list(range(length))
+
+        prompts = feature_prompts('tokenizer', make_prompt, (63, 64, 65))
+        self.assertEqual(calls, [('tokenizer', 128, 0)])
+        self.assertEqual([len(prompt) for prompt in prompts], [63, 64, 65])
+        self.assertEqual(prompts[0], prompts[2][:63])
+        with self.assertRaises(ValueError):
+            feature_prompts(None, lambda *args: [1], (63,))
+
     def fixture(self, *, between_layers=False, corrupt_state=False, missing_shard=False):
         model = SimpleNamespace(layers=[SimpleNamespace(forward=lambda hidden: hidden + 1) for index in range(4)])
         state = dict(value=0, calls=0)

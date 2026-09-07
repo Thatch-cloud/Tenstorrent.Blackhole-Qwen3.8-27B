@@ -560,14 +560,13 @@ def main():
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not options.target_features, max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
         if options.target_features:
-            from full_target_features import verify_features
+            from full_target_features import feature_prompts, verify_features
             from gdn_multitoken_conv import addresses as tensor_addresses
             output_path = root / 'target-features.json'
             report.update(scope='Real target eager B1 feature boundaries; no neural drafter or throughput claim',
                 feature_checks=[], feature_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                     for name in ('full_target_features.py', 'target_features.py')})
-            for length in lengths:
-                prompt = baseline.make_prompt(tokenizer, length, 0)
+            for prompt in feature_prompts(tokenizer, baseline.make_prompt, lengths):
                 result = verify_features(model, prompt, (5, 19, 33, 47, 61), prefill=prefill, decode=decode,
                     live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
                     snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),

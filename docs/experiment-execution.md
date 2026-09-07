@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Feature gate34087941937 failed before feature capture: the full chat template
+  exceeded the63-token prompt budget. It did not report a feature or kernel
+  mismatch. Short fixtures now slice a shared128-token template, matching the
+  existing short-context oracle convention, with explicit length validation.
+  Regression coverage reproduces the template-budget error; all441 host tests
+  pass. Source-matched TTsim20260907T055239Z-509 again passes10 ownership and10
+  next-layer boundary checks. Hardware feature parity still requires a retry.
 - Matched request34084598829 (`b487e95`) passed all eight requests. Independent
   reconstruction of both ABBA summaries reproduces committed rates exactly;
   request-helper hashes match. Four-row versus eight-row replay, both sharing

@@ -4,6 +4,16 @@ from model_batch import instance_overrides
 from target_features import LayerOutputCapture
 
 
+def feature_prompts(tokenizer, make_prompt, lengths):
+    lengths = tuple(lengths)
+    if not lengths or any(type(length) is not int or length < 1 for length in lengths):
+        raise ValueError('Positive integer feature context lengths required')
+    base = make_prompt(tokenizer, max(128, max(lengths)), 0)
+    if len(base) < max(lengths):
+        raise ValueError('Insufficient feature prompt tokens')
+    return tuple(base[:length] for length in lengths)
+
+
 def verify_features(model, prompt, tap_ids, *, prefill, decode, live_digest, kv_digest, inactive_digest,
                     snapshot, release, storage_ids, local_host):
     import torch
