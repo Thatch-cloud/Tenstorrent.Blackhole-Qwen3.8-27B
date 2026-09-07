@@ -27,6 +27,9 @@ def host_inputs(tokens, start, rope_dim, theta):
 def stage_inputs(fixture, tokens, start):
     operations, model = fixture.operations, fixture.model
     validate_tokens(tokens, fixture.rows, start, model.args.vocab_size, fixture.pages.shape[1] * 64)
+    replay_reader = getattr(fixture, 'replay_reader', None)
+    if replay_reader is not None:
+        replay_reader.validate(start)
     if len(fixture.singleton_positions) != fixture.rows:
         raise ValueError('Every B1 attention position buffer must be retained')
     token_values, positions, cos, sin = host_inputs(tokens, start, model.args.rope_head_dim, model.args.rope_theta)
@@ -36,6 +39,11 @@ def stage_inputs(fixture, tokens, start):
               (fixture.sin, sin, operations.bfloat16, operations.TILE_LAYOUT)]
     values.extend((destination, positions[index:index + 1], operations.int32, operations.ROW_MAJOR_LAYOUT)
                   for index, destination in enumerate(fixture.singleton_positions))
+    if replay_reader is not None:
+        import torch
+        words = torch.zeros(8, dtype=torch.int32)
+        words[0] = start
+        values.append((replay_reader.positions, words, operations.int32, operations.ROW_MAJOR_LAYOUT))
     if any(tuple(destination.shape) != tuple(value.shape) or destination.dtype != dtype or destination.layout != layout
            for destination, value, dtype, layout in values):
         raise ValueError('Staged metadata must preserve every captured tensor signature')
@@ -46,9 +54,16 @@ def stage_inputs(fixture, tokens, start):
     staged = [operations.from_torch(value, device=None, dtype=dtype, layout=layout,
               mesh_mapper=operations.ReplicateTensorToMesh(model.mesh_device)) for destination, value, dtype, layout in values]
     try:
-        for source, destination in zip(staged, destinations, strict=True):
-            operations.copy_host_to_device_tensor(source, destination)
-    finally:
-        operations.synchronize_device(model.mesh_device)
-    if [tuple(part.buffer_address() for part in operations.get_device_tensors(value)) for value in destinations] != addresses:
-        raise AssertionError('Input staging replaced a captured buffer')
+        try:
+            for source, destination in zip(staged, destinations, strict=True):
+                operations.copy_host_to_device_tensor(source, destination)
+        finally:
+            operations.synchronize_device(model.mesh_device)
+        if [tuple(part.buffer_address() for part in operations.get_device_tensors(value)) for value in destinations] != addresses:
+            raise AssertionError('Input staging replaced a captured buffer')
+    except BaseException:
+        if replay_reader is not None:
+            replay_reader.failed = True
+        raise
+    if replay_reader is not None:
+        replay_reader.start = start

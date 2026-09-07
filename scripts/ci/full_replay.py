@@ -16,7 +16,7 @@ def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
 
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
                   prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
-                  norm_batch=False):
+                  norm_batch=False, attention_replay=False):
     validate_fixture(rows, first_prefix, second_prefix, len(oracle))
     import torch
     import ttnn
@@ -40,7 +40,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
     fixture = ModelBatch(model, oracle[:rows], length, pages, helpers, checkpoints, rows,
         serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
         hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
-        packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=norm_batch)
+        packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=norm_batch, attention_replay=attention_replay)
     captured, output = None, None
     try:
         save(initial)
@@ -73,6 +73,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             raise AssertionError('Corrected replay continuation GDN/KV differs')
         return dict(length=length, rows=rows, first_prefix=first_prefix, second_prefix=second_prefix,
             replay_epoch=fixture.retained.replay_epoch, logits_exact=True, refreshed_prefixes_exact=True,
+            attention_replay_enabled=fixture.attention_replay,
             valid_kv_exact=True, inactive_slots_exact=True, correction_steps=2,
             scope='Two blocks using one captured verifier with changed metadata; no drafter or throughput claim')
     finally:

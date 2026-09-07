@@ -99,6 +99,16 @@ buffers remain unchanged. Expected coverage is96 chip/ticket checks and48 trace
 replays. No cache writes or GDN histories are involved yet; real-layer and retained
 full-model replay certification remain required before request-path integration.
 
+Hardware reader composition34069798251 passed all12 fixtures,96 exact chip/ticket
+checks and48 trace replays; complete K/V buffers stayed unchanged. The next
+`full-attention-replay` gate integrates one shared reader across all16 attention
+layers and stages its position input in the same transaction as tokens/RoPE/native
+positions. It uses aligned4K/16K starts4096/16384 so both verification blocks stay
+within their prepared256-token family; crossing a family is rejected before any
+metadata copy. T1/2/4 retain native attention. It retains the existing full-logit,
+GDN prefix, corrected-continuation and valid-K/V replay checks. Request-pilot and
+sampling modes remain rejected until this retained-state gate passes.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,

@@ -47,13 +47,22 @@ class ModelBatch:
     def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, serial_sdpa=False, profiler=None,
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
-                 retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False):
+                 retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
+                 attention_parallel=False, attention_replay=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if attention_replay and (not ordered_cache or not serial_sdpa or not norm_batch or profiler is not None or grouped_attention):
+            raise ValueError('Replay attention requires standalone ordered-cache norm-batch verification')
+        self.attention_replay = bool(attention_replay and self.rows >= 8)
+        self.replay_reader = None
+        if self.attention_replay:
+            from attention_mask_replay import validate_ticket
+            self.replay_capacity = (start // 256 + 1) * 256
+            validate_ticket(start, self.rows, self.replay_capacity)
         if attention_parallel and not attention_dma:
             raise ValueError('Parallel attention requires DMA layout')
         self.attention_parallel = bool(attention_parallel and self.rows >= 8)
@@ -132,6 +141,18 @@ class ModelBatch:
         self.cos, self.sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
                                             model.args.max_seq_len, model.args.rope_theta, positions)
         self.buffers.extend([self.cos, self.sin])
+        if self.attention_replay:
+            from attention_replay import ReplayAttentionReader
+
+            def upload_replay(value, dtype=ttnn.bfloat16):
+                return ttnn.from_torch(value, device=model.mesh_device, dtype=dtype,
+                    layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
+
+            self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages, upload_replay)
+            self.grouped_readers.append(self.replay_reader)
+            if self.replay_reader.start != start:
+                self.replay_reader.stage(start)
         gdn_index = 0
         for layer in model.layers:
             attention = layer.attention
@@ -142,7 +163,9 @@ class ModelBatch:
                     writer = OrderedCacheWriter(model.mesh_device, ttnn, cache_kernels)
                 self.writers.append(writer)
                 reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
-                if self.grouped_attention:
+                if self.replay_reader is not None:
+                    reader = self.replay_reader
+                elif self.grouped_attention:
                     from attention_grouped import GroupedAttentionReader
 
                     def upload_group(value, dtype=ttnn.bfloat16):
@@ -280,7 +303,8 @@ class ModelBatch:
             raise AssertionError("All 48 GDN and 16 attention adapters must engage")
         if self.norm_batch_calls - before_norm_batch != (48 if self.norm_batch else 0):
             raise AssertionError('Selected row-parallel norm must engage in all48 GDN layers')
-        if any(reader.calls - before != 1 for reader, before in zip(self.readers, before_reads, strict=True)):
+        if any(reader.calls - before != (16 if self.attention_replay else 1)
+               for reader, before in zip(self.readers, before_reads, strict=True)):
             raise AssertionError("Every selected B1 SDPA adapter must engage")
         if len(self.working_states) != (48 if self.compact_gdn else 0) or any(
             state.calls - before[0] != (1 if self.device_loop_gdn else self.rows) or state.checkpoint_calls - before[1] != 1

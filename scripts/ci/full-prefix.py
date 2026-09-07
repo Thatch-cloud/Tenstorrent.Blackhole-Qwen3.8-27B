@@ -85,7 +85,11 @@ def main():
     parser.add_argument('--grouped-attention', action='store_true')
     parser.add_argument('--attention-dma', action='store_true')
     parser.add_argument('--attention-parallel', action='store_true')
+    parser.add_argument('--attention-replay', action='store_true')
     options = parser.parse_args()
+    if options.attention_replay and (not options.norm_batch or not options.replay_inputs or options.grouped_attention
+            or options.device_selection or options.request_pilot or options.attribution):
+        raise ValueError('Replay attention is limited to retained norm-batch replay certification')
     if options.attention_parallel and not options.attention_dma:
         raise ValueError('Parallel attention requires DMA layout')
     if options.attention_dma and not options.grouped_attention:
@@ -145,6 +149,8 @@ def main():
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
+    if options.attention_replay:
+        lengths = (4096, 16384)
     prefixes = (0, 1, options.max_rows // 2, options.max_rows) if options.coding_cost else tuple(range(options.max_rows + 1))
     import torch
     import ttnn
@@ -159,6 +165,13 @@ def main():
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
     report['attention_parallel'] = options.attention_parallel
+    report['attention_replay'] = options.attention_replay
+    if options.attention_replay:
+        from sdpa_tree_scratch import audit
+        report['attention_replay_native_sources'] = audit('/opt/tt-metal')
+        report['attention_replay_prerequisite'] = 34069798251
+        report['attention_replay_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('attention_replay.py', 'attention_mask_replay.py', 'attention_mask_replay.cpp', 'attention_parallel.py')}
     if options.attention_parallel:
         from sdpa_tree_scratch import audit
         report['attention_parallel_layer_prerequisite'] = 34067099712
@@ -409,6 +422,7 @@ def main():
                                  packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
                                  norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
                                  attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
+                                 attention_replay=options.attention_replay,
                                  ordered_cache=options.ordered_cache)
             captured = None
             output = None
@@ -696,7 +710,7 @@ def main():
                                 rows=rows, first_prefix=first_prefix, second_prefix=second_prefix,
                                 prefill=prefill, decode=decode, save=save, restore=restore, state_digest=state_digest,
                                 live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host,
-                                norm_batch=options.norm_batch)
+                                norm_batch=options.norm_batch, attention_replay=options.attention_replay)
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)

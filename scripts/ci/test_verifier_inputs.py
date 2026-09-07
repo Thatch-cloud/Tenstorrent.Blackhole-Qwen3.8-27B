@@ -71,6 +71,34 @@ class InputTests(unittest.TestCase):
             stage_inputs(fixture, [7, 8], 16383)
         fixture.operations.synchronize_device.assert_called_once_with('mesh')
 
+    def test_replay_position_joins_the_same_staging_transaction(self):
+        fixture = self.fixture()
+        fixture.replay_reader = SimpleNamespace(validate=Mock(), start=4096, failed=False,
+            positions=SimpleNamespace(shape=(8,), dtype='int32', layout='RM'))
+        stage_inputs(fixture, [7, 8], 4103)
+        fixture.replay_reader.validate.assert_called_once_with(4103)
+        self.assertEqual(fixture.operations.copy_host_to_device_tensor.call_count, 7)
+        self.assertEqual(fixture.operations.copy_host_to_device_tensor.call_args.args[0].tolist(), [4103, 0, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(fixture.replay_reader.start, 4103)
+        fixture.operations.synchronize_device.assert_called_once()
+
+    def test_replay_family_rejected_before_any_metadata_is_changed(self):
+        fixture = self.fixture()
+        fixture.replay_reader = SimpleNamespace(validate=Mock(side_effect=ValueError('family')))
+        with self.assertRaisesRegex(ValueError, 'family'):
+            stage_inputs(fixture, [7, 8], 4352)
+        fixture.operations.copy_host_to_device_tensor.assert_not_called()
+
+    def test_partial_staging_poison_includes_attention_reader(self):
+        fixture = self.fixture()
+        fixture.replay_reader = SimpleNamespace(validate=Mock(), start=4096, failed=False,
+            positions=SimpleNamespace(shape=(8,), dtype='int32', layout='RM'))
+        fixture.operations.copy_host_to_device_tensor.side_effect = [None, RuntimeError('copy')]
+        with self.assertRaisesRegex(RuntimeError, 'copy'):
+            stage_inputs(fixture, [7, 8], 4103)
+        self.assertTrue(fixture.replay_reader.failed)
+        self.assertEqual(fixture.replay_reader.start, 4096)
+
 
 if __name__ == '__main__':
     unittest.main()

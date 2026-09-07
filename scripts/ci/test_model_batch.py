@@ -8,6 +8,28 @@ from model_batch import ModelBatch, compact_gdn_enabled, device_loop_enabled, in
 
 
 class ModelBatchTests(unittest.TestCase):
+    def test_shared_replay_reader_must_engage_for_all_sixteen_layers(self):
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = None
+        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.norm_batch = fixture.compact_gdn = False
+        fixture.attention_replay = True
+        fixture.working_states, fixture.writers, fixture.bindings = [], [], []
+        reader = SimpleNamespace(calls=0)
+        fixture.readers = [reader] * 16
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            reader.calls += 16
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        self.assertEqual(fixture.run(), 'logits')
+        fixture.model._forward_decode = Mock(side_effect=lambda *args, **kwargs: setattr(fixture, 'gdn_calls', fixture.gdn_calls + 48))
+        with self.assertRaisesRegex(AssertionError, 'Every selected'):
+            fixture.run()
+
     def test_raw_vocabulary_shards_require_explicit_forward_opt_in(self):
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
