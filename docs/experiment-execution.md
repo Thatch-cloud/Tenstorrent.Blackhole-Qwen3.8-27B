@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Native scratch run34070379248 (`081f2bd`) passed the repaired cold build,
+  runtime import and36 exact attention fixtures,4320 timed replays and72
+  changed-query checks. Both arms use compact tree scratch and stock device
+  layout; candidate increases grouped rows from4 to8. Mean matched T32
+  attention cost is1.108171->0.716134ms at4095 and1.524286->1.020002ms
+  at16383. This is a component result, not committed request throughput,
+  and is not a matched comparison with the separate DMA/parallel experiment.
+- Actual-request run34072489815 (`a81687a`, `full-attention-engine`) dispatched
+  after510 host tests, AST/YAML checks and shell syntax checks passed. It uses
+  the previously certified replay reader, not the new native scratch build.
+  No serving defaults changed and no reset was authorized.
 - Retained full-model attention replay34070163839 passed24 static batch cases,
   16 rollback checks,4 negative-control pairs and36 changed-metadata replay cases.
   The dynamic reader engaged in24 T16/T32 cases; twelve T2 cases retain native
