@@ -6,6 +6,18 @@ import unittest
 
 
 class LearnedAttentionSuiteTests(unittest.TestCase):
+    def test_selector_dot_rejects_unvalidated_hardware_configuration(self):
+        environment = {name: value for name, value in os.environ.items()
+            if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
+        environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        for configuration in ([], ['--cache-tiles', '--workers', '110'],
+                ['--cache-tiles', '--columns-per-task', '8']):
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('draft-dot-probe.py')),
+                '--hardware', '--keys', '32', '--width', '256', '--selector-fixture', '/not-a-fixture',
+                '--output', '/not-an-output', *configuration], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('Learned selector hardware requires validated', result.stderr)
+
     def test_selector_projection_rejects_hardware_before_fixture_load(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
@@ -117,11 +129,14 @@ timeout() {
         result = self.run_suite(stack=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
         self.assertIn('device-readback.py', lines[0])
+        for argument in ('draft-dot-probe.py', '--hardware --timing --keys 32 --width 256 --cache-tiles',
+                '--selector-fixture /experiment-selector-fixture', 'learned-selector-dot.json'):
+            self.assertIn(argument, lines[1])
         for argument in ('--stack-layers 5', '--selector-fixture /experiment-selector-fixture',
                 '--stack-fixtures /experiment-stack-fixture', '--cache-dot-tiles', 'learned-five-layers.json'):
-            self.assertIn(argument, lines[1])
+            self.assertIn(argument, lines[2])
         failed = self.run_suite(fail_health=True, stack=True)
         self.assertEqual(failed.returncode, 17)
         self.assertNotIn('learned-attention-probe.py', failed.stdout)

@@ -28,6 +28,9 @@ fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
+        OMP_NUM_THREADS=1 timeout -k 15 300 python3 /experiment-scripts/ci/draft-dot-probe.py \
+            --hardware --timing --keys 32 --width 256 --cache-tiles \
+            --selector-fixture /experiment-selector-fixture --output /experiment/results/learned-selector-dot.json
         OMP_NUM_THREADS=1 timeout -k 30 3600 python3 /experiment-scripts/ci/learned-attention-probe.py \
             --hardware --fp32-rope --explicit-softmax --fused-row-sum --fused-dots --cache-dot-tiles \
             --fixture /experiment-projection-fixture --convolution-fixture /experiment-convolution-fixture \

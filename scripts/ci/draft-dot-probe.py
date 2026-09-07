@@ -25,8 +25,11 @@ def main():
     parser.add_argument('--selector-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.selector_fixture and (options.hardware or (options.keys, options.width) != (32, 256)):
-        parser.error('Learned selector scoring requires simulator and keys32/width256')
+    if options.selector_fixture and (options.keys, options.width) != (32, 256):
+        parser.error('Learned selector scoring requires keys32/width256')
+    if options.selector_fixture and options.hardware and not (
+            options.cache_tiles and options.workers == 64 and options.columns_per_task == 32):
+        parser.error('Learned selector hardware requires validated cached 64-worker full-tile configuration')
     split_validated = (options.workers == 110 and options.cache_tiles
         and (options.keys, options.width, options.columns_per_task) == (128, 2080, 8))
     if options.hardware and options.columns_per_task != 32 and not split_validated:
@@ -34,7 +37,7 @@ def main():
     if options.hardware and options.workers != 64 and not (
             (options.workers == 110 and options.cache_tiles and (options.keys, options.width) == (2080, 128)) or split_validated):
         parser.error('Wider worker distribution requires simulator validation')
-    if options.hardware and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
+    if options.hardware and not options.selector_fixture and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
         parser.error('Hardware requires a simulator-validated dot shape')
     if options.timing and not options.hardware:
         parser.error('Timing requires allocated hardware')

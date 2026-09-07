@@ -1941,3 +1941,13 @@ persist weight validation and dispatch phase before native calls. Do not disable
 packer accumulation and label that a validation of the unchanged target kernel.
 The separate learned selector codebook dot gate is the next executable simulator
 prerequisite; fusion remains unvalidated and is not promoted to hardware.
+
+Learned selector scoring simulator192510Z passed with clean close and exit0:
+both chips' dot maximum error3.57628e-7, complete transition-score maximum
+error3.11447e-7, and exact seven-token greedy proposal IDs. This uses pinned
+codebooks with synthetic hidden/candidate/unary inputs; gathers and greedy
+selection are still host-side. It is not full-device selector or request TPS.
+The opt-in learned_stack hardware suite now runs this cached64-worker,
+keys32/width256 gate after health and before the five-layer gate, including
+bounded repeated latency measurements. Other shapes/placements remain guarded;
+the default suite and serving configuration are unchanged.
