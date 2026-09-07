@@ -1312,3 +1312,12 @@ tests, not a device MLP correctness or performance result. Host tests:530 passed
 The next independent step is to finish hashing the MLP fixture and build its
 device projection/activation/reduction gate, without interrupting the active
 full-row long-context attention validation.
+
+The initial MLP download terminated on a network read timeout. Its partial file
+is preserved and is not accepted as a fixture. The shared bounded-range reader
+now retries transient timeout/connection/incomplete-read failures at most three
+times for the identical range, retaining status/range/size validation and not
+retrying invalid responses. Tests cover retry identity, exhaustion and rejection
+without retry; all533 host tests pass. A fresh download is active under
+`hardware-evidence.local/dflash2-mlp-dedf8df-retry1`; no partial-file overwrite or
+unverified resume was performed. Attention retry remains a separate live process.

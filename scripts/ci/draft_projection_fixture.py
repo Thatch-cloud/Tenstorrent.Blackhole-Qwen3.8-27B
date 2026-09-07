@@ -2,10 +2,12 @@
 
 import argparse
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import re
 import struct
+import time
 import urllib.request
 
 
@@ -15,6 +17,16 @@ URL = f'https://huggingface.co/{MODEL}/resolve/{REVISION}/model.safetensors'
 
 
 def read_range(url, start, length):
+    for attempt in range(3):
+        try:
+            return _read_range_once(url, start, length)
+        except (TimeoutError, ConnectionError, http.client.IncompleteRead):
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+
+
+def _read_range_once(url, start, length):
     if type(start) is not int or start < 0 or type(length) is not int or not 0 < length <= 2097152:
         raise ValueError('Bounded positive byte range required')
     end = start + length - 1
