@@ -1261,3 +1261,13 @@ tasks, including exact full-output equality against cached64-worker whole tiles
 and the unchanged FP64 reference bound. Host tests:526 passed. The hardware suite
 adds only this validated split shape; integrated learned attention still uses
 whole-tile tasks. This is not yet a complete drafter or committed-token speedup.
+
+Hardware `34127121901` on `de7c0f7` passes the110-worker split PV gate: exact
+output equality against the cached64-worker whole-tile control, unchanged FP64
+reference error3.434e-5 on both ranks, and five stable repeated outputs. Same-run
+medians are1.706819ms for64-worker whole tiles versus1.457718ms for110-worker
+eight-column tasks (14.6% lower). Ranges1.516678..1.790549ms and
+1.427718..1.629718ms overlap, so treat this as a modest preliminary component
+improvement, not a robust whole-request gain. Next integrate the measured QK/PV
+placements into complete long-context learned attention and measure that pipeline
+before further microkernel tuning. No200 committed-token/s result is established.
