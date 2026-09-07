@@ -85,9 +85,14 @@ def main():
     parser.add_argument('--grouped-attention', action='store_true')
     parser.add_argument('--attention-dma', action='store_true')
     parser.add_argument('--attention-parallel', action='store_true')
+    parser.add_argument('--attention-tree', action='store_true')
     parser.add_argument('--attention-replay', action='store_true')
     parser.add_argument('--attention-engine', action='store_true')
     options = parser.parse_args()
+    if options.attention_tree and not options.attention_parallel:
+        raise ValueError('Eight-row attention requires parallel attention')
+    if options.attention_tree and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+        raise ValueError('Eight-row attention requires process-fixed compact native scratch')
     if options.attention_engine and (not options.request_pilot or not options.norm_batch):
         raise ValueError('Attention engine requires the matched norm-batch request pilot')
     if options.attention_replay and (not options.norm_batch or not options.replay_inputs or options.grouped_attention
@@ -168,6 +173,10 @@ def main():
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
     report['attention_parallel'] = options.attention_parallel
+    report['attention_tree'] = options.attention_tree
+    if options.attention_tree:
+        report['attention_tree_layer_prerequisite'] = 34074774493
+        report['attention_tree_scope'] = 'Static T4 versus T8 parallel groups; identical native scratch, DMA and GDN'
     report['attention_replay'] = options.attention_replay
     report['attention_engine'] = options.attention_engine
     if options.attention_engine:
@@ -187,7 +196,7 @@ def main():
     if options.attention_parallel:
         from sdpa_tree_scratch import audit
         report['attention_parallel_layer_prerequisite'] = 34067099712
-        report['attention_parallel_native_sources'] = audit('/opt/tt-metal')
+        report['attention_parallel_native_sources'] = audit('/opt/tt-metal', patched=options.attention_tree)
         report['attention_parallel_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('attention_parallel.py', 'attention_grouped.py', 'attention_head_fold.py')}
     if options.attention_dma:
@@ -434,6 +443,7 @@ def main():
                                  packed_checkpoints=options.packed_checkpoints, retain_records=deferred,
                                  norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
                                  attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
+                                 attention_tree=options.attention_tree,
                                  attention_replay=options.attention_replay,
                                  ordered_cache=options.ordered_cache)
             captured = None
@@ -751,7 +761,8 @@ def main():
                         compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
                         packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
                         norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
-                        attention_dma=options.attention_dma, attention_parallel=options.attention_parallel)
+                        attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
+                        attention_tree=options.attention_tree)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)

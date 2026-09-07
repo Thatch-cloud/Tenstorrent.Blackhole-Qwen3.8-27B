@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prepared `full-attention-tree`, gated on real-weight layer34074774493.
+  The candidate selects eight-row parallel groups only atT>=8; the matched
+  control keeps four-row groups with the same parallelism, DMA, native compact
+  scratch, GDN, ordered writes and checkpoints. Native small buckets remain
+  unchanged. This gate measures static full-model exactness/rollback and paired
+  verification cost, not committed generation.518 host/simulator-support/harness
+  tests and AST/YAML/shell checks pass. No hardware dispatch before layer success.
 - Parallel width microbenchmark34073855612 (`9f8248f`) passed36 native-exact
   fixtures,4320 timed replays and72 changed-query checks with immutable KV.
   Both arms use compact scratch, DMA and up to three parallel groups. Mean

@@ -18,7 +18,15 @@ def summarize(samples):
 
 def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
                          device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False,
-                         norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False):
+                         norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False):
+    if attention_tree:
+        if not attention_parallel:
+            raise ValueError('Eight-row timing requires the parallel control')
+        return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+                    hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
+                    compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
+                    ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention,
+                    attention_dma=attention_dma, attention_parallel=True, attention_tree=False)
     if attention_parallel:
         return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                     hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
@@ -59,7 +67,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             restore_initial, state_digest, kv_digest, local_host, serial_sdpa=False,
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
             device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False,
-            norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False):
+            norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False):
     import torch
     import ttnn
 
@@ -74,14 +82,15 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                            hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                            compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
                            ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention,
-                           attention_dma=attention_dma, attention_parallel=attention_parallel)
+                           attention_dma=attention_dma, attention_parallel=attention_parallel, attention_tree=attention_tree)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
                              reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
                              hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn,
                              compact_prologue=compact_prologue, batch_conv=batch_conv,
                              packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache,
-                             norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=attention_dma, attention_parallel=attention_parallel)) if compact_gdn else None
+                             norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=attention_dma,
+                             attention_parallel=attention_parallel, attention_tree=attention_tree)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
@@ -138,6 +147,9 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     if attention_parallel:
         report.update(attention_parallel_enabled=candidate.attention_parallel,
                       paired_control='Identical DMA attention and GDN; serial versus parallel query groups')
+    if attention_tree:
+        report.update(attention_tree_enabled=candidate.attention_tree,
+                      paired_control='Identical parallel DMA attention, compact native scratch and GDN; T4 versus T8 groups')
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -233,6 +245,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
 
             if attention_parallel:
                 report['compact_comparison']['scope'] = 'Full-model serial versus parallel attention groups; identical DMA layouts and GDN; static positions only, no committed tok/s'
+            if attention_tree:
+                report['compact_comparison']['scope'] = 'Full-model T4 versus T8 parallel attention groups; identical compact scratch, DMA and GDN; static positions only, no committed tok/s'
 
         restore_initial()
         trace, unused = capture_operation(ttnn, mesh, restore_initial)

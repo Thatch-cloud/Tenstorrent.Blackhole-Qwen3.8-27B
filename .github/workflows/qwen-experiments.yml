@@ -6,7 +6,7 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-gdn-device-loop, full-norm-batch, full-attention-groups, full-attention-dma, full-attention-parallel, full-attention-replay, full-attention-engine, full-norm-replay, full-norm-selection, full-norm-engine, full-verifier-replay, full-verifier-selection, full-verifier-engine, full-batch-attribution, attention-batch, attention-timing, attention-groups, attention-group-layer, attention-group-dma, attention-dma-layer, attention-parallel-groups, attention-mask-replay, attention-replay, attention-tree-scratch, attention-tree-parallel, attention-tree-layer, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, gdn-value-split, gdn-value-split-timing, gdn-value-split-prefetch, gdn-value-split-norm-batch, gdn-norm-batch-layer, gdn-multitoken-conv, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
+        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-gdn-device-loop, full-norm-batch, full-attention-groups, full-attention-dma, full-attention-parallel, full-attention-tree, full-attention-replay, full-attention-engine, full-norm-replay, full-norm-selection, full-norm-engine, full-verifier-replay, full-verifier-selection, full-verifier-engine, full-batch-attribution, attention-batch, attention-timing, attention-groups, attention-group-layer, attention-group-dma, attention-dma-layer, attention-parallel-groups, attention-mask-replay, attention-replay, attention-tree-scratch, attention-tree-parallel, attention-tree-layer, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, gdn-value-split, gdn-value-split-timing, gdn-value-split-prefetch, gdn-value-split-norm-batch, gdn-norm-batch-layer, gdn-multitoken-conv, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
         default: inventory
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
@@ -145,6 +145,13 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 4200 bash scripts/ci/run-baseline.sh
+      - name: Disposable compact-scratch full-model attention gate
+        if: inputs.suite == 'full-attention-tree'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: full-attention-tree
+        run: timeout 7000 bash scripts/ci/run-baseline.sh
       - name: GDN exact prefix and rollback prerequisite
         if: inputs.suite == 'gdn-prefix' || inputs.suite == 'gdn-block' || inputs.suite == 'gdn-active' || inputs.suite == 'gdn-direct' || inputs.suite == 'gdn-inplace' || inputs.suite == 'gdn-inplace-timing' || inputs.suite == 'gdn-checkpoint-cost' || inputs.suite == 'gdn-checkpoint-dma' || inputs.suite == 'gdn-multitoken' || inputs.suite == 'gdn-value-split' || inputs.suite == 'gdn-value-split-timing' || inputs.suite == 'gdn-value-split-prefetch' || inputs.suite == 'gdn-value-split-norm-batch' || inputs.suite == 'gdn-norm-batch-layer' || inputs.suite == 'gdn-multitoken-norm' || inputs.suite == 'gdn-multitoken-conv' || inputs.suite == 'device-readback'
         shell: bash

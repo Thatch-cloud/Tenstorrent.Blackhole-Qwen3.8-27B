@@ -12,6 +12,14 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_tree_attention_requires_parallel_and_compact_native_scratch(self):
+        for flags, message in ((['--attention-tree'], 'requires parallel'),
+                (['--attention-tree', '--attention-parallel'], 'process-fixed compact')):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', *flags]):
+                with self.assertRaisesRegex(ValueError, message):
+                    full_prefix.main()
+
     def test_attention_engine_requires_matched_request_mode(self):
         with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                 'sys.argv', ['full-prefix.py', '--attention-engine']):
