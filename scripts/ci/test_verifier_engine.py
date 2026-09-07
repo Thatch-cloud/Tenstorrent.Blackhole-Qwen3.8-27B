@@ -12,6 +12,33 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_replay_options_reach_all_warm_and_retained_buckets(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.model, engine.pages, engine.helpers = object(), object(), []
+        engine.position, engine.norm_batch, engine.attention_replay = 4078, True, True
+        for width in (4, 8):
+            for shared in (False, True):
+                engine.replay_group_rows, engine.attention_mask_once = width, shared
+                for rows in (1, 2, 4, 8, 16, 32):
+                    for retain in (False, True):
+                        with self.subTest(width=width, shared=shared, rows=rows, retain=retain):
+                            with patch('verifier_engine.ModelBatch') as factory:
+                                engine.fixture(rows, [], retain=retain, position=4096)
+                            self.assertEqual(factory.call_args.kwargs['replay_group_rows'], width)
+                            self.assertIs(factory.call_args.kwargs['attention_mask_once'], shared)
+                            self.assertIs(factory.call_args.kwargs['attention_replay'], True)
+                            self.assertEqual(factory.call_args.args[2], 4096)
+
+    def test_invalid_replay_options_fail_before_request_access(self):
+        invalid = [dict(replay_group_rows=value) for value in (True, 4.0, 3, 16)]
+        invalid += [dict(attention_mask_once=value) for value in (True, 1, 'true')]
+        invalid += [dict(replay_group_rows=8),
+                    dict(norm_batch=True, attention_replay=True, replay_group_rows=8)]
+        with patch.dict(sys.modules, ttnn=SimpleNamespace()), patch.dict('os.environ', {}, clear=True):
+            for options in invalid:
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    VerifierEngine(None, None, None, None, **options)
+
     def test_future_family_is_forwarded_to_the_model_fixture(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []

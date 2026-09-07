@@ -1,5 +1,6 @@
 """Single-request captured verifier buckets; prepare only after that request's prefill."""
 
+import os
 import time
 
 from attention_batch import capture_operation
@@ -19,15 +20,24 @@ def capture_widths(position, capacity, verifier_rows, remaining):
 
 
 class VerifierEngine:
-    def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False):
+    def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
+                 attention_mask_once=False, replay_group_rows=4):
         import ttnn
 
         if type(norm_batch) is not bool:
             raise ValueError('Explicit boolean norm-batch selection required')
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
             raise ValueError('Explicit replay attention requires norm batching')
+        if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
+            raise ValueError('Shared attention masks require explicit replay attention')
+        if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
+            raise ValueError('Replay group width must be integer four or eight')
+        if replay_group_rows == 8 and (not attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
+            raise ValueError('Eight-row replay requires explicit replay attention and native compact scratch')
         self.norm_batch = norm_batch
         self.attention_replay = attention_replay
+        self.attention_mask_once = attention_mask_once
+        self.replay_group_rows = replay_group_rows
         if session.phase != 'idle' or session.pending is not None or session.finished or len(helpers) != 48:
             raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
         if len(pages.shape) != 2 or pages.shape[0] != 1:
@@ -106,7 +116,9 @@ class VerifierEngine:
             0 if rows == 1 else rows, serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
-            norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False))
+            norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False),
+            attention_mask_once=getattr(self, 'attention_mask_once', False),
+            replay_group_rows=getattr(self, 'replay_group_rows', 4))
 
     def proposal_rows(self):
         remaining = self.session.max_new_tokens - len(self.session.emitted)

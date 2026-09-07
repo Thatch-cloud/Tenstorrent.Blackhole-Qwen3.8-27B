@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- `VerifierEngine` now accepts opt-in eight-row replay and shared-mask options
+  and forwards them to every warm and retained bucket, including native narrow
+  fallbacks. Invalid options and missing compact-scratch selection fail before
+  request preparation. Defaults remain four-row/per-layer mask refresh; the
+  actual-request CLI has not adopted these options. Host tests cover all six
+  bucket widths, both capture ownership modes and both mask settings. Hardware
+  eligibility still requires the component and full-model replay gates below.
 - Prepared `full-attention-tree-replay`, not yet dispatched: disposable native
   compact-scratch build, device health, then the full-model changed-metadata
   replay/rollback matrix with eight-row groups and one shared mask refresh per
