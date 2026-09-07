@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from draft_attention import draft_attention_mask, draft_sdpa
+from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention
 from feature_projection import require_projection_environment
 
 
@@ -14,12 +14,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--uniform-query', action='store_true')
+    parser.add_argument('--streaming', action='store_true')
+    parser.add_argument('--composed', action='store_true')
     options = parser.parse_args()
+    if options.composed and options.streaming:
+        parser.error('Composed and native streaming are separate controls')
     require_projection_environment(os.environ, False)
     import torch
     import ttnn
 
-    report = dict(passed=False, scope=__doc__, checks=[], uniform_query=options.uniform_query, tolerance=dict(rtol=.01, atol=.01),
+    report = dict(passed=False, scope=__doc__, checks=[], uniform_query=options.uniform_query,
+        streaming=options.streaming, tolerance=dict(rtol=.01, atol=.01),
+        composed=options.composed,
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('draft-attention-probe.py', 'draft_attention.py')})
     mesh = None
@@ -51,7 +57,7 @@ def main():
                     layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
                 tensors.append(device_mask)
-                output = draft_sdpa(ttnn, *tensors)
+                output = composed_draft_attention(ttnn, mesh, *tensors) if options.composed else draft_sdpa(ttnn, *tensors, streaming=options.streaming)
                 ttnn.synchronize_device(mesh)
                 shards = ttnn.get_device_tensors(output)
                 if len(shards) != 2:

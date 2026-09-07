@@ -5,6 +5,18 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Composed device draft attention `20260907T111306Z-301` PASSED all six
+  rank/context checks (context0/31/2048, eight proposal rows, 16Q/4KV local heads).
+  It explicitly expands GQA heads, performs QK matmul, FP32 scale/mask/softmax
+  and PV matmul, with no intermediate host tensor handoff. The original .01
+  relative/.01 absolute bound is unchanged; worst absolute error .0067646503.
+  Poisoned padded keys and the excluded oldest sliding key do not contaminate
+  results; all cases reject a causal-target-mask negative control.
+  This is an unfused synthetic correctness reference, not learned attention,
+  a fast-path adoption or a throughput measurement. Native FP32 SDPA numerical
+  failure is retained; native streaming `20260907T111126Z-296` also terminates
+  with the unsupported pack-zero instruction. No simulator guard was bypassed.
+  Host508 tests pass, including native noncausal dispatch and composed ownership.
 - Hardware `34114708492` (`212a8fb`) PASSED learned layer-zero convolution
   plumbing: attention and MLP prepare/finish both exact on both ranks, input
   normalization within one BF16 ULP. No intermediate host inspections were used.

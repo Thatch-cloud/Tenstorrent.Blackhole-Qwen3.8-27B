@@ -1018,6 +1018,10 @@ both phases exact for both branches/ranks, RMSNorm within one BF16 ULP.
 Draft attention is the next unresolved gate: the explicit noncausal-block,
 sliding-context GQA probe fails its random-query numerical bound; uniform-query
 isolation reaches an unsupported TTSim pack-zero instruction. Neither is an
-attention pass. The host test suite now passes 506 tests.
+native attention pass. An unfused device attention reference now passes the
+same random-query gate on context0/31/2048 (`20260907T111306Z-301`), including
+masked-key poison and causal-mask negative controls. This does not resolve the
+native SDPA numerical/unsupported-instruction issues or certify learned attention.
+The host test suite now passes 508 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.
