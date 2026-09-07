@@ -1,11 +1,28 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 
-from draft_mlp import split_mlp_weights, swiglu_reference
+from draft_mlp import split_mlp_weights, swiglu_reference, swiglu_device
 
 
 class DraftMlpTests(unittest.TestCase):
+    def test_device_sequence_preserves_reference_rounding(self):
+        operations = SimpleNamespace(bfloat16=torch.bfloat16, float32=torch.float32, DRAM_MEMORY_CONFIG=object(),
+            typecast=lambda value, dtype: value.to(dtype),
+            silu=lambda value, **kwargs: torch.nn.functional.silu(value),
+            multiply=lambda left, right, **kwargs: left * right)
+        gate = torch.tensor([[-3.123, .123, 2.456]])
+        up = torch.tensor([[.156, 3.141, -2.718]])
+        retained = []
+
+        def retain(value):
+            retained.append(value)
+            return value
+
+        self.assertTrue(torch.equal(swiglu_device(operations, gate, up, retain), swiglu_reference(gate, up)))
+        self.assertEqual(len(retained), 9)
+
     def test_hidden_and_intermediate_axes_are_not_interchanged(self):
         gate = torch.arange(32).reshape(8, 4).bfloat16()
         up = (gate + 2).bfloat16()

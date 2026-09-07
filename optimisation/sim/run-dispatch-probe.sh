@@ -27,7 +27,7 @@ fi
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 PROBE=${QWEN_SIM_DISPATCH_PROBE:-dispatch-probe}
-[[ "$PROBE" = draft-dot-probe || "$PROBE" = draft-row-sum-probe || "$PROBE" = learned-attention-probe || "$PROBE" = draft-attention-probe || "$PROBE" = learned-convolution-probe || "$PROBE" = draft-convolution-probe || "$PROBE" = dispatch-probe || "$PROBE" = feature-trace-probe || "$PROBE" = prefill-feature-probe || "$PROBE" = feature-projection-probe || "$PROBE" = feature-norm-probe ]]
+[[ "$PROBE" = learned-mlp-probe || "$PROBE" = draft-dot-probe || "$PROBE" = draft-row-sum-probe || "$PROBE" = learned-attention-probe || "$PROBE" = draft-attention-probe || "$PROBE" = learned-convolution-probe || "$PROBE" = draft-convolution-probe || "$PROBE" = dispatch-probe || "$PROBE" = feature-trace-probe || "$PROBE" = prefill-feature-probe || "$PROBE" = feature-projection-probe || "$PROBE" = feature-norm-probe ]]
 REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$REPORT"
 cd "$SIM_ROOT"

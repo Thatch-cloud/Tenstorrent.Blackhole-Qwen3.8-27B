@@ -1330,3 +1330,14 @@ are available in `hardware-evidence.local/dflash2-mlp-dedf8df-retry1` for the
 device MLP gate. All534 host tests pass. The long-context attention retry has
 completed chip0's full K projection/normalization/RoPE checks and is advancing
 through full V reference validation; final status remains pending, not passed.
+
+The simulator-only `learned-mlp-probe` is now implemented for eight synthetic
+input rows padded to32. It feeds learned TP2 gate/up projections through explicit
+BF16 rounding with FP32 SiLU/multiplication, then learned row-parallel down
+projection and FP32 fabric gather/add. Planned gates cover every valid gate/up
+and down projection value against the existing ISA-aware reference, activation
+within two BF16 ULPs, and exact all-row fabric sums. Progress is checkpointed.
+The operation-sequence CPU test and existing suite pass535 tests; the device gate
+has not yet run because the long-context attention simulator remains active.
+No second simulator process is started concurrently, and no MLP hardware pass,
+fused-kernel speedup or complete draft-layer integration is claimed.
