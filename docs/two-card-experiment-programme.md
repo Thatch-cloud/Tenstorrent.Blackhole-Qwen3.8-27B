@@ -1514,3 +1514,10 @@ whole-process deadline accommodates the previously measured CPU reference cost;
 no check is sampled away or tolerance relaxed. This run has no final result yet.
 The remaining-layer download continues independently; neither active process is
 restarted. Integrated long-context hardware remains blocked until this gate passes.
+
+Remaining layer1 finished downloading. All15 tensors (665948672 bytes) were
+independently rehashed on Windows, pinned in the loader, then rehashed and
+verified as finite BF16 tensors in WSL. The loader rejects layers without
+audited hash pins and rejects corrupted cached content; layers2-4 continue
+downloading and are not accepted yet. All547 host tests pass. This is checkpoint
+readiness only, not a layer1 device or complete five-layer numerical pass.
