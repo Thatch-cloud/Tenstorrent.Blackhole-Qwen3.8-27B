@@ -45,10 +45,13 @@ def main():
     parser.add_argument('--selector-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.selector_fixture and (options.hardware or not options.mlp_fixture or not options.convolution_fixture):
-        parser.error('Selector projection requires simulator and complete layer fixtures')
-    if options.stack_fixtures and (options.hardware or not options.mlp_fixture or not options.convolution_fixture):
-        parser.error('Multi-layer stack requires simulator and complete layer fixtures')
+    if options.selector_fixture and (not options.mlp_fixture or not options.convolution_fixture):
+        parser.error('Selector projection requires complete layer fixtures')
+    if options.stack_fixtures and (not options.mlp_fixture or not options.convolution_fixture):
+        parser.error('Multi-layer stack requires complete layer fixtures')
+    if options.hardware and (options.stack_fixtures or options.selector_fixture) and not (
+            options.stack_fixtures and options.stack_layers == 5 and options.selector_fixture):
+        parser.error('Hardware stack requires all five simulator-validated layers and selector projection')
     if options.mlp_fixture and not options.convolution_fixture:
         parser.error('Complete draft layer requires convolution fixture')
     if options.hardware and options.convolution_fixture and not (

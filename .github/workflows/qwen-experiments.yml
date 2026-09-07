@@ -20,6 +20,10 @@ on:
         description: Opt-in prefix-copy experiment, full-attention-tree suite only
         type: boolean
         default: false
+      learned_stack:
+        description: Opt-in five-layer learned gate, learned-attention suite only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +36,7 @@ jobs:
   inventory:
     env:
       QWEN_PREFIX_ZERO_REUSE: ${{ inputs.prefix_zero_reuse && '1' || '0' }}
+      QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 120
     steps:
@@ -72,7 +77,7 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
-        run: timeout -k 30 4800 bash scripts/ci/run-baseline.sh
+        run: timeout -k 30 ${{ inputs.learned_stack && '7000' || '4800' }} bash scripts/ci/run-baseline.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'
         shell: bash

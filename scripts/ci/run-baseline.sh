@@ -8,6 +8,7 @@ ratio=${QWEN_INTERLEAVE_RATIO:-0}
 [[ "$ratio" = 0 || "$ratio" = 1 || "$ratio" = 2 || "$ratio" = 4 ]]
 output=experiment-results
 [[ "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 || ( "${QWEN_PREFIX_ZERO_REUSE:-0}" = 1 && "$mode" = full-attention-tree ) ]]
+[[ "${QWEN_LEARNED_STACK:-0}" = 0 || ( "${QWEN_LEARNED_STACK:-0}" = 1 && "$mode" = learned-attention ) ]]
 if [ "$mode" = interleave ]; then output="$output/interleave-$ratio"; fi
 mkdir -p "$output"
 projection_fixture="$output/draft-projection-fixture"
@@ -33,6 +34,14 @@ if [ "$mode" = learned-convolution ]; then
     projection_fixture=/home/thatch/.cache/qwen-experiments/dflash2-convolution-dedf8df68adfb1afeaf7b7480c0a0243108177b4
     timeout -k 10 600 python3 scripts/ci/draft_convolution_fixture.py --reuse-verified --output "$projection_fixture"
     cp "$projection_fixture/manifest.json" "$output/draft-convolution-manifest.json"
+fi
+if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
+    stack_fixture=/home/thatch/.cache/qwen-experiments/dflash2-stack-dedf8df68adfb1afeaf7b7480c0a0243108177b4
+    selector_fixture=/home/thatch/.cache/qwen-experiments/dflash2-selector-dedf8df68adfb1afeaf7b7480c0a0243108177b4
+    timeout -k 10 2400 python3 scripts/ci/draft_remaining_layers_fixture.py --reuse-verified --output "$stack_fixture"
+    timeout -k 10 900 python3 scripts/ci/draft_selector_fixture.py --reuse-verified --output "$selector_fixture"
+    for layer in 1 2 3 4; do cp "$stack_fixture/layer-$layer/manifest.json" "$output/draft-layer-$layer-manifest.json"; done
+    cp "$selector_fixture/manifest.json" "$output/draft-selector-manifest.json"
 fi
 if [ "$mode" = feature-projection ]; then
     timeout -k 10 120 python3 scripts/ci/draft_projection_fixture.py --output "$output/draft-projection-fixture"
@@ -83,11 +92,16 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \
     -e "QWEN_PREFIX_ZERO_REUSE=${QWEN_PREFIX_ZERO_REUSE:-0}" \
+    -e "QWEN_LEARNED_STACK=${QWEN_LEARNED_STACK:-0}" \
     -e "QWEN_BOUNDARY_DIAGNOSTICS=${QWEN_BOUNDARY_DIAGNOSTICS:-0}" \
     -e "QWEN_INTERLEAVE_MIXED=${QWEN_INTERLEAVE_MIXED:-0}" \
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
+    docker cp "$stack_fixture" "$test_id:/experiment-stack-fixture"
+    docker cp "$selector_fixture" "$test_id:/experiment-selector-fixture"
+fi
 if [ "$mode" = learned-attention ]; then
     docker cp "$mlp_fixture" "$test_id:/experiment-mlp-fixture"
 fi

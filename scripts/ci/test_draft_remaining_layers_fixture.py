@@ -6,11 +6,30 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_remaining_layers_fixture import specifications, fetch_layers, load_layer, TENSOR_SHA256
+from draft_remaining_layers_fixture import specifications, fetch_layers, ensure_layers, load_layer, TENSOR_SHA256
 from draft_convolution_fixture import MODEL, REVISION, HEADER_SHA256
 
 
 class RemainingLayerFixtureTests(unittest.TestCase):
+    def test_cached_layer_is_rehashed_and_corruption_never_refetched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'layer-1').mkdir()
+            (root / 'layer-1/manifest.json').write_text('{}')
+            with patch('draft_remaining_layers_fixture.fetch_subset') as fetch, \
+                    patch('draft_remaining_layers_fixture.verified_bytes', side_effect=ValueError('corrupt')) as verify:
+                with self.assertRaisesRegex(ValueError, 'corrupt'):
+                    ensure_layers(root, (1,))
+                fetch.assert_not_called()
+                self.assertEqual(verify.call_args.kwargs['hashes'], TENSOR_SHA256['1'])
+
+    def test_unpinned_staging_fails_before_network(self):
+        with patch('draft_remaining_layers_fixture.TENSOR_SHA256', {}), \
+                patch('draft_remaining_layers_fixture.fetch_subset') as fetch:
+            with self.assertRaisesRegex(ValueError, 'audited hashes'):
+                ensure_layers(Path('missing'), (1,))
+            fetch.assert_not_called()
+
     def test_all_remaining_layers_have_complete_sha256_pins(self):
         self.assertEqual(set(TENSOR_SHA256), {'1', '2', '3', '4'})
         for layer in range(1, 5):

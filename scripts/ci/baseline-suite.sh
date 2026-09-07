@@ -3,6 +3,7 @@ set -euo pipefail
 mkdir -p /experiment/results
 sampling_args=()
 prefix_copy_args=()
+[[ "${QWEN_LEARNED_STACK:-0}" = 0 || ( "${QWEN_LEARNED_STACK:-0}" = 1 && "${QWEN_RUN_MODE:-baseline}" = learned-attention ) ]]
 if [ "${QWEN_PREFIX_ZERO_REUSE:-0}" != 0 ]; then
     [[ "$QWEN_PREFIX_ZERO_REUSE" = 1 && "${QWEN_RUN_MODE:-baseline}" = full-attention-tree ]]
     prefix_copy_args=(--prefix-zero-reuse)
@@ -26,6 +27,14 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
+        OMP_NUM_THREADS=1 timeout -k 30 3600 python3 /experiment-scripts/ci/learned-attention-probe.py \
+            --hardware --fp32-rope --explicit-softmax --fused-row-sum --fused-dots --cache-dot-tiles \
+            --fixture /experiment-projection-fixture --convolution-fixture /experiment-convolution-fixture \
+            --mlp-fixture /experiment-mlp-fixture --stack-fixtures /experiment-stack-fixture --stack-layers 5 \
+            --selector-fixture /experiment-selector-fixture --output /experiment/results/learned-five-layers.json
+        exit 0
+    fi
     OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/learned-attention-probe.py \
         --hardware --fp32-rope --explicit-softmax --pairwise-softmax --pairwise-dots \
         --fixture /experiment-projection-fixture --output /experiment/results/learned-attention.json

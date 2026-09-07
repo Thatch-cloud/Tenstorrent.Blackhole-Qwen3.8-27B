@@ -1881,3 +1881,12 @@ IDs, and the merged seven proposal rows match full-vocabulary global IDs and
 scores exactly. This tests candidate extraction from synthetic logits, not the
 borrowed LM-head multiplication. Multi-row fused projection is the next simulator
 gate; the existing fast-dispatch wrapper now explicitly allows both probe names.
+
+Five-layer hardware promotion is opt-in via learned_stack=true with the
+learned-attention CI suite. It stages all four remaining pinned layer fixtures
+and selector tensors into the isolated container, rehashing cached files and
+failing rather than replacing corrupt cache entries. A health check precedes
+the exact simulator-validated short-context five-layer/selector-projection
+configuration. This branch does not rerun the unrelated long one-layer sweep;
+the existing suite remains unchanged when the option is false. No request or
+throughput certification follows merely from this mathematical hardware gate.

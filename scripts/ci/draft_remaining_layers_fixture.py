@@ -112,9 +112,27 @@ def fetch_layers(output, layers):
         for layer, selected in selections.items()}
 
 
+def ensure_layers(output, layers):
+    layers = tuple(layers)
+    if not layers or len(set(layers)) != len(layers):
+        raise ValueError('A nonempty unique list of layer indices is required')
+    selections = {layer: specifications(layer) for layer in layers}
+    if any(set(TENSOR_SHA256.get(str(layer), {})) != set(selected) for layer, selected in selections.items()):
+        raise ValueError('Every staged layer must have complete audited hashes')
+    manifests = {}
+    for layer, selected in selections.items():
+        directory = output / f'layer-{layer}'
+        if not (directory / 'manifest.json').exists():
+            fetch_subset(directory, specifications=selected, scope=__doc__)
+        manifests[layer] = verified_bytes(directory, specifications=selected, hashes=TENSOR_SHA256[str(layer)])[0]
+    return manifests
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--layers', type=int, nargs='+', choices=(1, 2, 3, 4), default=(1, 2, 3, 4))
+    parser.add_argument('--reuse-verified', action='store_true')
     options = parser.parse_args()
-    print(json.dumps(fetch_layers(options.output, options.layers), indent=2))
+    operation = ensure_layers if options.reuse_verified else fetch_layers
+    print(json.dumps(operation(options.output, options.layers), indent=2))

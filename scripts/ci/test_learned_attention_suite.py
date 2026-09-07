@@ -15,7 +15,7 @@ class LearnedAttentionSuiteTests(unittest.TestCase):
             '--mlp-fixture', '/not-a-fixture', '--selector-fixture', '/not-a-fixture',
             '--output', '/not-an-output'], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn('Selector projection requires simulator and complete layer fixtures', result.stderr)
+        self.assertIn('Hardware stack requires all five simulator-validated layers and selector projection', result.stderr)
 
     def test_multi_layer_stack_rejects_hardware_before_fixture_load(self):
         environment = {name: value for name, value in os.environ.items()
@@ -26,7 +26,7 @@ class LearnedAttentionSuiteTests(unittest.TestCase):
             '--mlp-fixture', '/not-a-fixture', '--stack-fixtures', '/not-a-fixture',
             '--output', '/not-an-output'], env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn('Multi-layer stack requires simulator and complete layer fixtures', result.stderr)
+        self.assertIn('Hardware stack requires all five simulator-validated layers and selector projection', result.stderr)
 
     def test_complete_layer_requires_convolution_fixture(self):
         environment = {name: value for name, value in os.environ.items()
@@ -49,7 +49,7 @@ class LearnedAttentionSuiteTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('Integrated attention hardware requires the validated short cached fused path', result.stderr)
 
-    def run_suite(self, fail_health=False, mode='learned-attention'):
+    def run_suite(self, fail_health=False, mode='learned-attention', stack=False):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
         start = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = ' + mode + ' ]; then')
         end = source.index('\nfi\n', start) + len('\nfi\n')
@@ -60,8 +60,9 @@ timeout() {
     if [[ "$*" == *device-readback.py && "$FAIL_HEALTH" == 1 ]]; then return 17; fi
 }
 '''
-        return subprocess.run(['bash', '-c', stub + source[start:end]],
-            env=dict(os.environ, QWEN_RUN_MODE=mode, FAIL_HEALTH=str(int(fail_health))),
+        guard = next(line for line in source.splitlines() if line.startswith('[[ "${QWEN_LEARNED_STACK'))
+        return subprocess.run(['bash', '-c', stub + guard + '\n' + source[start:end]],
+            env=dict(os.environ, QWEN_RUN_MODE=mode, FAIL_HEALTH=str(int(fail_health)), QWEN_LEARNED_STACK=str(int(stack))),
             capture_output=True, text=True)
 
     def test_health_precedes_precise_inspection_free_probe(self):
@@ -111,6 +112,20 @@ timeout() {
         result = self.run_suite(True)
         self.assertEqual(result.returncode, 17)
         self.assertNotIn('learned-attention-probe.py', result.stdout)
+
+    def test_five_layer_opt_in_is_separate_and_health_gated(self):
+        result = self.run_suite(stack=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn('device-readback.py', lines[0])
+        for argument in ('--stack-layers 5', '--selector-fixture /experiment-selector-fixture',
+                '--stack-fixtures /experiment-stack-fixture', '--cache-dot-tiles', 'learned-five-layers.json'):
+            self.assertIn(argument, lines[1])
+        failed = self.run_suite(fail_health=True, stack=True)
+        self.assertEqual(failed.returncode, 17)
+        self.assertNotIn('learned-attention-probe.py', failed.stdout)
+        self.assertNotEqual(self.run_suite(mode='learned-mlp', stack=True).returncode, 0)
 
     def test_mlp_health_precedes_bounded_learned_probe(self):
         result = self.run_suite(mode='learned-mlp')
