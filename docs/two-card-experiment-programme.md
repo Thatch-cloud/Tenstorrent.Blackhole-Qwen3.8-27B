@@ -1297,3 +1297,18 @@ roughly260 such chunks, making the old whole-process deadline inadequate once
 device simulation and other checks are included. The probe now writes explicit
 progress checkpoints with `passed=false` until all gates finish. Retry with a
 3600-second whole-process deadline, without dropping rows or changing tolerances.
+
+### Draft MLP preparation (2026-09-08)
+
+While retry `20260907T140423Z-302` runs, a bounded-range fetcher now selects only
+the pinned layer-zero gate/up/down BF16 matrices from the already audited header.
+Each matrix is178257920 bytes, total534773760 bytes. The download is in progress;
+content hashes and a verified tensor loader are not yet established for this new
+subset. No remote checkpoint code is executed.
+
+CPU helper tests establish gate/up output-axis splitting and down input-axis
+splitting for TP2, plus explicit BF16 SwiGLU rounding. These are packing/reference
+tests, not a device MLP correctness or performance result. Host tests:530 passed.
+The next independent step is to finish hashing the MLP fixture and build its
+device projection/activation/reduction gate, without interrupting the active
+full-row long-context attention validation.
