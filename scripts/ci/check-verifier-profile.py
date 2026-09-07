@@ -5,6 +5,22 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from verifier_trace_profile import PROFILE_BASE_FLAGS, PROFILE_BEST_FLAGS
+
+
+def validate_configuration(correctness, generation):
+    expected = correctness.get('profile_configuration')
+    actual = generation.get('profile_configuration')
+    if expected is None and actual is None:
+        return
+    flags = (*PROFILE_BASE_FLAGS, *PROFILE_BEST_FLAGS)
+    if (not isinstance(expected, dict) or not isinstance(actual, dict) or set(expected) != set(flags)
+            or any(type(value) is not bool for value in expected.values())
+            or any(type(value) is not bool for value in actual.values())
+            or not all(expected[name] for name in PROFILE_BASE_FLAGS)
+            or len({expected[name] for name in PROFILE_BEST_FLAGS}) != 1
+            or actual != expected):
+        raise AssertionError('Correctness and attribution configurations must match exactly')
 
 
 def validate_correctness(report):
@@ -91,15 +107,19 @@ def read_profile(root, generation_path, contexts):
 
 
 def main(root, generation_path=None):
-    validate_correctness(json.loads((root / 'correctness.json').read_text()))
+    correctness = json.loads((root / 'correctness.json').read_text())
+    validate_correctness(correctness)
     if generation_path is not None:
+        validate_configuration(correctness, json.loads(generation_path.read_text()))
         result = read_profile(root, generation_path, (4095, 16383))
     else:
         result = dict(passed=True, scope=__doc__, processes=[])
         for context in (4095, 16383):
             directory = root / f'context-{context}'
+            validate_configuration(correctness, json.loads((directory / 'generation.json').read_text()))
             profile = read_profile(directory, directory / 'generation.json', (context,))
             result['processes'].append(dict(context=context, attribution=profile))
+    result['profile_configuration'] = correctness.get('profile_configuration')
     (root / 'attribution.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 

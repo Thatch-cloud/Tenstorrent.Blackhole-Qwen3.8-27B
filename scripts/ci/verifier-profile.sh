@@ -18,8 +18,11 @@ preserve_metadata() {
 trap preserve_metadata EXIT
 arguments=(--max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input
     --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv
-    --packed-checkpoints --ordered-cache)
+    --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma
+    --attention-parallel --attention-tree --prefix-zero-reuse)
 unset TTNN_OP_PROFILER TT_METAL_DEVICE_PROFILER TT_METAL_PROFILER_TRACE_TRACKING
+timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
+export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
 timeout -k 30 2700 python3 /experiment-scripts/ci/full-prefix.py --correctness-only "${arguments[@]}" \
     2>&1 | tee "$output/correctness-console.log"
 cp /experiment/results/full-gdn-device-loop.json "$output/correctness.json"

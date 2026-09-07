@@ -12,6 +12,7 @@ import time
 
 from gdn_snapshot import ActiveSnapshot
 from attention_batch import capture_operation
+from verifier_trace_profile import PROFILE_BASE_FLAGS, PROFILE_BEST_FLAGS
 
 
 def active_serial_logits(logits, vocab_size):
@@ -102,7 +103,7 @@ def main():
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
     if options.prefix_zero_reuse and (not options.batch or not options.coding_cost or not options.packed_checkpoints
-            or any((options.device_profile, options.request_pilot, options.replay_inputs, options.deferred_commit,
+            or any((options.request_pilot, options.replay_inputs, options.deferred_commit,
                 options.attribution, options.device_selection, options.target_features, options.target_feature_batch))):
         raise ValueError('Prefix zero reuse requires a standalone static packed-checkpoint coding-cost experiment')
     if options.profile_context is not None and not options.device_profile:
@@ -112,9 +113,9 @@ def main():
             options.device_selection, options.request_pilot))):
         raise ValueError('Correctness-only requires a standalone static coding-cost matrix')
     if options.device_profile:
-        required = ('batch', 'coding_cost', 'serial_sdpa', 'compact_gdn', 'reuse_gdn_input',
-                    'skip_row_clones', 'hoist_row_layout', 'device_loop_gdn', 'compact_prologue',
-                    'batch_conv', 'packed_checkpoints', 'ordered_cache')
+        required = PROFILE_BASE_FLAGS
+        if any(getattr(options, name) for name in PROFILE_BEST_FLAGS):
+            required = (*required, *PROFILE_BEST_FLAGS)
         allowed = (*required, 'device_profile', 'profile_context', 'max_rows', 'replay_group_rows')
         if not all(getattr(options, name) for name in required) or any(
                 value for name, value in vars(options).items() if name not in allowed):
@@ -230,6 +231,7 @@ def main():
     report["batched_candidate"] = options.batch
     report['instrumented_timing'] = options.device_profile
     report['correctness_only'] = options.correctness_only
+    report['profile_configuration'] = {name: getattr(options, name) for name in (*PROFILE_BASE_FLAGS, *PROFILE_BEST_FLAGS)}
     report['prefix_zero_reuse'] = options.prefix_zero_reuse
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention

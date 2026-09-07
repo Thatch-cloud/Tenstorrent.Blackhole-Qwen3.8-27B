@@ -13,6 +13,20 @@ spec.loader.exec_module(checker)
 
 
 class VerifierProfileCheckTests(unittest.TestCase):
+    def test_configuration_requires_exact_boolean_match(self):
+        flags = (*checker.PROFILE_BASE_FLAGS, *checker.PROFILE_BEST_FLAGS)
+        configuration = dict.fromkeys(flags, True)
+        report = dict(profile_configuration=configuration)
+        checker.validate_configuration(report, report)
+        checker.validate_configuration({}, {})
+        for changed in (None, {}, dict(configuration, norm_batch=False), dict(configuration, attention_tree=1)):
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(AssertionError, 'configurations must match'):
+                    checker.validate_configuration(report, dict(profile_configuration=changed))
+        partial = dict(profile_configuration=dict(configuration, norm_batch=False))
+        with self.assertRaisesRegex(AssertionError, 'configurations must match'):
+            checker.validate_configuration(partial, partial)
+
     def test_isolated_processes_allow_reused_trace_ids_but_require_both_contexts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

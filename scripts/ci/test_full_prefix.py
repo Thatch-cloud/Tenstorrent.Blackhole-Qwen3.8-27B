@@ -16,7 +16,8 @@ class FullPrefixTests(unittest.TestCase):
         for flags in ([], ['--batch', '--coding-cost'], ['--batch', '--coding-cost', '--packed-checkpoints', '--device-profile']):
             with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                     'sys.argv', ['full-prefix.py', '--prefix-zero-reuse', *flags]):
-                with self.assertRaisesRegex(ValueError, 'standalone static packed-checkpoint'):
+                with self.assertRaisesRegex(ValueError, 'matched static' if '--device-profile' in flags
+                        else 'standalone static packed-checkpoint'):
                     full_prefix.main()
 
     def test_profile_context_cannot_narrow_correctness_matrix(self):
@@ -49,6 +50,18 @@ class FullPrefixTests(unittest.TestCase):
                 'sys.argv', ['full-prefix.py', '--device-profile', *flags]):
             with self.assertRaisesRegex(ValueError, 'trace tracking profilers'):
                 full_prefix.main()
+
+    def test_best_profile_requires_complete_validated_flag_set(self):
+        base = ['--' + name.replace('_', '-') for name in full_prefix.PROFILE_BASE_FLAGS]
+        best = ['--' + name.replace('_', '-') for name in full_prefix.PROFILE_BEST_FLAGS]
+        for missing in (None, *best):
+            flags = base + [flag for flag in best if flag != missing]
+            message = 'trace tracking profilers' if missing is None else 'matched static'
+            with self.subTest(missing=missing), patch.dict('os.environ', {
+                    'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--device-profile', *flags]):
+                with self.assertRaisesRegex(ValueError, message):
+                    full_prefix.main()
 
     def test_prefill_features_require_standalone_eager_feature_gate(self):
         for flags, message in (([], 'standalone eager target feature'),

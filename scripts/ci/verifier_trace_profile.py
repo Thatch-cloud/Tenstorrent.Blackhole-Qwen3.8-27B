@@ -1,5 +1,11 @@
 """Bounded attribution replays of existing T8 traces, not throughput measurements."""
 
+PROFILE_BASE_FLAGS = ('batch', 'coding_cost', 'serial_sdpa', 'compact_gdn', 'reuse_gdn_input',
+    'skip_row_clones', 'hoist_row_layout', 'device_loop_gdn', 'compact_prologue',
+    'batch_conv', 'packed_checkpoints', 'ordered_cache')
+PROFILE_BEST_FLAGS = ('norm_batch', 'grouped_attention', 'attention_dma', 'attention_parallel',
+    'attention_tree', 'prefix_zero_reuse')
+
 
 def profile_replays(*, rows, length, traces, restore, synchronize, execute, validate, dump, signpost):
     if rows != 8 or length not in (4095, 16383):

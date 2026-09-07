@@ -2109,3 +2109,17 @@ learned-stack hardware testing. That suite retains eager timing and adds the sam
 captured MLP gate with one warmup and five blocking trace timings. Input copies,
 weight uploads, capture and output validation remain outside timed regions.
 This is an isolated branch cost, not paired full-drafter or committed throughput.
+
+### Matched best-verifier attribution
+
+The earlier profiler34149690873 omitted batched normalization and the grouped
+attention optimizations present in the62--64ms best static T8 verifier. Its summed
+kernel durations therefore cannot identify the remaining critical path of that
+configuration. The verifier-profile suite now builds the already validated
+disposable compact native SDPA scratch and uses all six best flags together:
+norm-batch, grouped-attention, attention-dma, attention-parallel, attention-tree,
+prefix-zero-reuse. No new kernel arithmetic is introduced. The separate broad
+correctness process and both instrumented context processes use identical flags;
+the artifact checker rejects mismatched or partial configuration metadata.
+Three exact replays per arm/chip/context remain required. Profile sums remain
+attribution, not latency or committed throughput. Hardware execution is pending.
