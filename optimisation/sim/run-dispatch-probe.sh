@@ -18,11 +18,13 @@ test -f "$TT_METAL_MOCK_CLUSTER_DESC_PATH"
 cp "$TT_METAL_HOME/tt_metal/soc_descriptors/blackhole_140_arch.yaml" "$SIM_ROOT/simulator/soc_descriptor.yaml"
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
-REPORT="$SIM_ROOT/results/$RUN_ID-dispatch-probe.json"
+PROBE=${QWEN_SIM_DISPATCH_PROBE:-dispatch-probe}
+[[ "$PROBE" = dispatch-probe || "$PROBE" = feature-trace-probe ]]
+REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$REPORT"
 cd "$SIM_ROOT"
 status=0
-timeout -k 10 "${KERNEL_TIMEOUT:-300}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/../../scripts/ci/dispatch-probe.py" \
-    --output "$REPORT" "$@" 2>&1 | tee "$SIM_ROOT/results/$RUN_ID-dispatch-probe.log" || status=$?
-printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-dispatch-probe.exit-status"
+timeout -k 10 "${KERNEL_TIMEOUT:-300}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/../../scripts/ci/$PROBE.py" \
+    --output "$REPORT" "$@" 2>&1 | tee "$SIM_ROOT/results/$RUN_ID-$PROBE.log" || status=$?
+printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-$PROBE.exit-status"
 exit "$status"

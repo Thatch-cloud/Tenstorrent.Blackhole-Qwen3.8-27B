@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added opt-in `target-feature-replay` to the existing two-block retained replay
+  oracle. It captures owned feature copies inside the verifier trace, compares
+  initial and changed-input features against serial B1 rows, asserts allocation
+  stability and requires shifted fixtures to distinguish stale snapshots.
+  The trace is released before feature buffers. Existing logits/state/KV,
+  rollback and corrected-continuation checks remain enabled. Fast-dispatch
+  TTsim20260907T061712Z-318 passes30 exact synthetic feature comparisons across
+  three changed input patterns on the same allocations. This uses WORKER
+  dispatch with fabric disabled, not an Ethernet-dispatch pass. All448 host
+  tests and shell syntax checks pass; real-model traced freshness is not yet
+  established, and no accepted-prefix feature publication is implemented.
 - Real-target batched feature34089347478 (`4e3b809`) passed. Artifact inspection
   verifies all nine contexts63/64/65 byT8/T16/T32 fixtures,90 exact feature
   matrices covering1680 tap/chip/token rows, and unchanged full logits, GDN,
