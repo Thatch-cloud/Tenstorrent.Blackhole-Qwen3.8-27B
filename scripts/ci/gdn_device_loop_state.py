@@ -8,7 +8,10 @@ from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
-                 packed_checkpoints=False, norm_batch=False):
+                 packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False):
+        if type(prefix_zero_reuse) is not bool or (prefix_zero_reuse and not packed_checkpoints):
+            raise ValueError('Prefix zero reuse requires explicit bool and packed checkpoints')
+        self.prefix_zero_reuse = prefix_zero_reuse
         if type(norm_batch) is not bool or (norm_batch and not packed_checkpoints):
             raise ValueError('Norm batching requires explicit bool and packed checkpoints')
         if dma_windows and not batch_conv:
@@ -46,10 +49,13 @@ class DeviceLoopState:
                 **(dict(norm_batch=True) if self.norm_batch else {}),
                 **(dict(dma_windows=True) if self.dma_windows else {}),
                 **(dict(packed_checkpoints=True) if self.packed_checkpoints else {}),
+                **(dict(prefix_zero_reuse=True) if self.prefix_zero_reuse else {}),
                 **(dict(conv_checkpoints=tuple(sorted({prefix, rows} - {0})), hoist_input=True) if self.compact_prologue else {}))
             result['owned'].append(projected)
             if result.get('norm_batch', False) != norm_batch_enabled(rows, self.norm_batch):
                 raise AssertionError('Norm-batch recurrence adapter did not engage as selected')
+            if result.get('prefix_zero_reuse', False) != (self.prefix_zero_reuse and rows > 1):
+                raise AssertionError('Prefix zero reuse did not engage as selected')
             restore_prefix(operations, result, self.entry, checkpoint, prefix)
             restore_prefix(operations, result, self.entry, self.state, rows)
             self.active.restore(self.state)

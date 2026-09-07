@@ -6,6 +6,19 @@ from gdn_multitoken_conv import addresses, convolution_checkpoints, finish_outpu
 
 
 class ConvIntegrationTests(unittest.TestCase):
+    def test_zero_reuse_reaches_nonzero_prefix_publication_only(self):
+        for accepted in (0, 1, 4):
+            operations, result, entry, destinations, copies, slices, freed = self.restore_fixture(4)
+            result.update(packed_checkpoints=True, prefix_zero_reuse=True,
+                packed_conv_states=[SimpleNamespace(shape=(1, 4, 5120)) for slot in range(4)],
+                conv_prefixes=[None] * 4, mesh='mesh')
+            with patch('gdn_conv_prefix_copy.copy_prefix') as copy:
+                restore_prefix(operations, result, entry, destinations, accepted)
+            if accepted:
+                copy.assert_called_once_with('mesh', result['packed_conv_states'], destinations[1:], accepted, reuse_zero_tile=True)
+            else:
+                copy.assert_not_called()
+
     def test_native_gate_counts_scale_with_widths_and_reject_missing_cases(self):
         for widths, checks, projections, continuations, stale in (
             ((1, 2, 4, 8, 16), 30, 93, 216, 15),

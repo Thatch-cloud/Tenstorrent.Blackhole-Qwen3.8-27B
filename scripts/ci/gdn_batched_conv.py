@@ -20,7 +20,9 @@ def norm_batch_enabled(rows, requested):
 
 def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,
                           operations=None, *, conv_checkpoints=None, hoist_input=False, dma_windows=False,
-                          packed_checkpoints=False, norm_batch=False, norm_source_root=None):
+                          packed_checkpoints=False, norm_batch=False, norm_source_root=None, prefix_zero_reuse=False):
+    if type(prefix_zero_reuse) is not bool or (prefix_zero_reuse and not packed_checkpoints):
+        raise ValueError('Prefix zero reuse requires explicit bool and packed checkpoints')
     if operations is None:
         import ttnn as operations
     rows = validate_projected(tuple(projected.shape), conv_states)
@@ -91,14 +93,14 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
             owned.extend([output, states])
         if packed_checkpoints:
             from gdn_conv_prefix_copy import copy_prefix
-            copy_prefix(mesh, windows, conv_states, rows)
+            copy_prefix(mesh, windows, conv_states, rows, **(dict(reuse_zero_tile=True) if prefix_zero_reuse else {}))
         else:
             for source, destination in zip(prefixes[-1], conv_states, strict=True):
                 operations.copy(source, destination)
         if [addresses(operations, state) for state in conv_states] != original_addresses:
             raise AssertionError('Batched convolution changed stable state addresses')
         return dict(output=output, states=states, conv_prefixes=prefixes, owned=owned, packed_conv_states=windows,
-                    mesh=mesh, packed_checkpoints=packed_checkpoints,
+                    mesh=mesh, packed_checkpoints=packed_checkpoints, prefix_zero_reuse=prefix_zero_reuse,
                     materialized_conv_prefixes=() if packed_checkpoints else selected,
                     available_conv_prefixes=tuple(range(1, rows + 1)) if packed_checkpoints else selected,
                     hoisted_input=True, batched_convolution=True, dma_windows=dma_windows,

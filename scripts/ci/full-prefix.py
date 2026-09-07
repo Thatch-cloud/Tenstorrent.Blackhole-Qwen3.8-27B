@@ -67,6 +67,7 @@ def main():
     parser.add_argument("--attribution", action="store_true")
     parser.add_argument('--device-profile', action='store_true')
     parser.add_argument('--profile-context', type=int, choices=(4095, 16383))
+    parser.add_argument('--prefix-zero-reuse', action='store_true')
     parser.add_argument('--correctness-only', action='store_true')
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
@@ -100,6 +101,10 @@ def main():
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.prefix_zero_reuse and (not options.batch or not options.coding_cost or not options.packed_checkpoints
+            or any((options.device_profile, options.request_pilot, options.replay_inputs, options.deferred_commit,
+                options.attribution, options.device_selection, options.target_features, options.target_feature_batch))):
+        raise ValueError('Prefix zero reuse requires a standalone static packed-checkpoint coding-cost experiment')
     if options.profile_context is not None and not options.device_profile:
         raise ValueError('Profile context requires device profiling')
     if options.correctness_only and (not options.batch or not options.coding_cost or any((
@@ -225,6 +230,7 @@ def main():
     report["batched_candidate"] = options.batch
     report['instrumented_timing'] = options.device_profile
     report['correctness_only'] = options.correctness_only
+    report['prefix_zero_reuse'] = options.prefix_zero_reuse
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
@@ -521,6 +527,7 @@ def main():
                                  norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
                                  attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
                                  attention_tree=options.attention_tree,
+                                 prefix_zero_reuse=options.prefix_zero_reuse,
                                  attention_replay=options.attention_replay,
                                  attention_mask_once=options.attention_mask_once,
                                  replay_group_rows=options.replay_group_rows,
@@ -678,7 +685,8 @@ def main():
                 packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
                 norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
                 attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
-                attention_tree=options.attention_tree, device_profile=options.device_profile)
+                attention_tree=options.attention_tree, device_profile=options.device_profile,
+                prefix_zero_reuse=options.prefix_zero_reuse)
 
         for length in lengths:
             prompt = baseline.make_prompt(tokenizer, length, 0) if options.request_pilot else base_prompt[:length]

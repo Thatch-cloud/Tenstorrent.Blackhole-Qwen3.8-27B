@@ -40,6 +40,9 @@ def release_owned(operations, tensors):
 def restore_prefix(operations, result, entry, destinations, accepted):
     rows = result['states'].shape[0]
     packed_checkpoints = result.get('packed_checkpoints', False)
+    prefix_zero_reuse = result.get('prefix_zero_reuse', False)
+    if type(prefix_zero_reuse) is not bool or (prefix_zero_reuse and not packed_checkpoints):
+        raise ValueError('Prefix zero reuse requires explicit bool and packed checkpoints')
     windows = result.get('packed_conv_states', []) if packed_checkpoints else []
     if rows not in (1, 2, 4, 8, 16, 32) or tuple(result['states'].shape) != (rows, 24, 128, 128):
         raise ValueError('Supported recurrent prefix geometry required')
@@ -79,7 +82,8 @@ def restore_prefix(operations, result, entry, destinations, accepted):
             sliced = operations.slice(result['states'], (accepted - 1, 0, 0, 0),
                 (accepted, 24, 128, 128), memory_config=operations.DRAM_MEMORY_CONFIG)
             if packed_checkpoints:
-                copy_prefix(result['mesh'], windows, destinations[1:], accepted)
+                copy_prefix(result['mesh'], windows, destinations[1:], accepted,
+                    **(dict(reuse_zero_tile=True) if prefix_zero_reuse else {}))
                 sources = [sliced]
             else:
                 sources = [sliced, *result['conv_prefixes'][accepted - 1]]

@@ -6,6 +6,20 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_prefix_reuse_is_forwarded_and_must_engage(self):
+        adapter, active = self.fixture()
+        adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.prefix_zero_reuse = True
+        for engaged in (True, False):
+            with patch('gdn_device_loop_state.copy_compact'), patch('gdn_device_loop_state.release_owned'), \
+                    patch('gdn_device_loop_state.restore_prefix'), patch('gdn_device_loop_state.run_batched_projected',
+                        return_value=dict(owned=[], prefix_zero_reuse=engaged)) as run:
+                if engaged:
+                    adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], 2)
+                else:
+                    with self.assertRaisesRegex(AssertionError, 'did not engage'):
+                        adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], 2)
+                self.assertTrue(run.call_args.kwargs['prefix_zero_reuse'])
+
     def test_norm_batch_uses_same_publication_and_checks_engagement(self):
         adapter, active = self.fixture()
         adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.norm_batch = True

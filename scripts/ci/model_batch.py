@@ -49,7 +49,7 @@ class ModelBatch:
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
-                 replay_group_rows=4):
+                 replay_group_rows=4, prefix_zero_reuse=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -111,6 +111,9 @@ class ModelBatch:
         if packed_checkpoints and not batch_conv:
             raise ValueError('Packed checkpoints require batched convolution')
         self.packed_checkpoints = packed_checkpoints and self.device_loop_gdn
+        if type(prefix_zero_reuse) is not bool or (prefix_zero_reuse and not packed_checkpoints):
+            raise ValueError('Prefix zero reuse requires explicit bool and packed checkpoints')
+        self.prefix_zero_reuse = prefix_zero_reuse and self.packed_checkpoints
         from gdn_batched_conv import norm_batch_enabled
         if norm_batch and not packed_checkpoints:
             raise ValueError('Norm batching requires packed checkpoints')
@@ -227,7 +230,7 @@ class ModelBatch:
             from gdn_multitoken_conv import finish_output, release_owned
             state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True),
                                     self.compact_prologue, self.batch_conv, self.batch_conv, self.packed_checkpoints,
-                                    norm_batch=self.norm_batch)
+                                    norm_batch=self.norm_batch, prefix_zero_reuse=self.prefix_zero_reuse)
             self.working_states.append(state)
 
             def device_forward(value):

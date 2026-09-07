@@ -2,6 +2,11 @@
 set -euo pipefail
 mkdir -p /experiment/results
 sampling_args=()
+prefix_copy_args=()
+if [ "${QWEN_PREFIX_ZERO_REUSE:-0}" != 0 ]; then
+    [[ "$QWEN_PREFIX_ZERO_REUSE" = 1 && "${QWEN_RUN_MODE:-baseline}" = full-attention-tree ]]
+    prefix_copy_args=(--prefix-zero-reuse)
+fi
 if [[ "${QWEN_RUN_MODE:-baseline}" = sampling || "${QWEN_RUN_MODE:-baseline}" = sampling-extended ]]; then
     export QWEN_TP2_SAMPLING_EXPERIMENT=1
 fi
@@ -287,7 +292,7 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-tree ]; then
     timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
     export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
-    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel --attention-tree
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel --attention-tree "${prefix_copy_args[@]}"
     exit 0
 fi
 if [[ "${QWEN_RUN_MODE:-baseline}" = full-attention-replay || "${QWEN_RUN_MODE:-baseline}" = full-attention-mask-once || "${QWEN_RUN_MODE:-baseline}" = full-attention-tree-replay ]]; then

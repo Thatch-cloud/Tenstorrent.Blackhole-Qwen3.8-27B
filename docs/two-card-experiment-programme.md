@@ -1819,3 +1819,13 @@ CSV, generation report and console are checked independently, so reused numeric
 trace IDs cannot cross-contaminate attribution. Both contexts, three arms,
 three replays and both physical chips remain mandatory in the combined result.
 The scoped context flag cannot narrow a correctness-only matrix.
+
+The full-model prefix-copy experiment now forwards an explicit default-false
+option through ModelBatch, DeviceLoopState, convolution final-state copying
+and both checkpoint publications. Prefix0 still restores the original snapshot
+without invoking a packed copy; native T1 remains unchanged. The matched timing
+control retains norm batching and all grouped/DMA/parallel/T8 attention settings,
+changing only zero reuse. CI selects this using prefix_zero_reuse=true with the
+full-attention-tree suite; other suite combinations fail before hardware work.
+This retains the full static correctness/rollback matrix and end-to-end verifier
+timing, but does not establish committed coding throughput or alter serving defaults.

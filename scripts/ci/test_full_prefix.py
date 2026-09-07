@@ -12,6 +12,13 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_prefix_copy_rejects_missing_packed_static_contract(self):
+        for flags in ([], ['--batch', '--coding-cost'], ['--batch', '--coding-cost', '--packed-checkpoints', '--device-profile']):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--prefix-zero-reuse', *flags]):
+                with self.assertRaisesRegex(ValueError, 'standalone static packed-checkpoint'):
+                    full_prefix.main()
+
     def test_profile_context_cannot_narrow_correctness_matrix(self):
         with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                 'sys.argv', ['full-prefix.py', '--correctness-only', '--batch', '--coding-cost', '--profile-context', '4095']):
