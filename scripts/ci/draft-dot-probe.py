@@ -22,8 +22,6 @@ def main():
     parser.add_argument('--cache-tiles', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.hardware and options.cache_tiles:
-        parser.error('Cached tiles require simulator validation before hardware promotion')
     if options.hardware and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
         parser.error('Hardware requires a simulator-validated dot shape')
     if options.timing and not options.hardware:

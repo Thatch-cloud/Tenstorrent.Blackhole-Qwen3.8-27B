@@ -35,7 +35,8 @@ def main():
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
     if options.hardware and (not all((options.fp32_rope, options.explicit_softmax))
-            or options.inspect_attention or options.wide_attention or options.cache_dot_tiles
+            or options.inspect_attention or options.wide_attention
+            or (options.cache_dot_tiles and not options.fused_dots)
             or options.pairwise_softmax == options.fused_row_sum
             or options.pairwise_dots == options.fused_dots
             or (options.fused_dots and not options.fused_row_sum)):

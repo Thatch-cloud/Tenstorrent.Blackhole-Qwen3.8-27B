@@ -1195,3 +1195,11 @@ Inspection-free learned-attention simulator `20260907T125934Z-819` passes all ei
 checks with cached dots, including exact head order/fabric sums and the same
 reported attention errors as streaming fused dots. Hardware timing is the next
 decision gate; no simulator wall-time comparison is used as a speedup claim.
+
+The opt-in hardware suite now runs both streaming and cached versions of all
+three validated dot shapes, retaining identical seeded inputs and five warm
+samples per shape/variant. Cached probes also require full-output exact equality
+with their streaming control. A separate cached learned-attention gate retains
+the unchanged numerical bounds. Arms run sequentially, not interleaved, so any
+timing comparison must retain that limitation and the five-sample variability.
+Host tests:524 passed. No serving defaults or reset authorization change.
