@@ -2043,3 +2043,22 @@ Artifacts are retained under hardware-evidence.local/34157187322. This proves
 the short synthetic-input mathematical gates, not real target feature history,
 learned drafting acceptance, complete request latency or coding quality. The
 200 committed-token/s objective is still open; serving defaults are unchanged.
+
+### Reusable learned MLP parameters
+
+The learned MLP execution helper now separates prepare_mlp_branch from
+execute_mlp_branch. Preparation owns nine device tensors (norm, dynamic-kernel
+projection, four convolution bases and gate/up/down weights); repeated execution
+can reuse them without weight splitting or host uploads. Prepared assets are
+bound to the exact operations/mesh and learned-layer dictionaries. Per-block
+activation ownership remains separate, so releasing a completed block does not
+release its reusable weights. Default diagnostic callers still prepare their
+own assets and retain the same arithmetic/rounding configuration.
+
+Host tests verify two executions reuse all nine uploads, preserve projection
+order, and reject assets from another mesh/layer. Simulator220731Z executes
+three real-weight MLP blocks with seeds731/732/731, validating all intermediate
+stages and both chips, checking changed inputs and exact repeated outputs, then
+freeing each block while retaining stable parameter addresses. It uses the
+original restored LLK header, not the packer graft. This gate is in progress;
+no timing gain or complete reusable five-layer drafter is certified yet.

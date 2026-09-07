@@ -7,11 +7,9 @@ from feature_normalization import bf16_ulp_distance, rms_reference
 from projection_rounding import grouped_projection_reference
 
 
-def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain):
+def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
     import torch
 
-    if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
-        raise ValueError('A padded32-row BF16 hidden block is required')
     shards = split_mlp_weights(*(weights[f'layers.0.mlp.{name}_proj.weight'] for name in ('gate', 'up', 'down')))
     norm_weight = convolution['layers.0.post_attention_layernorm.weight']
     conv_weight = convolution['layers.0.mlp_conv.kernel_projection.weight'].T.contiguous()
@@ -24,6 +22,23 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
 
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+    return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
+        shards=shards, norm_weight=norm_weight, conv_weight=conv_weight, base_weight=base_weight, kernel=kernel,
+        device_norm=upload(norm_weight.reshape(1, 1, 160, 32), layout=operations.ROW_MAJOR_LAYOUT),
+        device_conv=upload(conv_weight),
+        bases=[upload(base_weight[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
+        device_projections=[upload(torch.cat([rank[index] for rank in shards], dim=0), True) for index in range(3)])
+
+
+def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None):
+    if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
+        raise ValueError('A padded32-row BF16 hidden block is required')
+    if parameters is None:
+        parameters = prepare_mlp_branch(operations, mesh, weights, convolution, retain)
+    if (parameters['operations'] is not operations or parameters['mesh'] is not mesh
+            or parameters['source_weights'] is not weights or parameters['source_convolution'] is not convolution):
+        raise ValueError('Prepared MLP parameters belong to a different mesh or learned layer')
+    kernel = parameters['kernel']
 
     def project(value, weight, grid, columns):
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
@@ -32,20 +47,18 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         return retain(operations.matmul(value, weight, dtype=operations.float32, program_config=program,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
 
-    device_norm = upload(norm_weight.reshape(1, 1, 160, 32), layout=operations.ROW_MAJOR_LAYOUT)
-    normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=device_norm,
+    normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['device_norm'],
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-    projected = project(normalized, upload(conv_weight), (8, 5), 1)
+    projected = project(normalized, parameters['device_conv'], (8, 5), 1)
     rounded = retain(operations.typecast(projected, operations.bfloat16))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
-    bases = [upload(base_weight[phase, offset].reshape(1, 1, 1, 5120))
-        for phase in range(2) for offset in range(2)]
+    bases = parameters['bases']
     prepared = retain(grouped_causal_convolution(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True))
-    projections = [project(prepared, upload(torch.cat([rank[index] for rank in shards], dim=0), True), (8, 10), 4)
+    projections = [project(prepared, parameters['device_projections'][index], (8, 10), 4)
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
-    partial = project(activation, upload(torch.cat([rank[2] for rank in shards], dim=0), True), (8, 10), 2)
+    partial = project(activation, parameters['device_projections'][2], (8, 10), 2)
     reduced = retain(gather_add_projection(operations, mesh, collectives, partial))
     rounded_output = retain(operations.typecast(reduced, operations.bfloat16))
     finished = retain(grouped_causal_convolution(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True))
@@ -55,7 +68,8 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
     output = retain(operations.typecast(summed, operations.bfloat16))
     return dict(hidden=hidden, normalized=normalized, conv_projection=projected, dynamic=dynamic, prepared=prepared,
         projections=projections, activation=activation, partial=partial, reduced=reduced, finished=finished,
-        output=output, shards=shards, norm_weight=norm_weight, conv_weight=conv_weight, base_weight=base_weight)
+        output=output, shards=parameters['shards'], norm_weight=parameters['norm_weight'],
+        conv_weight=parameters['conv_weight'], base_weight=parameters['base_weight'])
 
 
 def validate_mlp_branch(state, host, chip, *, failure_capture=None, checkpoint=None, layer=0):
