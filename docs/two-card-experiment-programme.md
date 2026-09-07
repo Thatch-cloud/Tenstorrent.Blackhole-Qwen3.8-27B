@@ -1684,3 +1684,29 @@ then gathers logits. The learned drafter must use its own final normalization,
 not the target's `_final_norm_decode`; sharded top16 selection could avoid the
 full-logit gather, but still requires a separate exact candidate/ID merge gate.
 No shared-head adapter is claimed implemented or benchmarked yet.
+
+### First matched verifier profile: correctness passed, attribution failed
+
+Hardware34144356177 completed24 batch checks and16 rollback checks; its
+numerical report passed. All18 T8 profiling replays also passed logits/GDN/KV/
+selected-checkpoint comparisons. However, every native serial replay dropped
+profiler markers with the10000-op buffer, and the Python host-log importer was
+killed with exit137. The overall CI gate failed; this is not a valid complete
+attribution result or a throughput improvement.
+
+The retry uses20000-op buffers and the already emitted C++ device-operation
+CSV directly, avoiding expansion of all warmup host metadata. The checker
+still rejects any dropped measured markers and missing chip/replay coverage;
+the saved failed run is rejected by this same checker. Diagnostic candidate
+rows showed matmul and generic operations dominating summed device durations,
+but summed durations are not a traced critical path. No performance claim is
+made from the failed profile.
+
+`draft_shared_head.py` now contains an experimental adapter borrowing the
+native vocabulary-sharded head after learned normalization. Four32768-wide
+top16 chunks per chip avoid a full-logit gather, with negative-infinity padding
+for the final chunk and checked global-ID merging. Host tests cover shard/chunk
+boundaries, missing/padded IDs and proposal rows1..7. This adapter is not yet
+simulator/hardware certified or integrated with the full drafter. Ties are
+deterministic among received candidates; matching MLX's unordered candidate
+selection at tied cutoffs is not claimed.

@@ -10,11 +10,9 @@ preserve_metadata() {
     done
 }
 trap preserve_metadata EXIT
-export QWEN_PROFILE_VERIFIER=1
-python3 /experiment-scripts/ci/stage-model-profile.py > "$output/report-stage.json"
 export TTNN_OP_PROFILER=1 TT_METAL_DEVICE_PROFILER=1 TT_METAL_PROFILER_TRACE_TRACKING=1
 unset TT_METAL_PROFILER_MID_RUN_DUMP
-timeout -k 30 5400 python3 -m tracy -p -r --disable-device-data-dump-to-files --op-support-count 10000 -o "$output" \
+timeout -k 30 5400 python3 -m tracy -p --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --op-support-count 20000 -o "$output" \
     /experiment-scripts/ci/full-prefix.py --device-profile --max-rows 32 --batch --coding-cost --serial-sdpa \
     --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn \
     --compact-prologue --batch-conv --packed-checkpoints --ordered-cache 2>&1 | tee "$output/console.log"

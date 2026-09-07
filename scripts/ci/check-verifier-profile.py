@@ -48,13 +48,23 @@ def analyze(generation, rows, console):
 
 
 def main(root, generation_path):
+    generation = json.loads(generation_path.read_text())
+    selected = {str(record['trace_id']) for timing in generation['timings']
+                for record in timing['device_profile']['records']}
     reports = list(root.rglob('*ops_perf_results*.csv'))
+    direct_device_report = False
+    if not reports:
+        reports = list(root.rglob('cpp_device_perf_report.csv'))
+        direct_device_report = True
     if len(reports) != 1:
         raise AssertionError('Exactly one operation report required')
     with reports[0].open(newline='') as stream:
-        rows = list(csv.DictReader(stream))
-    result = analyze(json.loads(generation_path.read_text()), rows,
-                     (root / 'console.log').read_text(errors='replace'))
+        rows = [row for row in csv.DictReader(stream) if row.get('METAL TRACE ID') in selected]
+    if direct_device_report:
+        for row in rows:
+            row['OP CODE'] = row['OP NAME']
+    result = analyze(generation, rows, (root / 'console.log').read_text(encoding='utf-8', errors='replace'))
+    result['source_format'] = 'runtime C++ device operation report' if direct_device_report else 'merged operation report'
     (root / 'attribution.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 

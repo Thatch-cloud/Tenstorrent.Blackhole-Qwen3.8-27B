@@ -1,6 +1,10 @@
 import importlib.util
+import csv
+import json
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location('verifier_check', Path(__file__).with_name('check-verifier-profile.py'))
@@ -9,6 +13,24 @@ spec.loader.exec_module(checker)
 
 
 class VerifierProfileCheckTests(unittest.TestCase):
+    def test_runtime_cpp_report_is_accepted_without_expanding_host_metadata(self):
+        generation, rows, console = self.fixture()
+        for row in rows:
+            row['OP NAME'] = row.pop('OP CODE')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'generation.json').write_text(json.dumps(generation))
+            (root / 'console.log').write_text(console, encoding='utf-8')
+            with (root / 'cpp_device_perf_report.csv').open('w', newline='') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            with patch('builtins.print'):
+                checker.main(root, root / 'generation.json')
+            result = json.loads((root / 'attribution.json').read_text())
+            self.assertTrue(result['passed'])
+            self.assertEqual(result['source_format'], 'runtime C++ device operation report')
+
     def fixture(self):
         timings, rows, console = [], [], []
         for context_index, length in enumerate((4095, 16383)):
