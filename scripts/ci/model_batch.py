@@ -1,6 +1,6 @@
 """Static-fixture full-model batching; no installed or class-global patches."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
@@ -48,7 +48,7 @@ class ModelBatch:
                  compact_gdn=False, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
-                 attention_parallel=False, attention_replay=False, attention_tree=False):
+                 attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
@@ -61,6 +61,9 @@ class ModelBatch:
         if attention_replay and (not ordered_cache or not serial_sdpa or not norm_batch or profiler is not None or grouped_attention):
             raise ValueError('Replay attention requires standalone ordered-cache norm-batch verification')
         self.attention_replay = bool(attention_replay and self.rows >= 8)
+        if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
+            raise ValueError('Shared attention masks require explicit replay attention')
+        self.attention_mask_once = attention_mask_once and self.attention_replay
         self.replay_reader = None
         if self.attention_replay:
             from attention_mask_replay import validate_ticket
@@ -298,9 +301,13 @@ class ModelBatch:
         before_clones = [state.skipped_clones for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
         before_reads = [reader.calls for reader in self.readers]
-        with instance_overrides(self.bindings):
+        before_mask_refresh = self.replay_reader.refresh_calls if self.attention_mask_once else 0
+        mask_scope = self.replay_reader.shared_masks(16) if self.attention_mask_once else nullcontext()
+        with instance_overrides(self.bindings), mask_scope:
             result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages,
                 **({'sharded_lm_head': True} if sharded_logits else {}))
+        if self.attention_mask_once and self.replay_reader.refresh_calls - before_mask_refresh != len(self.replay_reader.metadata):
+            raise AssertionError('Shared masks must refresh exactly once per model forward')
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):

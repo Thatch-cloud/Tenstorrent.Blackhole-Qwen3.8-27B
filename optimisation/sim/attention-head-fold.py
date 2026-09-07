@@ -1,6 +1,7 @@
 """Simulator-only attention folding probe against native serial causal SDPA."""
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import json
@@ -29,10 +30,13 @@ def main():
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--dynamic-mask', action='store_true')
     parser.add_argument('--replay-reader', action='store_true')
+    parser.add_argument('--mask-once', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.mask_once and not args.replay_reader:
+        parser.error('Shared masks require the prepared replay reader')
     if args.replay_reader and not args.dynamic_mask:
         parser.error('Replay reader requires dynamic-mask composition checks')
     if args.dynamic_mask:
@@ -61,6 +65,7 @@ def main():
         parallel_groups=args.parallel_groups,
         device_layout=args.device_layout, dma_layout=args.dma_layout, dynamic_mask=args.dynamic_mask,
         replay_reader=args.replay_reader,
+        mask_once=args.mask_once,
         scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
     report['runtime_library_sha256'] = hashlib.sha256((Path(os.environ['TT_METAL_HOME']) /
         'build_Release/lib/_ttnncpp.so').read_bytes()).hexdigest()
@@ -272,18 +277,22 @@ def main():
                             raise AssertionError('Dynamic mask refresh replaced existing mask buffers')
                         if replay_reader is not None:
                             replay_reader.stage(start)
-                            reader_result = replay_reader(device_query, keys, values, scale=0.0625,
-                                memory_config=ttnn.L1_MEMORY_CONFIG)
-                            owned.append(reader_result)
-                            if any(not torch.equal(reference, actual) for reference, actual in
-                                   zip(dynamic_expected, host(reader_result), strict=True)):
-                                raise AssertionError('Prepared replay reader differs from changed-position native B1')
-                            if any(not torch.equal(query, actual) for actual in host(device_query)):
-                                raise AssertionError('Prepared replay reader changed or released borrowed query')
+                            scope = replay_reader.shared_masks(2) if args.mask_once else nullcontext()
+                            with scope:
+                                for layer in range(2 if args.mask_once else 1):
+                                    reader_result = replay_reader(device_query, keys, values, scale=0.0625,
+                                        memory_config=ttnn.L1_MEMORY_CONFIG)
+                                    owned.append(reader_result)
+                                    if any(not torch.equal(reference, actual) for reference, actual in
+                                           zip(dynamic_expected, host(reader_result), strict=True)):
+                                        raise AssertionError('Prepared replay reader differs from changed-position native B1')
+                                    if any(not torch.equal(query, actual) for actual in host(device_query)):
+                                        raise AssertionError('Prepared replay reader changed or released borrowed query')
                     if replay_reader is not None:
-                        if replay_reader.calls != 2 or replay_reader.refresh_calls != 2 * len(replay_reader.metadata):
+                        if replay_reader.calls != (4 if args.mask_once else 2) or replay_reader.refresh_calls != 2 * len(replay_reader.metadata):
                             raise AssertionError('Every replay must refresh every prepared mask')
                         report['replay_reader_exact'] = True
+                        report['replay_reader_calls'] = replay_reader.calls
                         report['replay_reader_refresh_calls'] = replay_reader.refresh_calls
         if args.device_layout and args.grouped and args.rows >= 8 and (args.max_group_rows == 4 or
                 (args.max_group_rows == 8 and args.parallel_groups > 1)) and (args.parallel_groups == 1 or args.dma_layout):

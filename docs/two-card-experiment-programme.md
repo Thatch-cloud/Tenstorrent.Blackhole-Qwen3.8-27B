@@ -12,9 +12,10 @@ The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch
 also passes hardware correctness and component timing; its combination with
-eight-row DMA/parallel grouping passes simulator, hardware microbenchmark and
-real-weight attention-layer gates. Full-model gate34075945160 remains running
-at this checkpoint; no new full-model throughput claim is established.
+eight-row DMA/parallel grouping passes simulator, hardware microbenchmark,
+real-weight attention-layer and full-model gate34075945160. Matched T32 static
+verification improves96.407->93.218ms at4K and102.225->96.775ms at16K.
+These are full-logit block costs, not measured committed decode throughput.
 Materially better drafting and lower verification cost are both still required.
 
 ## Topology experiments - Ethernet dispatch and fabric weight loading

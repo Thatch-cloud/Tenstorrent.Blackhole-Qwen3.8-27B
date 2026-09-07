@@ -5,6 +5,24 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- TTsim20260907T030808Z-298 passes the shared-mask scope experiment atT8,
+  start4096/capacity4352, seed1. Forward/rollback positions4103->4096 each
+  execute two native-exact attention calls with one mask refresh, preserving
+  borrowed queries and prepared-reader ownership. The mask kernel and four-row
+  attention math are unchanged. `full-attention-mask-once` now tests the same
+  hoist across all16 attention layers with exact call/refresh budgets, capture,
+  changed-metadata replay and GDN/KV rollback. This is not yet a hardware pass
+  or an actual-request improvement; scopes reject nesting, mid-forward staging,
+  early close, partial/excess calls and failed refreshes.
+- Full-model34075945160 (`533a220`) passed24 exact batch checks,16 rollback
+  checks and4 negative-control pairs. Both arms retain compact native scratch,
+  DMA, parallelism and GDN; only maximum attention group width changes4->8.
+  Mean paired T8/T16/T32 block costs at4K are65.492->64.492ms,
+  75.072->75.112ms and96.407->93.218ms; at16K they are67.761->66.380ms,
+  78.411->77.532ms and102.225->96.775ms. T16 at4K is effectively flat.
+  This certifies static full-model correctness and block costs, not committed
+  tok/s or coding quality. The latest actual-request result remains23.763/20.127
+  tok/s from34072489815. Dynamic eight-row replay is not yet integrated.
 - Real-weight layer34074774493 (`14c7e16`) passed48 exact eager/trace checks,
   24 KV negative-control pairs and72 paired timing blocks. Both arms keep
   compact native scratch, parallelism, DMA, ordered writes and projections.

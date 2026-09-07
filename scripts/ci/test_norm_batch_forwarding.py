@@ -4,6 +4,18 @@ import unittest
 
 
 class NormBatchForwardingTests(unittest.TestCase):
+    def test_shared_masks_reach_both_retained_replay_boundaries(self):
+        root = Path(__file__).resolve().parent
+        for filename, called, expression in (
+                ('full-prefix.py', 'verify_replay', 'options.attention_mask_once'),
+                ('full_replay.py', 'ModelBatch', 'attention_mask_once')):
+            tree = ast.parse((root / filename).read_text())
+            calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == called]
+            self.assertEqual(len(calls), 1)
+            options = {keyword.arg: ast.unparse(keyword.value) for keyword in calls[0].keywords}
+            self.assertEqual(options['attention_mask_once'], expression)
+
     def test_all_harness_boundaries_forward_the_explicit_option(self):
         root = Path(__file__).resolve().parent
         contracts = {

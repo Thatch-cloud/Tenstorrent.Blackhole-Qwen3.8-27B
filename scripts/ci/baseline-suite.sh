@@ -181,9 +181,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-tree ]; then
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel --attention-tree
     exit 0
 fi
-if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-replay ]; then
+if [[ "${QWEN_RUN_MODE:-baseline}" = full-attention-replay || "${QWEN_RUN_MODE:-baseline}" = full-attention-mask-once ]]; then
+    mask_options=()
+    if [ "$QWEN_RUN_MODE" = full-attention-mask-once ]; then mask_options+=(--attention-mask-once); fi
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
-    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs --norm-batch --attention-replay
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs --norm-batch --attention-replay "${mask_options[@]}"
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-engine ]; then

@@ -79,3 +79,74 @@ class ReplayReaderTests(unittest.TestCase):
             release.assert_called_once_with(reader.operations, [scratch])
         self.assertEqual(events, ['mask', 'mask', 'attention'])
         self.assertEqual((reader.calls, reader.refresh_calls), (1, 2))
+
+    def test_shared_masks_refresh_once_for_each_sixteen_layer_forward(self):
+        reader, _ = self.fixture()
+        query = SimpleNamespace(shape=(1, 16, 12, 256))
+        keys, values, result = object(), object(), object()
+        events = []
+        with patch('attention_replay.addresses', side_effect=lambda operations, value: (id(value), id(value))), patch(
+                'attention_replay.refresh_mask', side_effect=lambda *args: events.append('mask')), patch(
+                'attention_replay.execute', side_effect=lambda *args, **kwargs: events.append('attention') or result), patch(
+                'attention_replay.release_owned'):
+            for forward in range(2):
+                with reader.shared_masks(16):
+                    for layer in range(16):
+                        self.assertIs(reader(query, keys, values, scale=0.0625, memory_config='L1'), result)
+        self.assertEqual(events, (['mask'] * 2 + ['attention'] * 16) * 2)
+        self.assertEqual((reader.calls, reader.refresh_calls), (32, 4))
+        self.assertIsNone(reader.mask_scope)
+        self.assertFalse(reader.failed)
+
+    def test_incomplete_or_failed_shared_forward_poisons_reader(self):
+        for expected in (1, 16):
+            reader, _ = self.fixture()
+            with patch('attention_replay.refresh_mask'):
+                with self.assertRaisesRegex(AssertionError, 'exact attention call budget'):
+                    with reader.shared_masks(expected):
+                        pass
+            self.assertTrue(reader.failed)
+            self.assertIsNone(reader.mask_scope)
+        reader, _ = self.fixture()
+        with patch('attention_replay.refresh_mask', side_effect=RuntimeError('mask failed')):
+            with self.assertRaisesRegex(RuntimeError, 'mask failed'):
+                with reader.shared_masks(16):
+                    self.fail('Failed mask refresh must not enter the model forward')
+        self.assertTrue(reader.failed)
+        self.assertIsNone(reader.mask_scope)
+
+    def test_shared_forward_cannot_stage_close_or_nest(self):
+        for operation in ('stage', 'close', 'nest'):
+            reader, _ = self.fixture()
+            with patch('attention_replay.refresh_mask'), self.assertRaises(RuntimeError):
+                with reader.shared_masks(16):
+                    if operation == 'stage':
+                        reader.stage(4103)
+                    elif operation == 'close':
+                        reader.close()
+                    else:
+                        with reader.shared_masks(1):
+                            self.fail('Nested mask scope must not enter')
+            self.assertTrue(reader.failed)
+            self.assertFalse(reader.closed)
+
+    def test_shared_forward_rejects_excess_calls_before_attention(self):
+        reader, _ = self.fixture()
+        query = SimpleNamespace(shape=(1, 16, 12, 256))
+        with patch('attention_replay.addresses', return_value=(1, 2)), patch(
+                'attention_replay.refresh_mask'), patch('attention_replay.execute') as execute, patch(
+                'attention_replay.release_owned'):
+            with self.assertRaisesRegex(AssertionError, 'exceeded'):
+                with reader.shared_masks(1):
+                    reader(query, object(), object(), scale=0.0625, memory_config='L1')
+                    reader(query, object(), object(), scale=0.0625, memory_config='L1')
+            execute.assert_called_once()
+        self.assertTrue(reader.failed)
+
+    def test_shared_forward_requires_explicit_bounded_budget(self):
+        reader, _ = self.fixture()
+        for expected in (0, 17, True, 1.0, None):
+            with self.assertRaises(ValueError):
+                with reader.shared_masks(expected):
+                    self.fail('Invalid scope must not enter')
+        self.assertFalse(reader.failed)

@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ class ModelBatchTests(unittest.TestCase):
         fixture.gdn_calls = fixture.norm_batch_calls = 0
         fixture.norm_batch = fixture.compact_gdn = False
         fixture.attention_replay = True
+        fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.bindings = [], [], []
         reader = SimpleNamespace(calls=0)
         fixture.readers = [reader] * 16
@@ -26,8 +28,22 @@ class ModelBatchTests(unittest.TestCase):
 
         fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
         self.assertEqual(fixture.run(), 'logits')
+        fixture.attention_mask_once = True
+        fixture.replay_reader = SimpleNamespace(refresh_calls=0, metadata=['mask'])
+
+        def shared_masks(expected):
+            fixture.replay_reader.refresh_calls += 1
+            return nullcontext()
+
+        fixture.replay_reader.shared_masks = Mock(side_effect=shared_masks)
+        self.assertEqual(fixture.run(), 'logits')
+        fixture.replay_reader.shared_masks.assert_called_once_with(16)
         fixture.model._forward_decode = Mock(side_effect=lambda *args, **kwargs: setattr(fixture, 'gdn_calls', fixture.gdn_calls + 48))
         with self.assertRaisesRegex(AssertionError, 'Every selected'):
+            fixture.run()
+        fixture.model._forward_decode = Mock(side_effect=forward)
+        fixture.replay_reader.shared_masks = Mock(return_value=nullcontext())
+        with self.assertRaisesRegex(AssertionError, 'exactly once per model forward'):
             fixture.run()
 
     def test_raw_vocabulary_shards_require_explicit_forward_opt_in(self):
@@ -36,6 +52,7 @@ class ModelBatchTests(unittest.TestCase):
         fixture.gdn_calls = 0
         fixture.norm_batch_calls = 0
         fixture.norm_batch = False
+        fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
         fixture.compact_gdn = False
         fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)

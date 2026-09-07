@@ -1,5 +1,7 @@
 """Experimental fixed-family attention reader; not wired into request serving."""
 
+from contextlib import contextmanager
+
 from attention_head_fold import parallel_groups
 from attention_mask_replay import execute as refresh_mask, prepare, validate_ticket
 from attention_parallel import execute
@@ -23,6 +25,7 @@ class ReplayAttentionReader:
         self.closed = False
         self.failed = False
         self.calls, self.refresh_calls = 0, 0
+        self.mask_scope = None
         self.start = capacity - 256
         grid = mesh.compute_with_storage_grid_size()
         try:
@@ -56,6 +59,8 @@ class ReplayAttentionReader:
         import torch
 
         self.validate(start)
+        if self.mask_scope is not None:
+            raise RuntimeError('Cannot stage positions during a shared-mask forward')
         operations = self.operations
         words = torch.zeros(8, dtype=torch.int32)
         words[0] = start
@@ -72,6 +77,31 @@ class ReplayAttentionReader:
             raise
         self.start = start
 
+    def refresh(self):
+        self.validate(self.start)
+        for entry, program in zip(self.metadata, self.programs, strict=True):
+            refresh_mask(self.positions, entry[2], program)
+            self.refresh_calls += 1
+
+    @contextmanager
+    def shared_masks(self, expected_calls):
+        self.validate(self.start)
+        if type(expected_calls) is not int or not 1 <= expected_calls <= 16:
+            raise ValueError('Explicit one-to-sixteen attention call budget required')
+        if self.mask_scope is not None:
+            raise RuntimeError('Shared-mask forwards cannot nest')
+        self.mask_scope = self.calls + expected_calls
+        try:
+            self.refresh()
+            yield
+            if self.calls != self.mask_scope:
+                raise AssertionError('Shared-mask forward did not consume its exact attention call budget')
+        except BaseException:
+            self.failed = True
+            raise
+        finally:
+            self.mask_scope = None
+
     def __call__(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
         self.validate(self.start)
         if tuple(query.shape) != (1, self.rows, 12, 256):
@@ -79,9 +109,10 @@ class ReplayAttentionReader:
         owned = []
         protected = {addresses(self.operations, value) for value in (query, keys, values)}
         try:
-            for entry, program in zip(self.metadata, self.programs, strict=True):
-                refresh_mask(self.positions, entry[2], program)
-                self.refresh_calls += 1
+            if self.mask_scope is None:
+                self.refresh()
+            elif self.calls >= self.mask_scope:
+                raise AssertionError('Shared-mask forward exceeded its attention call budget')
             result = execute(self.mesh, self.operations, query, keys, values, self.metadata, owned,
                 scale=kwargs['scale'], memory_config=kwargs['memory_config'])
             protected.add(addresses(self.operations, result))
@@ -96,6 +127,8 @@ class ReplayAttentionReader:
     def close(self):
         if self.closed:
             return
+        if self.mask_scope is not None:
+            raise RuntimeError('Cannot close a reader during a shared-mask forward')
         release_owned(self.operations, self.owned)
         self.owned.clear()
         self.closed = True
