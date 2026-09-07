@@ -15,6 +15,39 @@ also passes hardware correctness and component timing; its combination with
 eight-row DMA/parallel grouping is in simulator validation before hardware.
 Materially better drafting and lower verification cost are both still required.
 
+## Topology experiments - Ethernet dispatch and fabric weight loading
+
+User topology: one P150A on PCIe x16, the other on PCIe x4 behind a switch,
+with QSFP-DD inter-card fabric. Treat dispatch placement and upload routing as
+separate experiments, not a single switch or an assumed decode improvement.
+
+Pinned TT-Metal9f9cd4 has an explicit Blackhole Ethernet dispatch descriptor and
+loader branch. Unharvested compute grids are130->140 cores; the two-harvested
+descriptors are110->120. Confirm the actual per-card harvest masks and exposed
+grid before claiming recovered capacity. Source:
+[Ethernet descriptor](https://github.com/tenstorrent/tt-metal/blob/9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9/tt_metal/core_descriptors/blackhole_140_arch_eth_dispatch.yaml).
+
+Local TTsim runtime constructor probe passed `DispatchCoreConfig(DispatchCoreType.ETH)`
+with resolved COL axis. Explicit ETH+COL is rejected by the TTNN constructor;
+default WORKER resolves COL. This probe opened no mesh and proves neither
+fast-dispatch operation nor compatibility with the active fabric configuration.
+
+- D1: matched WORKER/ETH dispatch health, trace replay, fabric collectives, actual
+  core-grid enumeration and exact results; then same-grid versus expanded-grid
+  model measurements. Audit Ethernet resource assignments; do not assume idle
+  Ethernet dispatch resources are interchangeable with active fabric channels.
+- D2: independently compare direct per-card PCIe uploads with x16-card staging
+  followed by fabric distribution into the final TP weight shards. Verify
+  byte-exact destination shards and measure PCIe/fabric traffic, bandwidth,
+  temporary DRAM use and total load time. No supported routing shortcut is
+  certified yet; do not fabricate a hardware MMIO topology using simulator YAML.
+- D3: report model loading, prefill, setup and committed decode separately.
+  Current traced decode consumes resident device weights, so faster host uploads
+  do not by themselves remove the per-token device-DRAM bandwidth bottleneck.
+
+Simulator first for new kernels; hardware dispatch/PCIe/fabric performance needs
+isolated CI measurement. Preserve serving defaults and the x16/x4 topology.
+
 ## Earlier request-engine checkpoints
 
 T32 changed-input replay and synchronized
