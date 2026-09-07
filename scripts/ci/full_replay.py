@@ -105,6 +105,17 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
     stale_feature_control = None
     published = []
     publication_checks = []
+    publication_stages = []
+
+    def check_publication(stage):
+        if feature_publication:
+            import json
+            from feature_rows import check_published_features
+            checked = check_published_features(serial_features, published, feature_taps, local_host, stage=stage)
+            publication_stages.extend(checked)
+            print(json.dumps(dict(feature_publication_stage=stage, length=length, rows=rows,
+                first_prefix=first_prefix, second_prefix=second_prefix, exact=True)), flush=True)
+
     try:
         features = new_feature_capture() if feature_taps else None
         save(initial)
@@ -128,6 +139,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             publish_prefix(ttnn, features.outputs(), prefix_buffers[0], first_prefix)
             published.append(('first', 0, first_prefix, prefix_buffers[0]))
             ttnn.synchronize_device(mesh)
+            check_publication('after-first-publication')
         stage_inputs(fixture, oracle[first_prefix:first_prefix + rows], length + first_prefix)
         fixture.retained.replay(lambda: ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True))
         if fixture.retained.replay_epoch != 1:
@@ -146,6 +158,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
                     for before, after in zip(initial_parts, replayed_parts, strict=True))
                 if not stale_feature_control:
                     raise AssertionError('Changed-input feature fixture cannot distinguish stale snapshots')
+        check_publication('after-verifier-replay')
         if live_digest() != expected_end_state or kv_digest(length + first_prefix + rows) != expected_end_kv:
             raise AssertionError('Replayed block did not refresh native GDN/KV state')
         if state_digest(checkpoints) != expected_end_state:
@@ -155,10 +168,12 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             publish_prefix(ttnn, features.outputs(), prefix_buffers[1], second_prefix)
             published.append(('second', first_prefix, second_prefix, prefix_buffers[1]))
             ttnn.synchronize_device(mesh)
+            check_publication('after-second-publication')
             ttnn.release_trace(mesh, captured)
             captured = None
             features.close()
             features = None
+            check_publication('after-source-release')
         if live_digest() != expected_commit_state or kv_digest(length + first_prefix + second_prefix) != expected_commit_kv:
             raise AssertionError('Second decision did not use refreshed prefix histories')
         if inactive_digest() != expected_inactive:
@@ -166,6 +181,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
         for index, expected in zip(range(first_prefix + second_prefix, first_prefix + second_prefix + 2), expected_correction, strict=True):
             if not torch.equal(decode(oracle[index], length + index, True), expected):
                 raise AssertionError('Corrected continuation after replay differs from native')
+            check_publication(f'after-correction-{index - first_prefix - second_prefix + 1}')
         if live_digest() != expected_final_state or kv_digest(length + first_prefix + second_prefix + 2) != expected_final_kv:
             raise AssertionError('Corrected replay continuation GDN/KV differs')
         for phase, offset, prefix, copies in published:
@@ -186,6 +202,7 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             feature_checks=feature_checks, feature_taps=list(feature_taps),
             stale_feature_control_detected=stale_feature_control,
             feature_publications=publication_checks,
+            feature_publication_stages=publication_stages,
             scope='Two blocks using one captured verifier with changed metadata; no drafter or throughput claim')
     finally:
         if captured is not None:

@@ -2,10 +2,28 @@ import unittest
 
 import torch
 
-from feature_rows import compare_feature_rows
+from feature_rows import check_published_features, compare_feature_rows
 
 
 class FeatureRowsTests(unittest.TestCase):
+    def test_publication_checks_both_epochs_and_empty_abort(self):
+        serial, captured = self.fixture(2)
+        first = [[value[:, :, :1].clone() for value in parts] for parts in captured]
+        second = [[value[:, :, 1:].clone() for value in parts] for parts in captured]
+        published = [('abort', 0, 0, ()), ('first', 0, 1, first), ('second', 1, 1, second)]
+        checks = check_published_features(serial, published, (5, 19), lambda value: value, stage='after-replay')
+        self.assertEqual([len(check['checks']) for check in checks], [0, 4, 4])
+        self.assertTrue(all(check['stage'] == 'after-replay' for check in checks))
+        first[1][0].add_(1)
+        with self.assertRaisesRegex(AssertionError, "after-correction.*phase='first'.*layer 19, chip 0"):
+            check_published_features(serial, published, (5, 19), lambda value: value, stage='after-correction')
+
+    def test_publication_rejects_missing_and_abort_taps(self):
+        serial, captured = self.fixture(2)
+        for published in ([('first', 0, 1, captured[:1])], [('abort', 0, 0, captured)]):
+            with self.assertRaisesRegex(AssertionError, 'Abort or committed feature tap count'):
+                check_published_features(serial, published, (5, 19), lambda value: value, stage='immediate')
+
     def fixture(self, rows):
         serial = [[[torch.full((1, 1, 1, 2560), row + layer + chip, dtype=torch.bfloat16)
                     for chip in (0, 1)] for layer in (5, 19)] for row in range(rows)]

@@ -19,8 +19,11 @@ native logits/state/KV. Observed chip-local features are[1,1,1,2560]. Batched
 alignment gate34089347478 also passes90 exact matrices atT8/T16/T32, with
 chip-local shape[1,1,T,2560] and unchanged logits/state/KV. Changed-input traced
 feature gate34091904236 passes720 exact matrices and24 stale-snapshot controls,
-including rollback and corrected continuation. Accepted-prefix publication and
-prefill feature coverage remain next prerequisites; this is not yet a neural
+including rollback and corrected continuation. Accepted-prefix publication
+gate34094867083 fails retained feature exactness at layer19/chip0 in the first
+nonempty-first-prefix fixture. T2 two-publication simulator coverage passes;
+stage-by-stage hardware diagnostics are needed before claiming a fix. Publication
+and prefill feature coverage remain prerequisites; this is not yet a neural
 drafter port or an acceptance result.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;

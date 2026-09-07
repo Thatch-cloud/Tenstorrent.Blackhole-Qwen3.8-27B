@@ -5,6 +5,21 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Accepted-prefix hardware34094867083 (`aa7a516`) failed, not timed out.
+  Two T2/context4095 fixtures with first-prefix0 passed; the next fixture
+  (first-prefix1, second-prefix1) failed the final retained-feature comparison
+  at layer19/chip0. Initial/replayed features, logits, GDN/KV, inactive slots
+  and corrected continuation had already passed in that fixture. The artifact
+  does not identify when the published feature changed; the later remote-only
+  cleanup exception is secondary. Added stage checks immediately after first
+  publication, verifier replay, second publication, source release and each
+  correction, with phase/offset/prefix and first differing value in errors.
+  These extra readbacks are diagnostic, not a performance measurement or fix.
+  Extended simulator20260907T074521Z-305 passes T2 with two independent publication
+  epochs:30 changed-input feature matrices,60 first-prefix and30 second-prefix
+  retention checks. Source hashes match. This does not reproduce the hardware
+  failure or model native-trace allocation lifetime. All457 host tests pass.
+  No copy kernel, allocator guard, reset policy or serving default changed.
 - Added opt-in `target-feature-prefix` to publish first/second committed feature
   prefixes into independently owned buffers, then verify them after source
   trace replay/release and corrected continuation. Prefix0 publishes no tensors.
