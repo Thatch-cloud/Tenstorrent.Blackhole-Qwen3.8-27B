@@ -5,6 +5,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Integrated shared-BDF simulator `20260907T102134Z-309` PASSED full learned
+  projection -> raw FP32 fabric gather/add -> device BF16 cast -> learned RMSNorm,
+  without a host tensor handoff. Both ranks have exact sums and normalization
+  within one BF16 ULP (bound two). This is a one-row numerical gate, not a
+  neural drafter, coding-quality certification or throughput measurement.
+  The opt-in `feature-projection-full` hardware suite now retains the separate
+  host-reduction control and adds this integrated path. Hardware validation is
+  pending. Full fixture downloads now use a dedicated revision-pinned host cache,
+  rehashing both tensors on every reuse and rejecting corruption without overwrite;
+  artifacts retain the manifest rather than another 262 MB binary copy.
 - Hardware run `34109548525` (`f347f3c`) PASSED full one-row projection on
   both80-core grids, transfer health and learned normalization. Downloaded
   reports confirm all10,240 projection values exactly match the simulator

@@ -17,6 +17,35 @@ TENSOR_SHA256 = {
 }
 
 
+def verify_fixture(output):
+    manifest = json.loads((output / 'manifest.json').read_text())
+    if manifest['model'] != MODEL or manifest['revision'] != REVISION or manifest['header_sha256'] != HEADER_SHA256:
+        raise ValueError('Pinned full projection manifest required')
+    for tensor, (shape, filename) in TENSORS.items():
+        entry = manifest['tensors'][tensor]
+        length = 2
+        for dimension in shape:
+            length *= dimension
+        path = output / filename
+        if (entry['file'] != filename or entry['shape'] != shape or entry['dtype'] != 'BF16'
+                or entry['bytes'] != length or entry['sha256'] != TENSOR_SHA256[tensor]
+                or path.stat().st_size != length or path.with_suffix(path.suffix + '.partial').exists()):
+            raise ValueError('Complete pinned tensor metadata required')
+        digest = hashlib.sha256()
+        with path.open('rb') as source:
+            for data in iter(lambda: source.read(2097152), b''):
+                digest.update(data)
+        if digest.hexdigest() != TENSOR_SHA256[tensor]:
+            raise ValueError('Cached tensor content differs from audited checkpoint')
+    return manifest
+
+
+def ensure_fixture(output):
+    if not (output / 'manifest.json').exists():
+        fetch(output)
+    return verify_fixture(output)
+
+
 def load_projection(output):
     import torch
 
@@ -102,4 +131,6 @@ def fetch(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
-    print(json.dumps(fetch(parser.parse_args().output), indent=2))
+    parser.add_argument('--reuse-verified', action='store_true')
+    options = parser.parse_args()
+    print(json.dumps(ensure_fixture(options.output) if options.reuse_verified else fetch(options.output), indent=2))

@@ -18,6 +18,9 @@ if [ "${QWEN_RUN_MODE:-baseline}" = feature-projection-full ]; then
     OMP_NUM_THREADS=1 timeout -k 15 300 python3 /experiment-scripts/ci/feature-norm-probe.py \
         --hardware --fixture /experiment-projection-fixture \
         --projection-report /experiment/results/feature-projection-full.json --output /experiment/results/feature-norm.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/feature-projection-probe.py \
+        --hardware --full-projection --device-tail --rows 1 --fixture /experiment-projection-fixture \
+        --reference blackhole-accumulation --k-block 4 --output /experiment/results/feature-projection-device-tail.json
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = feature-projection ]; then

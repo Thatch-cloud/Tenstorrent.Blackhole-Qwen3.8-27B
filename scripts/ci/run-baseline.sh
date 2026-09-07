@@ -9,11 +9,14 @@ ratio=${QWEN_INTERLEAVE_RATIO:-0}
 output=experiment-results
 if [ "$mode" = interleave ]; then output="$output/interleave-$ratio"; fi
 mkdir -p "$output"
+projection_fixture="$output/draft-projection-fixture"
 if [ "$mode" = feature-projection ]; then
     timeout -k 10 120 python3 scripts/ci/draft_projection_fixture.py --output "$output/draft-projection-fixture"
 fi
 if [ "$mode" = feature-projection-full ]; then
-    timeout -k 10 900 python3 scripts/ci/draft_projection_full_fixture.py --output "$output/draft-projection-fixture"
+    projection_fixture=/home/thatch/.cache/qwen-experiments/dflash2-projection-dedf8df68adfb1afeaf7b7480c0a0243108177b4
+    timeout -k 10 900 python3 scripts/ci/draft_projection_full_fixture.py --reuse-verified --output "$projection_fixture"
+    cp "$projection_fixture/manifest.json" "$output/draft-projection-manifest.json"
 fi
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test_id=''
@@ -61,7 +64,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
 if [[ "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
-    docker cp "$output/draft-projection-fixture" "$test_id:/experiment-projection-fixture"
+    docker cp "$projection_fixture" "$test_id:/experiment-projection-fixture"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"

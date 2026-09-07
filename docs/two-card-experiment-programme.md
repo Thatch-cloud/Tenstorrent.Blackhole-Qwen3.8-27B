@@ -992,3 +992,12 @@ and plugin implementation are fetched into serving images rather than fully vend
 here, so inspect/export their exact running revisions before preparing runtime patches.
 Do not modify Thatch.Server or its production configuration as part of this repo-only
 experiment setup.
+# Integrated drafter projection update (2026-09-07)
+
+Simulator `20260907T102134Z-309` passes the live one-row full projection,
+FP32 fabric gather/add, BF16 cast and learned RMSNorm pipeline on both ranks.
+Sums are exact; normalization differs by at most one BF16 ULP (bound two).
+The existing opt-in full-projection CI suite now also checks this integrated
+path, retaining its host-reduction control. Hardware validation is pending.
+This removes a diagnostic host handoff, not the remaining draft layers or
+request-history integration. No committed-token throughput gain is established.
