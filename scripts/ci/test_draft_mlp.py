@@ -11,15 +11,15 @@ from draft_mlp import split_mlp_weights, swiglu_reference, swiglu_device
 
 
 class DraftMlpTests(unittest.TestCase):
-    def test_unvalidated_integrated_hardware_path_is_rejected_before_fixture_load(self):
+    def test_integrated_hardware_requires_allocation_before_fixture_load(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
-        environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='0')
         result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('learned-mlp-probe.py')),
             '--hardware', '--fixture', '/not-a-fixture', '--convolution-fixture', '/not-a-fixture',
             '--output', '/not-an-output'], env=environment, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('Integrated MLP branch requires simulator validation', result.stderr)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Explicit allocation and non-simulated hardware required', result.stderr)
 
     def test_device_sequence_preserves_reference_rounding(self):
         operations = SimpleNamespace(bfloat16=torch.bfloat16, float32=torch.float32, DRAM_MEMORY_CONFIG=object(),

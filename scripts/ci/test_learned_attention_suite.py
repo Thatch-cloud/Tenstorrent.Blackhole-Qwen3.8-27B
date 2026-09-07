@@ -63,11 +63,14 @@ timeout() {
         result = self.run_suite(mode='learned-mlp')
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
         self.assertIn('device-readback.py', lines[0])
         for argument in ('1800', 'learned-mlp-probe.py', '--hardware',
                 '--fixture /experiment-projection-fixture', 'learned-mlp.json'):
             self.assertIn(argument, lines[1])
+        for argument in ('1800', 'learned-mlp-probe.py', '--hardware',
+                '--convolution-fixture /experiment-convolution-fixture', 'learned-mlp-integrated.json'):
+            self.assertIn(argument, lines[2])
 
     def test_mlp_failed_health_stops_probe(self):
         result = self.run_suite(True, 'learned-mlp')

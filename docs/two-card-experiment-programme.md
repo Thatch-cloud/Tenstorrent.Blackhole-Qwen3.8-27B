@@ -1423,3 +1423,17 @@ diagnostic explicitly selects this schedule for its32-wide tiles; existing
 other diagnostics retain their old default until separately revalidated.
 The integrated branch still requires a complete new simulator pass on both
 ranks; the saved single-rank replay is not that pass and is not a speed result.
+
+The complete integrated MLP simulator151519Z-509 now passes on both ranks,
+with wrapper exit-status0. All gate/up/down projections match the corrected
+reference exactly (zero maximum error). SwiGLU, prepare/finish convolution,
+residual addition and fabric sums are exact; RMS normalization is within one
+BF16 ULP. Tolerances were not relaxed. This is the learned layer-zero MLP
+branch on synthetic input, not a complete attention-plus-MLP layer or drafter.
+
+Standalone MLP hardware34135694410 also passed, with matching simulator
+numerical values using the older16-wide reference. The `learned-mlp` suite
+now retains that standalone control using the corrected32-wide reference and
+adds the simulator-validated integrated branch. Both fixtures are hash-verified;
+each probe has1800s inside the existing4800s suite deadline. No integrated
+hardware pass or request-throughput improvement is claimed yet.

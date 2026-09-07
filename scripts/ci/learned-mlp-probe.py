@@ -25,8 +25,6 @@ def main():
     parser.add_argument('--convolution-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.hardware and options.convolution_fixture:
-        parser.error('Integrated MLP branch requires simulator validation')
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required')
     import torch
