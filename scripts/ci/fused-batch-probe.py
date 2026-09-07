@@ -85,6 +85,8 @@ def main():
                     report['weight_checks'][-1]['readback_diagnostics'] = diagnostics
         if not all(check['source_exact'] and check['exact'] for check in report['weight_checks']):
             raise AssertionError('Pair packing changed BF4 quantization; see weight_checks')
+        report['phase'] = 'weight_checks_passed'
+        options.output.write_text(json.dumps(report, indent=2))
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)
         program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),
@@ -93,6 +95,8 @@ def main():
         for rows in (1, 2, 4, 8, 16, 32):
             generator = torch.Generator().manual_seed(3891 + rows)
             inputs = upload(torch.randn((1, 1, rows, 5120), generator=generator).bfloat16(), ttnn.bfloat16)
+            report.update(phase='native_projection', active_rows=rows)
+            options.output.write_text(json.dumps(report, indent=2))
             projections = [ttnn.linear(inputs, value, program_config=program, compute_kernel_config=kernel,
                 memory_config=ttnn.L1_MEMORY_CONFIG) for value in (device_gate, device_up)]
             owned.extend(projections)
@@ -102,6 +106,8 @@ def main():
             owned.append(expected)
             operation = FusedProjection(mesh, device_packed, pairs_per_worker=3, token_rows=rows,
                 source_root=os.environ['TT_METAL_HOME'])
+            report['phase'] = 'fused_projection'
+            options.output.write_text(json.dumps(report, indent=2))
             actual = operation(inputs)
             owned.append(actual)
             report.setdefault('kernels', []).append(operation.manifest)

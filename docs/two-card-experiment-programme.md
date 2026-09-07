@@ -1932,3 +1932,12 @@ away failures. Simulator191717Z uses the verified ext4 fixture and retains the
 strict packing gate, with host tile quantization and repeated-readback
 diagnostics if a mismatch recurs. This does not establish a filesystem fix.
 The independent five-layer hardware CI remains in progress.
+
+Simulator191717Z exited1 after reaching native projection compilation/execution:
+`UnsupportedFunctionality: tensix_pacr: Disable_pack_zero_flags`. This is the
+known TTSim packer-L1-accumulation limitation, not a fused numerical pass. The
+process died before its finally block could write the report; subsequent probes
+persist weight validation and dispatch phase before native calls. Do not disable
+packer accumulation and label that a validation of the unchanged target kernel.
+The separate learned selector codebook dot gate is the next executable simulator
+prerequisite; fusion remains unvalidated and is not promoted to hardware.
