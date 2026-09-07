@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Real-weight layer34074774493 (`14c7e16`) passed48 exact eager/trace checks,
+  24 KV negative-control pairs and72 paired timing blocks. Both arms keep
+  compact native scratch, parallelism, DMA, ordered writes and projections.
+  Mean T4->T8-group layer costs at4K: T8 0.575713->0.506162ms,
+  T16 0.720521->0.701795ms, T32 1.135018->0.931048ms; at16K:
+  T8 0.709392->0.609928ms, T16 0.933878->0.869730ms,
+  T32 1.520761->1.203496ms. The prepared full-model gate is now eligible;
+  these layer measurements do not establish committed decode throughput.
 - Prepared `full-attention-tree`, gated on real-weight layer34074774493.
   The candidate selects eight-row parallel groups only atT>=8; the matched
   control keeps four-row groups with the same parallelism, DMA, native compact
