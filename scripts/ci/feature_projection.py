@@ -1,6 +1,17 @@
 """Pack a tap-major learned projection for TP2 hidden-sharded target features."""
 
 
+def require_projection_environment(environment, hardware):
+    if environment.get('TT_METAL_SLOW_DISPATCH_MODE'):
+        raise RuntimeError('Fast dispatch required')
+    if hardware:
+        if (environment.get('QWEN_HARDWARE_TESTS') != '1' or environment.get('QWEN_CARDS_ALLOCATED') != '1'
+                or environment.get('TT_METAL_SIMULATOR') or environment.get('TT_METAL_MOCK_CLUSTER_DESC_PATH')):
+            raise RuntimeError('Explicit allocation and non-simulated hardware required')
+    elif not environment.get('TT_METAL_SIMULATOR'):
+        raise RuntimeError('Simulator required unless --hardware is explicitly selected')
+
+
 def sparse_input_permutation(width, active_terms, stride):
     if (any(type(value) is not int or value < 1 for value in (width, active_terms, stride))
             or (active_terms - 1) * stride >= width):

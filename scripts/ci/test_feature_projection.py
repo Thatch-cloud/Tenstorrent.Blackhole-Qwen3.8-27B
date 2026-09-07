@@ -3,10 +3,23 @@ import unittest
 
 import torch
 
-from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation
+from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation, require_projection_environment
 
 
 class FeatureProjectionTests(unittest.TestCase):
+    def test_projection_runtime_requires_explicit_allocation(self):
+        hardware = dict(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        require_projection_environment(hardware, True)
+        require_projection_environment(dict(TT_METAL_SIMULATOR='sim.so'), False)
+        for environment, selected in (({}, False), ({}, True), (hardware, False),
+                (dict(QWEN_HARDWARE_TESTS='1'), True),
+                (dict(hardware, TT_METAL_SIMULATOR='sim.so'), True),
+                (dict(hardware, TT_METAL_MOCK_CLUSTER_DESC_PATH='mock.yaml'), True),
+                (dict(hardware, TT_METAL_SLOW_DISPATCH_MODE='1'), True),
+                (dict(TT_METAL_SIMULATOR='sim.so', TT_METAL_SLOW_DISPATCH_MODE='1'), False)):
+            with self.assertRaises(RuntimeError):
+                require_projection_environment(environment, selected)
+
     def test_sparse_controls_preserve_identical_operands(self):
         features = torch.arange(64, dtype=torch.float64).reshape(2, 32)
         features[:, 2:] = 0

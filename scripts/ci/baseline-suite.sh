@@ -10,6 +10,15 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_RUN_MODE:-baseline}" = feature-projection ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    for block in 100 4; do
+        OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/feature-projection-probe.py \
+            --hardware --fixture /experiment-projection-fixture --reference blackhole-accumulation \
+            --k-block "$block" --output "/experiment/results/feature-projection-k$block.json"
+    done
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = device-readback ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     exit 0

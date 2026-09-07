@@ -5,6 +5,18 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added CI suite `feature-projection`: bounded host-side fetch of the pinned
+  first32 learned output neurons, then an offline disposable container running
+  transfer health followed by the dense arithmetic-reference diagnostic for
+  Kblock100 and4. Each probe is limited to900 seconds; the outer suite is
+  limited to2400 seconds. Hardware mode requires explicit allocation, rejects
+  simulator/mock/slow-dispatch environments, and uses FABRIC_1D mesh startup.
+  Projection outputs are still reduced only on the host, not via fabric.
+  No full model is loaded, no target weights changed, and no reset is requested.
+  Both hardware reports retain all float64 failure flags and source hashes.
+  Host tests:482 passing; shell syntax and workflow YAML parse pass.
+  Final-source TTsim run `20260907T094438Z-514` passes before dispatch.
+
 - Added explicit Blackhole FP32 destination alignment, signed rounding,
   normalization, cancellation and overflow/underflow to the CPU reference.
   Dense run `20260907T093802Z-304` reduces remaining maxima to

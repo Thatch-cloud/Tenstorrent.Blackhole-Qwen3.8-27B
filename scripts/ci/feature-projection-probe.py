@@ -1,4 +1,4 @@
-"""TTsim learned-weight projection slice; host reduction only, no fabric or draft-model claim."""
+"""Learned-weight projection slice; host reduction only, no fabric reduction or draft-model claim."""
 
 import argparse
 import hashlib
@@ -7,14 +7,13 @@ import os
 from pathlib import Path
 
 from draft_projection_fixture import MODEL, REVISION
-from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation
+from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation, require_projection_environment
 from projection_rounding import grouped_projection_reference
 
 
 def main():
-    if not os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE'):
-        raise RuntimeError('Fast-dispatch simulator required')
     parser = argparse.ArgumentParser()
+    parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--k-block', type=int, choices=(4, 100), default=4)
@@ -23,6 +22,7 @@ def main():
     parser.add_argument('--fidelity', choices=('LoFi', 'HiFi2', 'HiFi3', 'HiFi4'), default='HiFi4')
     parser.add_argument('--reference', choices=('float64', 'blackhole-accumulation'), default='float64')
     options = parser.parse_args()
+    require_projection_environment(os.environ, options.hardware)
     if (options.active_k - 1) * options.k_stride >= 12800:
         parser.error('Active terms with the selected stride exceed the local input width')
     import torch
@@ -41,14 +41,14 @@ def main():
     packed = projection_shards(weight)
     permutation = torch.tensor(sparse_input_permutation(12800, options.active_k, options.k_stride))
     packed = [shard[permutation].contiguous() for shard in packed]
-    report = dict(passed=False, scope=__doc__, checkpoint=manifest, checks=[],
+    report = dict(passed=False, scope=__doc__, backend='hardware' if options.hardware else 'simulator', checkpoint=manifest, checks=[],
         tolerance=dict(rtol=1e-4, atol=1e-4), active_k=options.active_k, k_stride=options.k_stride,
         fidelity=options.fidelity, reference=options.reference, matched_operands=True, packer_l1_acc=False, sources={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('feature-projection-probe.py', 'feature_projection.py', 'draft_projection_fixture.py', 'projection_rounding.py')})
     mesh = device_weight = None
     try:
-        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware else ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
         device_weight = ttnn.from_torch(torch.cat(packed, dim=0), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,

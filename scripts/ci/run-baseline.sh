@@ -3,11 +3,15 @@ set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
 ratio=${QWEN_INTERLEAVE_RATIO:-0}
+[[ "$mode" = feature-projection ]] ||
 [[ "$mode" = baseline || "$mode" = interleave || "$mode" = profile || "$mode" = model-profile || "$mode" = mlp-sweep || "$mode" = mlp-packing || "$mode" = mlp-fusion || "$mode" = projection-1d || "$mode" = full-model-fusion || "$mode" = target-feature-prefill || "$mode" = target-feature-prefix || "$mode" = target-feature-replay || "$mode" = target-feature-batch || "$mode" = target-features || "$mode" = full-prefix || "$mode" = full-batch || "$mode" = full-gdn-row-layout || "$mode" = full-gdn-device-loop || "$mode" = full-attention-engine-wide || "$mode" = full-attention-engine || "$mode" = full-attention-replay || "$mode" = full-attention-mask-once || "$mode" = full-attention-tree-replay || "$mode" = full-attention-tree || "$mode" = full-attention-parallel || "$mode" = full-attention-dma || "$mode" = full-attention-groups || "$mode" = full-norm-batch || "$mode" = full-norm-replay || "$mode" = full-norm-selection || "$mode" = full-norm-engine || "$mode" = full-verifier-replay || "$mode" = full-verifier-engine || "$mode" = full-verifier-selection || "$mode" = full-gdn-row-clones || "$mode" = full-gdn-input-reuse || "$mode" = full-compact-gdn || "$mode" = full-coding-cost || "$mode" = full-batch-attribution || "$mode" = attention-batch || "$mode" = attention-timing || "$mode" = attention-tree-layer || "$mode" = attention-tree-replay || "$mode" = attention-tree-parallel || "$mode" = attention-tree-scratch || "$mode" = attention-replay || "$mode" = attention-mask-replay || "$mode" = attention-parallel-groups || "$mode" = attention-dma-layer || "$mode" = attention-group-dma || "$mode" = attention-group-layer || "$mode" = attention-groups || "$mode" = gdn-prefix || "$mode" = gdn-block || "$mode" = gdn-active || "$mode" = gdn-multitoken || "$mode" = gdn-value-split || "$mode" = gdn-value-split-timing || "$mode" = gdn-value-split-prefetch || "$mode" = gdn-value-split-norm-batch || "$mode" = gdn-norm-batch-layer || "$mode" = gdn-multitoken-norm || "$mode" = gdn-multitoken-conv || "$mode" = device-readback || "$mode" = gdn-checkpoint-dma || "$mode" = gdn-checkpoint-cost || "$mode" = gdn-inplace-timing || "$mode" = gdn-inplace || "$mode" = gdn-direct || "$mode" = sampling-kernel || "$mode" = sampling || "$mode" = sampling-extended ]]
 [[ "$ratio" = 0 || "$ratio" = 1 || "$ratio" = 2 || "$ratio" = 4 ]]
 output=experiment-results
 if [ "$mode" = interleave ]; then output="$output/interleave-$ratio"; fi
 mkdir -p "$output"
+if [ "$mode" = feature-projection ]; then
+    timeout -k 10 120 python3 scripts/ci/draft_projection_fixture.py --output "$output/draft-projection-fixture"
+fi
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test_id=''
 cleanup() {
@@ -53,6 +57,9 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "$mode" = feature-projection ]; then
+    docker cp "$output/draft-projection-fixture" "$test_id:/experiment-projection-fixture"
+fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
