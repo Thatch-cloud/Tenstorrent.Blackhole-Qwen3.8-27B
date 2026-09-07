@@ -1234,3 +1234,14 @@ Simulator `20260907T131006Z-307` passes cached long QK on110 active workers,
 including exact full-output equality against cached64 workers and the unchanged
 FP64 reference bound. The hardware suite adds only this validated110-worker
 shape;80-worker hardware remains gated. Learned-attention defaults still use64.
+
+Hardware `34126247829` on `6d358c2` confirms110 active workers per card for the
+cached long-QK probe. Full outputs equal the64-worker control, both ranks pass
+the FP64 reference bound (maximum error7.630e-6), and five repeated outputs are
+stable. Same-run five-sample warm medians improve2.327681ms at64 workers to
+1.593638ms at110 (31.5% lower); ranges2.294072..2.558523ms and
+1.574168..1.807489ms respectively. These are sequential-arm component timings,
+not a whole-model speedup. This demonstrates useful extra-core work without
+changing dispatch placement. PV still needs finer task partitioning to exploit
+more than64 cores; complete long-context learned attention and request integration
+remain unvalidated. The200 committed-token/s goal remains unmet.
