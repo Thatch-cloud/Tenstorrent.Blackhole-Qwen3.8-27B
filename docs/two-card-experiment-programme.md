@@ -1093,3 +1093,12 @@ attention integration `20260907T122502Z-302` also passes the unchanged gates.
 All 519 host tests pass. Hardware remains disabled for this new option until its
 own promotion; no timing improvement is claimed from simulator wall time.
 The QK/PV outer-product reference remains the next large allocation bottleneck.
+
+The learned-attention CI suite now retains its pairwise control, runs a matched
+fused/pairwise row-sum comparison, then checks the fused learned-attention path.
+The comparison has one warmup and five samples per arm/width, alternating arm
+order, checking every output against FP64 reference sums and repeated outputs
+for exact stability. Timing includes dispatch, allocation, synchronization and
+temporary cleanup, excluding uploads/readback/final output release. Simulator
+`20260907T123043Z-305` passes all twelve width/arm/rank correctness records.
+This is a reduction-only cost comparison, not full attention or request timing.

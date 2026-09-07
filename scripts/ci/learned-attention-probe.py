@@ -33,7 +33,8 @@ def main():
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
     if options.hardware and (not all((options.fp32_rope, options.explicit_softmax,
-            options.pairwise_softmax, options.pairwise_dots)) or options.inspect_attention or options.wide_attention or options.fused_row_sum):
+            options.pairwise_dots)) or options.inspect_attention or options.wide_attention
+            or options.pairwise_softmax == options.fused_row_sum):
         parser.error('Hardware requires the inspection-free simulator-validated precise path')
     import torch
     import ttnn
