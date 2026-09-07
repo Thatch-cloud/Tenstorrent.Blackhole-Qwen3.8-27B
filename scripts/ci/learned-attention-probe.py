@@ -76,6 +76,11 @@ def main():
     mesh = None
     tensors = []
 
+    def checkpoint(stage, **details):
+        report['progress'] = dict(stage=stage, **details)
+        options.output.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report['progress']), flush=True)
+
     def retain(value):
         tensors.append(value)
         return value
@@ -89,6 +94,7 @@ def main():
         return ttnn.to_torch(ttnn.get_device_tensors(value)[chip])
 
     try:
+        checkpoint('opening_mesh')
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
@@ -110,6 +116,7 @@ def main():
                 per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)
             projected[name] = retain(ttnn.matmul(inputs['q' if name == 'q' else 'k'], device_weight,
                 dtype=ttnn.float32, compute_kernel_config=kernel, program_config=program, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            checkpoint('projection_dispatched', projection=name, rows=rows)
             rounded = retain(ttnn.typecast(projected[name], ttnn.bfloat16))
             reshaped = retain(ttnn.reshape(rounded, (1, rows, count, 128)))
             heads[name] = retain(ttnn.transpose(reshaped, 1, 2))
@@ -158,6 +165,7 @@ def main():
             compute_kernel_config=kernel, program_config=output_program, memory_config=ttnn.DRAM_MEMORY_CONFIG))
         output = retain(gather_add_projection(ttnn, mesh, collectives, partial_output))
         ttnn.synchronize_device(mesh)
+        checkpoint('device_pipeline_complete')
         partials = [host(partial_output, chip) for chip in range(2)]
         for chip in range(2):
             for name, count in (('q', 16), ('k', 4), ('v', 4)):
@@ -171,6 +179,7 @@ def main():
                     actual_chunk = actual_projection[..., start:stop, :].double()
                     torch.testing.assert_close(actual_chunk, expected, rtol=1e-4, atol=1e-4)
                     max_projection_error = max(max_projection_error, float((actual_chunk - expected).abs().max()))
+                    checkpoint('projection_reference', chip=chip, projection=name, validated_rows=stop, total_rows=valid)
                 actual_heads = host(heads[name], chip)
                 expected_heads = host(projected[name], chip).bfloat16().reshape(1, -1, count, 128).transpose(1, 2)
                 if not torch.equal(actual_heads, expected_heads):
@@ -204,6 +213,7 @@ def main():
                 raise AssertionError('Output projection fabric sum must be exact')
             report['checks'].append(dict(chip=chip, stage='attention/output', sum_exact=True,
                 attention_max_error=float((actual_attention[..., :8, :] - expected_attention[..., :8, :]).abs().max())))
+            checkpoint('rank_checks_complete', chip=chip)
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise

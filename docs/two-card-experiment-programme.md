@@ -1287,3 +1287,13 @@ Run `20260907T132957Z-306` was launched for the long-context integrated gate and
 is still running; there is no pass claim yet. Host tests:527 passed. Full target
 feature history, convolution/MLP integration and request throughput remain separate
 outstanding requirements; this diagnostic does not complete them.
+
+The first long-context run terminated at the wrapper's1800-second limit
+(exit-status124), with no final numerical report; it is not a correctness pass
+or a demonstrated kernel failure. A CPU reference benchmark of the pinned K
+projection takes6.777s for32 rows and29.641s for128 rows (the overlapping results
+are exact), so keep32-row chunks. Four full K/V rank references alone require
+roughly260 such chunks, making the old whole-process deadline inadequate once
+device simulation and other checks are included. The probe now writes explicit
+progress checkpoints with `passed=false` until all gates finish. Retry with a
+3600-second whole-process deadline, without dropping rows or changing tolerances.
