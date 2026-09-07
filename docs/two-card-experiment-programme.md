@@ -1022,6 +1022,10 @@ native attention pass. An unfused device attention reference now passes the
 same random-query gate on context0/31/2048 (`20260907T111306Z-301`), including
 masked-key poison and causal-mask negative controls. This does not resolve the
 native SDPA numerical/unsupported-instruction issues or certify learned attention.
-The host test suite now passes 508 tests.
+Hardware `34115875438` confirms the composed attention reference. Warm attention
+median times are 0.633/0.825/1.637ms at context0/31/2048 respectively, excluding
+the other draft and target operations, not token throughput. The pinned learned
+Q/K/V/O and head-norm fixture is downloaded and verified for the next integration.
+The host test suite now passes 509 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.

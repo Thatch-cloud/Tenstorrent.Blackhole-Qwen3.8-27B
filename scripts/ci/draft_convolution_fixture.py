@@ -28,23 +28,25 @@ TENSOR_SHA256 = dict(zip(TENSORS, (
 ), strict=True))
 
 
-def verified_bytes(output):
+def verified_bytes(output, *, specifications=None, hashes=None):
+    specifications = TENSORS if specifications is None else specifications
+    hashes = TENSOR_SHA256 if hashes is None else hashes
     manifest = json.loads((output / 'manifest.json').read_text())
     if (manifest['model'] != MODEL or manifest['revision'] != REVISION
             or manifest['header_sha256'] != HEADER_SHA256 or manifest['checkpoint_bytes'] != 3848817896):
         raise ValueError('Pinned convolution manifest required')
     tensors = {}
-    for name, (shape, filename) in TENSORS.items():
+    for name, (shape, filename) in specifications.items():
         entry = manifest['tensors'][name]
         length = 2
         for dimension in shape:
             length *= dimension
         if (entry['file'] != filename or entry['shape'] != shape or entry['dtype'] != 'BF16'
-                or entry['bytes'] != length or entry['sha256'] != TENSOR_SHA256[name]
+                or entry['bytes'] != length or entry['sha256'] != hashes[name]
                 or (output / filename).stat().st_size != length):
             raise ValueError('Audited convolution metadata required')
         data = (output / filename).read_bytes()
-        if hashlib.sha256(data).hexdigest() != TENSOR_SHA256[name]:
+        if hashlib.sha256(data).hexdigest() != hashes[name]:
             raise ValueError('Audited convolution content required')
         tensors[name] = data
     return manifest, tensors
@@ -68,7 +70,8 @@ def ensure_fixture(output):
     return verified_bytes(output)[0]
 
 
-def fetch(output):
+def fetch(output, *, specifications=None, scope=__doc__):
+    specifications = TENSORS if specifications is None else specifications
     header_bytes, total = read_range(URL, 8, 8928)
     if total != 3848817896 or hashlib.sha256(header_bytes).hexdigest() != HEADER_SHA256:
         raise ValueError('Pinned audited checkpoint header required')
@@ -77,8 +80,8 @@ def fetch(output):
         raise ValueError('Empty fixture directory required; existing data is never overwritten')
     output.mkdir(parents=True, exist_ok=True)
     manifest = dict(model=MODEL, revision=REVISION, header_sha256=HEADER_SHA256,
-        checkpoint_bytes=total, tensors={}, scope=__doc__)
-    for tensor, (shape, filename) in TENSORS.items():
+        checkpoint_bytes=total, tensors={}, scope=scope)
+    for tensor, (shape, filename) in specifications.items():
         entry = header[tensor]
         length = 2
         for dimension in shape:

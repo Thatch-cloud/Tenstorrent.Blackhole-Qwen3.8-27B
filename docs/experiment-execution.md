@@ -5,6 +5,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware `34115875438` (`6b8fb71`) PASSED composed draft attention and the
+  learned convolution control. Five warm attention-only samples per context
+  have median0.632663ms (context0),0.825215ms (31),1.637039ms (2048) on the
+  two-card mesh. All repeated outputs equal the validated output. These timings
+  exclude weight/input uploads, readback, final output release, projections,
+  RoPE, convolution, MLP, remaining draft layers, selection and target verification;
+  they are not committed tokens/s or whole-drafter latency.
+- Prepared six pinned layer-zero learned attention tensors (104,858,112 bytes):
+  Q/K/V/O projections and Q/K norm weights. Bounded-range download completed;
+  all tensor hashes and finite BF16 shapes pass the independent loader. Shared
+  subset fetching/byte verification preserves existing convolution fixture pins.
+  Learned QKV/head normalization/RoPE and the output projection remain untested
+  on device; these weights are not evidence of an integrated attention layer.
 - Hardware `learned-convolution` suite now also checks the simulator-validated
   composed draft attention, retaining the learned convolution control. Native
   SDPA modes are explicitly refused by the hardware probe while unresolved.
