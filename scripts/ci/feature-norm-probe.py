@@ -1,4 +1,4 @@
-"""Learned RMSNorm on host-reduced full projection output; no fabric reduction."""
+"""Learned RMSNorm with explicit host or fabric reduction diagnostics."""
 
 import argparse
 import hashlib
@@ -9,16 +9,23 @@ from pathlib import Path
 from draft_projection_full_fixture import load_projection
 from feature_normalization import bf16_ulp_distance, projection_row, rms_reference
 from feature_projection import require_projection_environment
+from feature_collective import reduce_projection, gather_add_projection
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--fabric-reduce', action='store_true')
+    parser.add_argument('--gather-add', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--projection-report', type=Path, required=True)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.gather_add and not options.fabric_reduce:
+        parser.error('--gather-add requires --fabric-reduce')
+    if options.fabric_reduce and not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+        raise RuntimeError('Fabric simulator requires shared BDF loading')
     import torch
     import ttnn
 
@@ -32,17 +39,38 @@ def main():
     expected = rms_reference(value, norm_weight)
     report = dict(passed=False, scope=__doc__, backend='hardware' if options.hardware else 'simulator',
         projection_sha256=hashlib.sha256(projection_bytes).hexdigest(),
-        checkpoint=manifest, epsilon=1e-6, max_bf16_ulps=2, checks=[], sources={name:
+        checkpoint=manifest, fabric_reduce=options.fabric_reduce, gather_add=options.gather_add,
+        epsilon=1e-6, max_bf16_ulps=2, checks=[], sources={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ('feature-norm-probe.py', 'feature_normalization.py', 'draft_projection_full_fixture.py')})
+            for name in ('feature-norm-probe.py', 'feature_normalization.py', 'draft_projection_full_fixture.py', 'feature_collective.py')})
     mesh = None
     tensors = []
     try:
-        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware else ttnn.FabricConfig.DISABLED)
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware or options.fabric_reduce else ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
-        device_value = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+        if options.fabric_reduce:
+            from models.tt_transformers.tt.ccl import TT_CCL
+
+            partials = torch.tensor([check['actual_first_row'] for check in sorted(projection['checks'], key=lambda check: check['chip'])],
+                dtype=torch.float32).reshape(2, 1, 1, 5120)
+            device_partials = ttnn.from_torch(partials, device=mesh, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=0))
+            tensors.append(device_partials)
+            operation = gather_add_projection if options.gather_add else reduce_projection
+            reduced = operation(ttnn, mesh, TT_CCL(mesh), device_partials)
+            tensors.append(reduced)
+            reference_sum = partials.sum(dim=0, keepdim=True)
+            report['reduction_checks'] = []
+            for chip, shard in enumerate(ttnn.get_device_tensors(reduced)):
+                actual_sum = ttnn.to_torch(shard)
+                report['reduction_checks'].append(dict(chip=chip,
+                    max_abs_error=float((actual_sum - reference_sum).abs().max()), exact=bool(torch.equal(actual_sum, reference_sum))))
+                torch.testing.assert_close(actual_sum, reference_sum, rtol=0, atol=0)
+            device_value = ttnn.typecast(reduced, ttnn.bfloat16)
+        else:
+            device_value = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
         tensors.append(device_value)
         device_weight = ttnn.from_torch(norm_weight.reshape(1, 1, 160, 32), device=mesh,
             dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,

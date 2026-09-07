@@ -5,6 +5,27 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware run `34109548525` (`f347f3c`) PASSED full one-row projection on
+  both80-core grids, transfer health and learned normalization. Downloaded
+  reports confirm all10,240 projection values exactly match the simulator
+  (all5120 channels on both chips, not a sampled first32 slice). Normalization
+  is within one BF16 ULP on both chips. This path still used host reduction
+  and report re-upload; it is not a device-resident drafter or throughput test.
+- First actual shared-fabric reduction test `20260907T101538Z-302` exposed
+  a precision failure: native reduce-scatter followed by all-gather changes
+  5119/5120 FP32 sums on the first checked chip, max error0.0631866455078125.
+  It fails BEFORE normalization; no tolerance was relaxed or result promoted.
+  Alternative `gather_add_projection` gathers raw FP32 rank data along dim0,
+  slices the two rank tensors, then uses local FP32 `ttnn.add`. Shared-BDF
+  simulator run `20260907T101737Z-300` PASSES: all5120 sums EXACT on each
+  chip, followed by normalization within one BF16 ULP. The host computes only
+  validation references after uploading separate saved rank partials, not the
+  inference-path reduction. The native reduce-scatter arm remains an explicit
+  failing experimental control. These helpers synchronize for safe temporary
+  release; no latency or trace-replay result is claimed. Next connect the
+  live projection output directly to this collective and normalization, then
+  validate on hardware before trained-drafter layers. All494 host tests pass.
+
 - TTsim fabric-startup blocker resolved without SDK/kernel changes. Explicit
   P300 mesh graph alone (`20260907T100714Z-288`) still fails at router STARTED,
   waiting15000ms for the remote handshake. Installed UMD

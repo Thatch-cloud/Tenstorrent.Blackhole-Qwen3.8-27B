@@ -2,6 +2,12 @@
 
 ## Current measured result - 2026-09-07
 
+Hardware34109548525 passes full projection and learned normalization; every
+projection output matches TTsim. A shared-fabric gather-plus-FP32-add simulator
+test now reproduces the host sum exactly on both chips. Native reduce-scatter
+failed FP32 equality and is not adopted. Next connect live projection outputs
+to collective/norm without intermediate host serialization, then validate CI.
+
 The simulator fabric-startup blocker is resolved: a missing adjacent cluster
 descriptor caused isolated simulator instances. Opt-in shared BDF loading now
 passes FABRIC_1D startup and changed-input traces. This enables simulator-first
