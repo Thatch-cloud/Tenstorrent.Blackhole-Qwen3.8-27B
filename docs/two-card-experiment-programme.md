@@ -1376,3 +1376,17 @@ the pinned three layer-zero matrices with full hash validation, uses a1800s
 probe limit, and retains the existing allocation/no-reset requirements.
 No MLP hardware result is claimed yet. Long-attention hardware run34134992019
 is in progress at commit7d0287f.
+
+The next simulator-only gate connects the learned MLP branch end to end:
+post-attention RMS normalization, learned dynamic convolution kernels,
+prepare convolution, TP2 gate/up/SwiGLU/down, fabric sum, finish convolution
+and residual addition. Both convolution banks are generated from the same
+normalized branch input; no host readback feeds the device execution path.
+The diagnostic checks each stage against the existing rounding-aware references,
+including exact prepare/finish convolution and residual arithmetic, and retains
+the separate projection/activation/fabric gates. Inputs are eight synthetic rows
+padded to32, not actual attention outputs or a complete five-layer drafter.
+Run `20260907T145919Z-495` is active; no numerical pass is claimed yet.
+Hardware rejects this integrated option until simulator validation. All538 host
+tests pass, including the pre-fixture hardware rejection check. The standalone
+MLP hardware gate34135694410 remains queued behind long-attention34134992019.
