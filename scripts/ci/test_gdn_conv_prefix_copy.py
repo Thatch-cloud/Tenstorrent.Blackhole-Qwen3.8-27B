@@ -1,9 +1,26 @@
 import unittest
+import random
 
 from gdn_conv_prefix_copy import validate_prefix
 
 
 class PrefixCopyTests(unittest.TestCase):
+    def test_reused_padding_matches_per_page_clear_for_all_tile_rows(self):
+        generator = random.Random(38148)
+        pages = [[generator.getrandbits(32) for _ in range(512)] for _ in range(14)]
+        for token in range(32):
+            reused = [0] * 512
+            offset = (token // 16) * 256 + (token % 16) * 8
+            for source in pages:
+                control = [0] * 512
+                for face in range(2):
+                    for word in range(8):
+                        destination = face * 128 + word
+                        value = source[offset + face * 128 + word]
+                        reused[destination] = value
+                        control[destination] = value
+                self.assertEqual(reused, control)
+
     def test_every_supported_prefix(self):
         for rows in (1, 2, 4, 8, 16, 32):
             for prefix in range(1, rows + 1):

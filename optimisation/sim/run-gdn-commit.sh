@@ -19,10 +19,12 @@ test -f "$TT_METAL_MOCK_CLUSTER_DESC_PATH"
 cp "$TT_METAL_HOME/tt_metal/soc_descriptors/blackhole_140_arch.yaml" "$SIM_ROOT/simulator/soc_descriptor.yaml"
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
-export QWEN_SIM_REPORT="$SIM_ROOT/results/$RUN_ID-gdn-commit.json"
+PROBE=${QWEN_SIM_COMMIT_PROBE:-gdn-commit}
+[[ "$PROBE" = gdn-commit || "$PROBE" = gdn-prefix-copy ]]
+export QWEN_SIM_REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$QWEN_SIM_REPORT"
 cd "$SIM_ROOT"
 status=0
-timeout -k 10 "${KERNEL_TIMEOUT:-600}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/gdn-commit.py" "$@" 2>&1 | sed -E '/\| +info +\| +Metal +\| (DFB size:|Writing DFB config)/d' | tee "$SIM_ROOT/results/$RUN_ID-gdn-commit.log" || status=$?
-printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-gdn-commit.exit-status"
+timeout -k 10 "${KERNEL_TIMEOUT:-600}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/$PROBE.py" "$@" 2>&1 | sed -E '/\| +info +\| +Metal +\| (DFB size:|Writing DFB config)/d' | tee "$SIM_ROOT/results/$RUN_ID-$PROBE.log" || status=$?
+printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-$PROBE.exit-status"
 exit "$status"

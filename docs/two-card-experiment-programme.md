@@ -1736,3 +1736,12 @@ and the dependent selector gate correctly did not launch. Retry171550Z keeps
 the same numerical work but captures down inputs, actual/reference outputs,
 layer identity and pinned manifest on failure for offline ISA replay. No
 tolerance increase or hardware promotion was made.
+
+The independent `gdn-prefix-copy` simulator gate is now prepared and queued
+after the active MLP capture run. It checks all63 supported prefix/width pairs,
+both ranks and all four slots, comparing default and zero-tile-reuse kernels
+against the selected source row plus every physical padding element. Output
+buffers start with nonzero padding canaries; packed sources must remain
+unchanged. The slow-dispatch wrapper preserves its existing commit-gate
+default. This scheduling dependency requires the prior process to terminate,
+not the unrelated learned-layer numerical test to pass.
