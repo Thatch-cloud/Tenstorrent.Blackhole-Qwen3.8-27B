@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prepared `full-attention-tree-replay`, not yet dispatched: disposable native
+  compact-scratch build, device health, then the full-model changed-metadata
+  replay/rollback matrix with eight-row groups and one shared mask refresh per
+  forward. It uses the existing simulator composition evidence
+  `20260907T032057Z-302`; hardware promotion waits for component run34080112263
+  and inspection of its wide-mask and attention-replay artifacts. The workflow
+  retains the7000-second cold-build budget. Shell-routing tests check build
+  ordering, failure before device opening, and unchanged four-row modes.
+  This is the next correctness gate, not a throughput result or a serving change.
 - Shared-mask full-model34079160602 (`d4a5df5`) passed24 exact batch checks,
   16 rollback checks,4 negative-control pairs and36 changed-metadata replay
   cases at4096/16384. All24 T16/T32 replay cases engage the hoist;12 T2 cases
