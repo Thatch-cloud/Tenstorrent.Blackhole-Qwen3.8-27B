@@ -1668,3 +1668,19 @@ projection references, exact connected MLP outputs/residuals/fabric sums and
 one-ULP normalization. Attention max errors were1.1444092e-5/1.3828278e-5;
 existing tolerances were unchanged. Two-layer stack simulation
 `20260907T164514Z-3101` is now running, replacing the completed simulator slot.
+
+The final remaining layer4 download is complete. Its15 tensors (665,948,672
+bytes) passed independent Windows SHA256 comparison and WSL hash/finite-BF16
+verification. All four remaining layers now have complete source-pinned hashes;
+the fail-closed unpinned-loader test explicitly removes pins rather than relying
+on a permanently unavailable layer. Together with layer0, feature projection,
+final normalization and selector fixtures, the staged selections cover all81
+tensors and3,848,808,960 payload bytes of the pinned DFlash2 checkpoint.
+
+Shared target head integration was checked against the saved native `model.py`
+whose SHA256 is c977f3808c39c9dacde5a62a1e30c09dbb55b27d272fecaa9ffea09991270391.
+Its `_lm_head` applies `ttnn.linear` with borrowed vocab-sharded weights and
+then gathers logits. The learned drafter must use its own final normalization,
+not the target's `_final_norm_decode`; sharded top16 selection could avoid the
+full-logit gather, but still requires a separate exact candidate/ID merge gate.
+No shared-head adapter is claimed implemented or benchmarked yet.

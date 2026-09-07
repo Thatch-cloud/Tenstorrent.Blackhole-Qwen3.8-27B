@@ -6,13 +6,21 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_remaining_layers_fixture import specifications, fetch_layers, load_layer
+from draft_remaining_layers_fixture import specifications, fetch_layers, load_layer, TENSOR_SHA256
 from draft_convolution_fixture import MODEL, REVISION, HEADER_SHA256
 
 
 class RemainingLayerFixtureTests(unittest.TestCase):
+    def test_all_remaining_layers_have_complete_sha256_pins(self):
+        self.assertEqual(set(TENSOR_SHA256), {'1', '2', '3', '4'})
+        for layer in range(1, 5):
+            hashes = TENSOR_SHA256[str(layer)]
+            self.assertEqual(set(hashes), set(specifications(layer)))
+            for digest in hashes.values():
+                self.assertRegex(digest, r'^[0-9a-f]{64}$')
+
     def test_unpinned_layer_is_rejected_before_reading_files(self):
-        with self.assertRaisesRegex(ValueError, 'not been audited'):
+        with patch('draft_remaining_layers_fixture.TENSOR_SHA256', {}), self.assertRaisesRegex(ValueError, 'not been audited'):
             load_layer(Path('missing'), 4)
 
     def test_loader_rehashes_pinned_content(self):
