@@ -50,12 +50,26 @@ def main():
             return result
 
         device_gate, device_up, device_packed = [upload(value, ttnn.bfloat4_b, True) for value in (gate, up, packed)]
+        report['weight_checks'] = []
         for chip in range(2):
             unpacked = ttnn.to_torch(ttnn.get_device_tensors(device_packed)[chip]).reshape(5120, 272, 2, 32)
             for offset, value in enumerate((device_gate, device_up)):
-                if not torch.equal(unpacked[:, :, offset].reshape(5120, 8704),
-                        ttnn.to_torch(ttnn.get_device_tensors(value)[chip]).reshape(5120, 8704)):
-                    raise AssertionError('Pair packing changed BF4 quantization')
+                observed = unpacked[:, :, offset].reshape(5120, 8704)
+                reference = ttnn.to_torch(ttnn.get_device_tensors(value)[chip]).reshape(5120, 8704)
+                source = (gate, up)[offset][chip, 0]
+                source_packed = packed[chip, 0].reshape(5120, 272, 2, 32)[:, :, offset].reshape(5120, 8704)
+                mismatch = observed != reference
+                coordinates = mismatch.nonzero()[:8]
+                report['weight_checks'].append(dict(chip=chip, projection=('gate', 'up')[offset],
+                    source_exact=torch.equal(source, source_packed), exact=torch.equal(observed, reference),
+                    mismatches=int(mismatch.sum()), observed_finite=bool(torch.isfinite(observed).all()),
+                    reference_finite=bool(torch.isfinite(reference).all()),
+                    max_abs=float((observed.float() - reference.float()).abs().max()),
+                    examples=[dict(coordinate=coordinate.tolist(), packed=float(observed[tuple(coordinate)]),
+                        separate=float(reference[tuple(coordinate)]), source=float(source[tuple(coordinate)]))
+                        for coordinate in coordinates]))
+        if not all(check['source_exact'] and check['exact'] for check in report['weight_checks']):
+            raise AssertionError('Pair packing changed BF4 quantization; see weight_checks')
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)
         program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),

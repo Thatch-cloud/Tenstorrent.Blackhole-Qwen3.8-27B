@@ -275,6 +275,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report['compact_comparison']['scope'] = 'Full-model serial versus parallel attention groups; identical DMA layouts and GDN; static positions only, no committed tok/s'
             if attention_tree:
                 report['compact_comparison']['scope'] = 'Full-model T4 versus T8 parallel attention groups; identical compact scratch, DMA and GDN; static positions only, no committed tok/s'
+            if prefix_zero_reuse:
+                report['compact_comparison']['scope'] = 'Full-model per-page zeroing versus per-worker zero reuse; identical attention, GDN and checkpoint configuration; static positions only, no committed tok/s'
 
         restore_initial()
         trace, unused = capture_operation(ttnn, mesh, restore_initial)

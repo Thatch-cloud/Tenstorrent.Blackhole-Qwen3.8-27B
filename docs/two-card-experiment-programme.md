@@ -1890,3 +1890,26 @@ the exact simulator-validated short-context five-layer/selector-projection
 configuration. This branch does not rerun the unrelated long one-layer sweep;
 the existing suite remains unchanged when the option is false. No request or
 throughput certification follows merely from this mathematical hardware gate.
+
+### Prefix-copy full-model result and next gates
+
+Hardware run34150091732 passed the full-model static correctness, rollback and
+negative-control gate with prefix_zero_reuse=true. T8 interleaved A/B median
+costs were64.4831ms control versus62.3926ms candidate at4095, and66.1415ms
+versus64.0525ms at16383. Median paired speed ratios were1.033388 and1.032637.
+Separate candidate block medians were62.3475/64.0012ms. These are verifier
+costs, not committed coding throughput: even perfect acceptance with zero
+draft/commit overhead gives only128.31/125.00tok/s. Reaching200 still requires
+at least35.84/37.50% further verifier reduction before paying draft overhead.
+The archived compact_comparison.scope string incorrectly describes the older
+T4/T8 attention experiment; paired_control and the executed control flags
+correctly identify the zero-copy-only A/B. Future report scope is corrected;
+the downloaded evidence is preserved unchanged.
+
+Five-layer learned hardware run34154133218 was dispatched from bb17e86 after
+607 host tests passed. No reset or serving-default change was requested.
+Multi-row fusion simulator185201Z failed before kernel execution because its
+separate/paired BF4 weight equality prerequisite failed; no width passed.
+Diagnostic simulator190512Z retains that strict prerequisite and records
+source packing equality, finite checks and differing coordinates on both chips.
+It is not approved for hardware until the simulator gate genuinely passes.
