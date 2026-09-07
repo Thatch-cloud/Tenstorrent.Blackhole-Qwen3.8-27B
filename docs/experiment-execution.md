@@ -5,6 +5,27 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Shared-mask full-model34079160602 (`d4a5df5`) passed24 exact batch checks,
+  16 rollback checks,4 negative-control pairs and36 changed-metadata replay
+  cases at4096/16384. All24 T16/T32 replay cases engage the hoist;12 T2 cases
+  retain the native fallback. Captures contain two mask programs perT16 forward
+  and three perT32, rather than refreshing them in every attention layer.
+  Logits, refreshed prefixes, valid KV, inactive slots and both corrected
+  continuation steps pass. This is correctness, not a measured speed gain.
+  Eight-row attention-tree-replay34080112263 (`61e82b9`) is now running.
+- Neural-drafter prerequisite: `target_features.LayerOutputCapture` now captures
+  explicit post-layer outputs using instance-only scoped hooks. It preserves
+  configured tap order, requires every tap exactly once, rejects borrowed or
+  partially aliased chip storage, restores hooks on failure, and owns/releases
+  snapshots independently of the target's intermediate tensors. Its boundary
+  follows the pinned [upstream layer-hook contract](https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py#L473).
+  TTsim20260907T034521Z-428 passes10 exact tap/chip checks at32 rows with
+  two2560-wide shards and distinct chip values after all original buffers are
+  freed. The64 layers in this probe are synthetic additions, not Qwen layers.
+  This is ownership evidence only: actual-Qwen feature parity, trace lifetime,
+  prefill suffix/token alignment, accepted-prefix feature publication, learned
+  feature projection and neural drafting remain unimplemented or uncertified.
+  No serving/drafter callback is changed and no speed gain is claimed.
 - TTsim20260907T032057Z-302 passed T32/start4096/capacity4352, seed2, with
   compact native scratch, eight-row DMA groups and shared-mask scopes. Native,
   grouped, parallel, prepared-reader and forward/rollback4103->4096 outputs are

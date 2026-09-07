@@ -20,7 +20,7 @@ cp "$TT_METAL_HOME/tt_metal/soc_descriptors/blackhole_140_arch.yaml" "$SIM_ROOT/
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 PROBE=${QWEN_SIM_PROBE:-attention-head-fold}
-[[ "$PROBE" = attention-head-fold || "$PROBE" = attention-mask-replay ]]
+[[ "$PROBE" = attention-head-fold || "$PROBE" = attention-mask-replay || "$PROBE" = target-features ]]
 export QWEN_SIM_REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$QWEN_SIM_REPORT"
 cd "$SIM_ROOT"
