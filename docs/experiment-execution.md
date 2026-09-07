@@ -5,6 +5,13 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Eight-row integrated simulator `20260907T103148Z-411` PASSED: both complete
+  [1,1,8,5120] rank outputs meet the same arithmetic-reference tolerance, fabric
+  sums are exact across all rows and normalization is within one BF16 ULP.
+  Maximum arithmetic-reference absolute errors are 0.0001220703125 and
+  0.0000591278076171875; the relative-plus-absolute tolerance is unchanged.
+  The full-projection hardware suite now adds this case; no T32 or request-level
+  drafter certification is implied by an eight-row numerical pass.
 - Hardware `34111774033` (`731a3ea`) PASSED the live device-resident one-row
   projection/fabric gather-add/BF16/RMSNorm path: both sums exact, normalization
   at most one BF16 ULP. All 10,240 saved projection values match the retained

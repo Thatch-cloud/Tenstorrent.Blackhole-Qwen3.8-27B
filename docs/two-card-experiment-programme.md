@@ -1001,7 +1001,9 @@ The existing opt-in full-projection CI suite now also checks this integrated
 path, retaining its host-reduction control. Hardware run `34111774033` on
 `731a3ea` now passes: both sums exact, normalization within one BF16 ULP,
 all 10,240 projection values identical to the separate control. Eight-row
-batching is under simulator validation (`20260907T103148Z-411`), not yet
-hardware-certified; its host test suite passes 497 tests.
+batching now passes simulator validation (`20260907T103148Z-411`): exact
+fabric sums across both complete eight-row outputs and normalization within
+one BF16 ULP. It is added to the hardware suite but is not yet hardware-certified;
+its host test suite passes 497 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.

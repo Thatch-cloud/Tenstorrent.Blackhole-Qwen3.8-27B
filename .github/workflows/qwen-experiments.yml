@@ -66,7 +66,7 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
-        run: timeout -k 30 2400 bash scripts/ci/run-baseline.sh
+        run: timeout -k 30 4800 bash scripts/ci/run-baseline.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'
         shell: bash
