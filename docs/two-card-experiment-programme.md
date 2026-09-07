@@ -1321,3 +1321,12 @@ retrying invalid responses. Tests cover retry identity, exhaustion and rejection
 without retry; all533 host tests pass. A fresh download is active under
 `hardware-evidence.local/dflash2-mlp-dedf8df-retry1`; no partial-file overwrite or
 unverified resume was performed. Attention retry remains a separate live process.
+
+The fresh MLP download completed. All534773760 bytes were rehashed and loaded
+as finite BF16 matrices; `draft_mlp_fixture` now pins each tensor's SHA256 and
+checks model revision, header, shape, dtype and size before loading/reuse.
+Corrupt cached content fails without overwrite/redownload. The three matrices
+are available in `hardware-evidence.local/dflash2-mlp-dedf8df-retry1` for the
+device MLP gate. All534 host tests pass. The long-context attention retry has
+completed chip0's full K projection/normalization/RoPE checks and is advancing
+through full V reference validation; final status remains pending, not passed.
