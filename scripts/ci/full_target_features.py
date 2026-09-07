@@ -8,10 +8,13 @@ def feature_prompts(tokenizer, make_prompt, lengths):
     lengths = tuple(lengths)
     if not lengths or any(type(length) is not int or length < 1 for length in lengths):
         raise ValueError('Positive integer feature context lengths required')
-    base = make_prompt(tokenizer, max(128, max(lengths)), 0)
-    if len(base) < max(lengths):
-        raise ValueError('Insufficient feature prompt tokens')
-    return tuple(base[:length] for length in lengths)
+    budget = max(128, max(lengths))
+    for attempt in range(4):
+        base = make_prompt(tokenizer, budget, 0)
+        if len(base) >= max(lengths):
+            return tuple(base[:length] for length in lengths)
+        budget *= 2
+    raise ValueError(f'Insufficient feature prompt tokens: got {len(base)}, need {max(lengths)}')
 
 
 def verify_features(model, prompt, tap_ids, *, prefill, decode, live_digest, kv_digest, inactive_digest,

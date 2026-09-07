@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prefill-feature hardware34101889468 (`bb1c075`) failed before any feature
+  fixture: the prompt builder treats129 as an upper budget, not an exact token
+  count, and returned too few tokens. The fixture builder now grows the budget
+  with a bounded four-attempt loop until the same base supplies every requested
+  length, then slices nested prefixes. Short existing fixtures retain their
+  original first budget. Regression tests cover coarse template sizes and a
+  non-growing builder. No model, copy kernel or correctness criterion changed;
+  simulator prefill-oracle source hashes remain unchanged.
 - Added standalone `target-feature-prefill` gate for contexts63/64/65/127/128/129.
   It compares all five owned post-layer outputs with independently captured
   next-layer inputs, requires two [1,1,bucket,2560] shards, checks only valid

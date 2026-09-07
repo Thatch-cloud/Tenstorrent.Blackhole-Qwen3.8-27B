@@ -7,6 +7,29 @@ from full_target_features import feature_prompts, verify_features
 
 
 class TargetFeatureValidationTests(unittest.TestCase):
+    def test_template_budget_is_an_upper_bound_not_an_exact_length(self):
+        calls = []
+
+        def make_prompt(tokenizer, budget, variant):
+            calls.append(budget)
+            return list(range(budget // 32 * 32))
+
+        prompts = feature_prompts(None, make_prompt, (63, 64, 65, 127, 128, 129))
+        self.assertEqual(calls, [129, 258])
+        self.assertEqual([len(prompt) for prompt in prompts], [63, 64, 65, 127, 128, 129])
+        self.assertTrue(all(prompt == prompts[-1][:len(prompt)] for prompt in prompts))
+
+    def test_non_growing_template_is_bounded(self):
+        calls = []
+
+        def make_prompt(tokenizer, budget, variant):
+            calls.append(budget)
+            return [1]
+
+        with self.assertRaisesRegex(ValueError, 'Insufficient feature prompt tokens'):
+            feature_prompts(None, make_prompt, (129,))
+        self.assertEqual(calls, [129, 258, 516, 1032])
+
     def test_short_contexts_slice_a_template_sized_base(self):
         calls = []
 
