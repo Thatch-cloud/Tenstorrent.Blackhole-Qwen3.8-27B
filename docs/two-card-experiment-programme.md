@@ -1829,3 +1829,25 @@ changing only zero reuse. CI selects this using prefix_zero_reuse=true with the
 full-attention-tree suite; other suite combinations fail before hardware work.
 This retains the full static correctness/rollback matrix and end-to-end verifier
 timing, but does not establish committed coding throughput or alter serving defaults.
+
+### Complete profiler evidence: CI34149690873
+
+The context-isolated profiler passed CI and local revalidation of its downloaded
+CSV/report/console artifacts. The independent correctness matrix contains24
+batch cases,16 rollback cases and4 negative-control pairs. Both contexts have
+three exact replays of native/control/candidate on both physical chips, without
+dropped markers inside measured boundaries. Cgroup oom and oom_kill are zero;
+peak usage remains near96GiB, so this is not evidence of generous memory headroom.
+
+For the packed-GDN/ordered-cache candidate, chip0 median summed kernel durations
+are32.023/32.007ms for matmuls,22.463/22.460ms for generic GDN/cache operations,
+and5.682/10.081ms for SDPA at4095/16383 contexts. Each replay has2152 operations
+versus11448 native serial operations. These sums are attribution, not critical
+path or throughput, and this profile lacks the norm-batch/grouped-attention
+settings of the best static verifier. Matmul core counts vary32/39/43/56/108;
+SDPA uses110 workers. The workload is not uniformly limited to36 cores.
+
+The full-model zero-reuse A/B run34150091732 is now active on the stronger
+attention configuration. Its result, not the copy microbenchmark or instrumented
+kernel sums, must establish any verifier-level improvement. The separate
+five-layer learned simulation continues; no learned-request rate is certified.
