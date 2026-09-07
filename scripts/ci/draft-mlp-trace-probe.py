@@ -65,7 +65,7 @@ def main():
         original_addresses = [addresses(ttnn, value) for value in persistent]
         def execute():
             return execute_mlp_branch(ttnn, mesh, collective, device_hidden, weights, convolution,
-                retain_transient, parameters=parameters)
+                retain_transient, parameters=parameters, trace_safe=True)
         references = []
         for pattern, source in enumerate(host_inputs):
             ttnn.copy_host_to_device_tensor(source, device_hidden)

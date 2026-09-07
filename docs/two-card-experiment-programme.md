@@ -2087,3 +2087,17 @@ retain the old output and fail comparison to the other input's reference.
 Trace ownership is released before activation/parameter buffers. This new gate
 has no hardware mode or timing claim until simulation passes. Hardware34167225933
 separately measures the already validated eager parameter-reuse path.
+
+Hardware34167225933 passed all six changing-input eager MLP iterations and the
+five-layer gate. Five post-warmup branch samples were5.543028,3.938810,9.372616,
+4.182100,3.930729ms (median4.182100ms). This excludes weight/input transfer and
+validation and is neither full-drafter latency nor committed-token throughput.
+
+Simulator223954Z exited1 after both eager references passed: capture rejected
+the host synchronize_device call inside grouped_causal_convolution. No traced
+output passed. The failed report is retained locally. The fix adds explicit
+caller-owned temporary retention to convolution and gather-add, avoiding their
+internal host waits and frees only in the opt-in trace-safe MLP path. Existing
+eager callers remain unchanged. Captured temporaries stay alive until trace
+release;620 host tests pass, including deferred ownership checks. A fresh
+simulator gate must pass before this path can be promoted to hardware.

@@ -30,7 +30,7 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
         device_projections=[upload(torch.cat([rank[index] for rank in shards], dim=0), True) for index in range(3)])
 
 
-def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None):
+def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None, trace_safe=False):
     if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
         raise ValueError('A padded32-row BF16 hidden block is required')
     if parameters is None:
@@ -39,6 +39,7 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
             or parameters['source_weights'] is not weights or parameters['source_convolution'] is not convolution):
         raise ValueError('Prepared MLP parameters belong to a different mesh or learned layer')
     kernel = parameters['kernel']
+    ownership = dict(retain_temporaries=retain) if trace_safe else {}
 
     def project(value, weight, grid, columns):
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
@@ -54,14 +55,14 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
     bases = parameters['bases']
-    prepared = retain(grouped_causal_convolution(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True))
+    prepared = retain(grouped_causal_convolution(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership))
     projections = [project(prepared, parameters['device_projections'][index], (8, 10), 4)
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
     partial = project(activation, parameters['device_projections'][2], (8, 10), 2)
-    reduced = retain(gather_add_projection(operations, mesh, collectives, partial))
+    reduced = retain(gather_add_projection(operations, mesh, collectives, partial, **ownership))
     rounded_output = retain(operations.typecast(reduced, operations.bfloat16))
-    finished = retain(grouped_causal_convolution(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True))
+    finished = retain(grouped_causal_convolution(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership))
     wide_finished = retain(operations.typecast(finished, operations.float32))
     wide_hidden = retain(operations.typecast(hidden, operations.float32))
     summed = retain(operations.add(wide_finished, wide_hidden, dtype=operations.float32))

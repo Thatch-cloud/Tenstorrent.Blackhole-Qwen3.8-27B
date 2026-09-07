@@ -6,6 +6,18 @@ from feature_collective import reduce_projection, gather_add_projection
 
 
 class FeatureCollectiveTests(unittest.TestCase):
+    def test_trace_ownership_defers_sync_and_temporary_release(self):
+        operations, mesh, collectives, value, reduced, gathered = self.fixture()
+        left, right, output = object(), object(), object()
+        operations.slice = Mock(side_effect=[left, right])
+        operations.add = Mock(return_value=output)
+        owned = []
+        self.assertIs(gather_add_projection(operations, mesh, collectives, value,
+            retain_temporaries=owned.append), output)
+        self.assertEqual(owned, [gathered, left, right])
+        operations.synchronize_device.assert_not_called()
+        operations.deallocate.assert_not_called()
+
     def fixture(self):
         reduced, output = object(), object()
         operations = SimpleNamespace(float32='fp32', DRAM_MEMORY_CONFIG='dram', Topology=SimpleNamespace(Linear='linear'),

@@ -28,7 +28,7 @@ def convolution_reference(hidden, dynamic, base):
     return output
 
 
-def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None):
+def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None, retain_temporaries=None):
     rows = validate_shapes(hidden, dynamic, base)
     borrowed = (hidden, *dynamic, *base)
     if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16 for value in borrowed):
@@ -40,6 +40,8 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_
     def retain(value):
         if addresses(operations, value) not in protected:
             temporaries.append(value)
+            if retain_temporaries is not None:
+                retain_temporaries(value)
         return value
 
     def arithmetic(operation, left, right):
@@ -69,9 +71,12 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_
             output = arithmetic(operations.add, output, static_term)
             dynamic_term = arithmetic(operations.multiply, expanded, values)
             output = arithmetic(operations.add, output, dynamic_term)
-        operations.synchronize_device(mesh)
+        if retain_temporaries is None:
+            operations.synchronize_device(mesh)
     except BaseException:
-        release_owned(operations, temporaries)
+        if retain_temporaries is None:
+            release_owned(operations, temporaries)
         raise
-    release_owned(operations, [value for value in temporaries if addresses(operations, value) != addresses(operations, output)])
+    if retain_temporaries is None:
+        release_owned(operations, [value for value in temporaries if addresses(operations, value) != addresses(operations, output)])
     return output
