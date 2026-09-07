@@ -38,7 +38,7 @@ fi
 if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
     stack_fixture=/home/thatch/.cache/qwen-experiments/dflash2-stack-dedf8df68adfb1afeaf7b7480c0a0243108177b4
     selector_fixture=/home/thatch/.cache/qwen-experiments/dflash2-selector-dedf8df68adfb1afeaf7b7480c0a0243108177b4
-    timeout -k 10 2400 python3 scripts/ci/draft_remaining_layers_fixture.py --reuse-verified --output "$stack_fixture"
+    timeout -k 10 4800 python3 -u scripts/ci/draft_remaining_layers_fixture.py --reuse-verified --output "$stack_fixture"
     timeout -k 10 900 python3 scripts/ci/draft_selector_fixture.py --reuse-verified --output "$selector_fixture"
     for layer in 1 2 3 4; do cp "$stack_fixture/layer-$layer/manifest.json" "$output/draft-layer-$layer-manifest.json"; done
     cp "$selector_fixture/manifest.json" "$output/draft-selector-manifest.json"

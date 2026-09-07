@@ -6,11 +6,63 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_remaining_layers_fixture import specifications, fetch_layers, ensure_layers, load_layer, TENSOR_SHA256
+from draft_remaining_layers_fixture import specifications, fetch_layers, ensure_layers, recover_layer, load_layer, TENSOR_SHA256
 from draft_convolution_fixture import MODEL, REVISION, HEADER_SHA256
 
 
 class RemainingLayerFixtureTests(unittest.TestCase):
+    def test_recovery_reuses_only_pinned_complete_files_and_preserves_partials(self):
+        import hashlib
+        selected = {'tensor': ([2], 'tensor.bf16')}
+        hashes = {'tensor': hashlib.sha256(b'1234').hexdigest()}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'tensor.bf16').write_bytes(b'1234')
+            (root / 'tensor.bf16.partial').write_bytes(b'old partial')
+            with patch('draft_remaining_layers_fixture.fetch_subset') as fetch:
+                result = recover_layer(root, selected, hashes)
+            fetch.assert_not_called()
+            self.assertEqual(result['tensors']['tensor']['sha256'], hashes['tensor'])
+            self.assertEqual((root / 'tensor.bf16.partial').read_bytes(), b'old partial')
+            self.assertTrue((root / 'manifest.json').exists())
+
+    def test_corrupt_complete_recovery_fails_before_fetch(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'bad.bf16').write_bytes(b'bad!')
+            with patch('draft_remaining_layers_fixture.fetch_subset') as fetch:
+                with self.assertRaisesRegex(ValueError, 'corrupt'):
+                    recover_layer(root, {'missing': ([2], 'missing.bf16'), 'bad': ([2], 'bad.bf16')},
+                        dict.fromkeys(('missing', 'bad'), hashlib.sha256(b'1234').hexdigest()))
+            fetch.assert_not_called()
+            self.assertFalse((root / 'manifest.json').exists())
+
+    def test_missing_tensor_is_verified_before_exclusive_publication(self):
+        import hashlib
+        data = b'1234'
+        selected = {'tensor': ([2], 'tensor.bf16')}
+        hashes = {'tensor': hashlib.sha256(data).hexdigest()}
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'tensor.bf16.partial').write_bytes(b'old partial')
+                def fetch(staging, **kwargs):
+                    (staging / 'tensor.bf16').write_bytes(b'bad!' if corrupt else data)
+                    (staging / 'manifest.json').write_text(json.dumps(dict(model=MODEL, revision=REVISION,
+                        header_sha256=HEADER_SHA256, checkpoint_bytes=3848817896,
+                        tensors={'tensor': dict(file='tensor.bf16', bytes=4, shape=[2], dtype='BF16', sha256=hashes['tensor'])})))
+                with patch('draft_remaining_layers_fixture.fetch_subset', side_effect=fetch):
+                    if corrupt:
+                        with self.assertRaisesRegex(ValueError, 'content'):
+                            recover_layer(root, selected, hashes)
+                        self.assertFalse((root / 'tensor.bf16').exists())
+                        self.assertFalse((root / 'manifest.json').exists())
+                    else:
+                        recover_layer(root, selected, hashes)
+                        self.assertEqual((root / 'tensor.bf16').read_bytes(), data)
+                self.assertEqual((root / 'tensor.bf16.partial').read_bytes(), b'old partial')
+
     def test_cached_layer_is_rehashed_and_corruption_never_refetched(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

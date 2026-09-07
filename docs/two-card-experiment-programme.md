@@ -1980,3 +1980,21 @@ control through native_gate_up_control, with a regression test protecting the
 activation placement. Neither candidate math nor exact equality is loosened.
 Simulator194000Z is testing the corrected control under the same audited graft;
 the local header remains temporarily patched until this run finishes.
+
+Simulator194000Z failed its weight prerequisite before corrected-control
+execution: chip0 gate[242,8110] initially read as-0.00048828125 instead of-0.125.
+Host tile quantization and both repeated device reads returned-0.125 without
+any intervening device write. This local readback-path discrepancy is preserved
+as a failure, not retried into a pass. The patched header was restored after
+terminal exit; its SHA again matches87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181.
+
+Hardware34154133218 failed at the2400-second remaining-layer fixture staging
+timeout, before device tests. Queued34155661944 then failed because the
+incomplete directory was intentionally not overwritten. Recovery now hashes
+every completed tensor against its audited pin before reusing it, stages missing
+tensors in independent temporary directories with at most three concurrent
+downloads, verifies each before exclusive hard-link publication, and writes a
+manifest only after all succeed. Old partial files are preserved; corrupted
+completed files still fail closed. Unbuffered progress and a4800-second staging
+bound replace the silent40-minute timeout. Both prior hardware failures are
+infrastructure results, not learned-layer or selector numerical failures.

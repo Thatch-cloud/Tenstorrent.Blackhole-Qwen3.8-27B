@@ -1,11 +1,16 @@
 """Stage DFlash2 layers1-4 and load only hash-audited tensors; no checkpoint code execution."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
+import math
+import os
 from pathlib import Path
+import tempfile
 
 from draft_attention_fixture import TENSORS as ATTENTION
-from draft_convolution_fixture import TENSORS as CONVOLUTION, fetch as fetch_subset, verified_bytes
+from draft_convolution_fixture import TENSORS as CONVOLUTION, fetch as fetch_subset, verified_bytes, MODEL, REVISION, HEADER_SHA256
 from draft_mlp_fixture import TENSORS as MLP
 
 TENSOR_SHA256 = {
@@ -112,6 +117,44 @@ def fetch_layers(output, layers):
         for layer, selected in selections.items()}
 
 
+def recover_layer(directory, selected, hashes):
+    if directory.is_symlink():
+        raise ValueError('Fixture recovery refuses symbolic links')
+    directory.mkdir(parents=True, exist_ok=True)
+    entries, missing = {}, []
+    for name, (shape, filename) in selected.items():
+        path = directory / filename
+        length = 2 * math.prod(shape)
+        if path.is_symlink():
+            raise ValueError('Fixture recovery refuses symbolic links')
+        if path.exists():
+            with path.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            if path.stat().st_size != length or digest != hashes[name]:
+                raise ValueError('Existing complete tensor is corrupt; refusing replacement')
+        else:
+            missing.append(name)
+        entries[name] = dict(file=filename, bytes=length, sha256=hashes[name], shape=shape, dtype='BF16')
+
+    def fetch_missing(name):
+        print(f'Staging pinned tensor {name}', flush=True)
+        with tempfile.TemporaryDirectory(prefix='.stage-', dir=directory) as temporary:
+            staging = Path(temporary)
+            fetch_subset(staging, specifications={name: selected[name]}, scope=__doc__)
+            verified_bytes(staging, specifications={name: selected[name]}, hashes={name: hashes[name]})
+            filename = selected[name][1]
+            os.link(staging / filename, directory / filename)
+        print(f'Published verified tensor {name}', flush=True)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        list(executor.map(fetch_missing, missing))
+    manifest = dict(model=MODEL, revision=REVISION, header_sha256=HEADER_SHA256,
+        checkpoint_bytes=3848817896, tensors=entries, scope=__doc__)
+    with (directory / 'manifest.json').open('x') as destination:
+        json.dump(manifest, destination, indent=2)
+    return manifest
+
+
 def ensure_layers(output, layers):
     layers = tuple(layers)
     if not layers or len(set(layers)) != len(layers):
@@ -123,7 +166,7 @@ def ensure_layers(output, layers):
     for layer, selected in selections.items():
         directory = output / f'layer-{layer}'
         if not (directory / 'manifest.json').exists():
-            fetch_subset(directory, specifications=selected, scope=__doc__)
+            recover_layer(directory, selected, TENSOR_SHA256[str(layer)])
         manifests[layer] = verified_bytes(directory, specifications=selected, hashes=TENSOR_SHA256[str(layer)])[0]
     return manifests
 
