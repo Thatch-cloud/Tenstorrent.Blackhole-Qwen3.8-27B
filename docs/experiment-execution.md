@@ -5,6 +5,12 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prepared `attention-tree-parallel`: both arms use native compact scratch,
+  direct DMA layout and up to three parallel groups; only the maximum group
+  width changes4->8. The36-fixture gate requires native-exact original and
+  changed-query replay, immutable KV, explicit matched plans and4320 timed
+  replays.396 host tests plus AST/YAML/shell checks pass. Hardware dispatch
+  remains held for the long-context boundary and four-row simulator regressions.
 - Actual-request run34072489815 passed eight native-exact matched requests.
   At4078 tokens, committed decode is22.799244->23.762756 tok/s; at16363,
   18.587617->20.127396 tok/s. Both arms use norm batching and identical family

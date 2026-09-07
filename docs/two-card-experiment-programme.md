@@ -1,6 +1,23 @@
 # Qwen3.8-27B: two-card experiment programme
 
-Current request-engine checkpoint: T32 changed-input replay and synchronized
+## Current measured result - 2026-09-07
+
+Actual matched request run34072489815 passes native token/state/KV checks at
+**23.763 committed decode tok/s at4078 tokens and20.127 at16363 tokens**.
+Same-run controls achieve22.799/18.588 tok/s. Candidate setup-inclusive rates
+are10.284/9.524 tok/s and regress against control; all these rates exclude
+prefill. These are synthetic lookup requests, not coding-quality certification.
+The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
+
+Full-model parallel attention verification reaches95.884/102.058ms atT32;
+retained replay and actual-request integration are exact. Native compact scratch
+also passes hardware correctness and component timing; its combination with
+eight-row DMA/parallel grouping is in simulator validation before hardware.
+Materially better drafting and lower verification cost are both still required.
+
+## Earlier request-engine checkpoints
+
+T32 changed-input replay and synchronized
 publication passed run34041390068 (36 two-block fixtures). Device force-argmax
 passed34040918809; T32 verification plus readback is131.190/148.752ms at4K/16K.
 These component results do not establish200 committed tokens/s. The request pilot

@@ -87,11 +87,13 @@ if [ "${QWEN_RUN_MODE:-baseline}" = attention-parallel-groups ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout --parallel-groups
     exit 0
 fi
-if [ "${QWEN_RUN_MODE:-baseline}" = attention-tree-scratch ]; then
+if [[ "${QWEN_RUN_MODE:-baseline}" = attention-tree-scratch || "${QWEN_RUN_MODE:-baseline}" = attention-tree-parallel ]]; then
     timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
     export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
-    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --tree-scratch
+    tree_option=--tree-scratch
+    if [ "$QWEN_RUN_MODE" = attention-tree-parallel ]; then tree_option=--tree-parallel; fi
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py "$tree_option"
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = attention-mask-replay ]; then

@@ -9,6 +9,21 @@ spec.loader.exec_module(gate)
 
 
 class AttentionTimingTests(unittest.TestCase):
+    def test_tree_parallel_requires_both_matched_plans(self):
+        fixtures = self.fixtures()
+        for fixture in fixtures:
+            fixture['groups'] = gate.chunk_groups(fixture['start'], fixture['rows'])
+            fixture['candidate_groups'] = gate.chunk_groups(fixture['start'], fixture['rows'], max_group_rows=8)
+            fixture['control_parallel_plan'] = gate.parallel_groups(fixture['start'], fixture['rows'])
+            fixture['parallel_plan'] = gate.parallel_groups(fixture['start'], fixture['rows'], max_group_rows=8)
+        gate.validate_matrix(fixtures, tree_parallel=True)
+        for key in ('control_parallel_plan', 'parallel_plan'):
+            saved = fixtures[-1][key]
+            fixtures[-1][key] = []
+            with self.assertRaises(AssertionError):
+                gate.validate_matrix(fixtures, tree_parallel=True)
+            fixtures[-1][key] = saved
+
     def test_parallel_matrix_requires_complete_bundles(self):
         fixtures = self.fixtures()
         for fixture in fixtures:
