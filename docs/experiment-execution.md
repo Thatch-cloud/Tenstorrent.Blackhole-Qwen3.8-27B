@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Full-model parallel attention34067681095 passed24 batch fixtures,16 rollback
+  checks,4 negative-control pairs and12 paired timing fixtures. Matched T32 costs
+  99.331691->95.884002ms at4K and105.968306->102.058394ms at16K; T16 costs
+  76.966126->74.991160ms and80.284747->78.267385ms. Both arms use identical DMA
+  layouts and GDN. The4K control shifted across runs; do not add cross-run gains.
+- Hardware mask-replay34068177963 passed48 exact checks across24 captured
+  position refreshes. Reusable reader TTsim20260907T001643Z-681 passed T16/4K,
+  both chips, forward/rollback positions, mask refresh engagement and borrowed
+  query lifetime. Its hardware attention-composition gate is next.
 - Actual matched request decode remains22.46/18.67 committed tokens/s at4K/16K;
   the200 target is not achieved. New attention changes are not in that request path.
 - Grouped attention full-model34062230310 passed: T32 verification103.31/109.92ms,
@@ -64,6 +73,23 @@ rollback4096 with the same query/mask buffers. All four changed-position output
 checks match native causal B1 exactly; prepared-reader lifetime also passes.
 The probe is read-only K/V and slow dispatch, not a retained full-model verifier
 or hardware trace certification. The16K composition counterpart is next.
+
+The16K counterpart `20260907T000136Z-300` also passes: T16/start16384/seed2,
+forward16391 then rollback16384, four exact chip/position checks and prepared
+reader lifetime. The reusable `ReplayAttentionReader` is now a local prototype:
+fixed T8/T16/T32 family metadata, one same-address position input, per-call mask
+refresh, protected borrowed buffers and poisoning after a failed update/dispatch.
+Six host tests cover these contracts; the complete host suite passes380 tests.
+It is not connected to `ModelBatch` or the request engine. Its own TTsim lifetime
+and output check `20260907T001643Z-681` is running before any hardware promotion.
+
+That reusable-reader simulator run subsequently passed. The native scratch
+diagnostic from34067681095 shows the on-disk transformer CMake registrations
+exclude existing attn_prep/GDN graft sources, although their source directories
+and Python bindings are present. A cold rebuild therefore loses runtime symbols.
+Re-register the exact graft sources and verify the loaded-library ABI before
+another scratch experiment; this issue is separate from the passing unmodified
+runtime attention tests.
 
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and

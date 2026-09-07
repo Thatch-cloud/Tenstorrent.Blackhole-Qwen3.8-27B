@@ -28,10 +28,13 @@ def main():
     parser.add_argument('--device-layout', action='store_true')
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--dynamic-mask', action='store_true')
+    parser.add_argument('--replay-reader', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.replay_reader and not args.dynamic_mask:
+        parser.error('Replay reader requires dynamic-mask composition checks')
     if args.dynamic_mask:
         from attention_mask_replay import validate_ticket
         if not args.dma_layout or args.parallel_groups != 3:
@@ -57,11 +60,13 @@ def main():
         max_group_rows=args.max_group_rows, tree_scratch_rounds=os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') == '1',
         parallel_groups=args.parallel_groups,
         device_layout=args.device_layout, dma_layout=args.dma_layout, dynamic_mask=args.dynamic_mask,
+        replay_reader=args.replay_reader,
         scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
     report['runtime_library_sha256'] = hashlib.sha256((Path(os.environ['TT_METAL_HOME']) /
         'build_Release/lib/_ttnncpp.so').read_bytes()).hexdigest()
     mesh = None
     owned = []
+    replay_reader = None
 
     def stage(name):
         report['last_stage'] = name
@@ -223,6 +228,16 @@ def main():
                     before_addresses = [tuple(part.buffer_address() for part in ttnn.get_device_tensors(mask))
                                         for bundle, group_pages, mask, config in metadata]
                     report['dynamic_checks'] = []
+                    if args.replay_reader:
+                        from attention_replay import ReplayAttentionReader
+                        report['replay_reader_sha256'] = hashlib.sha256((Path(__file__).resolve().parents[2] /
+                            'scripts/ci/attention_replay.py').read_bytes()).hexdigest()
+                        def upload_replay(value, dtype=ttnn.bfloat16):
+                            return ttnn.from_torch(value, device=mesh, dtype=dtype,
+                                layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
+                                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                        replay_reader = ReplayAttentionReader(ttnn, mesh, args.rows, args.capacity,
+                            torch.tensor([page_ids], dtype=torch.int32), upload_replay)
                     for delta in (7, 0):
                         start = args.start + delta
                         validate_ticket(start, args.rows, args.capacity)
@@ -255,6 +270,21 @@ def main():
                         if before_addresses != [tuple(part.buffer_address() for part in ttnn.get_device_tensors(mask))
                                                 for bundle, group_pages, mask, config in metadata]:
                             raise AssertionError('Dynamic mask refresh replaced existing mask buffers')
+                        if replay_reader is not None:
+                            replay_reader.stage(start)
+                            reader_result = replay_reader(device_query, keys, values, scale=0.0625,
+                                memory_config=ttnn.L1_MEMORY_CONFIG)
+                            owned.append(reader_result)
+                            if any(not torch.equal(reference, actual) for reference, actual in
+                                   zip(dynamic_expected, host(reader_result), strict=True)):
+                                raise AssertionError('Prepared replay reader differs from changed-position native B1')
+                            if any(not torch.equal(query, actual) for actual in host(device_query)):
+                                raise AssertionError('Prepared replay reader changed or released borrowed query')
+                    if replay_reader is not None:
+                        if replay_reader.calls != 2 or replay_reader.refresh_calls != 2 * len(replay_reader.metadata):
+                            raise AssertionError('Every replay must refresh every prepared mask')
+                        report['replay_reader_exact'] = True
+                        report['replay_reader_refresh_calls'] = replay_reader.refresh_calls
         if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and (args.parallel_groups == 1 or args.dma_layout):
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')
@@ -274,6 +304,8 @@ def main():
         report['passed'] = True
     finally:
         if mesh is not None:
+            if replay_reader is not None:
+                replay_reader.close()
             release_owned(ttnn, owned)
             ttnn.close_mesh_device(mesh)
         path.write_text(json.dumps(report, indent=2))
