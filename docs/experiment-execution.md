@@ -5,6 +5,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Learned layer-zero convolution simulator `20260907T105950Z-754` PASSED
+  attention/MLP prepare and finish arithmetic on both ranks, T8 width5120,
+  with zero intermediate host inspections. Both convolution phases match
+  the staged BF16 CPU reference exactly; input RMSNorm is within one ULP.
+  Learned 5120->1280 kernel projections pass the existing arithmetic reference
+  (max errors 1.9073486328125e-6 attention and 1.5497207641601563e-6 MLP).
+  This plumbing test feeds prepare output directly to finish, NOT through real
+  attention/MLP transforms; it is not a complete draft layer or speed measurement.
+  Six layer-zero tensors (26,316,800 bytes) were fetched with bounded ranges
+  from the same pinned checkpoint and independently SHA-pinned in the loader.
+- Important negative controls: default BF16 convolution failed learned inputs
+  (`20260907T105152Z-307`, repeated `105323Z-301`). FP32 output alone reduced
+  but did not eliminate the error (`105447Z-302`). Stage inspection `105619Z-302`
+  isolated nonexact adds with BF16 operands despite FP32 output. Explicit FP32
+  operands AND outputs, with BF16 casts after each arithmetic operation, make
+  all32 inspected arithmetic stages exact (`105738Z-301`). No tolerance was
+  relaxed. This opt-in composed path adds casts/allocations; fusion and measured
+  latency remain necessary. Hardware convolution validation is still pending.
+  All502 host tests pass.
 - Hardware `34112856023` (`3cb7381`) PASSED the eight-row integrated path:
   both full [1,1,8,5120] outputs pass the arithmetic gate, sums are exact and
   normalization is within one BF16 ULP. This is still not an end-to-end drafter.

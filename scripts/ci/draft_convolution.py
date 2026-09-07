@@ -28,7 +28,7 @@ def convolution_reference(hidden, dynamic, base):
     return output
 
 
-def grouped_causal_convolution(operations, mesh, hidden, dynamic, base):
+def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None):
     rows = validate_shapes(hidden, dynamic, base)
     borrowed = (hidden, *dynamic, *base)
     if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16 for value in borrowed):
@@ -41,6 +41,16 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base):
         if addresses(operations, value) not in protected:
             temporaries.append(value)
         return value
+
+    def arithmetic(operation, left, right):
+        if fp32_intermediates:
+            left = retain(operations.typecast(left, operations.float32))
+            right = retain(operations.typecast(right, operations.float32))
+        result = retain(operation(left, right, dtype=operations.float32 if fp32_intermediates else operations.bfloat16))
+        rounded = retain(operations.typecast(result, operations.bfloat16)) if fp32_intermediates else result
+        if inspect is not None:
+            inspect('multiply' if operation == operations.multiply else 'add', left, right, result, rounded)
+        return rounded
 
     try:
         zero = retain(operations.zeros_like(hidden))
@@ -55,10 +65,10 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base):
                     values = retain(operations.concat((leading, previous), dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
             expanded = retain(operations.repeat_interleave(dynamic[offset], 16, dim=3,
                 memory_config=operations.DRAM_MEMORY_CONFIG))
-            static_term = retain(operations.multiply(base[offset], values, dtype=operations.bfloat16))
-            output = retain(operations.add(output, static_term, dtype=operations.bfloat16))
-            dynamic_term = retain(operations.multiply(expanded, values, dtype=operations.bfloat16))
-            output = retain(operations.add(output, dynamic_term, dtype=operations.bfloat16))
+            static_term = arithmetic(operations.multiply, base[offset], values)
+            output = arithmetic(operations.add, output, static_term)
+            dynamic_term = arithmetic(operations.multiply, expanded, values)
+            output = arithmetic(operations.add, output, dynamic_term)
         operations.synchronize_device(mesh)
     except BaseException:
         release_owned(operations, temporaries)

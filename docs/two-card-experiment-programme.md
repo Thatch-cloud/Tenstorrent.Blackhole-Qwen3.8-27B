@@ -1007,6 +1007,12 @@ one BF16 ULP. Hardware run `34112856023` on `3cb7381` now passes the same
 eight-row gate. Next, the composed DFlash2 group-16 dynamic causal convolution
 passes exact synthetic T1/T8 simulator checks (`20260907T104613Z-391`);
 learned convolution weights and draft-layer integration remain outstanding.
-The host test suite now passes 500 tests.
+Learned layer-zero convolution plumbing now passes T8 simulator checks
+(`20260907T105950Z-754`), with exact prepare/finish arithmetic on both ranks.
+The fix requires explicit FP32 operands/output and BF16 rounding per operation;
+FP32 output alone did not suffice. This is a correctness control with extra
+casts, not a fused speedup. Real attention/MLP transforms between prepare and
+finish and hardware convolution validation remain outstanding.
+The host test suite now passes 502 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.
