@@ -70,12 +70,14 @@ def pairwise_dot(operations, left, right, retain):
     return retain(operations.reshape(reduced, (1, heads, rows, key_rows)))
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False):
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False, fused_dots=False):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
     if fused_row_sum and (not explicit_softmax or pairwise_sum):
         raise ValueError('Fused row sum requires explicit softmax and replaces pairwise sum')
+    if fused_dots and pairwise_dots:
+        raise ValueError('Fused and pairwise dots are separate controls')
     if pairwise_sum and not explicit_softmax:
         raise ValueError('Pairwise reduction requires the explicit softmax control')
     protected = {addresses(operations, tensor) for tensor in (query, key, value, mask)}
@@ -92,9 +94,13 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
     try:
         keys = retain(operations.repeat_interleave(key, 4, dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
         values = retain(operations.repeat_interleave(value, 4, dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
-        if wide_operands:
+        if wide_operands or fused_dots:
             query, keys, values = [retain(operations.typecast(tensor, operations.float32)) for tensor in (query, keys, values)]
-        if pairwise_dots:
+        if fused_dots:
+            from draft_dot import fused_dot
+
+            scores = fused_dot(mesh, query, keys, owned)
+        elif pairwise_dots:
             scores = pairwise_dot(operations, query, keys, retain)
         else:
             transposed = retain(operations.transpose(keys, -1, -2))
@@ -120,7 +126,10 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         else:
             probabilities = retain(operations.softmax(masked, dim=-1, numeric_stable=True,
                 compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-        if pairwise_dots:
+        if fused_dots:
+            transposed_values = retain(operations.transpose(values, -1, -2))
+            output = fused_dot(mesh, probabilities, transposed_values, owned)
+        elif pairwise_dots:
             transposed_values = retain(operations.transpose(values, -1, -2))
             output = pairwise_dot(operations, probabilities, transposed_values, retain)
         else:

@@ -8,6 +8,12 @@ from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_att
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_fused_and_pairwise_dots_are_separate_controls(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        with self.assertRaises(ValueError):
+            composed_draft_attention(operations, object(), query, key, value, mask,
+                pairwise_dots=True, fused_dots=True)
+
     def test_fused_row_sum_rejects_ambiguous_controls(self):
         for explicit, pairwise in ((False, False), (True, True)):
             operations, query, key, value, mask = self.operations_fixture()

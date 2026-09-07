@@ -1120,3 +1120,29 @@ latencies including allocation/temporary cleanup, not pure device kernel time.
 Small sample counts and observed latency variation require end-to-end retesting;
 do not multiply this speedup into model throughput. QK/PV remain allocation-heavy,
 the full drafter remains incomplete, and200 committed tokens/s remains unproven.
+
+### Bounded SFPU QK/PV dot prototype (2026-09-08)
+
+`draft_dot` now streams tile products through SFPU row broadcast, multiplication,
+FP32 tile accumulation and row reduction in one generic-op dispatch. It does not
+materialize the earlier four-dimensional outer-product tensor. Seven FP32 tiles
+of circular-buffer/scratch storage (28KiB) are allocated per worker, with16..64
+workers per card. This is independent of key/reduction width; output scores and
+input casts still consume DRAM. No Ethernet dispatch or extra-column claim.
+
+Signed random FP32 inputs pass against FP64 host matmul at unchanged1e-5 relative,
+1e-4 absolute bounds on both ranks:
+
+- `20260907T123900Z-305`: QK width128/keys32, maximum error3.815e-6.
+- `20260907T123947Z-381`: QK width128/keys2080, maximum error7.630e-6.
+- `20260907T124150Z-472`: PV width2080/outputs128, maximum error3.434e-5.
+
+The prototype rereads tiles and serializes output columns within each worker;
+bounded memory is not proof of adequate latency. Learned-attention integration
+and hardware cost must gate adoption. The simulator-only option is `--fused-dots`;
+hardware rejects it for now. All 522 host tests pass.
+
+Inspection-free learned attention `20260907T124315Z-759` also passes all eight
+checks with fused QK/PV and fused denominator reduction. Output head ordering and
+fabric sums remain exact. This establishes the short-context integrated numerical
+gate only; synthetic long-context dot checks are not full long-context attention.
