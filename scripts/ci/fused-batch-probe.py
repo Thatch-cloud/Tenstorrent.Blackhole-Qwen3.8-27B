@@ -68,6 +68,21 @@ def main():
                     examples=[dict(coordinate=coordinate.tolist(), packed=float(observed[tuple(coordinate)]),
                         separate=float(reference[tuple(coordinate)]), source=float(source[tuple(coordinate)]))
                         for coordinate in coordinates]))
+                if coordinates.numel():
+                    repeated_packed = ttnn.to_torch(ttnn.get_device_tensors(device_packed)[chip]).clone().reshape(5120, 272, 2, 32)
+                    repeated_separate = ttnn.to_torch(ttnn.get_device_tensors(value)[chip]).clone().reshape(5120, 8704)
+                    diagnostics = []
+                    for coordinate in coordinates:
+                        row, column = coordinate.tolist()
+                        row_start, column_start = row // 32 * 32, column // 32 * 32
+                        tile = source[row_start:row_start + 32, column_start:column_start + 32].contiguous()
+                        host_tile = ttnn.from_torch(tile, dtype=ttnn.bfloat4_b, layout=ttnn.TILE_LAYOUT)
+                        quantized = ttnn.to_torch(host_tile).clone()
+                        diagnostics.append(dict(coordinate=[row, column],
+                            host_quantized=float(quantized[row % 32, column % 32]),
+                            repeated_packed=float(repeated_packed[row, column // 32, offset, column % 32]),
+                            repeated_separate=float(repeated_separate[row, column])))
+                    report['weight_checks'][-1]['readback_diagnostics'] = diagnostics
         if not all(check['source_exact'] and check['exact'] for check in report['weight_checks']):
             raise AssertionError('Pair packing changed BF4 quantization; see weight_checks')
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,

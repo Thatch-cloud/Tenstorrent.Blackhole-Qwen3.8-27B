@@ -1913,3 +1913,22 @@ separate/paired BF4 weight equality prerequisite failed; no width passed.
 Diagnostic simulator190512Z retains that strict prerequisite and records
 source packing equality, finite checks and differing coordinates on both chips.
 It is not approved for hardware until the simulator gate genuinely passes.
+
+Simulator190512Z localized the packing discrepancy to one chip0 up-weight at
+row1458/column3022: packed0.000732421875 versus separate0.1875, from source
+BF16 value0.1767578125. All source packing checks and the other three chip/
+projection checks were exact. No fused kernel ran. Diagnostic191304Z then
+failed pinned fixture hashing before opening devices. A standalone Python
+read loop (no TTNN/Torch) produced8 failing full-file hashes in15 reads;
+rehashing each already-read buffer was stable. Windows and WSL sha256sum
+checks matched the pins. Subsequent streaming/whole-file diagnostics and a
+new18-read test across DrvFS and an independently staged ext4 copy all passed.
+This is an unresolved intermittent local data-integrity issue, not evidence
+that the fusion algorithm or quantization tolerances should be changed.
+
+The reusable fixture_integrity_probe.py compares two retained whole-file
+buffers with streamed bytes and records mismatch coordinates without retrying
+away failures. Simulator191717Z uses the verified ext4 fixture and retains the
+strict packing gate, with host tile quantization and repeated-readback
+diagnostics if a mismatch recurs. This does not establish a filesystem fix.
+The independent five-layer hardware CI remains in progress.
