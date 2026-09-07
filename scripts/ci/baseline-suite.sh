@@ -10,6 +10,10 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_RUN_MODE:-baseline}" = device-readback ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    exit 0
+fi
 python3 - <<'PY' > /experiment/results/token-protocol-fields.json
 import ast
 import importlib.util
@@ -45,6 +49,246 @@ print(json.dumps(dict(snapshot=root.name, files={name: hashlib.sha256((root / na
 PY
 if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
     timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-model-fusion ]; then
+    timeout -k 30 3000 python3 /experiment-scripts/ci/full-model-fusion.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-batch ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-groups ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-group-layer ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-group-dma ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --dma-layout
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-dma-layer ]; then
+    timeout -k 15 60 python3 /experiment-scripts/ci/sdpa-tree-audit.py
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-parallel-groups ]; then
+    timeout -k 15 60 python3 /experiment-scripts/ci/sdpa-tree-audit.py
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py --parallel-groups
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout --parallel-groups
+    exit 0
+fi
+if [[ "${QWEN_RUN_MODE:-baseline}" = attention-tree-scratch || "${QWEN_RUN_MODE:-baseline}" = attention-tree-parallel || "${QWEN_RUN_MODE:-baseline}" = attention-tree-layer ]]; then
+    timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
+    export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    if [ "$QWEN_RUN_MODE" = attention-tree-layer ]; then
+        timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache --grouped --dma-layout --parallel-groups --tree-parallel
+        exit 0
+    fi
+    tree_option=--tree-scratch
+    if [ "$QWEN_RUN_MODE" = attention-tree-parallel ]; then tree_option=--tree-parallel; fi
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-group-timing.py "$tree_option"
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-mask-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 600 python3 /experiment-scripts/ci/attention-mask-replay.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-replay.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-timing ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-prefix ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-batch ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-coding-cost ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-compact-gdn ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-input-reuse ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-row-clones ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-row-layout ]; then
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-engine ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-selection ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 15 300 python3 /experiment-scripts/ci/sampling-kernel.py
+    timeout -k 30 4200 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot --norm-batch
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-selection ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 15 300 python3 /experiment-scripts/ci/sampling-kernel.py
+    timeout -k 30 4200 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --norm-batch
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs --norm-batch
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-tree ]; then
+    timeout -k 30 1920 bash /experiment-scripts/ci/sdpa-tree-build.sh
+    export QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel --attention-tree
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --deferred-commit --commit-dma --captured-commit --ordered-cache --replay-inputs --norm-batch --attention-replay
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-engine ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot --norm-batch --attention-engine
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-batch ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-groups ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-dma ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-attention-parallel ]; then
+    timeout -k 15 90 python3 /experiment-scripts/ci/sdpa-tree-audit.py
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --norm-batch --grouped-attention --attention-dma --attention-parallel
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-gdn-device-loop ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --max-rows 32 --continuation --full-layer --batch-conv --dma-windows --packed-checkpoints
+    timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = full-batch-attribution ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/full-prefix.py --batch --serial-sdpa --attribution
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-prefix ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-block ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-active ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-inplace ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-inplace-timing ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state --paired-timing
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-checkpoint-cost ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state --paired-timing --checkpoint-diagnostics
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-checkpoint-dma ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state --paired-timing --checkpoint-diagnostics --compact-checkpoint-dma
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken.py
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate --value-split
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-timing ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py --stage-timing
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-prefetch ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py --prefetch-inputs
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-value-split-norm-batch ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1200 python3 /experiment-scripts/ci/gdn-vsplit-timing.py --batch-norm --stage-timing
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-norm-batch-layer ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --norm-batch --max-rows 32 --continuation --full-layer --paired-timing --batch-conv --dma-windows --packed-checkpoints
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-norm ]; then
+    timeout -k 30 420 python3 /experiment-scripts/ci/gdn-multitoken.py --norm-gate
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-multitoken-conv ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-multitoken-conv.py --continuation --full-layer --paired-timing --batch-conv --dma-windows --packed-checkpoints
+    exit 0
+fi
+if [ "${QWEN_RUN_MODE:-baseline}" = gdn-direct ]; then
+    timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = projection-1d ]; then

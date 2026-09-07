@@ -28,6 +28,14 @@ class HardwareGuardTests(unittest.TestCase):
                                ["--suite", "audit", "--output", "/tmp/unused-qwen-guard.json"])
         self.assertIn("Explicit hardware authorization", error)
 
+    def test_gdn_prefix_gate_requires_explicit_authorization(self):
+        error = self.run_guard(Path(__file__).with_name("gdn-prefix.py"), [])
+        self.assertIn("Explicit hardware allocation", error)
+
+    def test_full_prefix_gate_requires_explicit_authorization(self):
+        error = self.run_guard(Path(__file__).with_name("full-prefix.py"), [])
+        self.assertIn("Explicit hardware allocation", error)
+
     def test_prefill_hardware_gate_requires_explicit_authorization(self):
         script = Path(__file__).resolve().parents[2] / "optimisation/sim/prefill-state.py"
         self.assertIn("Hardware requires explicit authorization", self.run_guard(script, ["--hardware"]))

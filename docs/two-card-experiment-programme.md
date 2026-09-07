@@ -1,5 +1,182 @@
 # Qwen3.8-27B: two-card experiment programme
 
+## Current measured result - 2026-09-07
+
+Actual matched request run34072489815 passes native token/state/KV checks at
+**23.763 committed decode tok/s at4078 tokens and20.127 at16363 tokens**.
+Same-run controls achieve22.799/18.588 tok/s. Candidate setup-inclusive rates
+are10.284/9.524 tok/s and regress against control; all these rates exclude
+prefill. These are synthetic lookup requests, not coding-quality certification.
+The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
+
+Full-model parallel attention verification reaches95.884/102.058ms atT32;
+retained replay and actual-request integration are exact. Native compact scratch
+also passes hardware correctness and component timing; its combination with
+eight-row DMA/parallel grouping is in simulator validation before hardware.
+Materially better drafting and lower verification cost are both still required.
+
+## Earlier request-engine checkpoints
+
+T32 changed-input replay and synchronized
+publication passed run34041390068 (36 two-block fixtures). Device force-argmax
+passed34040918809; T32 verification plus readback is131.190/148.752ms at4K/16K.
+These component results do not establish200 committed tokens/s. The request pilot
+uses actual lookup proposals, exact native token/state comparison, complete
+proposal-to-commit timing and separately reported per-request capture cost.
+Repeated-code pilot prompts cannot establish representative coding quality.
+
+Actual lookup pilot34045603132 now passes exact native token/state/KV checks
+but yields only21.415/17.741 committed decode tok/s at4078/16363-token contexts,
+with3.701/3.234s request-specific setup excluded from those rates. Acceptance
+is39/537 and30/658 proposed tokens. This confirms the reusable request pipeline,
+not a useful general lookup speedup or200 tok/s. Further kernel work and better
+proposal economics are required; defaults remain unchanged.
+
+External-drafter width audit (2026-09-07): the official
+[DFlash2 config](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/raw/main/config.json)
+declares block_size8. The [authors' Qwen comparison](https://inco.ai/blog/dflash2/)
+also uses width8 and reports mean acceptance4.39 on HumanEval and4.79 on MBPP
+under default sampling, not our greedy TT backend. Width32 verifier support
+does not certify a width32 neural draft. At our measured T8 verifier/selection
+cost72.660/77.054ms, even perfect8-token acceptance with zero draft/commit cost
+caps this configuration at about110/104 committed tokens/s. Reaching200 at
+width8 requires at most40ms for the ENTIRE cycle. Thus a drafter port alone
+cannot meet the target on the current verifier; further kernel acceleration
+or a separately validated wider high-acceptance strategy remains necessary.
+
+## Programme checkpoint — 2026-09-06
+
+Latest kernel checkpoint: run34019033933 (`36b9eed`) passed synthetic multi-token
+recurrence plus fused norm/gate on both cards after simulator-first debugging:
+30 exact eager/trace cases, 216 restored-prefix continuations and 15 negative
+controls. The CB5 counter handoff fix is hardware-validated. No timing was measured;
+full-model integration remains next. Historical entries
+below explain the earlier stalls and recovery, not the current kernel status.
+
+Latest integration checkpoint: native serial convolution/gates feeding the device-loop
+recurrence/norm passed seven simulator fixtures (seed0 T1/2/4/8/16, seeds1/2 T2),
+including every output and recurrent/convolution prefix. Run34019928513 (`8e75a95`)
+then passed all30 real-weight native-oracle eager/trace hardware cases. Composed
+state rollback and two-step corrected continuation passed simulator T1/T2/T4
+checks and hardware run34021612139 (`241be95`):216 two-step prefix-continuation
+cases and15 stale-state controls passed. Full-layer run34022668338 (`6b7d2b2`)
+also passed native output projection/fabric reduction and all correctness checks.
+T16 mean layer time improved5.176 to3.372ms against native serial; T1 regressed and
+remains native. Full-model run34023117059 (`6a2ca23`) passed logits/state/KV/rollback
+but regressed at every T>1 width: T16 was210.138/218.918ms versus173.072/181.859ms
+at4K/16K. It is not adopted. Compact-prologue follow-up34024642720 (`8cb31c8`)
+passed the full correctness matrix and reduced T16 to163.227/172.023ms against
+173.067/181.856ms paired controls. T8 also improved; T2 regressed and T4 was marginal.
+Experimental routing now keeps the previous path below T8. These are fixed verifier
+blocks with a preselected checkpoint, not dynamic speculative committed throughput.
+This is not convolution token-loop fusion or a committed-throughput result.
+
+Newer checkpoint: parallel causal convolution windows use the unchanged native
+conv/gates kernel once across token rows, with aligned DMA window construction.
+Run34027510486 (`de6fd22`) passed full logits/state/valid-KV/rollback and reduced
+T16 verification to94.882/103.655ms at4K/16K, versus163.262/172.040ms paired controls.
+T8 improved to74.177/78.592ms; T1/T2/T4 retained previous paths. Packed convolution
+histories then passed native-oracle layer run34028407207 (`7a20340`), including
+every rollback prefix, and reduced T16 layer time3.006 to0.912ms. Its full-model
+integration is the next gate. This removes prefix materialization, not arithmetic;
+engine-level dynamic acceptance/commit and executable coding evaluation remain open.
+
+Packed histories passed34028729821 and ordered cache writes passed34034319922:
+T16 is now89.552/98.325ms at4K/16K. All multirow widths improved; T1 stays native.
+Post-verification greedy commit passed34029984214. Fused96-worker publication
+passed34034469074, including every inactive native slot. Captured commit passed
+34036778172: selected publication plus binding guards/synchronization costs
+1.852-4.571ms, with setup separately recorded. These are still forced-draft
+correctness fixtures, not a measured end-to-end speculative coding engine.
+
+T32 now has full-model exactness/timing evidence in34038451865:128.738ms at4K
+and146.288ms at16K, with24 width/mode checks and16 corrected rollback cases.
+The workflow failed only its final outdated10-versus12 timing-fixture counter;
+that bookkeeping check is fixed, but the original workflow is not a green run.
+Ideal perfect-acceptance/no-overhead ceilings are248.57/218.75 tok/s. Actual
+committed throughput and coding-quality evaluation remain open; target200 is
+not yet achieved. T32 dynamic publication and request-trace reuse are next.
+
+Active implementation: `ci/qwen-hardware-correctness` (PR #7), in the
+`Tenstorrent.Qwen-Runner-CI` worktree. Other branches may contain older versions
+of this programme. The [execution ledger](experiment-execution.md) records individual
+passes, failures and timing evidence. No serving defaults have been promoted.
+
+| Track | Verified progress | Remaining programme gate |
+| --- | --- | --- |
+| E0 baseline | Pinned runtime and card-backed endpoint benchmarks | Complete engine-commit accounting and gateway comparison |
+| E1 cache | Nonzero occupancy observed; exact full-model active state/valid-KV checks | Full serving lifecycle, cancellation and slot-reuse coverage; historical zero not reproduced |
+| E2 scheduling | Boundary and mixed-traffic interleaving gates passed | Broader load, long-context, cancellation and repeatability sweeps |
+| E3 verifier | Exact T32 verification, dynamic commit and reused request pipeline | Substantially lower V(T), multi-request trace lifecycle and representative repeatability |
+| E4 fusion/pipeline | Parallel attention full-model34067681095 exact: matched T32 verification95.88ms at4K,102.06ms at16K. Retained replay34070163839 and actual requests34072489815 pass. Scratch rebuild34070379248 repaired and exact, T32 component cost1.108->0.716ms /1.524->1.020ms | Combine scratch with DMA/parallel groups simulator-first; component gains do not establish committed throughput. Preserve native T1/2/4 and bounded family routing |
+| E5 drafting | Matched replay requests34072489815 exact at23.763/20.127 decode tok/s versus22.799/18.588 control; setup-inclusive rates regressed to10.284/9.524. Native-tape48-policy lookup analysis completed; historical MTP groundwork | Faster verifier and materially better drafting required:128 committed tokens require89/99 verifier blocks. No DFlash2/DSpark/EAGLE3 TT adapter certified; synthetic lookup is not coding-quality evidence |
+| E6 coding/adoption | Exactness maintained on experiment fixtures | Freeze 200-task executable corpus; quality, serving lifecycle and adoption gates |
+| E7 prefix reuse | Dependency analysis | Validated hybrid-state reuse and request isolation |
+| E8 precomputation | Planning and cost investigation | Measured table/precomputation candidate; no LUT gain established |
+| E9 spare cores | Profiles, DMA experiments and guarded force-argmax results | Persistent L1 recurrence, dedicated staging and broader worker mappings |
+| E10 disaggregation | Capacity/feasibility analysis | TP1 feasibility, hybrid-state handoff and actual split-workload benchmarks |
+
+Latest verified full-model T16 block costs (run **34034319922**, `2391339`) are
+**89.552 ms at 4095 tokens** and **98.325 ms at 16383 tokens**. Full logits,
+active GDN state, valid KV and corrected rollback passed. These are static verifier
+costs, not committed-token throughput: even perfect acceptance with zero drafting
+and commit overhead gives only about178.67/162.73 tok/s for T16. The 200 committed
+token/s goal is not met; a sixteen-token cycle must fit within 80 ms including
+drafting and commit. T1 retains native handling.
+
+Post-verification record lifetime and greedy commit passed run34029984214:
+all48 layers retained,16 post-output decisions across4K/16K eager/trace, including
+abort and rejection corrections. Readback/selection/eager commit alone costs
+25.45-41.57ms; this is not an actual drafter or reusable serving engine.
+The ordered cache writer passed hardware layer gate34033619168:60 exact cases,
+30 negative-control pairs and90 paired timing blocks. T16 attention improved
+0.722 to0.592ms; T1 regressed and remains native. After correcting and simulator-
+certifying1024-column metadata, full-model run34034319922 passed all correctness
+and timing gates: the real full-model gain is about2%, not21%.
+Attention retains exact B1 SDPA; GDN recurrence remains sequential inside its
+device loop. Fused96-worker publication passed full-model hardware certification;
+warm eager commit costs7.35-9.09ms, while full-logit readback remains about8ms.
+Target200 remains unachieved, and serving defaults remain unchanged.
+
+Historical recurrence-kernel development:
+The first recurrence-only prototype retains BF16 state between tokens in L1 and
+passed hardware compilation/exactness in run 34012883902 (`855f8de`): 30 eager/trace
+cases, 216 restored-prefix continuations and 15 stale-state controls. No timing was
+measured in that run. Paired recurrence timing passed in run 34013199242: 1800
+replays, T16 medians about 0.532 ms serial versus 0.340 ms device loop. All nine T16
+paired blocks favored the candidate, with timing spikes; no full-model speedup is
+established. The norm/gate extension timed out in run 34013517498 after T1 passed;
+larger widths remain uncertified. A bounded stage/stack diagnostic retry keeps
+the same CB5 feedback and head-local assembly kernels to identify the blocking call.
+That retry (34014926676) instead stalled reading the initial tensor, before either
+oracle or custom kernel. A minimal paired-card transfer health check is now staged;
+the original kernel stall remains unresolved. That health check (34015497253)
+failed during firmware initialization, before transfers. The operator has now
+authorized a controlled two-card reset followed by the same health check. Recovery
+passed in run 34016364842: reset/reinitialization succeeded and all 12 transfer
+checks plus clean mesh close passed. The unchanged instrumented norm/gate test is
+next, without another reset; the original kernel stall remains unresolved.
+Real-weight convolution and full-model integration remain; this is not yet a
+complete multi-token GDN layer or speculative serving.
+
+Kernel development is now **simulator-first**: new device-loop changes must pass
+local liveness/output/prefix-state gates before silicon native-oracle, trace and
+performance validation. Run34016749007 reproduced T2 candidate warm-up stalling
+after native reference success on recovered cards. The operator requested another
+CI reset; run34017283126 reset/reinitialized both cards and passed all12 transfer
+checks. Cards remain idle while the same generated kernels are tested locally in
+TT-Sim. See [simulator entry point and limits](../optimisation/sim/README.md).
+Local debugging identified a missing packer-private CB5 tile-count handoff after
+the reader's initial-state push. Seeding that count fixed T2 liveness and preserved
+exact output/prefix states in simulation. Runtime-header hashes now guard that
+dependency; all15 fixtures in the three-seed T1/2/4/8/16 simulator matrix passed
+exact output/prefix-state comparisons on both chips and clean close. Hardware
+native-oracle/trace validation and any performance benefit remain unverified.
+Keep E5 end-to-end deployment gated on verifier economics; do not label host drafter
+tests or oracle verification as real coding throughput.
+
+## Initial execution context
+
 Status: execution started, 2026-09-05. Hardware operator prerequisites passed in
 [run 33941853075](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33941853075):
 80 fused-kernel reference cases, 224 recurrent/KV-state checks and 8 eager/traced
@@ -174,6 +351,40 @@ tokens. Smaller chunks require separate trace/state support and are not a flag-o
 
 ### E3: verification cost curve before investing in a drafter
 
+Current bounded evidence: `gdn-prefix` and `gdn-block` CI runs validate one real
+GDN layer with batched input/output projections and exact every-prefix state plus
+two-step rollback continuation on both chips. Each arm passed 216 cases and 30
+stale-state negative controls. Separately, `full-prefix` run 33999532634 passed 102
+full-model serial rollback cases across the 64-token page boundary, six eager/trace
+baseline comparisons and both stale-GDN/wrong-page controls in six configurations.
+  Attention-layer runs 34000512864/34000694699 additionally passed 60 exact
+  eager/trace cases each with native QKV/SDPA/output batching and ordered B1
+  shared-page KV writes. Timing measured T=16 at 0.5218 ms versus 4.4063 ms serial
+  (8.451x median speedup), one real-weight layer at short context only. Static
+  position fixtures are not a full-model/device-dynamic verifier integration.
+  Integrated `full-batch` run 34001403540 subsequently passed 30 full-model
+  T=1/2/4/8/16 eager/trace cases and all 102 T=16 prefix rollback cases, at prompt
+  lengths 63/64/65, with exact active-token logits, all 48 active GDN states and
+  valid KV prefixes across all 16 attention layers. Per-layer candidate snapshots
+  are independent of the reference buffers. Six baseline mode checks and six
+  stale-GDN/wrong-page negative-control pairs also passed. This remains a static,
+  short-context correctness gate: full-model timings, coding-length contexts and
+  a device-dynamic serving/drafter integration are still required.
+  Coding-context run 34002876975 subsequently passed 20 width/mode and 16 selected
+  rollback cases at 4095/16383 tokens, plus paired timings. Batched SDPA caused
+  long-context drift; retaining B1 SDPA reads restored exactness while projections
+  stayed batched. T16 full-logit blocks measured 235.098/243.876 ms versus serial
+  701.383/710.095 ms (2.983x/2.912x median paired speedup). Separate active-state
+  restore costs about 0.867 ms. Timings include one preselected end checkpoint,
+  not dynamic all-prefix selection/commit. Even perfect acceptance and zero other
+  overhead imply only a 68.06/65.61-token/s bound for this target path, not 200.
+  Prioritize reducing target block time below 80 ms before relying on a neural
+  drafter to approach 200 committed tokens/s; this is not a hardware-wide ceiling.
+  The full-model serial oracle verifies full logits, active GDN states and valid KV values, not batched target
+execution or safe concurrent writes to shared KV pages. Keep the old multi-token
+harness diagnostic-only; its composed operations
+are not the current native fused control. See the execution ledger for run IDs.
+
 Use the existing multi-token GDN harness and latest fused control. Define T as target
 verification rows, including the seed row; K=T-1 draft proposals. Sweep T=1/2/4/8/16.
 Existing code already batches projections across rows; investigate remaining serial
@@ -218,6 +429,121 @@ weights or state in this phase. Stop an arm after a correct full-path result sho
 repeatable gain; retain the negative result.
 
 ### E5: real coding draft proposals
+
+#### Drafter comparison update (2026-09-06)
+
+Do not restrict the experiment to MTP. Neither DFlash2 nor DSpark has a recorded
+P150A hardware result in this repository. Lookup has an integrated exact request
+pilot at21.415/17.741 committed decode tokens/s, not a representative coding-quality
+result. The older EAGLE3 discussion is analysis,
+not evidence that an EAGLE3 drafter ran here.
+
+| Arm | Upstream implementation to audit | TT port work beyond the shared verifier |
+| --- | --- | --- |
+| DFlash2 (first external drafter candidate) | [Official checkpoint](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2), [code](https://github.com/z-lab/dflash), [configuration](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/raw/main/config.json) | Five-layer draft backbone, 2048-token sliding attention, two-tap dynamic convolutions, top-16 candidate path selector of rank 256; checkpoint uses target feature taps 5/19/33/47/61. |
+| DSpark | [RadixArk Qwen3.8-27B checkpoint](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark), [method paper](https://arxiv.org/abs/2607.05147) | Five full-attention layers, BF16 1.86B-parameter draft, VanillaMarkov rank-256 head; the card specifies the same target feature layer indices. Audit exact feature definitions, not just matching indices. |
+| MTP | Existing checkpoint and local speculative branch | Repair trace integration and compare on the same verified target path. |
+| Request-local lookup | Existing host-tested proposal policy | Device verification/commit integration; no model or cross-user cache. |
+| EAGLE3 (compatibility-gated) | [Official implementation/checkpoint list](https://github.com/SafeAILab/EAGLE), [related Qwen3.6 PRISM head](https://huggingface.co/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3) | No Qwen3.8-27B-specific public head verified in this audit. The related 3.6 head uses feature taps 1/31/60 and offers full/compressed vocabulary variants. Transfer requires explicit feature/tokenizer/map compatibility and measured acceptance, or retraining; it is not established 3.8 support. |
+
+Additional candidate families, not runnable Qwen3.8 TT implementations:
+
+- Request-local suffix/retrieval drafting extends lookup without draft weights.
+  Keep any global cross-request suffix cache disabled for this experiment. It is
+  a low-cost candidate for edits/refactors, not an assumed fresh-code speedup.
+- A small independent autoregressive draft model avoids target-feature capture
+  but adds its own weights/KV and sequential drafting. Require token alignment;
+  cross-vocabulary adapters are additional port work, not implicit compatibility.
+  [vLLM method and vocabulary documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
+- PARD is another parallel-draft family. The documented AMD checkpoint targets
+  Qwen3-4B/8B, not a verified Qwen3.8-27B setup. Treat it as an adaptation/training
+  track. [PARD documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/parallel_draft_model/).
+- Medusa/Hydra-style trained heads are another architecture option, not ready
+  Qwen3.8 checkpoints verified here. [Hydra implementation](https://github.com/zankner/Hydra).
+
+EAGLE3 remains a meaningful comparison: a smaller/compressed draft may save memory
+traffic, while sequential draft calls can cost latency. That tradeoff must be
+measured against parallel block drafting, not decided by paper headline speedups.
+Prioritize the published 3.8 DFlash2/DSpark checkpoints and lookup/MTP controls;
+keep EAGLE3 as a compatibility/transfer candidate rather than silently substituting
+a 3.6 head. Engine support for an `EAGLE`/MTP flag is not evidence of an external
+EAGLE3 checkpoint or a TT backend port.
+
+The upstream MLX implementation at
+[`07ebd93`, target hooks and generation loop](https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py)
+provides a concrete feature-capture contract for the next port: zero-based layer
+IDs index decoder layers, hooks save each layer's returned hidden output, and
+those outputs concatenate along the hidden dimension in configured tap order.
+They are not GDN recurrent states or final-normalized logits inputs. The draft
+applies its learned feature projection and hidden normalization. Prefill retains
+a bounded hidden suffix when configured; verification captures new block
+features. A TT adapter must establish the same post-layer residual boundary,
+token alignment and accepted-prefix feature ownership before draft execution.
+The public implementation is a reference, not a TT-certified feature adapter.
+
+The [DFlash2 authors' Qwen3.8 model-card comparison](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
+uses one H200, SGLang, default sampled xhigh reasoning and seven proposals per
+verification. At concurrency one, reported HumanEval end-to-end output rates are
+69.0 (ordinary), 151.9 (MTP), 159.9 (DSpark), and 214.6 (DFlash2) tok/s; MBPP gives
+69.0, 153.1, 163.3 and 226.9 respectively. These are publisher measurements, not our
+greedy control, not TT-Metal support and not speed forecasts for two P150As.
+
+Inference: DFlash2 is the stronger first external candidate for the coding workload,
+but port cost, acceptance against our BF4/BF8 target and draft/verify wall time must
+decide. Both external drafts need feature capture and extra device memory; neither
+is a flag-only extension of the current TT plugin. Keep the target TP2 across both
+cards. Audit checkpoint/runtime revisions and exact feature semantics before any
+port; never execute downloaded custom model code as part of a metadata audit.
+
+The historical `speculative-decoding` branch retains only post-final-norm hidden
+states for MTP (`patch_hidden_retention.py`); that is not the five-layer feature
+interface these external drafters need. Its `spec_generate.py` also explicitly
+reports long-generation token divergence without asserting identity. Retain it
+as historical diagnostic evidence, not a ready lossless verifier or a current
+performance baseline. Audit feature lifetime, trace addresses and accepted-prefix
+selection together with recurrent/conv/KV rollback before adapting either drafter.
+
+Sequence: E3 forced-prefix/rollback correctness and T=1/2/4/8/16 verification curve;
+then checkpoint conformance and native draft kernels; then matched MTP/lookup/
+DFlash2/DSpark coding runs. Report emitted tokens per entire draft+verify+commit
+cycle, including rejected proposals and state/feature movement. As an arithmetic
+budget, 4–5 committed tokens per cycle requires a complete 20–25 ms cycle to reach
+200 tok/s. No GPU multiplier bypasses that measured requirement on these cards.
+
+#### Multiple drafters: staged comparisons
+
+Start with routing, not an unconditional ensemble. The host-only
+`speculative-decoding/harness/hybrid_draft.py` policy tries request-local lookup
+and, on a miss, calls only the selected neural adapter. Defaults disable drafting
+unless greedy mode and verifier readiness are explicitly asserted. All returned
+tokens are unverified proposals; only the target verifier may authorize emission.
+This is a tested proposal interface, not a TT neural port or a state rollback engine.
+Adapters receive a bounded committed-history suffix, not full prompt context or
+feature tensors. A future device adapter must own request-local synchronized state,
+track the full committed position and catch up after lookup-only cycles. Never
+rebuild a long-context neural cache from that truncated suffix alone. Device errors
+propagate: do not silently fall back while target/drafter state may be inconsistent.
+
+| Arm | Work per cycle | Entry gate |
+| --- | --- | --- |
+| Single controls | Lookup only, MTP only, then each compatible external drafter separately | E3 exact verifier and each adapter's conformance gate |
+| Lookup + selected neural | Lookup hit skips neural work; miss calls one neural drafter; target verifies either proposal | Request isolation, committed-only history and neural catch-up after skipped cycles |
+| Adaptive routing | Select one drafter and block length using measured committed tokens per total cycle time | Enough paired per-workload measurements; include switching, feature and cache costs |
+| Hierarchical cascade | Cheap draft proposes to a larger draft, then the target verifies | Intermediate verification semantics, compatible inputs, rollback and incremental memory budget |
+| Multi-branch ensemble | Several drafts propose branches for joint target verification | Explicit tree attention plus branch-local GDN recurrence/conv state; no assumed TT tree support |
+
+[Hierarchical speculative decoding](https://arxiv.org/abs/2510.19705) establishes
+the multi-model cascade approach, not a speed guarantee on Blackhole. Arbitrarily
+chaining EAGLE3, DFlash2 and DSpark is not plug-and-play: their feature interfaces
+and proposal mechanisms differ. Keep both cards serving the TP2 target initially.
+Spare compute cores do not provide independent DRAM bandwidth for extra drafts.
+
+Record lookup time/hit rate, selected drafter, proposal length, accepted prefix,
+target bonus/correction tokens, draft/verify/rollback/commit time, peak DRAM/L1,
+and total committed tok/s. Include zero-acceptance cycles and neural catch-up.
+Test every rejection position, EOS, cancellation, stale request IDs, slot reuse,
+lookup-to-neural transitions and a forced state-corruption negative control before
+hardware promotion. Host routing tests do not satisfy these E3 device-state gates.
 
 After E3 correctness, repair MTP trace/buffer integration and its documented eager/trace
 stall interaction. Compare speculation off, MTP, and exact token-sequence lookup proposals
