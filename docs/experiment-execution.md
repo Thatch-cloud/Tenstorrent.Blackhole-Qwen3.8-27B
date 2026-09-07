@@ -5,6 +5,21 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Full projection fixture download completed:262,163,176 bytes including the
+  audited header, not the3.85GB checkpoint. `fc.weight` SHA256 is
+  `3ccef5ab503ff30aa589ee0c528f462a37c544ef766fa943c5b622aa92d4b2d5`;
+  `hidden_norm.weight` is
+  `998ae0570db09ee6b5549d9a35296a2ba8e4adfa5898135534646dede1a91693`.
+  Loader verifies both pinned hashes, dimensions, finite BF16 data, and the
+  previously audited first32 projection rows. No checkpoint code is imported.
+  `--full-projection --rows 1` now computes all5120 output channels on an
+  explicit8x10 grid, two output tiles per core, per rank. It evaluates the
+  arithmetic reference over ALL outputs, not a sampled subset. This mode is
+  simulator-only until verified; `normalization_tested=false` remains explicit.
+  TTsim run `20260907T095558Z-298` is active with a1800-second bound at this
+  entry; no result is claimed. All488 host tests pass. The downloaded norm
+  tensor is prepared but normalization and fabric reduction remain next work.
+
 - Hardware run `34107875990` (`5077e63`) PASSED runtime audit, two-card
   transfer health and dense learned-slice arithmetic comparisons for Kblock100
   and4:12 row/chip checks total. Artifacts were downloaded and inspected.

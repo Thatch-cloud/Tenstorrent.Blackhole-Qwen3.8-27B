@@ -7,6 +7,10 @@ Hardware projection diagnostic34107875990 now passes both Kblock100/4 arms,
 The float64 discrepancy also reproduces on silicon. This validates the numerical
 diagnostic for the first32 learned outputs, not a complete neural drafter.
 Next: full5120-output projection, learned normalization and fabric reduction.
+The complete projection and norm tensors are now downloaded and hash-pinned.
+A simulator-only all-output projection probe uses80 cores per chip; its first
+single-row run is pending, not a demonstrated utilization or speed improvement
+for the target model. Normalization and fabric reduction are not implemented.
 
 Learned-drafter projection remains simulator-gated: a single active input term
 is exact across both chips and rows1/8/32, but two terms already fail three of

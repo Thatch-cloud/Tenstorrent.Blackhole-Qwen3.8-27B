@@ -11,6 +11,36 @@ from draft_projection_fixture import MODEL, REVISION, URL, read_range
 
 HEADER_SHA256 = '0c2c70601b30f8d1ca7d5794b817779ba2dcf1956cfc7d4f83e87091e1ab7c8c'
 TENSORS = {'fc.weight': ([5120, 25600], 'fc.bf16'), 'hidden_norm.weight': ([5120], 'hidden_norm.bf16')}
+TENSOR_SHA256 = {
+    'fc.weight': '3ccef5ab503ff30aa589ee0c528f462a37c544ef766fa943c5b622aa92d4b2d5',
+    'hidden_norm.weight': '998ae0570db09ee6b5549d9a35296a2ba8e4adfa5898135534646dede1a91693',
+}
+
+
+def load_projection(output):
+    import torch
+
+    manifest = json.loads((output / 'manifest.json').read_text())
+    if (manifest['model'] != MODEL or manifest['revision'] != REVISION or manifest['header_sha256'] != HEADER_SHA256):
+        raise ValueError('Pinned full projection manifest required')
+    tensors = {}
+    for tensor, (shape, filename) in TENSORS.items():
+        entry = manifest['tensors'][tensor]
+        data = (output / filename).read_bytes()
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+        if (entry['file'] != filename or entry['shape'] != shape or entry['dtype'] != 'BF16'
+                or entry['bytes'] != 2 * elements or len(data) != 2 * elements
+                or entry['sha256'] != TENSOR_SHA256[tensor]
+                or hashlib.sha256(data).hexdigest() != entry['sha256']):
+            raise ValueError('Complete hashed BF16 projection tensors required')
+        if tensor == 'fc.weight' and hashlib.sha256(data[:32 * 25600 * 2]).hexdigest() != '882b3405c0eb1e9bc0d502e0ff241e43c25f405c8e10c4ba469129008f161a33':
+            raise ValueError('Full projection differs from audited first32 outputs')
+        tensors[tensor] = torch.frombuffer(bytearray(data), dtype=torch.bfloat16).reshape(shape)
+        if not torch.isfinite(tensors[tensor]).all():
+            raise ValueError('Finite learned tensors required')
+    return manifest, tensors['fc.weight'], tensors['hidden_norm.weight']
 
 
 def stream_tensor(output, start, length, total, *, chunk_bytes=2097152):

@@ -6,10 +6,17 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from draft_projection_full_fixture import fetch, stream_tensor
+from draft_projection_full_fixture import fetch, stream_tensor, load_projection
 
 
 class FullProjectionFixtureTests(unittest.TestCase):
+    def test_loader_rejects_unpinned_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'manifest.json').write_text(json.dumps(dict(model='wrong', revision='wrong', header_sha256='wrong')))
+            with self.assertRaises(ValueError):
+                load_projection(root)
+
     def test_complete_manifest_requires_both_verified_tensors(self):
         header = json.dumps({'fc.weight': dict(dtype='BF16', shape=[2, 8], data_offsets=[0, 32]),
             'hidden_norm.weight': dict(dtype='BF16', shape=[2], data_offsets=[32, 36])}).encode()
