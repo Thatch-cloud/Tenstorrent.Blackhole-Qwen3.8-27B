@@ -28,17 +28,23 @@ def main():
         mesh.enable_program_cache()
         generator = torch.Generator().manual_seed(38148)
 
-        def upload(value):
+        def upload(value, pad_value=0.):
             result = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh), pad_value=pad_value)
             owned.append(result)
             return result
 
         for rows in (1, 2, 4, 8, 16, 32):
             host_sources = [torch.randn((1, rows, 5120), generator=generator).bfloat16() for _ in range(4)]
             sources = [upload(value) for value in host_sources]
-            destinations = [[upload(torch.full((1, 32, 5120), 17., dtype=torch.bfloat16)).reshape((1, 1, 5120))
+            destinations = [[upload(torch.full((1, 1, 5120), 17., dtype=torch.bfloat16), pad_value=17.)
                              for _ in range(4)] for _ in range(2)]
+            for targets in destinations:
+                for target in targets:
+                    for shard in ttnn.get_device_tensors(target):
+                        physical = shard.cpu().to_torch_with_padded_shape()
+                        if tuple(physical.shape) != (1, 32, 5120) or not torch.all(physical == 17):
+                            raise AssertionError('Physical padding canary was not initialized')
             for prefix in range(1, rows + 1):
                 for candidate, targets in zip((False, True), destinations, strict=True):
                     copy_prefix(mesh, sources, targets, prefix, reuse_zero_tile=candidate)
@@ -49,7 +55,7 @@ def main():
                         if len(shards) != 2:
                             raise AssertionError('Both simulated chips required')
                         for shard in shards:
-                            actual = ttnn.to_torch(shard.reshape(shard.padded_shape))
+                            actual = shard.cpu().to_torch_with_padded_shape()
                             if not torch.equal(actual, expected):
                                 raise AssertionError(f'Prefix or physical padding mismatch: rows={rows}, prefix={prefix}, candidate={candidate}')
                 report['checks'].append(dict(rows=rows, prefix=prefix, both_chips=True, physical_padding_exact=True))

@@ -1768,3 +1768,14 @@ down-replay diagnostic now supports preserving all input terms/rows while
 selecting only failing output columns, for a faster ISA-versus-FP64 comparison
 if the failure recurs. The independent prefix-copy gate starts next; the old
 queue was stopped after its terminal-PID check encountered null output.
+
+Prefix-copy174127Z and174322Z failed in canary setup, before the candidate
+kernel: logical-volume-changing reshapes are not supported. The corrected
+gate uploads compact tensors with explicit pad_value=17 and checks the initial
+physical canary via host to_torch_with_padded_shape, without a reshape.
+Run174502Z passed all63 prefix/width cases on both chips, including every
+padding element, unchanged sources, exit0 and clean mesh closure. This clears
+the simulator correctness gate for opt-in zero-tile reuse, not its hardware
+timing or full-model promotion gates. A five-distinct-layer simulator run with
+the final learned norm/selector projection is next; the earlier intermittent
+two-layer mismatch remains unexplained and numerical tolerances stay fixed.
