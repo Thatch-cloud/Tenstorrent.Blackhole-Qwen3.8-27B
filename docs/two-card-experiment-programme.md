@@ -2,6 +2,12 @@
 
 ## Current measured result - 2026-09-07
 
+Hardware projection diagnostic34107875990 now passes both Kblock100/4 arms,
+12 arithmetic-reference checks total; saved first-row values match TTsim.
+The float64 discrepancy also reproduces on silicon. This validates the numerical
+diagnostic for the first32 learned outputs, not a complete neural drafter.
+Next: full5120-output projection, learned normalization and fabric reduction.
+
 Learned-drafter projection remains simulator-gated: a single active input term
 is exact across both chips and rows1/8/32, but two terms already fail three of
 six checks at the unchanged float32 tolerance. The sparse controls retain the

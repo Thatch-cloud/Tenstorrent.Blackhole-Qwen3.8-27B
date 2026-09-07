@@ -5,6 +5,23 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware run `34107875990` (`5077e63`) PASSED runtime audit, two-card
+  transfer health and dense learned-slice arithmetic comparisons for Kblock100
+  and4:12 row/chip checks total. Artifacts were downloaded and inspected.
+  Four source hashes match the final TTsim run, and all192 saved first-row
+  output values per blocking choice exactly match that simulator report.
+  Only first rows are saved: this is NOT a claim that every output element was
+  independently compared bitwise between simulator and hardware. Every complete
+  matrix does pass the arithmetic-reference tolerance on hardware, with maximum
+  residual2.86102294921875e-5. Float64 comparison still fails all12 checks,
+  showing the discrepancy is real device arithmetic, not solely a simulator bug.
+  No reset occurred, and no trained-drafter speed/quality claim follows.
+  Next expand to all5120 projection outputs and learned hidden normalization,
+  followed by fabric reduction and drafter layers. Added a bounded streaming
+  downloader for just `fc.weight` and `hidden_norm.weight`; it pins the audited
+  header hash, limits requests to2MiB, rejects changed totals and existing
+  outputs, and keeps interrupted files marked `.partial` without a manifest.
+
 - Added CI suite `feature-projection`: bounded host-side fetch of the pinned
   first32 learned output neurons, then an offline disposable container running
   transfer health followed by the dense arithmetic-reference diagnostic for
