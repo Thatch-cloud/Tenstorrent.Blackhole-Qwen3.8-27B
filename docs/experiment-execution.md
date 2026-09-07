@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Real-target prefill34102267362 (`1d72ea4`) passes all six boundary contexts
+  63/64/65/127/128/129. Independent artifact checks verify60 exact tap/chip
+  matrices covering5760 valid token rows, all five configured taps, full
+  prefill logits, native GDN/KV, inactive slots and one decode continuation per
+  fixture. Chip-local buckets are[1,1,128,2560] through128 tokens and
+  [1,1,256,2560] at129; excluded padding rows are65/64/63/1/0/127 respectively.
+  Feature helper hashes match the dispatched commit. All466 host tests pass.
+  This establishes eager single-chunk feature boundaries, not a neural draft
+  proposal or acceptance result. Next port work is the learned feature
+  projection and request-owned feature/history integration; long/chunked and
+  traced prefill still need separate coverage. No throughput uplift is claimed.
 - Prefill-feature hardware34101889468 (`bb1c075`) failed before any feature
   fixture: the prompt builder treats129 as an upper budget, not an exact token
   count, and returned too few tokens. The fixture builder now grows the budget

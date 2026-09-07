@@ -26,8 +26,11 @@ first native correction trace, not the verifier or publication copy. A pool
 allocated before all traces passes simulator with a failing late-allocation
 control and hardware34099243313:72 publication events,600 retained matrices and
 12 empty aborts across all36 fixtures, including native traced continuation.
-Prefill feature coverage and integrated transactional history remain prerequisites; this is not yet a neural
-drafter port or an acceptance result.
+Eager single-chunk prefill34102267362 also passes60 exact tap/chip matrices at
+contexts63/64/65/127/128/129, excluding padding and preserving logits/state/KV
+and decode continuation. Learned feature projection, transactional history and
+long/chunked/traced prefill remain port prerequisites. These feature gates are
+not yet a neural drafter or an acceptance result.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch
