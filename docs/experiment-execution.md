@@ -5,6 +5,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Retained full-model attention replay34070163839 passed24 static batch cases,
+  16 rollback checks,4 negative-control pairs and36 changed-metadata replay cases.
+  The dynamic reader engaged in24 T16/T32 cases; twelve T2 cases retain native
+  attention. Every replay also checks two corrected native continuations.
+- Matched actual-request benchmark `full-attention-engine` is now prepared.
+  Both arms use norm batching and the same bounded family proposal routing;
+  only the candidate enables dynamic parallel attention. Each arm owns a fresh
+  prefill and trace lifetime. ABBA validation requires identical emitted tokens,
+  proposal/acceptance accounting and routing, and reports setup cost separately.
+  This remains the existing synthetic lookup pilot, not coding-quality evidence.
 - Full-model parallel attention34067681095 passed24 batch fixtures,16 rollback
   checks,4 negative-control pairs and12 paired timing fixtures. Matched T32 costs
   99.331691->95.884002ms at4K and105.968306->102.058394ms at16K; T16 costs

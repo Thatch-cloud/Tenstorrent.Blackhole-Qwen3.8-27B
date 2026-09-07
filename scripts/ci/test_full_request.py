@@ -26,8 +26,8 @@ class RequestPilotTests(unittest.TestCase):
             logits[0, (token + 1) % 3] = 1
             return logits
 
-        def factory(model, session, pages, helpers, sampler, norm_batch):
-            engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock())
+        def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False):
+            engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
 
             def verify(ticket):
                 engine.phase = 'verified'

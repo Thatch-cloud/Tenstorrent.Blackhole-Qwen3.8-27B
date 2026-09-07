@@ -86,7 +86,10 @@ def main():
     parser.add_argument('--attention-dma', action='store_true')
     parser.add_argument('--attention-parallel', action='store_true')
     parser.add_argument('--attention-replay', action='store_true')
+    parser.add_argument('--attention-engine', action='store_true')
     options = parser.parse_args()
+    if options.attention_engine and (not options.request_pilot or not options.norm_batch):
+        raise ValueError('Attention engine requires the matched norm-batch request pilot')
     if options.attention_replay and (not options.norm_batch or not options.replay_inputs or options.grouped_attention
             or options.device_selection or options.request_pilot or options.attribution):
         raise ValueError('Replay attention is limited to retained norm-batch replay certification')
@@ -166,6 +169,15 @@ def main():
     report['attention_dma'] = options.attention_dma
     report['attention_parallel'] = options.attention_parallel
     report['attention_replay'] = options.attention_replay
+    report['attention_engine'] = options.attention_engine
+    if options.attention_engine:
+        from sdpa_tree_scratch import audit
+        report['attention_engine_native_sources'] = audit('/opt/tt-metal')
+        report['attention_engine_replay_prerequisite'] = 34070163839
+        report['attention_engine_scope'] = 'Both request arms use norm batching and identical mask-family proposal limits'
+        report['attention_engine_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('attention_request_plan.py', 'attention_replay.py', 'attention_mask_replay.py',
+                         'attention_mask_replay.cpp', 'model_batch.py', 'verifier_engine.py', 'verifier_inputs.py')}
     if options.attention_replay:
         from sdpa_tree_scratch import audit
         report['attention_replay_native_sources'] = audit('/opt/tt-metal')
@@ -529,10 +541,10 @@ def main():
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
-                def request_measure(*, norm_batch=options.norm_batch):
+                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False):
                     result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
                         live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
-                        norm_batch=norm_batch)
+                        norm_batch=norm_batch, attention_replay=attention_replay, family_routing=options.attention_engine)
                     report.setdefault('request_checks', []).append(result)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(result), flush=True)
@@ -542,7 +554,8 @@ def main():
 
                 if options.norm_batch:
                     from full_request_pair import measure_requests
-                    unused_requests, comparison = measure_requests(request_measure)
+                    unused_requests, comparison = measure_requests(request_measure,
+                        arm_key='attention_replay' if options.attention_engine else 'norm_batch')
                     comparison['length'] = len(prompt)
                     report.setdefault('request_comparisons', []).append(comparison)
                     output_path.write_text(json.dumps(report, indent=2))

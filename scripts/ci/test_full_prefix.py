@@ -12,6 +12,12 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_attention_engine_requires_matched_request_mode(self):
+        with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                'sys.argv', ['full-prefix.py', '--attention-engine']):
+            with self.assertRaisesRegex(ValueError, 'matched norm-batch request'):
+                full_prefix.main()
+
     def test_replay_attention_rejects_uncertified_request_modes(self):
         for flag in ('--request-pilot', '--device-selection', '--attribution', '--grouped-attention'):
             with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(

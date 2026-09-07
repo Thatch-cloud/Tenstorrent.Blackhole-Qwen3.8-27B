@@ -5,6 +5,20 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_attention_comparison_keeps_norm_and_family_routing_fixed(self):
+        def measure(*, attention_replay):
+            return dict(self.record(attention_replay), norm_batch=True, attention_replay=attention_replay, family_routing=True)
+
+        records, summary = measure_requests(measure, arm_key='attention_replay')
+        self.assertEqual([entry['attention_replay'] for entry in records], [False, True, True, False])
+        self.assertEqual(summary['arm_key'], 'attention_replay')
+        self.assertEqual(summary['decode_speedup'], 1.25)
+        for key in ('norm_batch', 'family_routing'):
+            invalid = deepcopy(records)
+            invalid[1][key] = False
+            with self.assertRaisesRegex(ValueError, 'identical norm batching'):
+                summarize_requests(invalid, arm_key='attention_replay')
+
     def record(self, enabled):
         return dict(norm_batch=enabled, prompt_tokens=[8, 9], emitted=[0, 1, 2], max_new_tokens=3,
             eos_ids=[], vocab_size=10, committed_decode_tokens=2, proposed=1, accepted=1,

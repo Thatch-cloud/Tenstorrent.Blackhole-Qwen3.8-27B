@@ -19,9 +19,14 @@ def terminal_ids(weights, vocab_size):
 
 
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
-                    kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False):
+                    kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
+                    attention_replay=False, family_routing=False):
     if type(norm_batch) is not bool:
         raise ValueError('Explicit boolean norm-batch selection required')
+    if type(attention_replay) is not bool or type(family_routing) is not bool:
+        raise ValueError('Explicit boolean attention and routing selection required')
+    if attention_replay and (not norm_batch or not family_routing):
+        raise ValueError('Replay attention requires norm batching and bounded family routing')
     started = time.perf_counter()
     gold = [prefill(prompt)]
     native_prefill_ms = (time.perf_counter() - started) * 1000
@@ -43,14 +48,25 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     engine = None
     blocks = []
     setup_ms = decode_ms = 0.0
+    capture_count = 0
     try:
         if not session.finished:
-            engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch)
+            plan = None
+            if family_routing:
+                from attention_request_plan import capture_plan
+                plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
+                    session.max_new_tokens - len(session.emitted))
+            engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
+                attention_replay=attention_replay)
+            capture_count = len(engine.buckets)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
             while not session.finished:
                 block_started = time.perf_counter()
-                ticket = session.propose(session.request_id, max_rows=32)
+                maximum = plan.max_rows(session.position, session.max_new_tokens - len(session.emitted)) if plan else 32
+                if attention_replay and maximum != engine.proposal_rows():
+                    raise AssertionError('Engine and matched request disagree on safe proposal width')
+                ticket = session.propose(session.request_id, max_rows=maximum)
                 drafted = time.perf_counter()
                 predictions, components = engine.verify(ticket)
                 verified = time.perf_counter()
@@ -74,6 +90,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             raise AssertionError('Actual request final active GDN, valid KV or inactive slots differ')
         return dict(length=len(prompt), kind='Synthetic repeated-code lookup pilot; not a coding-quality benchmark',
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
+            attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
             vocab_size=model.args.vocab_size,
             prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),
