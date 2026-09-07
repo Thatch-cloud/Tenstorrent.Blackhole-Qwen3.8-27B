@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -6,6 +7,27 @@ from projection_rounding import accumulate_fp32, grouped_projection_reference
 
 
 class ProjectionRoundingTests(unittest.TestCase):
+    def test_tile_fidelity_span_preserves_two_separate_mvmul_accumulations(self):
+        features = torch.ones(1, 32, dtype=torch.bfloat16)
+        weight = torch.cat((torch.ones(16, 1), torch.full((16, 1), 2.0))).bfloat16()
+        calls = []
+
+        def record(destination, terms):
+            calls.append([int(exponent.item()) for exponent, subtotal in terms])
+            return accumulate_fp32(destination, terms)
+
+        with patch('projection_rounding.accumulate_fp32', side_effect=record):
+            actual = grouped_projection_reference(features, weight, destination_rounding=True, fidelity_span=32)
+        self.assertEqual(calls, [[127, 127], [128, 128], [122, 122], [123, 123],
+            [120, 120], [121, 121], [115, 115], [116, 116]])
+        self.assertTrue(torch.equal(actual, features.double() @ weight.double()))
+
+    def test_fidelity_span_rejects_unsupported_geometry(self):
+        for width, span in ((16, 32), (32, True), (32, 64)):
+            with self.assertRaises(ValueError):
+                grouped_projection_reference(torch.ones(1, width, dtype=torch.bfloat16),
+                    torch.ones(width, 1, dtype=torch.bfloat16), destination_rounding=True, fidelity_span=span)
+
     def test_destination_accumulation_adds_and_cancels(self):
         initial = torch.tensor([2.0, -2.0, 2.0, 0.0], dtype=torch.float32)
         encoded = initial.view(torch.int32).to(torch.int64) & 0xffffffff

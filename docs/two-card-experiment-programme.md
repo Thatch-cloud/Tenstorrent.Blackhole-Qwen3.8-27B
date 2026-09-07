@@ -1406,3 +1406,20 @@ unchanged and integrated hardware remains blocked. A failure capture now saves
 actual activation/output, ISA-aware and ideal FP64 references plus checkpoint
 identity for bounded local replay; the diagnostic retry is intended to locate
 the numerical cause rather than declare the discrepancy acceptable.
+
+The captured rank0 down-projection failure is explained by CPU reference
+ordering, not relaxed tolerance. Pinned Blackhole LLK `matmul_configure_mop`
+in `llk_math_matmul.h` processes both16-wide reduction halves of a32-wide
+tile before advancing fidelity. The old reference advanced fidelity after each
+16-wide half. A configurable32-wide fidelity span now retains separate MVMUL
+accumulations while matching this instruction order. CPU replay of all40960
+captured outputs reproduces the old reference's four tolerance failures and
+maximum error0.0078125, but the corrected schedule is bitwise exact with
+zero error everywhere. Evidence: `hardware-evidence.local/mlp-down-fidelity-replay.json`.
+The accumulator arithmetic remains based on
+https://github.com/tenstorrent/ttsim/blob/v1.10.3/src/tensix.cpp .
+Tests assert phase/half ordering and reject unsupported geometry. The MLP
+diagnostic explicitly selects this schedule for its32-wide tiles; existing
+other diagnostics retain their old default until separately revalidated.
+The integrated branch still requires a complete new simulator pass on both
+ranks; the saved single-rank replay is not that pass and is not a speed result.

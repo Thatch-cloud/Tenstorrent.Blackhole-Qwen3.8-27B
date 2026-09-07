@@ -39,6 +39,7 @@ def main():
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, checks=[], block_rows=8,
         backend='hardware' if options.hardware else 'simulator',
         convolution_checkpoint=convolution_manifest, integrated_branch=bool(options.convolution_fixture),
+        projection_fidelity_span=32,
         tolerance=dict(projection_rtol=1e-4, projection_atol=1e-4, activation_ulps=2),
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('learned-mlp-probe.py', 'draft_mlp.py', 'draft_mlp_fixture.py', 'feature_collective.py',
@@ -131,7 +132,7 @@ def main():
                 if norm_ulps > 2:
                     raise AssertionError('Integrated MLP normalization exceeds two BF16 ULPs')
                 actual_conv_projection = host(conv_projection, chip)
-                expected_conv_projection = grouped_projection_reference(actual_norm, conv_weight, destination_rounding=True)
+                expected_conv_projection = grouped_projection_reference(actual_norm, conv_weight, destination_rounding=True, fidelity_span=32)
                 torch.testing.assert_close(actual_conv_projection.double(), expected_conv_projection, rtol=1e-4, atol=1e-4)
                 expected_dynamic = actual_conv_projection.bfloat16().split(320, dim=-1)
                 if any(not torch.equal(host(value, chip), expected) for value, expected in zip(dynamic, expected_dynamic, strict=True)):
@@ -148,7 +149,7 @@ def main():
                     prepare_exact=True, finish_exact=True, residual_exact=True))
                 checkpoint('convolution_reference_complete', chip=chip)
             for index, name in enumerate(('gate', 'up')):
-                expected = grouped_projection_reference(actual_input[..., :8, :], shards[chip][index], destination_rounding=True)
+                expected = grouped_projection_reference(actual_input[..., :8, :], shards[chip][index], destination_rounding=True, fidelity_span=32)
                 actual = host(projections[index], chip)[..., :8, :].double()
                 torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
                 report['checks'].append(dict(chip=chip, stage=name, max_error=float((actual - expected).abs().max())))
@@ -158,14 +159,14 @@ def main():
             distance = int(bf16_ulp_distance(actual_activation, expected_activation).max())
             if distance > 2:
                 raise AssertionError(f'SwiGLU activation differs by {distance} BF16 ULPs')
-            expected_down = grouped_projection_reference(actual_activation[..., :8, :], shards[chip][2], destination_rounding=True)
+            expected_down = grouped_projection_reference(actual_activation[..., :8, :], shards[chip][2], destination_rounding=True, fidelity_span=32)
             actual_down = partials[chip][..., :8, :].double()
             mismatched = ~torch.isclose(actual_down, expected_down, rtol=1e-4, atol=1e-4)
             if mismatched.any():
                 ideal_down = actual_activation[..., :8, :].double() @ shards[chip][2].double()
                 failure_path = options.output.with_suffix(f'.rank{chip}-down-failure.pt')
                 torch.save(dict(activation=actual_activation[..., :8, :].contiguous(), actual=actual_down,
-                    reference=expected_down, ideal=ideal_down, chip=chip, checkpoint=manifest), failure_path)
+                    reference=expected_down, ideal=ideal_down, chip=chip, checkpoint=manifest, fidelity_span=32), failure_path)
                 indices = mismatched.nonzero().tolist()
                 report['down_failure'] = dict(chip=chip, activation_ulps=distance, capture=str(failure_path),
                     mismatched_elements=len(indices), samples=[dict(index=index, actual=float(actual_down[tuple(index)]),

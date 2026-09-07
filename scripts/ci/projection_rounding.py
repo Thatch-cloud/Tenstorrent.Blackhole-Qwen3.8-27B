@@ -37,13 +37,15 @@ def accumulate_fp32(destination, terms):
     return torch.where((magnitude != 0) & (exponent > 0) & (common_exp > 0), encoded, 0)
 
 
-def grouped_projection_reference(features, weight, *, phases=4, reverse_sources=False, destination_rounding=False):
+def grouped_projection_reference(features, weight, *, phases=4, reverse_sources=False, destination_rounding=False,
+        fidelity_span=16):
     import torch
 
     if (features.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16
             or features.device.type != 'cpu' or weight.device.type != 'cpu'
             or features.ndim < 2 or weight.ndim != 2 or features.shape[-1] != weight.shape[0]
-            or weight.shape[0] % (16 if destination_rounding else 8)
+            or type(fidelity_span) is not int or fidelity_span not in (16, 32)
+            or weight.shape[0] % (fidelity_span if destination_rounding else 8)
             or type(phases) is not int or phases not in (1, 2, 3, 4)):
         raise ValueError('CPU BF16 matrices with matching group-eight input width required')
     if not torch.isfinite(features).all() or not torch.isfinite(weight).all():
@@ -83,9 +85,10 @@ def grouped_projection_reference(features, weight, *, phases=4, reverse_sources=
                 pending[phase].append((scale + 137, subtotal))
             else:
                 result += torch.ldexp(subtotal.double(), scale.to(torch.int32))
-        if destination_rounding and start % 16 == 8:
+        if destination_rounding and start % fidelity_span == fidelity_span - 8:
             for terms in pending:
-                destination = accumulate_fp32(destination, terms)
+                for offset in range(0, len(terms), 2):
+                    destination = accumulate_fp32(destination, terms[offset:offset + 2])
             pending = [[] for phase in range(phases)]
     if destination_rounding:
         result = destination.to(torch.int32).view(torch.float32).double()
