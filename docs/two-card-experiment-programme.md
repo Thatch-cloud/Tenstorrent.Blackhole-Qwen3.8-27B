@@ -1534,3 +1534,19 @@ two-layer path still require device validation. A two-layer test is queued
 behind active long-context155120Z-300, conditional on that run's clean success.
 No second simulator is launched concurrently, and multi-layer hardware remains
 blocked. Layers2-4 are still downloading and cannot load without audited pins.
+
+Selector/final-normalization staging is now active separately: hidden projection
+[256,5120], predecessor and successor codebooks [248320,256] each, and final
+norm [5120], totaling256911360 bytes. Shapes and ranges were checked against
+the pinned header before adding the bounded subset. The five layer families,
+feature projection/norm and selector/final norm account for the complete
+3848817896-byte checkpoint including its8936-byte header area; this arithmetic
+coverage test is not a completed download or numerical gate. All550 host tests pass.
+
+The pinned upstream `CandidateSelector.select` reranks top16 LM-head candidates
+using the projected hidden state and predecessor/successor codebooks, choosing
+the next predecessor sequentially. It does not remove the LM-head prerequisite.
+Source: https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py .
+Selector hashes/loading, arithmetic, token path and shared target LM-head wiring
+remain unvalidated. Long-context simulator155120Z-300 has completed device
+execution and is advancing through all-row CPU references, without a final pass yet.
