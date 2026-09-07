@@ -16,8 +16,10 @@ Generating128 committed tokens still needs89/99 verifier blocks, including
 this observed low-acceptance lookup workload. Real-target feature boundary
 retry34088626033 passes30 exact eager B1 tap/chip comparisons with unchanged
 native logits/state/KV. Observed chip-local features are[1,1,1,2560]. Batched
-alignment, traced feature reuse and accepted-prefix publication remain next
-prerequisites; this is not yet a neural-drafter port or an acceptance result.
+alignment gate34089347478 also passes90 exact matrices atT8/T16/T32, with
+chip-local shape[1,1,T,2560] and unchanged logits/state/KV. Changed-input traced
+feature reuse and accepted-prefix publication remain next prerequisites;
+this is not yet a neural-drafter port or an acceptance result.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch

@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Real-target batched feature34089347478 (`4e3b809`) passed. Artifact inspection
+  verifies all nine contexts63/64/65 byT8/T16/T32 fixtures,90 exact feature
+  matrices covering1680 tap/chip/token rows, and unchanged full logits, GDN,
+  valid KV and inactive slots. Batched features have logical chip-local shape
+  [1,1,T,2560] and match serial B1 row order at all five taps. All four feature
+  helper/model-adapter hashes match the worktree. This clears eager batched
+  alignment only. The next trace gate must change inputs on the same captured
+  allocations and compare refreshed features against independent eager output;
+  replaying unchanged inputs alone would not establish feature freshness.
 - Added `target-feature-batch`: serial greedy B1 features versus the same input
   tokens in the certified static norm-batch verifier atT8/T16/T32 and contexts
   63/64/65. It checks full logits, active GDN, valid KV, inactive slots and exact
