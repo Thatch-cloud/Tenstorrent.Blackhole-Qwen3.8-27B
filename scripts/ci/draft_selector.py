@@ -1,7 +1,7 @@
 """Ideal FP64 greedy selector oracle; not a BF16 device-equivalence or coding-quality gate."""
 
 
-def greedy_selector_reference(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors):
+def validate_selector_operands(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors):
     import torch
 
     operands = (projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors)
@@ -27,6 +27,13 @@ def greedy_selector_reference(projected_hidden, candidates, unary_logits, predec
     sorted_candidates = candidates.sort(dim=-1).values
     if torch.any(sorted_candidates[..., 1:] == sorted_candidates[..., :-1]):
         raise ValueError('Unique candidates per position required')
+
+
+def greedy_selector_reference(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors):
+    import torch
+
+    validate_selector_operands(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors)
+    positions = projected_hidden.shape[1]
     hidden = projected_hidden.double()
     unary = unary_logits.double()
     predecessor_codes, successor_codes = predecessor_codes.double(), successor_codes.double()

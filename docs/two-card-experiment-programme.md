@@ -1636,3 +1636,20 @@ Remaining learned layer3 is now pinned: all15 tensors (665,948,672 bytes)
 were independently SHA256-checked on Windows, then rehashed and verified finite
 as BF16 by the WSL loader. Layer4 continues downloading. This fixture audit is
 not a multi-layer execution or coding-quality result.
+
+### Selector transition-table experiment
+
+`draft_selector_transitions.py` supplies a mathematical oracle for parallel
+transition scoring: at each proposal position the possible predecessor IDs are
+the preceding position's16 candidates, with the known anchor at position1.
+All seven16x16 score tables can therefore be computed before following the
+greedy path. Only seven tiny row selections remain sequential; codebook reads
+and dot products need not wait for preceding argmax decisions.
+
+This spends up to16 times more dot-product work to expose parallelism; it is
+not an assumed speedup. The block requires7x16x16 scores (7KiB in FP32) and
+uses the original candidate order for ties. The FP64 oracle agrees with the
+sequential greedy path and selected score rows on bounded randomized tests.
+Finite-precision device equivalence, simulator gating, measured cost versus
+serial selection, shared-LM-head candidate generation and coding acceptance
+remain outstanding. No alternate drafter contract or serving change is implied.
