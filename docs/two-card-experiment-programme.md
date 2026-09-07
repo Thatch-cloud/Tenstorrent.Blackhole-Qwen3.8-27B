@@ -1758,3 +1758,13 @@ The checker requires both reports; this does not waive broad correctness.
 Runtime C++ post-processing is enabled before Python starts, Tracy child exit
 codes are checked, and cgroup memory events/peak are saved for diagnosis.
 Instrumented durations remain attribution only, never throughput evidence.
+
+The171550Z two-layer rerun completed with passed=true, exit0 and clean mesh
+closure. Both layers/ranks report zero MLP projection error and exact connected
+convolution/residual/fabric checks; the earlier six-value mismatch did not
+reproduce, so no failure capture was generated. This is not an explained fix
+or sufficient evidence to promote the multi-layer drafter to hardware. The
+down-replay diagnostic now supports preserving all input terms/rows while
+selecting only failing output columns, for a faster ISA-versus-FP64 comparison
+if the failure recurs. The independent prefix-copy gate starts next; the old
+queue was stopped after its terminal-PID check encountered null output.
