@@ -18,6 +18,7 @@ def main():
         raise RuntimeError('Fast-dispatch simulator required')
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--prefix-copy', action='store_true')
     options = parser.parse_args()
     import torch
     import ttnn
@@ -27,6 +28,7 @@ def main():
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                  for name in ('feature-trace-probe.py', 'target_features.py', 'full_replay.py')})
     mesh = tensor = output = trace = features = None
+    published = []
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
@@ -59,7 +61,12 @@ def main():
                 release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
 
         features = capture_features()
-        warm_feature_fixture(SimpleNamespace(run=operation, close=lambda: None), features, ttnn, mesh)
+        from feature_prefix import allocate_prefixes
+        prefixes = (0, 1, 17, 32)
+        buffers = warm_feature_fixture(SimpleNamespace(run=operation, close=lambda: None), features, ttnn, mesh,
+            prepare_features=(lambda values: allocate_prefixes(ttnn, values, prefixes)) if options.prefix_copy else None)
+        if buffers is not None:
+            published = list(zip(prefixes, buffers, strict=True))
         features = None
         features = capture_features()
         with features.capture():
@@ -80,12 +87,37 @@ def main():
                     if not torch.equal(ttnn.to_torch(part), gold):
                         raise AssertionError('Captured feature copy remained stale')
                     report['checks'].append(dict(pattern=pattern, layer=layer, chip=chip, exact=True))
+            if options.prefix_copy:
+                from feature_prefix import publish_prefix
+                if pattern == 0:
+                    for prefix, copies in published:
+                        publish_prefix(ttnn, features.outputs(), copies, prefix)
+                        if len(copies) != (len(taps) if prefix else 0):
+                            raise AssertionError('Incorrect committed feature tap count')
+                    ttnn.synchronize_device(mesh)
+                else:
+                    for prefix, copies in published:
+                        for layer, value in zip(taps if prefix else (), copies, strict=True):
+                            for chip, part in enumerate(ttnn.get_device_tensors(value)):
+                                gold = expected[0][..., :prefix, chip * 2560:(chip + 1) * 2560] + layer + 1
+                                actual = ttnn.to_torch(part)
+                                if list(actual.shape) != [1, 1, prefix, 2560] or not torch.equal(actual, gold):
+                                    raise AssertionError('Published prefix changed after source trace replay')
+                                report.setdefault('prefix_checks', []).append(dict(pattern=pattern, prefix=prefix,
+                                    layer=layer, chip=chip, exact=True))
         if len(report['checks']) != 30:
             raise AssertionError('Complete changed-input matrix required')
+        if options.prefix_copy:
+            if len(report.get('prefix_checks', [])) != 60:
+                raise AssertionError('Complete retained-prefix matrix required')
+            report['sources']['feature_prefix.py'] = hashlib.sha256(Path(__file__).with_name('feature_prefix.py').read_bytes()).hexdigest()
     finally:
         if mesh is not None:
             if trace is not None:
                 ttnn.release_trace(mesh, trace)
+            for prefix, copies in published:
+                for value in copies:
+                    ttnn.deallocate(value)
             if features is not None:
                 features.close()
             if output is not None:

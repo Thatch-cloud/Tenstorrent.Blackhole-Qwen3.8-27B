@@ -16,12 +16,14 @@ def validate_fixture(rows, first_prefix, second_prefix, oracle_length):
         raise ValueError('Oracle must include the replay block and corrected continuation')
 
 
-def warm_feature_fixture(fixture, features, operations, mesh):
+def warm_feature_fixture(fixture, features, operations, mesh, *, prepare_features=None):
     output = None
     try:
         with features.capture():
             output = fixture.run()
         operations.synchronize_device(mesh)
+        if prepare_features is not None:
+            return prepare_features(features.outputs())
     finally:
         try:
             features.close()
@@ -36,8 +38,10 @@ def warm_feature_fixture(fixture, features, operations, mesh):
 def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *, rows, first_prefix, second_prefix,
                   prefill, decode, save, restore, state_digest, live_digest, kv_digest, inactive_digest, local_host,
                   norm_batch=False, attention_replay=False, attention_mask_once=False, replay_group_rows=4,
-                  feature_taps=()):
+                  feature_taps=(), feature_publication=False):
     validate_fixture(rows, first_prefix, second_prefix, len(oracle))
+    if type(feature_publication) is not bool or (feature_publication and not feature_taps):
+        raise ValueError('Feature prefix publication requires explicit captured taps')
     import torch
     import ttnn
 
@@ -83,11 +87,15 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             packed_checkpoints=True, retain_records=retain, ordered_cache=True, norm_batch=norm_batch,
             attention_replay=attention_replay, attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
 
+    prefix_buffers = ()
     if feature_taps:
         save(initial)
         warm = make_fixture(False)
         try:
-            warm_feature_fixture(warm, new_feature_capture(), ttnn, mesh)
+            from feature_prefix import allocate_prefixes
+            prefix_buffers = warm_feature_fixture(warm, new_feature_capture(), ttnn, mesh,
+                prepare_features=(lambda values: allocate_prefixes(ttnn, values, (first_prefix, second_prefix)))
+                    if feature_publication else None) or ()
         finally:
             restore(initial)
     fixture = make_fixture(True)
@@ -95,6 +103,8 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
     features = None
     feature_checks = []
     stale_feature_control = None
+    published = []
+    publication_checks = []
     try:
         features = new_feature_capture() if feature_taps else None
         save(initial)
@@ -113,6 +123,11 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             feature_checks.extend(dict(check, phase='initial') for check in
                 compare_feature_rows(serial_features[:rows], first_features, feature_taps))
         fixture.retained.commit(first_prefix, dma=True, synchronize=True)
+        if feature_publication:
+            from feature_prefix import publish_prefix
+            publish_prefix(ttnn, features.outputs(), prefix_buffers[0], first_prefix)
+            published.append(('first', 0, first_prefix, prefix_buffers[0]))
+            ttnn.synchronize_device(mesh)
         stage_inputs(fixture, oracle[first_prefix:first_prefix + rows], length + first_prefix)
         fixture.retained.replay(lambda: ttnn.execute_trace(mesh, captured, cq_id=0, blocking=True))
         if fixture.retained.replay_epoch != 1:
@@ -136,6 +151,14 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
         if state_digest(checkpoints) != expected_end_state:
             raise AssertionError('Replayed end checkpoint remained stale')
         fixture.retained.commit(second_prefix, dma=True, synchronize=True)
+        if feature_publication:
+            publish_prefix(ttnn, features.outputs(), prefix_buffers[1], second_prefix)
+            published.append(('second', first_prefix, second_prefix, prefix_buffers[1]))
+            ttnn.synchronize_device(mesh)
+            ttnn.release_trace(mesh, captured)
+            captured = None
+            features.close()
+            features = None
         if live_digest() != expected_commit_state or kv_digest(length + first_prefix + second_prefix) != expected_commit_kv:
             raise AssertionError('Second decision did not use refreshed prefix histories')
         if inactive_digest() != expected_inactive:
@@ -145,6 +168,13 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
                 raise AssertionError('Corrected continuation after replay differs from native')
         if live_digest() != expected_final_state or kv_digest(length + first_prefix + second_prefix + 2) != expected_final_kv:
             raise AssertionError('Corrected replay continuation GDN/KV differs')
+        for phase, offset, prefix, copies in published:
+            if len(copies) != (len(feature_taps) if prefix else 0):
+                raise AssertionError('Abort or committed feature tap count differs')
+            checks = compare_feature_rows(serial_features[offset:offset + prefix],
+                [local_host(value) for value in copies], feature_taps) if prefix else []
+            publication_checks.append(dict(phase=phase, prefix=prefix, position=length + offset,
+                checks=checks, source_released=True, exact=True))
         return dict(length=length, rows=rows, first_prefix=first_prefix, second_prefix=second_prefix,
             replay_epoch=fixture.retained.replay_epoch, logits_exact=True, refreshed_prefixes_exact=True,
             attention_replay_enabled=fixture.attention_replay,
@@ -155,12 +185,16 @@ def verify_replay(model, prompt, oracle, pages, helpers, checkpoints, initial, *
             valid_kv_exact=True, inactive_slots_exact=True, correction_steps=2,
             feature_checks=feature_checks, feature_taps=list(feature_taps),
             stale_feature_control_detected=stale_feature_control,
+            feature_publications=publication_checks,
             scope='Two blocks using one captured verifier with changed metadata; no drafter or throughput claim')
     finally:
         if captured is not None:
             ttnn.release_trace(mesh, captured)
         if features is not None:
             features.close()
+        for copies in prefix_buffers:
+            for value in copies:
+                ttnn.deallocate(value)
         if output is not None:
             ttnn.deallocate(output)
         fixture.close()

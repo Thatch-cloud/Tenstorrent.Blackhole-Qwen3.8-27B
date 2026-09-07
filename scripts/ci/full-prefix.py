@@ -94,7 +94,10 @@ def main():
     parser.add_argument('--target-features', action='store_true')
     parser.add_argument('--target-feature-batch', action='store_true')
     parser.add_argument('--target-feature-replay', action='store_true')
+    parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.target_feature_prefix and not options.target_feature_replay:
+        raise ValueError('Feature prefix publication requires feature replay validation')
     if options.target_feature_replay and (not options.replay_inputs or not options.norm_batch or
             options.target_features or options.target_feature_batch):
         raise ValueError('Target feature replay requires standalone retained norm-batch replay')
@@ -211,7 +214,7 @@ def main():
     if options.target_feature_replay:
         report['feature_taps'] = [5, 19, 33, 47, 61]
         report['feature_replay_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ('feature_rows.py', 'target_features.py', 'full_replay.py')}
+            for name in ('feature_rows.py', 'target_features.py', 'full_replay.py', 'feature_prefix.py')}
     report['attention_engine_wide'] = options.attention_engine_wide
     if options.attention_engine:
         from sdpa_tree_scratch import audit
@@ -817,7 +820,8 @@ def main():
                                 live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, local_host=local_host,
                                 norm_batch=options.norm_batch, attention_replay=options.attention_replay,
                                 attention_mask_once=options.attention_mask_once, replay_group_rows=options.replay_group_rows,
-                                feature_taps=(5, 19, 33, 47, 61) if options.target_feature_replay else ())
+                                feature_taps=(5, 19, 33, 47, 61) if options.target_feature_replay else (),
+                                feature_publication=options.target_feature_prefix)
                             report.setdefault('replay_checks', []).append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             print(json.dumps(result), flush=True)

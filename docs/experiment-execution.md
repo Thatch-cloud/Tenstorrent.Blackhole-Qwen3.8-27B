@@ -5,6 +5,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added opt-in `target-feature-prefix` to publish first/second committed feature
+  prefixes into independently owned buffers, then verify them after source
+  trace replay/release and corrected continuation. Prefix0 publishes no tensors.
+  The first simulator attempt20260907T071233Z-299 exposed actual corruption when
+  persistent prefix buffers were allocated after capture. It was not promoted.
+  Destinations are now allocated during instrumented warmup before capture;
+  publication copies into those addresses without replacing them. Simulator
+  20260907T071615Z-291 passes30 changed-input feature checks and60 retained
+  prefix checks (prefixes1/17/32), with source hashes matched. Temporary slice
+  allocations still trigger the runtime active-trace warning; do not suppress
+  it or treat the narrow pass as general allocator safety. All455 host tests
+  and shell syntax checks pass. This is a controlled publication primitive,
+  not an integrated transactional drafter history or a throughput improvement.
 - Warmed real-target feature replay34091904236 (`d6a0aff`) passed. Artifact
   inspection verifies720 exact initial/replayed feature matrices across36
   fixtures: contexts4095/16383, rows2/16/32, first commits0/1/full and second
