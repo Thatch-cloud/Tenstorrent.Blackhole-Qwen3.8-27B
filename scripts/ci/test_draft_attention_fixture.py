@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_attention_fixture import load_attention
+from draft_attention_fixture import load_attention, ensure_fixture
 from draft_convolution_fixture import MODEL, REVISION, HEADER_SHA256
 
 
@@ -22,6 +22,13 @@ class AttentionFixtureTests(unittest.TestCase):
             (root / 'manifest.json').write_text(json.dumps(manifest))
             (root / 'query.bf16').write_bytes(data)
             self.assertEqual(load_attention(root)[1]['query'].item(), 1)
+            with patch('draft_attention_fixture.fetch') as download:
+                self.assertEqual(ensure_fixture(root), manifest)
+                download.assert_not_called()
             (root / 'query.bf16').write_bytes(b'xx')
             with self.assertRaises(ValueError):
                 load_attention(root)
+            with patch('draft_attention_fixture.fetch') as download:
+                with self.assertRaises(ValueError):
+                    ensure_fixture(root)
+                download.assert_not_called()

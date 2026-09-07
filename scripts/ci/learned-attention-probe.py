@@ -19,6 +19,7 @@ from projection_rounding import grouped_projection_reference
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--fp32-rope', action='store_true')
     parser.add_argument('--inspect-attention', action='store_true')
@@ -27,15 +28,19 @@ def main():
     parser.add_argument('--pairwise-softmax', action='store_true')
     parser.add_argument('--pairwise-dots', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
-    if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+    require_projection_environment(os.environ, options.hardware)
+    if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
+    if options.hardware and (not all((options.fp32_rope, options.explicit_softmax,
+            options.pairwise_softmax, options.pairwise_dots)) or options.inspect_attention or options.wide_attention):
+        parser.error('Hardware requires the inspection-free simulator-validated precise path')
     import torch
     import ttnn
     from models.tt_transformers.tt.ccl import TT_CCL
 
     manifest, weights = load_attention(options.fixture)
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, context=31, block_rows=8,
+        backend='hardware' if options.hardware else 'simulator',
         fp32_rope=options.fp32_rope,
         explicit_softmax=options.explicit_softmax,
         wide_attention=options.wide_attention,

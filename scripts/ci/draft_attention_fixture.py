@@ -42,7 +42,15 @@ def fetch(output):
     return fetch_subset(output, specifications=TENSORS, scope=__doc__)
 
 
+def ensure_fixture(output):
+    if not (output / 'manifest.json').exists():
+        fetch(output)
+    return verified_bytes(output, specifications=TENSORS, hashes=TENSOR_SHA256)[0]
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
-    print(json.dumps(fetch(parser.parse_args().output), indent=2))
+    parser.add_argument('--reuse-verified', action='store_true')
+    options = parser.parse_args()
+    print(json.dumps(ensure_fixture(options.output) if options.reuse_verified else fetch(options.output), indent=2))

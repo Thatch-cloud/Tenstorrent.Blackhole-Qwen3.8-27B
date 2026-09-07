@@ -1060,3 +1060,10 @@ and exact fabric sums. All 516 host tests pass in the WSL Torch environment;
 Windows Python lacks Torch and is not the supported test environment. The next
 gate is isolated learned-attention hardware validation, followed by bounded
 tiled/fused arithmetic and complete draft-layer integration.
+
+The opt-in `learned-attention` CI suite now performs owner/runtime auditing,
+transfer health and this precise inspection-free learned-attention gate only.
+Its pinned fixture cache is rehashed before reuse; failed health prevents the
+probe. Hardware rejects unvalidated arithmetic flag combinations. All 518 host
+tests pass. This gate neither loads the target model nor changes serving defaults;
+it establishes component correctness only, not end-to-end latency or throughput.
