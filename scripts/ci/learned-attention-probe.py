@@ -1,4 +1,4 @@
-"""Learned draft attention on synthetic hidden features; no convolution, MLP or request-history integration."""
+"""Learned attention with optional convolution/residual integration; no MLP or request-history integration."""
 
 import argparse
 import hashlib
@@ -8,9 +8,11 @@ from pathlib import Path
 
 from draft_attention import draft_attention_mask, composed_draft_attention
 from draft_attention_fixture import load_attention
+from draft_convolution import grouped_causal_convolution, convolution_reference
+from draft_convolution_fixture import load_convolution
 from draft_head_preparation import rope_tables, rope_reference, head_norm_reference
 from feature_collective import gather_add_projection
-from feature_normalization import bf16_ulp_distance
+from feature_normalization import bf16_ulp_distance, rms_reference
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import release_owned
 from projection_rounding import grouped_projection_reference
@@ -32,8 +34,11 @@ def main():
     parser.add_argument('--cache-dot-tiles', action='store_true')
     parser.add_argument('--context', type=int, choices=(31, 2048), default=31)
     parser.add_argument('--wide-dot-placement', action='store_true')
+    parser.add_argument('--convolution-fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.hardware and options.convolution_fixture:
+        parser.error('Integrated attention branch requires simulator validation')
     if options.hardware and (options.context != 31 or options.wide_dot_placement) and not (
             options.context == 2048 and options.wide_dot_placement and options.cache_dot_tiles
             and options.fused_dots and options.fused_row_sum):
@@ -52,11 +57,14 @@ def main():
     from models.tt_transformers.tt.ccl import TT_CCL
 
     manifest, weights = load_attention(options.fixture)
+    conv_manifest, conv_weights = load_convolution(options.convolution_fixture) if options.convolution_fixture else (None, None)
     context = options.context
     valid_keys = context + 8
     key_rows = ((valid_keys + 31) // 32) * 32
     query_start = 4096 + context
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, context=context, block_rows=8,
+        convolution_checkpoint=conv_manifest, integrated_branch=bool(options.convolution_fixture),
+        projection_fidelity_span=32 if options.convolution_fixture else 16,
         wide_dot_placement=options.wide_dot_placement,
         backend='hardware' if options.hardware else 'simulator',
         fp32_rope=options.fp32_rope,
@@ -73,6 +81,7 @@ def main():
                 hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ('learned-attention-probe.py', 'draft_head_preparation.py', 'draft_attention.py',
                     'draft_attention_fixture.py', 'feature_collective.py', 'projection_rounding.py',
+                    'draft_convolution.py', 'draft_convolution_fixture.py',
                     'draft_row_sum.py', 'draft_row_sum_io.cpp', 'draft_row_sum_compute.cpp',
                     'draft_dot.py', 'draft_dot_io.cpp', 'draft_dot_compute.cpp')})
     mesh = None
@@ -107,6 +116,32 @@ def main():
         query_hidden = torch.zeros((1, 1, 32, 5120), dtype=torch.bfloat16)
         query_hidden[..., :8, :] = key_hidden[..., context:valid_keys, :]
         inputs = {'q': upload(query_hidden), 'k': upload(key_hidden)}
+        residual = inputs['q']
+        if conv_weights is not None:
+            branch_norm_weight = conv_weights['layers.0.input_layernorm.weight']
+            conv_weight = conv_weights['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()
+            base_weight = conv_weights['layers.0.attention_conv.base_kernel']
+            device_branch_norm = upload(branch_norm_weight.reshape(1, 1, 160, 32), layout=ttnn.ROW_MAJOR_LAYOUT)
+            branch_normalized = retain(ttnn.rms_norm(residual, epsilon=1e-6, weight=device_branch_norm,
+                compute_kernel_config=kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            conv_program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 5),
+                in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
+                fuse_batch=True, fused_activation=None, mcast_in0=True)
+            conv_projection = retain(ttnn.matmul(branch_normalized, upload(conv_weight), dtype=ttnn.float32,
+                program_config=conv_program, compute_kernel_config=kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            rounded_dynamic = retain(ttnn.typecast(conv_projection, ttnn.bfloat16))
+            dynamic = [retain(ttnn.slice(rounded_dynamic, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
+                for offset in range(4)]
+            bases = [upload(base_weight[phase, offset].reshape(1, 1, 1, 5120))
+                for phase in range(2) for offset in range(2)]
+            inputs['q'] = retain(grouped_causal_convolution(ttnn, mesh, branch_normalized, dynamic[:2], bases[:2],
+                fp32_intermediates=True))
+            context_input = retain(ttnn.slice(inputs['k'], (0, 0, 0, 0), (1, 1, context, 5120)))
+            proposal_input = retain(ttnn.slice(inputs['q'], (0, 0, 0, 0), (1, 1, 8, 5120)))
+            padding_input = upload(torch.zeros((1, 1, key_rows - valid_keys, 5120), dtype=torch.bfloat16))
+            inputs['k'] = retain(ttnn.concat((context_input, proposal_input, padding_input), dim=2,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            checkpoint('convolution_prepare_complete')
         projected, heads, normalized, rotated, local_weights = {}, {}, {}, {}, {}
         for name, count in (('q', 16), ('k', 4), ('v', 4)):
             weight = weights[f'layers.0.self_attn.{name}_proj.weight']
@@ -166,18 +201,57 @@ def main():
         partial_output = retain(ttnn.matmul(merged, device_output_weight, dtype=ttnn.float32,
             compute_kernel_config=kernel, program_config=output_program, memory_config=ttnn.DRAM_MEMORY_CONFIG))
         output = retain(gather_add_projection(ttnn, mesh, collectives, partial_output))
+        if conv_weights is not None:
+            rounded_output = retain(ttnn.typecast(output, ttnn.bfloat16))
+            finished = retain(grouped_causal_convolution(ttnn, mesh, rounded_output, dynamic[2:], bases[2:],
+                fp32_intermediates=True))
+            wide_finished = retain(ttnn.typecast(finished, ttnn.float32))
+            wide_residual = retain(ttnn.typecast(residual, ttnn.float32))
+            branch_sum = retain(ttnn.add(wide_finished, wide_residual, dtype=ttnn.float32))
+            branch_output = retain(ttnn.typecast(branch_sum, ttnn.bfloat16))
         ttnn.synchronize_device(mesh)
         checkpoint('device_pipeline_complete')
         partials = [host(partial_output, chip) for chip in range(2)]
         for chip in range(2):
+            if conv_weights is not None:
+                actual_branch_norm = host(branch_normalized, chip)
+                norm_ulps = int(bf16_ulp_distance(actual_branch_norm, rms_reference(query_hidden, branch_norm_weight)).max())
+                if norm_ulps > 2:
+                    raise AssertionError('Attention branch normalization exceeds two BF16 ULPs')
+                actual_conv_projection = host(conv_projection, chip)
+                expected_conv_projection = grouped_projection_reference(actual_branch_norm, conv_weight,
+                    destination_rounding=True, fidelity_span=32)
+                torch.testing.assert_close(actual_conv_projection.double(), expected_conv_projection, rtol=1e-4, atol=1e-4)
+                expected_dynamic = actual_conv_projection.bfloat16().split(320, dim=-1)
+                if any(not torch.equal(host(value, chip), expected) for value, expected in zip(dynamic, expected_dynamic, strict=True)):
+                    raise AssertionError('Attention dynamic kernel slicing must be exact')
+                expected_prepared = convolution_reference(actual_branch_norm, expected_dynamic[:2],
+                    [base_weight[0, offset].reshape(1, 1, 1, 5120) for offset in range(2)])
+                if not torch.equal(host(inputs['q'], chip), expected_prepared):
+                    raise AssertionError('Attention prepare convolution must be exact')
+                expected_keys = torch.cat((key_hidden[..., :context, :], expected_prepared[..., :8, :],
+                    torch.zeros((1, 1, key_rows - valid_keys, 5120), dtype=torch.bfloat16)), dim=2)
+                if not torch.equal(host(inputs['k'], chip), expected_keys):
+                    raise AssertionError('Attention context/proposal assembly must be exact')
+                expected_finished = convolution_reference(host(output, chip).bfloat16(), expected_dynamic[2:],
+                    [base_weight[1, offset].reshape(1, 1, 1, 5120) for offset in range(2)])
+                if not torch.equal(host(finished, chip), expected_finished):
+                    raise AssertionError('Attention finish convolution must be exact')
+                if not torch.equal(host(branch_output, chip), (expected_finished.float() + query_hidden.float()).bfloat16()):
+                    raise AssertionError('Attention residual must be exact')
+                report['checks'].append(dict(chip=chip, stage='convolution/residual', norm_ulps=norm_ulps,
+                    prepare_exact=True, context_proposal_exact=True, finish_exact=True, residual_exact=True))
             for name, count in (('q', 16), ('k', 4), ('v', 4)):
                 valid = 8 if name == 'q' else valid_keys
                 actual_projection = host(projected[name], chip)[..., :valid, :]
                 reference_input = query_hidden if name == 'q' else key_hidden
+                if conv_weights is not None:
+                    reference_input = host(inputs['q' if name == 'q' else 'k'], chip)
                 max_projection_error = 0.
                 for start in range(0, valid, 32):
                     stop = min(start + 32, valid)
-                    expected = grouped_projection_reference(reference_input[..., start:stop, :], local_weights[name][chip], destination_rounding=True)
+                    expected = grouped_projection_reference(reference_input[..., start:stop, :], local_weights[name][chip],
+                        destination_rounding=True, fidelity_span=report['projection_fidelity_span'])
                     actual_chunk = actual_projection[..., start:stop, :].double()
                     torch.testing.assert_close(actual_chunk, expected, rtol=1e-4, atol=1e-4)
                     max_projection_error = max(max_projection_error, float((actual_chunk - expected).abs().max()))
@@ -209,7 +283,8 @@ def main():
             expected_merged = actual_attention.bfloat16().transpose(1, 2).reshape(1, 1, 32, 2048)
             if not torch.equal(actual_merged, expected_merged):
                 raise AssertionError('Output head merge changed channel order')
-            expected_output = grouped_projection_reference(actual_merged[..., :8, :], output_weights[chip], destination_rounding=True)
+            expected_output = grouped_projection_reference(actual_merged[..., :8, :], output_weights[chip],
+                destination_rounding=True, fidelity_span=report['projection_fidelity_span'])
             torch.testing.assert_close(partials[chip][..., :8, :].double(), expected_output, rtol=1e-4, atol=1e-4)
             if not torch.equal(host(output, chip), partials[0] + partials[1]):
                 raise AssertionError('Output projection fabric sum must be exact')

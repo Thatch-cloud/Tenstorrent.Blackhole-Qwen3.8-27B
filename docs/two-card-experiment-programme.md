@@ -1437,3 +1437,15 @@ now retains that standalone control using the corrected32-wide reference and
 adds the simulator-validated integrated branch. Both fixtures are hash-verified;
 each probe has1800s inside the existing4800s suite deadline. No integrated
 hardware pass or request-throughput improvement is claimed yet.
+
+The attention diagnostic now has a simulator-only integrated branch matching
+the pinned DFlash2 layer contract: normalize proposal inputs, compute both
+dynamic convolution banks once, prepare proposals, project Q from prepared
+proposals and K/V from unchanged context plus prepared proposals, run attention
+and output projection/fabric sum, then finish convolution and add the residual.
+Device execution does not use intermediate host readbacks. Exact context/proposal
+assembly, convolution/residual arithmetic and all prior attention checks are
+retained; integrated projections select the corrected32-wide fidelity schedule.
+The first context31 gate152816Z-525 is running, not yet passed. Hardware rejects
+this option before fixture/device access. All541 host tests pass. This is not yet
+a full attention-plus-MLP layer, five-layer drafter or request-history adapter.

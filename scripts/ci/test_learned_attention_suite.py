@@ -1,10 +1,21 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 
 
 class LearnedAttentionSuiteTests(unittest.TestCase):
+    def test_integrated_attention_is_simulator_only_before_fixture_load(self):
+        environment = {name: value for name, value in os.environ.items()
+            if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}
+        environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('learned-attention-probe.py')),
+            '--hardware', '--fixture', '/not-a-fixture', '--convolution-fixture', '/not-a-fixture',
+            '--output', '/not-an-output'], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Integrated attention branch requires simulator validation', result.stderr)
+
     def run_suite(self, fail_health=False, mode='learned-attention'):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
         start = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = ' + mode + ' ]; then')
