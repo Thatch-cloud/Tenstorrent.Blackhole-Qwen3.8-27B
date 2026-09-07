@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Eight-row component run34080112263 (`61e82b9`) passed. Artifact inspection
+  confirms112 exact wide-mask checks across56 mask trace replays, plus96 exact
+  changed-query/position attention checks across48 attention trace replays.
+  All12 fixtures (T8/T16/T32, capacities4352/16640, seeds0/1) retain the entire
+  KV cache unchanged. Reported helper hashes match the current worktree and
+  native scratch factory hash is the expected patched build. This clears the
+  component prerequisite for `full-attention-tree-replay`; it does not prove
+  full-model correctness or committed throughput.
 - `VerifierEngine` now accepts opt-in eight-row replay and shared-mask options
   and forwards them to every warm and retained bucket, including native narrow
   fallbacks. Invalid options and missing compact-scratch selection fail before
