@@ -18,6 +18,11 @@ The new grouped-product CPU diagnostic exactly matches the two-term simulator
 case; on the dense12800-term slice it reduces unexplained maximum errors to
 0.00067..0.00109. Destination rounding and accumulation order remain to be
 modeled before this reference can serve as an implementation-correctness gate.
+Update: explicit accumulator modeling reduces this residual below0.000029,
+and the dense slice passes the opt-in arithmetic-reference comparison at the
+same1e-4 tolerance. Default float64 comparison still fails and stays visible.
+The reference is not bitwise exact; next is hardware numerical comparison,
+then full-width learned projection and trained-drafter acceptance validation.
 
 Actual matched request run34084598829 passes native token/state/KV checks at
 **23.883 committed decode tok/s at4078 tokens and20.608 at16363 tokens**

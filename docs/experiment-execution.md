@@ -5,6 +5,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added explicit Blackhole FP32 destination alignment, signed rounding,
+  normalization, cancellation and overflow/underflow to the CPU reference.
+  Dense run `20260907T093802Z-304` reduces remaining maxima to
+  0.00001526/0.00001240 (T1),0.00001907/0.00001907 (T8), and
+  0.00002670/0.00002861 (T32). It is NOT bitwise exact; residual phase/order
+  effects remain unproven. An explicit `--reference blackhole-accumulation`
+  mode now evaluates implementation agreement using the original1e-4 relative
+  and absolute tolerances. This changes the reference, not the tolerances;
+  default remains `float64`, and every report retains its original float64
+  errors and `float64_gate_passed`. Run `20260907T093949Z-304` passes all
+  six arithmetic-reference checks for dense12800-term projection/Kblock100.
+  This justifies a bounded hardware numerical diagnostic, not trained-drafter
+  adoption, complete5120-output projection, coding quality or a speed claim.
+  Host tests additionally cover signed accumulation/cancellation, accumulator
+  overflow/underflow, single-product accumulation and invalid16-term geometry.
+  Final-code Kblock4 run `20260907T094057Z-443` also passes all six
+  arithmetic-reference checks; all481 host tests pass. Both Kblocking choices
+  retain failing float64 flags, rather than concealing the precision change.
+
 - Added an independent CPU grouped-product diagnostic in
   `scripts/ci/projection_rounding.py`, following the pinned MVMUL phase widths
   and group-eight exponent alignment described below. It deliberately excludes
