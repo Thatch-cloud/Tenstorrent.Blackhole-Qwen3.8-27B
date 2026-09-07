@@ -10,9 +10,10 @@ void kernel_main() {
     const uint32_t key_tiles = get_arg_val<uint32_t>(5);
     const uint32_t width_tiles = get_arg_val<uint32_t>(6);
     const bool cache_tiles = get_arg_val<uint32_t>(7) != 0;
-    for (uint32_t task = worker; task < 16 * key_tiles; task += workers) {
+    const uint32_t columns_per_task = get_arg_val<uint32_t>(8);
+    for (uint32_t task = worker; task < 16 * key_tiles * (32 / columns_per_task); task += workers) {
         if (cache_tiles) { cb_wait_front(0, width_tiles); }
-        for (uint32_t key = 0; key < 32; key++) {
+        for (uint32_t key = 0; key < columns_per_task; key++) {
             init_sfpu(0, 16);
             sfpu_mul_bcast_row_init();
             tile_regs_acquire();

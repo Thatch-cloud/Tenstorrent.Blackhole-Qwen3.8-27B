@@ -24,7 +24,7 @@ timeout() {
         result = self.run_suite()
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 13)
+        self.assertEqual(len(lines), 14)
         self.assertIn('device-readback.py', lines[0])
         for argument in ('learned-attention-probe.py', '--hardware', '--fp32-rope',
                 '--explicit-softmax', '--pairwise-softmax', '--pairwise-dots'):
@@ -48,6 +48,7 @@ timeout() {
         self.assertIn('--fused-dots --cache-dot-tiles', lines[11])
         self.assertNotIn('--pairwise-dots', lines[11])
         self.assertIn('--cache-tiles --workers 110 --keys 2080 --width 128', lines[12])
+        self.assertIn('--workers 110 --keys 128 --width 2080 --columns-per-task 8', lines[13])
 
     def test_failed_health_stops_probe(self):
         result = self.run_suite(True)

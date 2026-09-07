@@ -3,15 +3,17 @@
 from pathlib import Path
 
 
-def dot_geometry(left_shape, right_shape, worker_limit=64):
+def dot_geometry(left_shape, right_shape, worker_limit=64, columns_per_task=32):
     if type(worker_limit) is not int or worker_limit not in (64, 80, 110):
         raise ValueError('Worker limit must be64,80 or110')
+    if type(columns_per_task) is not int or columns_per_task not in (8, 32):
+        raise ValueError('Each dot task owns8 or32 output columns')
     if (len(left_shape) != 4 or len(right_shape) != 4 or tuple(left_shape[:3]) != (1, 16, 32)
             or tuple(right_shape[:2]) != (1, 16) or left_shape[3] != right_shape[3]
             or any(type(value) is not int or value % 32 or not 32 <= value <= 2080
                 for value in (left_shape[3], right_shape[2]))):
         raise ValueError('TP2 head-local FP32 dot geometry with tile-aligned width/keys32..2080 required')
-    tasks = 16 * (right_shape[2] // 32)
+    tasks = 16 * (right_shape[2] // columns_per_task)
     return min(worker_limit, tasks), right_shape[2] // 32, left_shape[3] // 32
 
 
@@ -29,10 +31,10 @@ def dot_buffer_tiles(width_tiles, cache_tiles):
     return ((0, width_tiles if cache_tiles else 2), (1, 2), (2, width_tiles + 1 if cache_tiles else 2), (16, 1))
 
 
-def fused_dot(mesh, left, right, owned, *, cache_tiles=False, worker_limit=64):
+def fused_dot(mesh, left, right, owned, *, cache_tiles=False, worker_limit=64, columns_per_task=32):
     import ttnn
 
-    workers, key_tiles, width_tiles = dot_geometry(tuple(left.shape), tuple(right.shape), worker_limit)
+    workers, key_tiles, width_tiles = dot_geometry(tuple(left.shape), tuple(right.shape), worker_limit, columns_per_task)
     columns, full_rows, remainder = dot_core_layout(workers)
     grid = mesh.compute_with_storage_grid_size()
     if grid.x < columns or grid.y < full_rows + bool(remainder):
@@ -61,7 +63,7 @@ def fused_dot(mesh, left, right, owned, *, cache_tiles=False, worker_limit=64):
     for chip, shards in enumerate(zip(*(ttnn.get_device_tensors(tensor) for tensor in (left, right, output)), strict=True)):
         runtime = ttnn.RuntimeArgs()
         for worker in range(workers):
-            runtime[worker % columns][worker // columns] = [tensor.buffer_address() for tensor in shards] + [worker, workers, key_tiles, width_tiles, int(cache_tiles)]
+            runtime[worker % columns][worker // columns] = [tensor.buffer_address() for tensor in shards] + [worker, workers, key_tiles, width_tiles, int(cache_tiles), columns_per_task]
         reader = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_name('draft_dot_io.cpp')), core_ranges=cores,
             compile_time_args=[argument for tensor in shards for argument in ttnn.TensorAccessorArgs(tensor).get_compile_time_args()],
             runtime_args=runtime, config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,

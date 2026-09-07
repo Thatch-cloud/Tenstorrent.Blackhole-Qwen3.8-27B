@@ -1245,3 +1245,19 @@ not a whole-model speedup. This demonstrates useful extra-core work without
 changing dispatch placement. PV still needs finer task partitioning to exploit
 more than64 cores; complete long-context learned attention and request integration
 remain unvalidated. The200 committed-token/s goal remains unmet.
+
+### Split PV output-tile tasks (2026-09-08)
+
+An opt-in eight-column task partitions each32-column output tile four ways.
+Long PV therefore has256 tasks instead of64 and can occupy110 cores. Each worker
+writes only its own32-byte-aligned row segments; no whole-tile write races or
+cross-worker floating-point reductions are introduced. Host coverage tests check
+that the four partitions cover every output-tile byte exactly once. Cached L1
+storage remains536KiB per worker, and tile fetches are duplicated across the four
+partitions, so a hardware timing comparison must decide whether parallelism wins.
+
+Simulator `20260907T132015Z-307` passes long PV on110 workers with eight-column
+tasks, including exact full-output equality against cached64-worker whole tiles
+and the unchanged FP64 reference bound. Host tests:526 passed. The hardware suite
+adds only this validated split shape; integrated learned attention still uses
+whole-tile tasks. This is not yet a complete drafter or committed-token speedup.

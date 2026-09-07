@@ -21,10 +21,15 @@ def main():
     parser.add_argument('--timing', action='store_true')
     parser.add_argument('--cache-tiles', action='store_true')
     parser.add_argument('--workers', type=int, choices=(64, 80, 110), default=64)
+    parser.add_argument('--columns-per-task', type=int, choices=(8, 32), default=32)
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    split_validated = (options.workers == 110 and options.cache_tiles
+        and (options.keys, options.width, options.columns_per_task) == (128, 2080, 8))
+    if options.hardware and options.columns_per_task != 32 and not split_validated:
+        parser.error('Partial-tile tasks require simulator validation')
     if options.hardware and options.workers != 64 and not (
-            options.workers == 110 and options.cache_tiles and (options.keys, options.width) == (2080, 128)):
+            (options.workers == 110 and options.cache_tiles and (options.keys, options.width) == (2080, 128)) or split_validated):
         parser.error('Wider worker distribution requires simulator validation')
     if options.hardware and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
         parser.error('Hardware requires a simulator-validated dot shape')
@@ -36,7 +41,8 @@ def main():
     report = dict(passed=False, checks=[], scope=__doc__, keys=options.keys, width=options.width,
         cache_tiles=options.cache_tiles,
         worker_limit=options.workers,
-        active_workers=dot_geometry((1, 16, 32, options.width), (1, 16, options.keys, options.width), options.workers)[0],
+        columns_per_task=options.columns_per_task,
+        active_workers=dot_geometry((1, 16, 32, options.width), (1, 16, options.keys, options.width), options.workers, options.columns_per_task)[0],
         timings_ms=[], backend='hardware' if options.hardware else 'simulator',
         timing_scope='Warm dispatch, output allocation and synchronization; excludes input uploads and output readback/release',
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -53,8 +59,9 @@ def main():
         for host in (left, right):
             tensors.append(ttnn.from_torch(host, device=mesh, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
-        output = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles, worker_limit=options.workers)
-        control = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles) if options.workers != 64 else (
+        output = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles, worker_limit=options.workers,
+            columns_per_task=options.columns_per_task)
+        control = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles) if options.workers != 64 or options.columns_per_task != 32 else (
             fused_dot(mesh, tensors[0], tensors[1], tensors) if options.cache_tiles else None)
         expected = (left.double() @ right.double().transpose(-1, -2)).float()
         for chip, tensor in enumerate(ttnn.get_device_tensors(output)):
@@ -70,7 +77,8 @@ def main():
                 try:
                     ttnn.synchronize_device(mesh)
                     started = time.perf_counter()
-                    repeated = fused_dot(mesh, tensors[0], tensors[1], temporary, cache_tiles=options.cache_tiles, worker_limit=options.workers)
+                    repeated = fused_dot(mesh, tensors[0], tensors[1], temporary, cache_tiles=options.cache_tiles, worker_limit=options.workers,
+                        columns_per_task=options.columns_per_task)
                     ttnn.synchronize_device(mesh)
                     elapsed_ms = (time.perf_counter() - started) * 1000
                     for chip, tensor in enumerate(ttnn.get_device_tensors(repeated)):
