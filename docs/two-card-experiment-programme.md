@@ -1797,3 +1797,12 @@ and exact global proposal IDs across chunk/chip boundaries, including248319.
 This does not test the borrowed LM-head matrix multiplication or tie-equivalence
 at the learned-model cutoff. It is prepared, not executed; it must wait for the
 active five-layer simulator to terminate before taking the simulator devices.
+
+Profiler CI34148441153 failed again, now with confirmed cgroup OOM evidence:
+memory.peak103079301120 bytes (96GiB), oom3 and oom_kill1. The separate broad
+correctness report was saved, but the profiling child was killed during the
+second context's final serial replay. Child-exit checking correctly failed CI;
+this is not a complete attribution result. The next resource fix must isolate
+contexts in separate processes and preserve per-process trace identities rather
+than rerunning the same memory-growing job or increasing its limit blindly.
+Checkpoint-cost CI34149243028 has started independently.
