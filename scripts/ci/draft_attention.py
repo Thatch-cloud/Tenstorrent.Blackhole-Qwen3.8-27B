@@ -55,7 +55,22 @@ def pairwise_column_sum(operations, value, retain):
     return total
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False):
+def pairwise_dot(operations, left, right, retain):
+    batch, heads, rows, width = tuple(left.shape)
+    key_rows = right.shape[2]
+    if batch != 1 or tuple(right.shape)[:2] != (1, heads) or right.shape[-1] != width:
+        raise ValueError('Matching single-request head batches required')
+    if heads * rows * key_rows * width > 8388608:
+        raise ValueError('Outer-product diagnostic exceeds its memory bound; a tiled kernel is required')
+    wide_left, wide_right = [retain(operations.typecast(value, operations.float32)) for value in (left, right)]
+    left_view = retain(operations.reshape(wide_left, (heads, rows, 1, width)))
+    right_view = retain(operations.reshape(wide_right, (heads, 1, key_rows, width)))
+    products = retain(operations.multiply(left_view, right_view, dtype=operations.float32))
+    reduced = pairwise_column_sum(operations, products, retain)
+    return retain(operations.reshape(reduced, (1, heads, rows, key_rows)))
+
+
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
@@ -77,9 +92,12 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         values = retain(operations.repeat_interleave(value, 4, dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
         if wide_operands:
             query, keys, values = [retain(operations.typecast(tensor, operations.float32)) for tensor in (query, keys, values)]
-        transposed = retain(operations.transpose(keys, -1, -2))
-        scores = retain(operations.matmul(query, transposed, dtype=operations.float32,
-            compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        if pairwise_dots:
+            scores = pairwise_dot(operations, query, keys, retain)
+        else:
+            transposed = retain(operations.transpose(keys, -1, -2))
+            scores = retain(operations.matmul(query, transposed, dtype=operations.float32,
+                compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         scaled = retain(operations.multiply(scores, 128 ** -0.5, dtype=operations.float32))
         wide_mask = retain(operations.typecast(mask, operations.float32))
         masked = retain(operations.add(scaled, wide_mask, dtype=operations.float32))
@@ -96,8 +114,12 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         else:
             probabilities = retain(operations.softmax(masked, dim=-1, numeric_stable=True,
                 compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-        output = retain(operations.matmul(probabilities, values, dtype=operations.float32,
-            compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        if pairwise_dots:
+            transposed_values = retain(operations.transpose(values, -1, -2))
+            output = pairwise_dot(operations, probabilities, transposed_values, retain)
+        else:
+            output = retain(operations.matmul(probabilities, values, dtype=operations.float32,
+                compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         operations.synchronize_device(mesh)
         if inspect is not None:
             inspect(query, keys, values, scores, masked, probabilities, output)

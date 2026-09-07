@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--explicit-softmax', action='store_true')
     parser.add_argument('--wide-attention', action='store_true')
     parser.add_argument('--pairwise-softmax', action='store_true')
+    parser.add_argument('--pairwise-dots', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
@@ -39,6 +40,7 @@ def main():
         explicit_softmax=options.explicit_softmax,
         wide_attention=options.wide_attention,
         pairwise_softmax=options.pairwise_softmax,
+        pairwise_dots=options.pairwise_dots,
         attention_diagnostics=[],
         start_position=4096, checks=[], tolerance=dict(projection_rtol=1e-4, projection_atol=1e-4,
             attention_rtol=.01, attention_atol=.01, norm_ulps=2), sources={name:
@@ -115,7 +117,7 @@ def main():
 
         attention = retain(composed_draft_attention(ttnn, mesh, rotated['q'], rotated['k'], heads['v'], upload(mask),
             inspect=inspect_attention if options.inspect_attention else None, explicit_softmax=options.explicit_softmax,
-            wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax))
+            wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots))
         rounded_attention = retain(ttnn.typecast(attention, ttnn.bfloat16))
         transposed = retain(ttnn.transpose(rounded_attention, 1, 2))
         merged = retain(ttnn.reshape(transposed, (1, 1, 32, 2048)))
@@ -160,6 +162,9 @@ def main():
             actual_attention = host(attention, chip)
             torch.testing.assert_close(actual_attention[..., :8, :], expected_attention[..., :8, :], rtol=.01, atol=.01)
             actual_merged = host(merged, chip)
+            expected_merged = actual_attention.bfloat16().transpose(1, 2).reshape(1, 1, 32, 2048)
+            if not torch.equal(actual_merged, expected_merged):
+                raise AssertionError('Output head merge changed channel order')
             expected_output = grouped_projection_reference(actual_merged[..., :8, :], output_weights[chip], destination_rounding=True)
             torch.testing.assert_close(partials[chip][..., :8, :].double(), expected_output, rtol=1e-4, atol=1e-4)
             if not torch.equal(host(output, chip), partials[0] + partials[1]):

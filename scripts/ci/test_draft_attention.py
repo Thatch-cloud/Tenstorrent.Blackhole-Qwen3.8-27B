@@ -4,10 +4,23 @@ from unittest.mock import Mock
 
 import torch
 
-from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention, pairwise_column_sum
+from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention, pairwise_column_sum, pairwise_dot
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_pairwise_dot_matches_batched_product_and_rejects_oversize(self):
+        operations = SimpleNamespace(float32=torch.float32,
+            slice=lambda value, start, end: value[tuple(slice(begin, stop) for begin, stop in zip(start, end, strict=True))],
+            add=lambda left, right, **kwargs: left + right,
+            multiply=lambda left, right, **kwargs: left * right,
+            reshape=lambda value, shape: value.reshape(shape), typecast=lambda value, dtype: value.to(dtype))
+        left = torch.arange(2 * 3 * 5).float().reshape(1, 2, 3, 5)
+        right = torch.arange(2 * 7 * 5).float().reshape(1, 2, 7, 5)
+        self.assertTrue(torch.equal(pairwise_dot(operations, left, right, lambda value: value), left @ right.transpose(-1, -2)))
+        with self.assertRaises(ValueError):
+            pairwise_dot(operations, SimpleNamespace(shape=(1, 16, 32, 128)),
+                SimpleNamespace(shape=(1, 16, 2048, 128)), lambda value: value)
+
     def test_pairwise_sum_includes_odd_tails_and_keeps_rows_independent(self):
         operations = SimpleNamespace(float32=torch.float32,
             slice=lambda value, start, end: value[tuple(slice(begin, stop) for begin, stop in zip(start, end, strict=True))],

@@ -1036,3 +1036,27 @@ outside the unchanged bound (`20260907T114726Z-297`). No learned-layer hardware
 promotion or speedup claim. The host test suite now passes 515 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.
+
+### Learned attention precision reference (2026-09-08)
+
+Simulator `20260907T115603Z-287` passes the learned layer-zero Q/K/V projection,
+head normalization, FP32 RoPE, attention, output head merge, O projection and
+fabric sum checks on both ranks. The fixture uses synthetic hidden features,
+context31, eight proposal rows and absolute start4096, not a coding request.
+Explicit FP32 broadcast products and pairwise reductions replace both QK and PV
+matmuls, alongside the explicit pairwise softmax. Attention maximum errors are
+1.431e-5/1.669e-5 against the unchanged reference bound; output head order and
+fabric sums are exact. Intermediate inspection measures QK error at most
+3.052e-5, softmax error1.193e-7 and PV error5.723e-6.
+
+This is an allocation-heavy numerical reference, not a fused kernel or speedup.
+Its outer-product memory guard deliberately rejects long-context inputs;
+production attention still requires a bounded tiled/fused implementation and
+long-context validation. The earlier hardware attention timings do not measure
+this new path. No complete draft layer, coding-quality result or 200tok/s result
+is established. The inspection-free repeat `20260907T120553Z-446` also passes:
+eight checks, zero intermediate diagnostic readbacks, unchanged attention errors
+and exact fabric sums. All 516 host tests pass in the WSL Torch environment;
+Windows Python lacks Torch and is not the supported test environment. The next
+gate is isolated learned-attention hardware validation, followed by bounded
+tiled/fused arithmetic and complete draft-layer integration.
