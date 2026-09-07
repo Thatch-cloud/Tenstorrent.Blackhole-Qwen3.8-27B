@@ -2,12 +2,19 @@
 
 ## Current measured result - 2026-09-07
 
-Actual matched request run34072489815 passes native token/state/KV checks at
-**23.763 committed decode tok/s at4078 tokens and20.127 at16363 tokens**.
-Same-run controls achieve22.799/18.588 tok/s. Candidate setup-inclusive rates
-are10.284/9.524 tok/s and regress against control; all these rates exclude
+Actual matched request run34084598829 passes native token/state/KV checks at
+**23.883 committed decode tok/s at4078 tokens and20.608 at16363 tokens**
+for eight-row replay. Same-run four-row controls achieve23.929/20.231 tok/s;
+both arms share masks and native compact scratch. Width expansion is flat
+at4K (-0.19%) and improves16K by1.87%, not a material breakthrough.
+Candidate setup-inclusive rates are10.746/10.345 tok/s versus control
+11.558/10.691 and regress at both contexts; all these rates exclude
 prefill. These are synthetic lookup requests, not coding-quality certification.
 The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
+Generating128 committed tokens still needs89/99 verifier blocks, including
+54/58 single-row blocks. Better wide-block latency alone cannot compensate for
+this observed low-acceptance lookup workload. Real-target feature boundary
+gate34087941937 is running as a neural-drafter prerequisite, not a drafter port.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch

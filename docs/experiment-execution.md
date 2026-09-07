@@ -5,6 +5,16 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Matched request34084598829 (`b487e95`) passed all eight requests. Independent
+  reconstruction of both ABBA summaries reproduces committed rates exactly;
+  request-helper hashes match. Four-row versus eight-row replay, both sharing
+  masks and native scratch:23.929061->23.883430 tok/s at4078 (-0.19%), and
+  20.230685->20.608087 at16363 (+1.87%). Setup-inclusive rates regress
+  11.557603->10.745876 and10.691499->10.344840; all rates exclude prefill.
+  Per request128 committed tokens require89/99 verifier blocks and accept
+  only39/29 draft tokens. Of those blocks54/58 are single-row. This is not a
+  material single-stream gain or coding-quality certification; no adoption.
+  Real-target feature gate34087941937 (`2e9cc9f`) is now running separately.
 - Prepared standalone `target-features`: pinned real Qwen source, eager native
   prefill/decode, contexts63/64/65 and post-layer taps5/19/33/47/61. Each fixture
   compares an uninstrumented decode with independent next-layer input snapshots
