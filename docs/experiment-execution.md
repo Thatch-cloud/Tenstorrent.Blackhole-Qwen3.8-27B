@@ -5,6 +5,22 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Full-width TTsim `20260907T095558Z-298` PASSED: one row,5120 outputs
+  on each chip,80-core grids, with every output checked. Arithmetic-reference
+  maxima are3.814697265625e-5 /3.0517578125e-5; float64 maxima remain
+  0.02397370 /0.10955491. This is a numerical gate, not a hardware speed result.
+  Added `feature-norm-probe.py`: consumes the complete saved projection row,
+  adds rank partials on the HOST in FP32, casts to BF16, uploads replicated
+  inputs and applies learned `hidden_norm` with epsilon1e-6. Upstream ordering
+  is [fc then standard RMSNorm](https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad8428328a/dflash/model_mlx.py#L363),
+  not a unit-offset norm weight. TTsim `20260907T100114Z-303` passes both
+  chips within ONE BF16 ULP (predeclared diagnostic bound TWO), max absolute
+  difference0.015625. This tests all5120 elements but is not an end-to-end
+  trained-drafter parity or coding-quality gate. No fabric reduction yet.
+  CI suite `feature-projection-full` now fetches only the two audited tensors,
+  checks transfer health, runs full one-row projection and its linked norm
+  diagnostic, with allocation required and no reset. Host tests491 pass.
+
 - Full projection fixture download completed:262,163,176 bytes including the
   audited header, not the3.85GB checkpoint. `fc.weight` SHA256 is
   `3ccef5ab503ff30aa589ee0c528f462a37c544ef766fa943c5b622aa92d4b2d5`;

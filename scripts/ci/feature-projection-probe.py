@@ -26,8 +26,8 @@ def main():
     parser.add_argument('--reference', choices=('float64', 'blackhole-accumulation'), default='float64')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.full_projection and (options.rows is None or options.hardware):
-        parser.error('Full projection currently requires explicit rows and simulator execution')
+    if options.full_projection and options.rows is None:
+        parser.error('Full projection requires explicit rows')
     if (options.active_k - 1) * options.k_stride >= 12800:
         parser.error('Active terms with the selected stride exceed the local input width')
     import torch

@@ -2,6 +2,12 @@
 
 ## Current measured result - 2026-09-07
 
+Full-width simulator projection now passes all5120 outputs on both chips;
+learned RMSNorm on its host-reduced result passes within one BF16 ULP. The
+80-core grid is simulator-tested, not yet a target-model throughput result.
+Hardware suite `feature-projection-full` is prepared. Fabric reduction and
+trained-drafter layers/acceptance remain outstanding.
+
 Hardware projection diagnostic34107875990 now passes both Kblock100/4 arms,
 12 arithmetic-reference checks total; saved first-row values match TTsim.
 The float64 discrepancy also reproduces on silicon. This validates the numerical
