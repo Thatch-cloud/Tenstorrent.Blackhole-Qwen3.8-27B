@@ -5,6 +5,12 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Full-model eight-row/shared-mask replay run34081751556 (`20d9afa`) is running.
+  The next actual-request measurement helper now forwards and records replay
+  group width and shared-mask selection, rejecting invalid geometry before
+  native prefill. Host request tests cover four/eight-row and both mask modes
+  with unchanged committed-token accounting. This helper remains opt-in; no
+  request CLI or serving default has been promoted, and no new rate is measured.
 - Eight-row component run34080112263 (`61e82b9`) passed. Artifact inspection
   confirms112 exact wide-mask checks across56 mask trace replays, plus96 exact
   changed-query/position attention checks across48 attention trace replays.

@@ -19,6 +19,15 @@ def capture_widths(position, capacity, verifier_rows, remaining):
     return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining))
 
 
+def validate_replay_options(attention_replay, attention_mask_once, replay_group_rows):
+    if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
+        raise ValueError('Shared attention masks require explicit replay attention')
+    if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
+        raise ValueError('Replay group width must be integer four or eight')
+    if replay_group_rows == 8 and (not attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
+        raise ValueError('Eight-row replay requires explicit replay attention and native compact scratch')
+
+
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4):
@@ -28,12 +37,7 @@ class VerifierEngine:
             raise ValueError('Explicit boolean norm-batch selection required')
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
             raise ValueError('Explicit replay attention requires norm batching')
-        if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
-            raise ValueError('Shared attention masks require explicit replay attention')
-        if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
-            raise ValueError('Replay group width must be integer four or eight')
-        if replay_group_rows == 8 and (not attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
-            raise ValueError('Eight-row replay requires explicit replay attention and native compact scratch')
+        validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
         self.norm_batch = norm_batch
         self.attention_replay = attention_replay
         self.attention_mask_once = attention_mask_once

@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 from greedy_session import GreedySession
-from verifier_engine import VerifierEngine
+from verifier_engine import VerifierEngine, validate_replay_options
 
 
 def terminal_ids(weights, vocab_size):
@@ -20,13 +20,14 @@ def terminal_ids(weights, vocab_size):
 
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
-                    attention_replay=False, family_routing=False):
+                    attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4):
     if type(norm_batch) is not bool:
         raise ValueError('Explicit boolean norm-batch selection required')
     if type(attention_replay) is not bool or type(family_routing) is not bool:
         raise ValueError('Explicit boolean attention and routing selection required')
     if attention_replay and (not norm_batch or not family_routing):
         raise ValueError('Replay attention requires norm batching and bounded family routing')
+    validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
     started = time.perf_counter()
     gold = [prefill(prompt)]
     native_prefill_ms = (time.perf_counter() - started) * 1000
@@ -57,7 +58,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
                     session.max_new_tokens - len(session.emitted))
             engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
-                attention_replay=attention_replay)
+                attention_replay=attention_replay, attention_mask_once=attention_mask_once,
+                replay_group_rows=replay_group_rows)
             capture_count = len(engine.buckets)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
@@ -91,6 +93,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         return dict(length=len(prompt), kind='Synthetic repeated-code lookup pilot; not a coding-quality benchmark',
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
+            attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
             vocab_size=model.args.vocab_size,
             prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),
