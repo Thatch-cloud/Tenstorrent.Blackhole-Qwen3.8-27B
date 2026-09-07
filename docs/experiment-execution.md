@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Eight-row prepared-reader TTsim20260907T014407Z-415 passed atT16/start4096:
+  native B1, serial groups, parallel groups and `GroupedAttentionReader` are
+  bitwise exact on both chips; the borrowed query survives reader execution.
+  Prepared `attention-tree-layer` compares T4/T8 parallel groups with identical
+  compact scratch, DMA, ordered KV writes and real-weight projections. Native
+  T1/T2/T4 fallback remains unchanged.401 host tests and55 simulator-support
+  tests plus AST/YAML/shell checks pass. Do not dispatch this layer gate until
+  the running microbenchmark34073855612 passes; no serving change is made.
 - Legacy four-row TTsim20260907T013817Z-304 passed T16/start4096 with the
   compact scratch flag unset: native, grouped, parallel and reusable adapter
   outputs are exact on both chips, including prepared-reader ownership checks.

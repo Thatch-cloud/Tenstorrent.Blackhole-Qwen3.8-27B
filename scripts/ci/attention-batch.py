@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--grouped", action="store_true")
     parser.add_argument('--dma-layout', action='store_true')
     parser.add_argument('--parallel-groups', action='store_true')
+    parser.add_argument('--tree-parallel', action='store_true')
     options = parser.parse_args()
     if options.grouped and not options.ordered_cache:
         parser.error('--grouped requires --ordered-cache')
@@ -28,6 +29,10 @@ def main():
         parser.error('--dma-layout requires --grouped')
     if options.parallel_groups and not options.dma_layout:
         parser.error('--parallel-groups requires --dma-layout')
+    if options.tree_parallel and not options.parallel_groups:
+        parser.error('--tree-parallel requires --parallel-groups')
+    if options.tree_parallel and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
+        raise RuntimeError('Eight-row layer requires the process-fixed compact native scratch allocation')
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_attn_layer
@@ -42,6 +47,7 @@ def main():
     report['grouped'] = options.grouped
     report['dma_layout'] = options.dma_layout
     report['parallel_groups'] = options.parallel_groups
+    report['tree_parallel'] = options.tree_parallel
     report['adapter_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
         for name in ('attention_grouped.py', 'attention_parallel.py', 'attention_fold_dma.py',
                      'attention_fold_dma.cpp', 'attention_head_fold.py')}
@@ -52,8 +58,12 @@ def main():
         report['timing_control'] = 'Identical grouped attention, ordered cache and projections; stock layout chain versus DMA'
     if options.parallel_groups:
         from sdpa_tree_scratch import audit
-        report['native_sources'] = audit('/opt/tt-metal')
+        report['native_sources'] = audit('/opt/tt-metal', patched=options.tree_parallel)
         report['timing_control'] = 'Identical DMA layouts, ordered cache and projections; serial versus parallel groups'
+    if options.tree_parallel:
+        report['timing_control'] = 'Identical DMA layouts, parallelism, compact scratch, ordered cache and projections; T4 versus T8 groups'
+        report['microbenchmark_prerequisite'] = 34073855612
+        report['simulator_reader_prerequisite'] = '20260907T014407Z-415'
     output_path = Path("/experiment/results/attention-timing.json" if options.timing else "/experiment/results/attention-batch.json")
 
     def stage(name, **details):
@@ -151,10 +161,12 @@ def main():
                     if options.grouped:
                         from attention_grouped import GroupedAttentionReader
                         grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
-                            singleton_positions, page_single, upload, dma_layout=options.dma_layout, parallel=options.parallel_groups)
+                            singleton_positions, page_single, upload, dma_layout=options.dma_layout, parallel=options.parallel_groups,
+                            max_group_rows=8 if options.tree_parallel else 4)
                         if options.dma_layout:
                             stock_grouped_reader = GroupedAttentionReader(ttnn, mesh, start, rows, pages_host,
-                                singleton_positions, page_single, upload, dma_layout=options.parallel_groups)
+                                singleton_positions, page_single, upload, dma_layout=options.parallel_groups,
+                                parallel=options.tree_parallel)
                             control_reader = stock_grouped_reader
                     tail = serial_tail(attention, writer, ttnn, grouped_reader or reader)
 

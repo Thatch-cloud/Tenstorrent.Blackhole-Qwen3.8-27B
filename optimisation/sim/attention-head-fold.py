@@ -285,14 +285,15 @@ def main():
                             raise AssertionError('Every replay must refresh every prepared mask')
                         report['replay_reader_exact'] = True
                         report['replay_reader_refresh_calls'] = replay_reader.refresh_calls
-        if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and (args.parallel_groups == 1 or args.dma_layout):
+        if args.device_layout and args.grouped and args.rows >= 8 and (args.max_group_rows == 4 or
+                (args.max_group_rows == 8 and args.parallel_groups > 1)) and (args.parallel_groups == 1 or args.dma_layout):
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')
             positions = [upload(torch.tensor([args.start + offset], dtype=torch.int32), ttnn.int32)
                          for offset in range(args.rows)]
             reader = GroupedAttentionReader(ttnn, mesh, args.start, args.rows,
                 torch.tensor([page_ids], dtype=torch.int32), positions, pages, upload,
-                dma_layout=args.dma_layout, parallel=args.parallel_groups > 1)
+                dma_layout=args.dma_layout, parallel=args.parallel_groups > 1, max_group_rows=args.max_group_rows)
             result = reader(device_query, keys, values, page_table_tensor=pages, cur_pos_tensor=positions[0],
                 scale=0.0625, program_config=native_config, memory_config=ttnn.L1_MEMORY_CONFIG)
             owned.append(result)

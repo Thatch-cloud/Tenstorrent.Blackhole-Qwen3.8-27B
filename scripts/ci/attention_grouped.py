@@ -6,11 +6,14 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class GroupedAttentionReader:
-    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload, *, dma_layout=False, parallel=False):
+    def __init__(self, operations, mesh, start, rows, pages_host, positions, pages, upload, *, dma_layout=False, parallel=False,
+                 max_group_rows=4):
         if type(dma_layout) is not bool:
             raise ValueError('Explicit boolean DMA selection required')
         if type(parallel) is not bool or (parallel and not dma_layout):
             raise ValueError('Parallel groups require explicit boolean selection and DMA layout')
+        if type(max_group_rows) is not int or max_group_rows not in (4, 8) or (max_group_rows == 8 and not parallel):
+            raise ValueError('Eight-row reader requires the explicit parallel DMA path')
         self.parallel = parallel
         self.mesh, self.dma_layout = mesh, dma_layout
         self.operations = operations
@@ -24,12 +27,12 @@ class GroupedAttentionReader:
         grid = mesh.compute_with_storage_grid_size()
         if rows < 8:
             return
-        groups = chunk_groups(start, rows)
+        groups = chunk_groups(start, rows, max_group_rows=max_group_rows)
         if any(group['signature'][1] % 64 or group['signature'][1] // 64 > pages_host.shape[1] for group in groups):
             raise ValueError('Whole-page bounded group required')
         if parallel:
             import torch
-            for bundle in parallel_groups(start, rows):
+            for bundle in parallel_groups(start, rows, max_group_rows=max_group_rows):
                 chunk, capacity = bundle[0]['signature']
                 group_pages = upload(pages_host[:, :capacity // 64].repeat(len(bundle), 1).contiguous(), operations.int32)
                 mask = upload(torch.cat([causal_mask(group['rows'], start + group['offset'], capacity)
