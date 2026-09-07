@@ -1623,8 +1623,12 @@ profiler dumps and exact logits/GDN/KV/end-checkpoint validation are outside
 the marked interval. All existing correctness matrices remain required.
 
 This is instrumentation preparation, not a hardware-validated profile yet.
-The CI Tracy launcher and device-report extraction still need a dedicated gate
-before interpreting attribution. Instrumented timings are explicitly marked and
+The dedicated `verifier-profile` CI suite now launches Tracy and validates
+both-chip device reports for all six context/arm traces. It retains the full
+correctness matrix, but replaces timing sweeps with three T8 attribution
+replays per arm. Missing replay coverage or dropped markers fails the gate.
+Summed per-operation kernel durations are not critical-path latency.
+Instrumented runs are explicitly marked and
 rejected by `verification_budget.py`; throughput must be measured separately
 without profiler overhead. No serving configuration changes are involved.
 

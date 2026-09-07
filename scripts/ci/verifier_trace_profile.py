@@ -13,6 +13,7 @@ def profile_replays(*, rows, length, traces, restore, synchronize, execute, vali
             synchronize()
             dump()
             label = f'qwen_verifier_t8_ctx{length}_{arm}_{repeat}'
+            print('QWEN_VERIFIER_PROFILE_BEGIN ' + label, flush=True)
             signpost(label + '_begin')
             try:
                 execute(traces[arm])
@@ -20,6 +21,7 @@ def profile_replays(*, rows, length, traces, restore, synchronize, execute, vali
             finally:
                 signpost(label + '_end')
                 dump()
+            print('QWEN_VERIFIER_PROFILE_END ' + label, flush=True)
             validate(arm)
             records.append(dict(label=label, arm=arm, repeat=repeat, trace_id=int(traces[arm]), exact=True))
     return dict(rows=rows, length=length, records=records,

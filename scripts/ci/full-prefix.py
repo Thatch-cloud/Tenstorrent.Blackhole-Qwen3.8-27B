@@ -877,7 +877,7 @@ def main():
             from full_batch_timing import measure
             report["timing_scope"] = "Captured full-logit blocks with one preselected end checkpoint; no drafter, dynamic selection or complete speculative commit pipeline"
             for prompt, oracle in timing_fixtures:
-                for rows in widths:
+                for rows in ((8,) if options.device_profile else widths):
                     measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
                         prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
                         state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
@@ -892,9 +892,11 @@ def main():
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
-            if len(report.get("timings", [])) != len(lengths) * len(widths):
+            if len(report.get("timings", [])) != len(lengths) * (1 if options.device_profile else len(widths)):
                 raise AssertionError("Missing full-model timing fixtures")
-            if options.batch:
+            if options.device_profile:
+                report['timing_scope'] = 'Instrumented T8 attribution only; no latency or throughput measurement'
+            elif options.batch:
                 from full_matrix import validate_static_matrix
                 validate_static_matrix(report, options.max_rows)
         if options.attribution and (len(report.get("attribution", [])) != 4 or

@@ -73,6 +73,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
     import ttnn
 
     rows = len(tokens)
+    if device_profile and rows != 8:
+        raise ValueError('Device attribution is restricted to T8')
     if compact_gdn and checkpoint_digest is None:
         raise ValueError("Compact timing requires exact end-checkpoint validation")
     mesh = model.mesh_device
@@ -206,6 +208,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 restore=restore_initial, synchronize=lambda: ttnn.synchronize_device(mesh),
                 execute=lambda trace: ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True),
                 validate=validate, dump=lambda: ttnn.ReadDeviceProfiler(mesh), signpost=signpost)
+            report.update(instrumented_timing=True, exact=True)
+            return report
         report['instrumented_timing'] = device_profile
 
         for block in range(3):
