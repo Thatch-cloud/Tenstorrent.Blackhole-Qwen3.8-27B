@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--serial-sdpa", action="store_true")
     parser.add_argument("--attribution", action="store_true")
     parser.add_argument('--device-profile', action='store_true')
+    parser.add_argument('--profile-context', type=int, choices=(4095, 16383))
     parser.add_argument('--correctness-only', action='store_true')
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
@@ -99,6 +100,8 @@ def main():
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.profile_context is not None and not options.device_profile:
+        raise ValueError('Profile context requires device profiling')
     if options.correctness_only and (not options.batch or not options.coding_cost or any((
             options.device_profile, options.attribution, options.deferred_commit, options.replay_inputs,
             options.device_selection, options.request_pilot))):
@@ -107,7 +110,7 @@ def main():
         required = ('batch', 'coding_cost', 'serial_sdpa', 'compact_gdn', 'reuse_gdn_input',
                     'skip_row_clones', 'hoist_row_layout', 'device_loop_gdn', 'compact_prologue',
                     'batch_conv', 'packed_checkpoints', 'ordered_cache')
-        allowed = (*required, 'device_profile', 'max_rows', 'replay_group_rows')
+        allowed = (*required, 'device_profile', 'profile_context', 'max_rows', 'replay_group_rows')
         if not all(getattr(options, name) for name in required) or any(
                 value for name, value in vars(options).items() if name not in allowed):
             raise ValueError('Device profiling requires the matched static packed-GDN ordered-cache configuration')
@@ -202,6 +205,8 @@ def main():
         sys.path.insert(0, '/experiment-speculative')
         from greedy_verify import select_prefix
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
+    if options.profile_context is not None:
+        lengths = (options.profile_context,)
     if options.target_feature_batch:
         lengths = (63, 64, 65)
     if options.target_feature_prefill:

@@ -26,11 +26,13 @@ def validate_correctness(report):
         raise AssertionError('Both negative controls required in every context/mode')
 
 
-def analyze(generation, rows, console):
+def analyze(generation, rows, console, *, contexts=(4095, 16383)):
     if generation.get('passed') is not True or generation.get('instrumented_timing') is not True:
         raise AssertionError('Passed instrumented verifier correctness report required')
     timings = generation.get('timings', [])
-    if sorted(timing['length'] for timing in timings) != [4095, 16383]:
+    if tuple(contexts) not in ((4095, 16383), (4095,), (16383,)):
+        raise AssertionError('Audited profiling contexts required')
+    if sorted(timing['length'] for timing in timings) != list(contexts):
         raise AssertionError('Both matched coding contexts required')
     spec = importlib.util.spec_from_file_location('model_profile_check', Path(__file__).with_name('check-model-profile.py'))
     checker = importlib.util.module_from_spec(spec)
@@ -66,15 +68,15 @@ def analyze(generation, rows, console):
     return dict(passed=True, scope=__doc__, traces=results)
 
 
-def main(root, generation_path):
-    validate_correctness(json.loads((root / 'correctness.json').read_text()))
+def read_profile(root, generation_path, contexts):
     generation = json.loads(generation_path.read_text())
     selected = {str(record['trace_id']) for timing in generation['timings']
                 for record in timing['device_profile']['records']}
     reports = list(root.rglob('*ops_perf_results*.csv'))
     direct_device_report = False
     if not reports:
-        reports = list(root.rglob('cpp_device_perf_report.csv'))
+        reports = [directory / 'cpp_device_perf_report.csv' for directory in (root / '.logs', root / 'metadata', root)
+                   if (directory / 'cpp_device_perf_report.csv').is_file()][:1]
         direct_device_report = True
     if len(reports) != 1:
         raise AssertionError('Exactly one operation report required')
@@ -83,11 +85,24 @@ def main(root, generation_path):
     if direct_device_report:
         for row in rows:
             row['OP CODE'] = row['OP NAME']
-    result = analyze(generation, rows, (root / 'console.log').read_text(encoding='utf-8', errors='replace'))
+    result = analyze(generation, rows, (root / 'console.log').read_text(encoding='utf-8', errors='replace'), contexts=contexts)
     result['source_format'] = 'runtime C++ device operation report' if direct_device_report else 'merged operation report'
+    return result
+
+
+def main(root, generation_path=None):
+    validate_correctness(json.loads((root / 'correctness.json').read_text()))
+    if generation_path is not None:
+        result = read_profile(root, generation_path, (4095, 16383))
+    else:
+        result = dict(passed=True, scope=__doc__, processes=[])
+        for context in (4095, 16383):
+            directory = root / f'context-{context}'
+            profile = read_profile(directory, directory / 'generation.json', (context,))
+            result['processes'].append(dict(context=context, attribution=profile))
     (root / 'attribution.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 
 
 if __name__ == '__main__':
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    main(Path(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) > 2 else None)

@@ -1806,3 +1806,16 @@ this is not a complete attribution result. The next resource fix must isolate
 contexts in separate processes and preserve per-process trace identities rather
 than rerunning the same memory-growing job or increasing its limit blindly.
 Checkpoint-cost CI34149243028 has started independently.
+
+Checkpoint-cost CI34149243028 passed: all63 prefix-copy correctness cases and
+60 measured replay records. At T8, median blocking48-copy trace time is
+1.445458ms control versus0.746584ms zero-reuse (about48.35percent less).
+This is a shared-hot-buffer microbenchmark, not an end-to-end coding speedup.
+Production copy call sites remain unchanged pending full-model validation.
+
+The next profiler retry retains the broad uninstrumented correctness process,
+then starts one fresh instrumented process per4095/16383 context. Context-local
+CSV, generation report and console are checked independently, so reused numeric
+trace IDs cannot cross-contaminate attribution. Both contexts, three arms,
+three replays and both physical chips remain mandatory in the combined result.
+The scoped context flag cannot narrow a correctness-only matrix.

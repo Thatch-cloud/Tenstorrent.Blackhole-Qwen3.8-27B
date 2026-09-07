@@ -4,9 +4,12 @@ cd /opt/tt-metal
 output=/experiment/results/verifier-profile
 mkdir -p "$output"
 preserve_metadata() {
-    mkdir -p "$output/metadata"
-    for name in tracy_ops_data.csv cpp_device_perf_report.csv; do
-        if [ -f "$output/.logs/$name" ]; then cp "$output/.logs/$name" "$output/metadata/$name"; fi
+    for directory in "$output" "$output"/context-*; do
+        [ -d "$directory" ] || continue
+        mkdir -p "$directory/metadata"
+        for name in tracy_ops_data.csv cpp_device_perf_report.csv; do
+            if [ -f "$directory/.logs/$name" ]; then cp "$directory/.logs/$name" "$directory/metadata/$name"; fi
+        done
     done
     for name in memory.current memory.peak memory.events; do
         if [ -r "/sys/fs/cgroup/$name" ]; then cat "/sys/fs/cgroup/$name" > "$output/$name.txt"; fi
@@ -23,6 +26,11 @@ cp /experiment/results/full-gdn-device-loop.json "$output/correctness.json"
 export TTNN_OP_PROFILER=1 TT_METAL_DEVICE_PROFILER=1 TT_METAL_PROFILER_TRACE_TRACKING=1
 export TT_METAL_PROFILER_CPP_POST_PROCESS=1
 unset TT_METAL_PROFILER_MID_RUN_DUMP
-timeout -k 30 2700 python3 -m tracy -p --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --op-support-count 20000 -o "$output" \
-    /experiment-scripts/ci/full-prefix.py --device-profile "${arguments[@]}" 2>&1 | tee "$output/console.log"
-python3 /experiment-scripts/ci/check-verifier-profile.py "$output" /experiment/results/full-gdn-device-loop.json
+for context in 4095 16383; do
+    directory="$output/context-$context"
+    mkdir -p "$directory"
+    timeout -k 30 1500 python3 -m tracy -p --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --op-support-count 20000 -o "$directory" \
+        /experiment-scripts/ci/full-prefix.py --device-profile --profile-context "$context" "${arguments[@]}" 2>&1 | tee "$directory/console.log"
+    cp /experiment/results/full-gdn-device-loop.json "$directory/generation.json"
+done
+python3 /experiment-scripts/ci/check-verifier-profile.py "$output"

@@ -13,6 +13,36 @@ spec.loader.exec_module(checker)
 
 
 class VerifierProfileCheckTests(unittest.TestCase):
+    def test_isolated_processes_allow_reused_trace_ids_but_require_both_contexts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'correctness.json').write_text(json.dumps(self.correctness_fixture()))
+            for context_index, context in enumerate((4095, 16383)):
+                generation, rows, console = self.fixture()
+                generation['timings'] = [generation['timings'][context_index]]
+                for record in generation['timings'][0]['device_profile']['records']:
+                    record['trace_id'] -= context_index * 3
+                rows = [row for row in rows if context_index * 3 < int(row['METAL TRACE ID']) <= context_index * 3 + 3]
+                for row in rows:
+                    row['METAL TRACE ID'] = str(int(row['METAL TRACE ID']) - context_index * 3)
+                    row['OP NAME'] = row.pop('OP CODE')
+                selected = root / f'context-{context}'
+                selected.mkdir()
+                (selected / 'generation.json').write_text(json.dumps(generation))
+                (selected / 'console.log').write_text('\n'.join(line for line in console.splitlines() if f'ctx{context}_' in line))
+                with (selected / 'cpp_device_perf_report.csv').open('w', newline='') as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                    writer.writeheader()
+                    writer.writerows(rows)
+            with patch('builtins.print'):
+                checker.main(root)
+            result = json.loads((root / 'attribution.json').read_text())
+            self.assertEqual([process['context'] for process in result['processes']], [4095, 16383])
+            self.assertEqual([process['attribution']['traces'][0]['trace_id'] for process in result['processes']], [1, 1])
+            (root / 'context-16383' / 'generation.json').unlink()
+            with self.assertRaises(FileNotFoundError):
+                checker.main(root)
+
     def correctness_fixture(self):
         report = dict(passed=True, correctness_only=True, instrumented_timing=False)
         for key, dimension, values in (('batch_checks', 'rows', (1, 2, 4, 8, 16, 32)),
