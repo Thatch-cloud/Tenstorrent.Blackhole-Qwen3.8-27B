@@ -2062,3 +2062,14 @@ stages and both chips, checking changed inputs and exact repeated outputs, then
 freeing each block while retaining stable parameter addresses. It uses the
 original restored LLK header, not the packer graft. This gate is in progress;
 no timing gain or complete reusable five-layer drafter is certified yet.
+
+Simulator220731Z passed all three blocks and both chips (exit0, clean close).
+All six connected-MLP checks have zero projection errors, zero activation ULP
+distance and one normalization ULP; exact repeated outputs and stable nine-buffer
+parameter ownership passed after freeing each block. Hardware promotion adds the
+same replay gate to learned_stack=true after health, before selector/stack checks.
+With --hardware --timing it runs one warmup plus five measured changing-input
+executions, retaining full stage validation outside each timed region. Samples
+cover eager MLP dispatch, activation allocation, collectives and synchronization;
+weight/input transfer and host reference checks are excluded. This is a branch
+cost measurement, not traced latency, an upload-inclusive A/B or full drafter TPS.

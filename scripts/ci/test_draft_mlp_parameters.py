@@ -1,4 +1,8 @@
 from types import SimpleNamespace
+import os
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,6 +12,16 @@ from draft_mlp_branch import execute_mlp_branch, prepare_mlp_branch
 
 
 class DraftMLPParameterTests(unittest.TestCase):
+    def test_simulator_timing_is_rejected_before_fixture_loading(self):
+        environment = {name: value for name, value in os.environ.items()
+            if name not in ('TT_METAL_SLOW_DISPATCH_MODE', 'TT_METAL_MOCK_CLUSTER_DESC_PATH')}
+        environment['TT_METAL_SIMULATOR'] = 'simulator-placeholder'
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('draft-mlp-replay-probe.py')),
+            '--fixture', '/missing', '--convolution-fixture', '/missing', '--output', '/missing', '--timing'],
+            env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Latency measurements require allocated hardware', result.stderr)
+
     def fixture(self):
         value = SimpleNamespace(shape=(1, 1, 32, 5120), dtype='bf16')
         operations = SimpleNamespace(bfloat16='bf16', float32='fp32', TILE_LAYOUT='tile', ROW_MAJOR_LAYOUT='row',

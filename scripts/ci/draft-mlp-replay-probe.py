@@ -1,10 +1,12 @@
-"""Simulator-only learned MLP parameter reuse and changing-input replay gate."""
+"""Learned MLP parameter reuse and changing-input replay; optional isolated hardware latency."""
 
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import time
 
 from draft_convolution_fixture import load_convolution
 from draft_mlp_branch import execute_mlp_branch, prepare_mlp_branch, validate_mlp_branch
@@ -18,9 +20,13 @@ def main():
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--convolution-fixture', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--timing', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
-    if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+    require_projection_environment(os.environ, options.hardware)
+    if options.timing and not options.hardware:
+        parser.error('Latency measurements require allocated hardware')
+    if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for TP2 output reduction')
     import torch
     import ttnn
@@ -29,6 +35,8 @@ def main():
     manifest, weights = load_mlp(options.fixture)
     convolution_manifest, convolution = load_convolution(options.convolution_fixture)
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, convolution_checkpoint=convolution_manifest,
+        backend='hardware' if options.hardware else 'simulator', timings_ms=[],
+        timing_scope='Post-warmup eager branch execution, activation allocation and TP2 synchronization; excludes input/weight uploads and validation; not full drafter or committed throughput',
         checks=[], sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('draft_mlp_branch.py', 'draft-mlp-replay-probe.py')})
     mesh, parameters_owned, temporary = None, [], []
@@ -50,19 +58,30 @@ def main():
         if len(parameters_owned) != 9:
             raise AssertionError('Expected exactly nine reusable parameter tensors')
         first_outputs = None
-        for repetition, seed in enumerate((731, 732, 731)):
+        seeds = (731, 732, 731, 732, 731, 732) if options.timing else (731, 732, 731)
+        for repetition, seed in enumerate(seeds):
             hidden = torch.zeros((1, 1, 32, 5120), dtype=torch.bfloat16)
             hidden[..., :8, :] = torch.randn((1, 1, 8, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
             device_hidden = retain_temporary(ttnn.from_torch(hidden, device=mesh, dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
+            if options.timing:
+                ttnn.synchronize_device(mesh)
+                started = time.perf_counter()
             state = execute_mlp_branch(ttnn, mesh, collective, device_hidden, weights, convolution,
                 retain_temporary, parameters=parameters)
+            if options.timing:
+                ttnn.synchronize_device(mesh)
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if not math.isfinite(elapsed_ms) or elapsed_ms <= 0:
+                    raise AssertionError('Positive hardware latency required')
+                if repetition:
+                    report['timings_ms'].append(elapsed_ms)
             current_outputs = []
             for chip in range(2):
                 check = validate_mlp_branch(state, host, chip, checkpoint=manifest)
                 check.update(repetition=repetition, seed=seed)
                 current = host(state['output'], chip).clone()
-                if first_outputs is not None and torch.equal(current, first_outputs[chip]) != (repetition == 2):
+                if first_outputs is not None and torch.equal(current, first_outputs[chip]) != (seed == 731):
                     raise AssertionError('Changing-input or repeat-input MLP output gate failed')
                 current_outputs.append(current)
                 report['checks'].append(check)
@@ -76,7 +95,7 @@ def main():
             report.update(repetitions_completed=repetition + 1, reusable_parameter_tensors=len(parameters_owned))
             options.output.write_text(json.dumps(report, indent=2))
             print(json.dumps(dict(repetition=repetition, seed=seed, checked=True)), flush=True)
-        report['passed'] = len(report['checks']) == 6
+        report['passed'] = len(report['checks']) == 2 * len(seeds)
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise
