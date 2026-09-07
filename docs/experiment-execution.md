@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Parallel width microbenchmark34073855612 (`9f8248f`) passed36 native-exact
+  fixtures,4320 timed replays and72 changed-query checks with immutable KV.
+  Both arms use compact scratch, DMA and up to three parallel groups. Mean
+  matched attention costs at start4095: T8 0.267853->0.201240ms,
+  T16 0.386645->0.383785ms, T32 0.644490->0.447736ms; at start16383:
+  T8 0.411835->0.305782ms, T16 0.572341->0.517279ms,
+  T32 1.026139->0.685868ms. This is not full-model or committed throughput.
+  The simulator-certified real-weight `attention-tree-layer` gate is now
+  eligible for dispatch; no serving default changes follow this component pass.
 - Eight-row prepared-reader TTsim20260907T014407Z-415 passed atT16/start4096:
   native B1, serial groups, parallel groups and `GroupedAttentionReader` are
   bitwise exact on both chips; the borrowed query survives reader execution.
