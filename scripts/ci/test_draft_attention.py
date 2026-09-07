@@ -8,6 +8,11 @@ from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_att
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_cached_tiles_require_fused_dots(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        with self.assertRaises(ValueError):
+            composed_draft_attention(operations, object(), query, key, value, mask, cache_dot_tiles=True)
+
     def test_fused_and_pairwise_dots_are_separate_controls(self):
         operations, query, key, value, mask = self.operations_fixture()
         with self.assertRaises(ValueError):

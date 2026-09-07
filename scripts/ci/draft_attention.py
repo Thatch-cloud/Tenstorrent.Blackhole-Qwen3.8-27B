@@ -70,7 +70,7 @@ def pairwise_dot(operations, left, right, retain):
     return retain(operations.reshape(reduced, (1, heads, rows, key_rows)))
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False, fused_dots=False):
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False, fused_dots=False, cache_dot_tiles=False):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
@@ -78,6 +78,8 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         raise ValueError('Fused row sum requires explicit softmax and replaces pairwise sum')
     if fused_dots and pairwise_dots:
         raise ValueError('Fused and pairwise dots are separate controls')
+    if cache_dot_tiles and not fused_dots:
+        raise ValueError('Dot tile caching requires fused dots')
     if pairwise_sum and not explicit_softmax:
         raise ValueError('Pairwise reduction requires the explicit softmax control')
     protected = {addresses(operations, tensor) for tensor in (query, key, value, mask)}
@@ -99,7 +101,7 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         if fused_dots:
             from draft_dot import fused_dot
 
-            scores = fused_dot(mesh, query, keys, owned)
+            scores = fused_dot(mesh, query, keys, owned, cache_tiles=cache_dot_tiles)
         elif pairwise_dots:
             scores = pairwise_dot(operations, query, keys, retain)
         else:
@@ -128,7 +130,7 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
                 compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         if fused_dots:
             transposed_values = retain(operations.transpose(values, -1, -2))
-            output = fused_dot(mesh, probabilities, transposed_values, owned)
+            output = fused_dot(mesh, probabilities, transposed_values, owned, cache_tiles=cache_dot_tiles)
         elif pairwise_dots:
             transposed_values = retain(operations.transpose(values, -1, -2))
             output = pairwise_dot(operations, probabilities, transposed_values, retain)

@@ -19,8 +19,11 @@ def main():
     parser.add_argument('--width', type=int, default=128)
     parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--timing', action='store_true')
+    parser.add_argument('--cache-tiles', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.hardware and options.cache_tiles:
+        parser.error('Cached tiles require simulator validation before hardware promotion')
     if options.hardware and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
         parser.error('Hardware requires a simulator-validated dot shape')
     if options.timing and not options.hardware:
@@ -29,6 +32,7 @@ def main():
     import ttnn
 
     report = dict(passed=False, checks=[], scope=__doc__, keys=options.keys, width=options.width,
+        cache_tiles=options.cache_tiles,
         timings_ms=[], backend='hardware' if options.hardware else 'simulator',
         timing_scope='Warm dispatch, output allocation and synchronization; excludes input uploads and output readback/release',
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -45,11 +49,14 @@ def main():
         for host in (left, right):
             tensors.append(ttnn.from_torch(host, device=mesh, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
-        output = fused_dot(mesh, tensors[0], tensors[1], tensors)
+        output = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles)
+        control = fused_dot(mesh, tensors[0], tensors[1], tensors) if options.cache_tiles else None
         expected = (left.double() @ right.double().transpose(-1, -2)).float()
         for chip, tensor in enumerate(ttnn.get_device_tensors(output)):
             actual = ttnn.to_torch(tensor)
             torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
+            if control is not None and not torch.equal(actual, ttnn.to_torch(ttnn.get_device_tensors(control)[chip])):
+                raise AssertionError('L1 cached dot differs from streaming control')
             report['checks'].append(dict(chip=chip, max_error=float((actual - expected).abs().max())))
         if options.timing:
             baselines = [ttnn.to_torch(tensor).clone() for tensor in ttnn.get_device_tensors(output)]
@@ -58,7 +65,7 @@ def main():
                 try:
                     ttnn.synchronize_device(mesh)
                     started = time.perf_counter()
-                    repeated = fused_dot(mesh, tensors[0], tensors[1], temporary)
+                    repeated = fused_dot(mesh, tensors[0], tensors[1], temporary, cache_tiles=options.cache_tiles)
                     ttnn.synchronize_device(mesh)
                     elapsed_ms = (time.perf_counter() - started) * 1000
                     for chip, tensor in enumerate(ttnn.get_device_tensors(repeated)):

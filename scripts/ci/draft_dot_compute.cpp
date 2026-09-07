@@ -9,17 +9,19 @@ void kernel_main() {
     const uint32_t workers = get_arg_val<uint32_t>(4);
     const uint32_t key_tiles = get_arg_val<uint32_t>(5);
     const uint32_t width_tiles = get_arg_val<uint32_t>(6);
+    const bool cache_tiles = get_arg_val<uint32_t>(7) != 0;
     for (uint32_t task = worker; task < 16 * key_tiles; task += workers) {
+        if (cache_tiles) { cb_wait_front(0, width_tiles); }
         for (uint32_t key = 0; key < 32; key++) {
             init_sfpu(0, 16);
             sfpu_mul_bcast_row_init();
             tile_regs_acquire();
             for (uint32_t column = 0; column < width_tiles; column++) {
-                cb_wait_front(0, 1);
+                if (!cache_tiles) { cb_wait_front(0, 1); }
                 cb_wait_front(1, 1);
                 const uint32_t slot = column == 0 ? 0 : 1;
                 copy_tile_to_dst_init_short(0);
-                copy_tile(0, 0, slot);
+                copy_tile(0, cache_tiles ? column : 0, slot);
                 copy_tile_to_dst_init_short(1);
                 copy_tile(1, 0, 2);
                 sfpu_mul_bcast_row(slot, 2);
@@ -28,7 +30,7 @@ void kernel_main() {
                     add_binary_tile(0, 1, 0);
                     sfpu_mul_bcast_row_init();
                 }
-                cb_pop_front(0, 1);
+                if (!cache_tiles) { cb_pop_front(0, 1); }
                 cb_pop_front(1, 1);
             }
             MATH((sfpu::init_reduce<PoolType::SUM, DataFormat::Float32, true>()));
@@ -43,5 +45,6 @@ void kernel_main() {
             tile_regs_release();
             cb_push_back(16, 1);
         }
+        if (cache_tiles) { cb_pop_front(0, width_tiles); }
     }
 }

@@ -13,10 +13,17 @@ def dot_geometry(left_shape, right_shape):
     return min(64, tasks), right_shape[2] // 32, left_shape[3] // 32
 
 
-def fused_dot(mesh, left, right, owned):
+def dot_buffer_tiles(width_tiles, cache_tiles):
+    if type(cache_tiles) is not bool or type(width_tiles) is not int or not 1 <= width_tiles <= 65:
+        raise ValueError('Explicit cache policy and bounded reduction width required')
+    return ((0, width_tiles if cache_tiles else 2), (1, 2), (2, width_tiles + 1 if cache_tiles else 2), (16, 1))
+
+
+def fused_dot(mesh, left, right, owned, *, cache_tiles=False):
     import ttnn
 
     workers, key_tiles, width_tiles = dot_geometry(tuple(left.shape), tuple(right.shape))
+    buffer_tiles = dot_buffer_tiles(width_tiles, cache_tiles)
     for tensor in (left, right):
         if tensor.dtype != ttnn.float32 or tensor.layout != ttnn.TILE_LAYOUT or tensor.memory_config() != ttnn.DRAM_MEMORY_CONFIG:
             raise ValueError('Interleaved FP32 operands required')
@@ -27,7 +34,7 @@ def fused_dot(mesh, left, right, owned):
     buffers = [ttnn.CBDescriptor(total_size=4096 * count, core_ranges=cores,
         format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=ttnn.float32,
             page_size=4096, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
-        for index, count in ((0, 2), (1, 2), (2, 2), (16, 1))]
+        for index, count in buffer_tiles]
     config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4,
         fp32_dest_acc_en=True, math_approx_mode=False)
     modes = [ttnn.UnpackToDestMode.Default] * 64
@@ -37,7 +44,7 @@ def fused_dot(mesh, left, right, owned):
     for chip, shards in enumerate(zip(*(ttnn.get_device_tensors(tensor) for tensor in (left, right, output)), strict=True)):
         runtime = ttnn.RuntimeArgs()
         for worker in range(workers):
-            runtime[worker % 8][worker // 8] = [tensor.buffer_address() for tensor in shards] + [worker, workers, key_tiles, width_tiles]
+            runtime[worker % 8][worker // 8] = [tensor.buffer_address() for tensor in shards] + [worker, workers, key_tiles, width_tiles, int(cache_tiles)]
         reader = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_name('draft_dot_io.cpp')), core_ranges=cores,
             compile_time_args=[argument for tensor in shards for argument in ttnn.TensorAccessorArgs(tensor).get_compile_time_args()],
             runtime_args=runtime, config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,

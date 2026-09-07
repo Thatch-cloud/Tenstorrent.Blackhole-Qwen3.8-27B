@@ -1174,3 +1174,24 @@ should reuse left/right tiles in L1 instead of rereading them for every output
 column, explicitly measuring the L1-capacity versus DRAM-traffic tradeoff. The
 bounded streaming implementation remains the correctness control. No new
 end-to-end throughput result or200 committed tokens/s claim follows from this run.
+
+### L1 dot-tile reuse candidate (2026-09-08)
+
+The simulator-only `--cache-tiles` dot variant retains a complete left tile row
+and right tile block per worker/output tile. Each operand tile is fetched once
+instead of once per each of32 output columns. SFPU multiplication/accumulation
+order is unchanged; the existing streaming variant remains selectable. Static
+input tile reads per output tile decrease32-fold, not a measured latency gain.
+
+The deliberate L1 tradeoff is48KiB per worker for QK width128 and536KiB for PV
+width2080, versus28KiB for streaming. Output assembly and broadcast buffers are
+included. Capacity alongside a complete drafter/target/trace is not yet validated.
+Simulator cached-versus-streaming full-output equality and the FP64 reference
+gate pass on both ranks for short QK (`20260907T125336Z-310`), long QK
+(`20260907T125413Z-619`) and long PV (`20260907T125729Z-657`). Host tests:524 passed.
+The integrated option is `--cache-dot-tiles`; hardware rejects it pending promotion.
+
+Inspection-free learned-attention simulator `20260907T125934Z-819` passes all eight
+checks with cached dots, including exact head order/fabric sums and the same
+reported attention errors as streaming fused dots. Hardware timing is the next
+decision gate; no simulator wall-time comparison is used as a speedup claim.
