@@ -92,10 +92,13 @@ def main():
     parser.add_argument('--attention-engine', action='store_true')
     parser.add_argument('--attention-engine-wide', action='store_true')
     parser.add_argument('--target-features', action='store_true')
+    parser.add_argument('--target-feature-prefill', action='store_true')
     parser.add_argument('--target-feature-batch', action='store_true')
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.target_feature_prefill and not options.target_features:
+        raise ValueError('Prefill features require the standalone eager target feature gate')
     if options.target_feature_prefix and not options.target_feature_replay:
         raise ValueError('Feature prefix publication requires feature replay validation')
     if options.target_feature_replay and (not options.replay_inputs or not options.norm_batch or
@@ -106,7 +109,7 @@ def main():
              options.grouped_attention, options.attention_replay, options.attribution, options.device_selection))):
         raise ValueError('Batched target features require standalone T32 static norm-batch verification')
     if options.target_features and (options.max_rows != 16 or options.replay_group_rows != 4 or any(
-            value for name, value in vars(options).items() if name not in ('target_features', 'max_rows', 'replay_group_rows'))):
+            value for name, value in vars(options).items() if name not in ('target_features', 'target_feature_prefill', 'max_rows', 'replay_group_rows'))):
         raise ValueError('Target feature gate requires standalone eager native settings')
     if options.attention_engine_wide and (not options.attention_engine or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
         raise ValueError('Wide request comparison requires attention engine and process-fixed compact scratch')
@@ -184,6 +187,8 @@ def main():
     lengths = (4095, 16383) if options.coding_cost or options.attribution else (63, 64, 65)
     if options.target_feature_batch:
         lengths = (63, 64, 65)
+    if options.target_feature_prefill:
+        lengths = (63, 64, 65, 127, 128, 129)
     if options.attention_replay:
         lengths = (4096, 16384)
     prefixes = (0, 1, options.max_rows // 2, options.max_rows) if options.coding_cost else tuple(range(options.max_rows + 1))
@@ -472,13 +477,13 @@ def main():
         def argmax(logits):
             return int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax())
 
-        def prefill(prompt):
+        def prefill(prompt, *, return_logits=False):
             generator.prev_page_table = None
             logits, _ = generator.prefill_forward(torch.tensor([prompt], dtype=torch.int32), page_table,
                 kv_cache, [len(prompt)], empty_slots=[0], enable_trace=not (options.target_features or options.target_feature_batch))
             if addresses() != original_addresses:
                 raise AssertionError("Prefill replaced persistent decode state")
-            return argmax(logits)
+            return logits.clone() if return_logits else argmax(logits)
 
         def batched(tokens, length, prefix, trace, *, deferred=False, abort=False, known_seed=None):
             from model_batch import ModelBatch
@@ -610,13 +615,22 @@ def main():
             return
         if options.target_features:
             from full_target_features import feature_prompts, verify_features
+            from full_prefill_features import verify_prefill_features
             from gdn_multitoken_conv import addresses as tensor_addresses
             output_path = root / 'target-features.json'
+            if options.target_feature_prefill:
+                output_path = root / 'target-feature-prefill.json'
             report.update(scope='Real target eager B1 feature boundaries; no neural drafter or throughput claim',
                 feature_checks=[], feature_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                    for name in ('full_target_features.py', 'target_features.py')})
+                    for name in ('full_target_features.py', 'target_features.py', 'full_prefill_features.py')})
+            verify = verify_features
+            prefill_callback = dict(prefill=prefill)
+            if options.target_feature_prefill:
+                verify = verify_prefill_features
+                prefill_callback = dict(prefill_logits=lambda prompt: prefill(prompt, return_logits=True))
+                report['scope'] = 'Real target eager single-chunk prefill features; no neural drafter or throughput claim'
             for prompt in feature_prompts(tokenizer, baseline.make_prompt, lengths):
-                result = verify_features(model, prompt, (5, 19, 33, 47, 61), prefill=prefill, decode=decode,
+                result = verify(model, prompt, (5, 19, 33, 47, 61), **prefill_callback, decode=decode,
                     live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
                     snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                     release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(tensor_addresses(ttnn, value))),

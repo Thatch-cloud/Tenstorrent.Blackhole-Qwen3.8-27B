@@ -12,6 +12,14 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_prefill_features_require_standalone_eager_feature_gate(self):
+        for flags, message in (([], 'standalone eager target feature'),
+                (['--target-features', '--batch'], 'standalone eager native')):
+            with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--target-feature-prefill', *flags]):
+                with self.assertRaisesRegex(ValueError, message):
+                    full_prefix.main()
+
     def test_feature_publication_requires_replay_gate(self):
         with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                 'sys.argv', ['full-prefix.py', '--target-feature-prefix']):

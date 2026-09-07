@@ -5,6 +5,28 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added standalone `target-feature-prefill` gate for contexts63/64/65/127/128/129.
+  It compares all five owned post-layer outputs with independently captured
+  next-layer inputs, requires two [1,1,bucket,2560] shards, checks only valid
+  prompt rows (never bucket padding), and preserves full prefill logits, native
+  GDN/KV, inactive slots and one decode continuation. Multiple forward chunks
+  deliberately fail this single-chunk gate rather than silently dropping rows.
+  Simulator20260907T083714Z-310 passes20 exact feature matrices at128/256-row
+  buckets using the same oracle, with source hashes matched. All464 host tests
+  and shell syntax checks pass, including shifted-row/state-drift/missing-shard
+  and repeated-chunk negative tests. No real-target prefill result yet; long
+  prefill streaming, traced prefill, feature-history integration and trained
+  drafter compatibility remain unvalidated.
+- Early-pool hardware34099243313 (`7bdbbbf`) passes the complete accepted-prefix
+  gate. Independently checked all36 context/width/decision fixtures,720 captured
+  feature matrices,72 publication events and600 nonempty retained matrices;
+  12 first-prefix aborts publish no tensors. Both epochs remain exact through
+  every diagnostic stage, including source release and both native traced
+  corrections. All24 shifted-input controls,24 batch checks,16 rollback checks
+  and4 negative-control pairs pass; helper hashes match the dispatched commit.
+  The40-buffer mesh-open pool fixes the demonstrated native-trace overwrite.
+  This establishes controlled prefix ownership, not integrated drafter history,
+  prefill feature coverage, trained-drafter parity or additional committed tok/s.
 - Diagnostic hardware34097205308 (`c341149`) isolates the publication failure:
   both published epochs remain exact after verifier replay, second publication
   and source release. The first native traced correction overwrites the second

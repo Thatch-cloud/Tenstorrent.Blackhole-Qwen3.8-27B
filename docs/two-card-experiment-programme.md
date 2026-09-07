@@ -24,8 +24,9 @@ gate34094867083 fails retained feature exactness at layer19/chip0 in the first
 nonempty-first-prefix fixture. Diagnostic34097205308 isolates overwrite by the
 first native correction trace, not the verifier or publication copy. A pool
 allocated before all traces passes simulator with a failing late-allocation
-control; hardware certification of that lifetime fix remains required. Publication
-and prefill feature coverage remain prerequisites; this is not yet a neural
+control and hardware34099243313:72 publication events,600 retained matrices and
+12 empty aborts across all36 fixtures, including native traced continuation.
+Prefill feature coverage and integrated transactional history remain prerequisites; this is not yet a neural
 drafter port or an acceptance result.
 
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
