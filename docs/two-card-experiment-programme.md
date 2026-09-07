@@ -1564,3 +1564,10 @@ input immutability and invalid geometry/IDs/nonfinite data. It consumes already
 projected hidden states and supplied LM-head candidates; it does not implement
 the shared LM head or claim BF16/device equivalence. Selector arithmetic must
 still be calibrated and validated on simulator/hardware. All555 host tests pass.
+
+Selector/final norm download completed. All four tensors (256911360 bytes)
+are now SHA256-pinned, rehashed by the loader and verified as finite BF16 in
+WSL. Reuse rejects corrupted content without overwriting or redownloading it.
+All556 host tests pass. These verified weights enable the forthcoming learned
+selector numerical gate; no selector device implementation, LM-head integration
+or measured proposal/coding throughput is implied by fixture validation.
