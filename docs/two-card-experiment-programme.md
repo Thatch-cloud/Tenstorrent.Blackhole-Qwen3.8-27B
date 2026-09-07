@@ -12,7 +12,9 @@ The200 tok/s single-stream target remains unmet; serving defaults are unchanged.
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch
 also passes hardware correctness and component timing; its combination with
-eight-row DMA/parallel grouping is in simulator validation before hardware.
+eight-row DMA/parallel grouping passes simulator, hardware microbenchmark and
+real-weight attention-layer gates. Full-model gate34075945160 remains running
+at this checkpoint; no new full-model throughput claim is established.
 Materially better drafting and lower verification cost are both still required.
 
 ## Topology experiments - Ethernet dispatch and fabric weight loading
@@ -31,6 +33,31 @@ Local TTsim runtime constructor probe passed `DispatchCoreConfig(DispatchCoreTyp
 with resolved COL axis. Explicit ETH+COL is rejected by the TTNN constructor;
 default WORKER resolves COL. This probe opened no mesh and proves neither
 fast-dispatch operation nor compatibility with the active fabric configuration.
+
+The subsequent fast-dispatch mesh probe is not yet an Ethernet pass:
+
+- TTsim20260907T022544Z-412: WORKER with fabric disabled passes all six
+  changed-input trace checks on both chips and closes successfully; grid11x10.
+- TTsim20260907T022756Z-417: ETH with fabric disabled fails during mesh opening,
+  before tensor uploads, at `No core coordinate found at location: (0, 12, ETH, LOGICAL)`.
+- TTsim20260907T022254Z-424: WORKER with FABRIC_1D fails during router handshake
+  at mesh opening. Fabric coexistence remains a separate prerequisite.
+
+The P300 simulator mock has14 physical Ethernet cores and eth_harvesting_mask288
+on each chip, leaving12 logical Ethernet cores. The stock dispatch descriptor
+lists14 logical cores. Native `core_descriptor.cpp` filters active fabric cores
+but does not filter unavailable harvested cores; the allocator then translates
+every listed dispatch core and fails at logical12. This is simulator evidence,
+not confirmation of the physical P150A Ethernet harvesting masks. Do not clear
+harvesting bits or fabricate an MMIO topology to make this test pass.
+
+Before a native fix, account for descriptor caching too: the current cache key
+contains product, dispatch/fabric configuration, queue count and dispatch mode,
+but not chip identity or Ethernet availability. A per-chip availability filter
+must not reuse another chip's dispatch-core list. Preserve worker dispatch and
+active-fabric exclusions, and validate differing chip availability in addition
+to the symmetric mock. The bounded probe is `scripts/ci/dispatch-probe.py`, with
+`optimisation/sim/run-dispatch-probe.sh` selecting fast dispatch explicitly.
 
 - D1: matched WORKER/ETH dispatch health, trace replay, fabric collectives, actual
   core-grid enumeration and exact results; then same-grid versus expanded-grid
