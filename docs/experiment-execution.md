@@ -109,6 +109,16 @@ metadata copy. T1/2/4 retain native attention. It retains the existing full-logi
 GDN prefix, corrected-continuation and valid-K/V replay checks. Request-pilot and
 sampling modes remain rejected until this retained-state gate passes.
 
+Native scratch build repair: source registration hash
+`a2fb5b6ea5769c57f79353f2a8c3859f85d161f3a94ced173862d10cd5adca10`
+is pinned from34067681095. A separate patch adds only15 existing host implementation
+files for attn_prep, gdn_conv_gates, gdn_norm_gate, gdn_decay and
+decode_gated_delta_rule. No native kernel math or Python binding is edited. The
+disposable build records every source hash, checks existing transformer imports
+before opening devices and records dynamic-library resolution. It still applies
+the simulator-certified allocation-only scratch patch and uses the same paired
+T4/T8 group microbenchmark; it does not alter the serving image or host runtime.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,

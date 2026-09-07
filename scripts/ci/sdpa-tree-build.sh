@@ -8,6 +8,10 @@ PYTHONPATH=/experiment-scripts/ci python3 -c 'from sdpa_tree_scratch import audi
 command -v clang++-20
 command -v ninja
 test -f /opt/tt-metal/build_Release/build.ninja
+python3 /experiment-scripts/ci/sdpa_graft_build.py
+grafts=/experiment-optimisation/sim/sdpa-graft-registration.patch
+git -C /opt/tt-metal apply --check "$grafts"
+git -C /opt/tt-metal apply "$grafts"
 patch=/experiment-optimisation/sim/sdpa-tree-scratch.patch
 git -C /opt/tt-metal apply --check "$patch"
 git -C /opt/tt-metal apply "$patch"
@@ -21,3 +25,6 @@ if [ "$(readlink -f "$source")" != "$(readlink -f "$destination")" ]; then
     cp "$source" "$destination"
 fi
 sha256sum "$destination" "$patch" > /experiment/results/sdpa-tree-build.sha256
+sha256sum "$grafts" >> /experiment/results/sdpa-tree-build.sha256
+python3 -c 'import ttnn; names = ("attn_decode_prep", "gdn_decode_norm_gate", "gdn_decode_conv_gates", "decode_gated_delta_rule_packed"); assert all(callable(getattr(ttnn.transformer, name)) for name in names); print("Existing transformer graft ABI imports before any device opens")'
+ldd /opt/tt-metal/ttnn/ttnn/_ttnn.so > /experiment/results/sdpa-tree-loaded-libraries.txt
