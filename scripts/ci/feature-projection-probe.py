@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--k-block', type=int, choices=(4, 100), default=4)
+    parser.add_argument('--active-k', type=int, choices=(1, 2, 4, 8, 16, 32, 128, 12800), default=12800)
     options = parser.parse_args()
     import torch
     import ttnn
@@ -33,7 +34,7 @@ def main():
         raise ValueError('Finite learned weights required')
     packed = projection_shards(weight)
     report = dict(passed=False, scope=__doc__, checkpoint=manifest, checks=[],
-        tolerance=dict(rtol=1e-4, atol=1e-4), packer_l1_acc=False, sources={name:
+        tolerance=dict(rtol=1e-4, atol=1e-4), active_k=options.active_k, packer_l1_acc=False, sources={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('feature-projection-probe.py', 'feature_projection.py', 'draft_projection_fixture.py')})
     mesh = device_weight = None
@@ -55,6 +56,9 @@ def main():
         for rows in (1, 8, 32):
             generator = torch.Generator().manual_seed(1234 + rows)
             features = [torch.randn((1, 1, rows, 5120), generator=generator).bfloat16() for tap in range(5)]
+            for tap, value in enumerate(features):
+                local_mask = torch.arange(2560) + tap * 2560 < options.active_k
+                value.mul_(local_mask.repeat(2))
             tensors = []
             joined = output = None
             try:

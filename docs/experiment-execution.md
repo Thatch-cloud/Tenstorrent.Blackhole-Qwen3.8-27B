@@ -5,6 +5,21 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Sparse learned-projection controls now isolate the numerical failure without
+  changing tensor dimensions, learned coefficients, HiFi4/FP32 configuration or
+  the `rtol=atol=1e-4` gate. `--active-k` masks each rank's tap-major input
+  prefix; the default remains all12800 terms. With `--k-block 100`, TTsim
+  `20260907T092230Z-406` (one active term) passes all six row/chip checks
+  with zero absolute error. `20260907T092357Z-636` (two terms) fails three
+  of six checks, maximum absolute error0.000244140625.
+  `20260907T092314Z-573` (32 terms) fails all six, maximum0.002295970916748047.
+  Inputs and weights still round-trip exactly and the wrong-order negative
+  control remains effective. Thus thousands of nonzero accumulation terms are
+  not necessary to reproduce the discrepancy; this does not yet distinguish
+  simulator arithmetic from native hardware behavior. Next isolate fidelity
+  phases and internal accumulation precision using the two-term reproducer.
+  All471 host tests pass. No hardware promotion or serving change.
+
 - Started learned TP2 feature projection with checkpoint
   `incoai/Qwen3.8-27B-DFlash2@dedf8df68adfb1afeaf7b7480c0a0243108177b4`.
   Bounded HTTP range audit finds BF16 `fc.weight` [5120,25600]; only its first32

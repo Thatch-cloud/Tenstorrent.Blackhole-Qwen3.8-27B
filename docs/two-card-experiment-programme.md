@@ -2,6 +2,12 @@
 
 ## Current measured result - 2026-09-07
 
+Learned-drafter projection remains simulator-gated: a single active input term
+is exact across both chips and rows1/8/32, but two terms already fail three of
+six checks at the unchanged float32 tolerance. The sparse controls retain the
+full tensor layout and checkpoint coefficients; they narrow the arithmetic
+investigation, not certify a drafter or demonstrate a throughput improvement.
+
 Actual matched request run34084598829 passes native token/state/KV checks at
 **23.883 committed decode tok/s at4078 tokens and20.608 at16363 tokens**
 for eight-row replay. Same-run four-row controls achieve23.929/20.231 tok/s;
