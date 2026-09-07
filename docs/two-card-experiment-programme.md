@@ -1067,3 +1067,13 @@ Its pinned fixture cache is rehashed before reuse; failed health prevents the
 probe. Hardware rejects unvalidated arithmetic flag combinations. All 518 host
 tests pass. This gate neither loads the target model nor changes serving defaults;
 it establishes component correctness only, not end-to-end latency or throughput.
+
+Hardware run `34120652422` on `a6829df` now passes this gate on both P150As.
+All eight reported check records match the inspection-free simulator result,
+including attention errors1.431e-5/1.669e-5, one-ULP head normalization and exact
+fabric sums. This comparison is of reported metrics, not a saved full-tensor
+bitwise comparison. The arithmetic implementation hash matches the simulator;
+the hardware report contains zero intermediate inspection records. No timing
+was measured for this precise path. Next work must remove the outer-product
+allocation/long-context limitation and integrate complete draft layers; this
+correctness pass alone supplies no new committed-token throughput result.
