@@ -5,6 +5,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware `34114708492` (`212a8fb`) PASSED learned layer-zero convolution
+  plumbing: attention and MLP prepare/finish both exact on both ranks, input
+  normalization within one BF16 ULP. No intermediate host inspections were used.
+- Next draft-attention gate is not passed: `20260907T110745Z-301` random-query
+  T8 GQA (16Q/4KV heads per rank, dimension128) fails the predeclared .01 relative
+  plus .01 absolute bound at context0 (max absolute error .0200960636138916).
+  Explicit masks make the proposal block bidirectional, restrict historical keys
+  to window2048, hide padded keys and give discarded padded queries a finite row.
+  Host tests cover those boundaries and a causal-target-mask negative control.
+  Uniform-query isolation `20260907T110920Z-293` terminates in TTSim with
+  `UnsupportedFunctionality: tensix_pacr: Disable_pack_zero_flags`; no completed
+  result report exists for that run. Neither attention experiment is promoted to
+  hardware. All506 host tests pass; learned attention and full drafter remain open.
 - Added opt-in `learned-convolution` hardware suite: allocation/runtime audit,
   transfer health, then learned T8 convolution with explicit FP32 operands and
   outputs, BF16 rounding per operation, and no intermediate host inspections.

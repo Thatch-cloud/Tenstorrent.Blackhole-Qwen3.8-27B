@@ -1013,6 +1013,11 @@ The fix requires explicit FP32 operands/output and BF16 rounding per operation;
 FP32 output alone did not suffice. This is a correctness control with extra
 casts, not a fused speedup. Real attention/MLP transforms between prepare and
 finish and hardware convolution validation remain outstanding.
-The host test suite now passes 502 tests.
+Hardware `34114708492` now confirms the learned convolution plumbing gate:
+both phases exact for both branches/ranks, RMSNorm within one BF16 ULP.
+Draft attention is the next unresolved gate: the explicit noncausal-block,
+sliding-context GQA probe fails its random-query numerical bound; uniform-query
+isolation reaches an unsupported TTSim pack-zero instruction. Neither is an
+attention pass. The host test suite now passes 506 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.
