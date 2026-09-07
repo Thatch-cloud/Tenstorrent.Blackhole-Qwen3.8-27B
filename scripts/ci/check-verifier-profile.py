@@ -7,6 +7,25 @@ from pathlib import Path
 import sys
 
 
+def validate_correctness(report):
+    if (report.get('passed') is not True or report.get('correctness_only') is not True
+            or report.get('instrumented_timing') or report.get('timings')):
+        raise AssertionError('Separate passed uninstrumented correctness matrix required')
+    for key, dimension, values in (('batch_checks', 'rows', (1, 2, 4, 8, 16, 32)),
+                                   ('checks', 'prefix', (0, 1, 16, 32))):
+        checks = report.get(key, [])
+        expected = {(length, trace, value) for length in (4095, 16383) for trace in (False, True) for value in values}
+        actual = {(check['length'], check['trace'], check[dimension]) for check in checks}
+        if actual != expected or len(checks) != len(expected) or not all(all(check.get(field) is True
+                for field in ('logits_exact', 'all_gdn_states_exact', 'valid_kv_exact')) for check in checks):
+            raise AssertionError('Incomplete exact broad correctness matrix')
+    negatives = report.get('negative_controls', [])
+    if (len(negatives) != 4 or {(item['length'], item['trace']) for item in negatives} != {
+            (length, trace) for length in (4095, 16383) for trace in (False, True)}
+            or not all(item.get('stale_gdn_detected') is True and item.get('wrong_page_detected') is True for item in negatives)):
+        raise AssertionError('Both negative controls required in every context/mode')
+
+
 def analyze(generation, rows, console):
     if generation.get('passed') is not True or generation.get('instrumented_timing') is not True:
         raise AssertionError('Passed instrumented verifier correctness report required')
@@ -48,6 +67,7 @@ def analyze(generation, rows, console):
 
 
 def main(root, generation_path):
+    validate_correctness(json.loads((root / 'correctness.json').read_text()))
     generation = json.loads(generation_path.read_text())
     selected = {str(record['trace_id']) for timing in generation['timings']
                 for record in timing['device_profile']['records']}

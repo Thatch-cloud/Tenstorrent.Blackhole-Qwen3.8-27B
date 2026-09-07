@@ -8,12 +8,21 @@ preserve_metadata() {
     for name in tracy_ops_data.csv cpp_device_perf_report.csv; do
         if [ -f "$output/.logs/$name" ]; then cp "$output/.logs/$name" "$output/metadata/$name"; fi
     done
+    for name in memory.current memory.peak memory.events; do
+        if [ -r "/sys/fs/cgroup/$name" ]; then cat "/sys/fs/cgroup/$name" > "$output/$name.txt"; fi
+    done
 }
 trap preserve_metadata EXIT
+arguments=(--max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input
+    --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv
+    --packed-checkpoints --ordered-cache)
+unset TTNN_OP_PROFILER TT_METAL_DEVICE_PROFILER TT_METAL_PROFILER_TRACE_TRACKING
+timeout -k 30 2700 python3 /experiment-scripts/ci/full-prefix.py --correctness-only "${arguments[@]}" \
+    2>&1 | tee "$output/correctness-console.log"
+cp /experiment/results/full-gdn-device-loop.json "$output/correctness.json"
 export TTNN_OP_PROFILER=1 TT_METAL_DEVICE_PROFILER=1 TT_METAL_PROFILER_TRACE_TRACKING=1
+export TT_METAL_PROFILER_CPP_POST_PROCESS=1
 unset TT_METAL_PROFILER_MID_RUN_DUMP
-timeout -k 30 5400 python3 -m tracy -p --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --op-support-count 20000 -o "$output" \
-    /experiment-scripts/ci/full-prefix.py --device-profile --max-rows 32 --batch --coding-cost --serial-sdpa \
-    --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn \
-    --compact-prologue --batch-conv --packed-checkpoints --ordered-cache 2>&1 | tee "$output/console.log"
+timeout -k 30 2700 python3 -m tracy -p --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --op-support-count 20000 -o "$output" \
+    /experiment-scripts/ci/full-prefix.py --device-profile "${arguments[@]}" 2>&1 | tee "$output/console.log"
 python3 /experiment-scripts/ci/check-verifier-profile.py "$output" /experiment/results/full-gdn-device-loop.json

@@ -12,6 +12,16 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_correctness_only_rejects_mixed_modes_before_import(self):
+        for flags in ([], ['--batch'], ['--coding-cost'], *[
+                ['--batch', '--coding-cost', flag] for flag in ('--device-profile', '--attribution',
+                    '--deferred-commit', '--replay-inputs', '--device-selection', '--request-pilot')]):
+            with self.subTest(flags=flags), patch.dict('os.environ', {
+                    'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--correctness-only', *flags]):
+                with self.assertRaisesRegex(ValueError, 'standalone static coding-cost'):
+                    full_prefix.main()
+
     def test_device_profile_rejects_unmatched_configuration_before_import(self):
         with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(
                 'sys.argv', ['full-prefix.py', '--device-profile']):

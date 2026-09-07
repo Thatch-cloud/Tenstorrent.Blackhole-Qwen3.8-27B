@@ -13,12 +13,49 @@ spec.loader.exec_module(checker)
 
 
 class VerifierProfileCheckTests(unittest.TestCase):
+    def correctness_fixture(self):
+        report = dict(passed=True, correctness_only=True, instrumented_timing=False)
+        for key, dimension, values in (('batch_checks', 'rows', (1, 2, 4, 8, 16, 32)),
+                                       ('checks', 'prefix', (0, 1, 16, 32))):
+            report[key] = [dict(length=length, trace=trace, **{dimension: value},
+                logits_exact=True, all_gdn_states_exact=True, valid_kv_exact=True)
+                for length in (4095, 16383) for trace in (False, True) for value in values]
+        report['negative_controls'] = [dict(length=length, trace=trace,
+            stale_gdn_detected=True, wrong_page_detected=True)
+            for length in (4095, 16383) for trace in (False, True)]
+        return report
+
+    def test_separate_correctness_requires_complete_exact_matrix(self):
+        checker.validate_correctness(self.correctness_fixture())
+        for key in ('batch_checks', 'checks', 'negative_controls'):
+            for change in ('missing', 'duplicate', 'inexact'):
+                with self.subTest(key=key, change=change):
+                    report = self.correctness_fixture()
+                    if change == 'missing':
+                        report[key].pop()
+                    elif change == 'duplicate':
+                        report[key][-1] = report[key][0]
+                    else:
+                        field = 'wrong_page_detected' if key == 'negative_controls' else 'valid_kv_exact'
+                        report[key][0][field] = False
+                    with self.assertRaises(AssertionError):
+                        checker.validate_correctness(report)
+
+    def test_separate_correctness_rejects_timing_or_failed_run(self):
+        for field, value in (('passed', False), ('correctness_only', False),
+                             ('instrumented_timing', True), ('timings', [{}])):
+            report = self.correctness_fixture()
+            report[field] = value
+            with self.assertRaises(AssertionError):
+                checker.validate_correctness(report)
+
     def test_runtime_cpp_report_is_accepted_without_expanding_host_metadata(self):
         generation, rows, console = self.fixture()
         for row in rows:
             row['OP NAME'] = row.pop('OP CODE')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / 'correctness.json').write_text(json.dumps(self.correctness_fixture()))
             (root / 'generation.json').write_text(json.dumps(generation))
             (root / 'console.log').write_text(console, encoding='utf-8')
             with (root / 'cpp_device_perf_report.csv').open('w', newline='') as stream:

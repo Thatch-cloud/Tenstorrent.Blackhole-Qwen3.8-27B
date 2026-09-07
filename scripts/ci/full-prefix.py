@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--serial-sdpa", action="store_true")
     parser.add_argument("--attribution", action="store_true")
     parser.add_argument('--device-profile', action='store_true')
+    parser.add_argument('--correctness-only', action='store_true')
     parser.add_argument("--compact-gdn", action="store_true")
     parser.add_argument("--reuse-gdn-input", action="store_true")
     parser.add_argument("--skip-row-clones", action="store_true")
@@ -98,6 +99,10 @@ def main():
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    if options.correctness_only and (not options.batch or not options.coding_cost or any((
+            options.device_profile, options.attribution, options.deferred_commit, options.replay_inputs,
+            options.device_selection, options.request_pilot))):
+        raise ValueError('Correctness-only requires a standalone static coding-cost matrix')
     if options.device_profile:
         required = ('batch', 'coding_cost', 'serial_sdpa', 'compact_gdn', 'reuse_gdn_input',
                     'skip_row_clones', 'hoist_row_layout', 'device_loop_gdn', 'compact_prologue',
@@ -214,6 +219,7 @@ def main():
                   scope="Native sequential 64-layer target; active GDN restore and logical KV rollback, no drafter or speed claim")
     report["batched_candidate"] = options.batch
     report['instrumented_timing'] = options.device_profile
+    report['correctness_only'] = options.correctness_only
     report["serial_sdpa"] = options.serial_sdpa
     report['grouped_attention'] = options.grouped_attention
     report['attention_dma'] = options.attention_dma
@@ -655,6 +661,20 @@ def main():
             return
         base_prompt = baseline.make_prompt(tokenizer, max(lengths) + 128, 0) if options.coding_cost or options.attribution else baseline.make_prompt(tokenizer, 128, 0)
         timing_fixtures = []
+        def measure_fixture(prompt, oracle, rows):
+            from full_batch_timing import measure
+            return measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
+                prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
+                state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
+                compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
+                reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
+                hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
+                compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
+                packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
+                norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
+                attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
+                attention_tree=options.attention_tree, device_profile=options.device_profile)
+
         for length in lengths:
             prompt = baseline.make_prompt(tokenizer, length, 0) if options.request_pilot else base_prompt[:length]
             if not options.request_pilot and len(prompt) != length:
@@ -696,7 +716,7 @@ def main():
                 continue
             oracle = [prefill(prompt)]
             oracle_logits = []
-            for position in range(options.max_rows * (2 if options.replay_inputs else 1) + 2):
+            for position in range(8 if options.device_profile else options.max_rows * (2 if options.replay_inputs else 1) + 2):
                 logits = decode(oracle[-1], length + position, False)
                 oracle_logits.append(logits)
                 oracle.append(argmax(logits))
@@ -704,6 +724,12 @@ def main():
             report.setdefault("prompts", []).append(dict(length=length,
                 tokens_sha256=hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
                 kind="Truncated deterministic repeated-code fixture, not a coding-quality benchmark"))
+            if options.device_profile:
+                measurement = measure_fixture(prompt, oracle, 8)
+                report.setdefault('timings', []).append(measurement)
+                output_path.write_text(json.dumps(report, indent=2))
+                print(json.dumps(measurement), flush=True)
+                continue
             if options.device_selection:
                 from full_device_selection import measure_selection
                 for rows in widths:
@@ -830,6 +856,11 @@ def main():
                             raise AssertionError("Full-model negative control was not detected")
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(dict(length=length, prefix=prefix, trace=trace, exact=True)), flush=True)
+        if options.device_profile:
+            if addresses() != original_addresses or len(report.get('timings', [])) != len(lengths):
+                raise AssertionError('Incomplete stable-state T8 profile contexts')
+            report.update(passed=True, timing_scope='Isolated instrumented T8 attribution; broad correctness matrix runs separately')
+            return
         if options.request_pilot:
             expected_requests = len(lengths) * (4 if options.norm_batch else 1)
             if addresses() != original_addresses or len(report.get('request_checks', [])) != expected_requests:
@@ -873,35 +904,24 @@ def main():
             raise AssertionError("Missing rollback cases")
         if options.deferred_commit and len(report['dynamic_commits']) != len(lengths) * 2 * len(prefixes):
             raise AssertionError('Missing post-verification commits')
-        if options.coding_cost and not options.deferred_commit:
-            from full_batch_timing import measure
+        if options.coding_cost and not options.deferred_commit and not options.correctness_only:
             report["timing_scope"] = "Captured full-logit blocks with one preselected end checkpoint; no drafter, dynamic selection or complete speculative commit pipeline"
             for prompt, oracle in timing_fixtures:
-                for rows in ((8,) if options.device_profile else widths):
-                    measurement = measure(model, oracle[:rows], len(prompt), page_table, helpers, candidate_saved,
-                        prefill=lambda: prefill(prompt), save_initial=lambda: save(saved), restore_initial=restore,
-                        state_digest=live_digest, kv_digest=kv_digest, local_host=local_host, serial_sdpa=options.serial_sdpa,
-                        compact_gdn=options.compact_gdn, checkpoint_digest=lambda: state_digest(candidate_saved),
-                        reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
-                        hoist_row_layout=options.hoist_row_layout, device_loop_gdn=options.device_loop_gdn,
-                        compact_prologue=options.compact_prologue, batch_conv=options.batch_conv,
-                        packed_checkpoints=options.packed_checkpoints, ordered_cache=options.ordered_cache,
-                        norm_batch=options.norm_batch, grouped_attention=options.grouped_attention,
-                        attention_dma=options.attention_dma, attention_parallel=options.attention_parallel,
-                        attention_tree=options.attention_tree, device_profile=options.device_profile)
+                for rows in widths:
+                    measurement = measure_fixture(prompt, oracle, rows)
                     report.setdefault("timings", []).append(measurement)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(measurement), flush=True)
-            if len(report.get("timings", [])) != len(lengths) * (1 if options.device_profile else len(widths)):
+            if len(report.get("timings", [])) != len(lengths) * len(widths):
                 raise AssertionError("Missing full-model timing fixtures")
-            if options.device_profile:
-                report['timing_scope'] = 'Instrumented T8 attribution only; no latency or throughput measurement'
-            elif options.batch:
+            if options.batch:
                 from full_matrix import validate_static_matrix
                 validate_static_matrix(report, options.max_rows)
         if options.attribution and (len(report.get("attribution", [])) != 4 or
                                    not all(value["exact"] for value in report["attribution"])):
             raise AssertionError("Missing exact attribution fixtures")
+        if options.correctness_only:
+            report['timing_scope'] = 'Broad correctness matrix only; no timings collected'
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"

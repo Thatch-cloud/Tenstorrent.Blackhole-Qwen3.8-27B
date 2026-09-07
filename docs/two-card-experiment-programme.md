@@ -1745,3 +1745,16 @@ buffers start with nonzero padding canaries; packed sources must remain
 unchanged. The slow-dispatch wrapper preserves its existing commit-gate
 default. This scheduling dependency requires the prior process to terminate,
 not the unrelated learned-layer numerical test to pass.
+
+### Profiler resource isolation retry
+
+CI34146165134 failed when the profiled child was killed during the second
+context; it produced no complete runtime device CSV. Resource pressure is a
+hypothesis, not a confirmed OOM diagnosis. The next retry separates the full
+24-case batch and 16-case rollback correctness matrix, including all four
+negative-control pairs, into an uninstrumented process. A fresh process then
+profiles only the two T8 contexts with three native/control/candidate replays.
+The checker requires both reports; this does not waive broad correctness.
+Runtime C++ post-processing is enabled before Python starts, Tracy child exit
+codes are checked, and cgroup memory events/peak are saved for diagnosis.
+Instrumented durations remain attribution only, never throughput evidence.
