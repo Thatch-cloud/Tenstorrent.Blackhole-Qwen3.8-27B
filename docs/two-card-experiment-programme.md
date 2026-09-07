@@ -1998,3 +1998,23 @@ manifest only after all succeed. Old partial files are preserved; corrupted
 completed files still fail closed. Unbuffered progress and a4800-second staging
 bound replace the silent40-minute timeout. Both prior hardware failures are
 infrastructure results, not learned-layer or selector numerical failures.
+
+### Bytewise device packing prerequisite
+
+The isolated packed_weight_check dataflow kernel compares every144 uint32 word
+in each576-byte BF4 tile against the corresponding separate gate/up tile. No
+floating-point conversion or tolerance is involved. Each worker publishes page
+coverage, a completion sentinel, mismatch count and its bitwise complement;
+the host checks all counters and untouched output padding. This avoids returning
+entire dequantized weight matrices through the unreliable local bulk-readback
+path rather than accepting a failed read on retry.
+
+Simulator195634Z passed18 cases/36 chip checks at32x32,64x96 and320x256,
+including12 single-chip negative cases, both tile offsets, fewer-than64 and
+more-than64 page distributions. It closed cleanly with exit0. Host tests cover
+complete full-size tile mapping and rejected incomplete/corrupt readback reports.
+The fusion probe's explicit --device-weight-check option retains host source
+packing equality and replaces only device-weight readback validation with this
+byte-exact check. Simulator195732Z tests full5120x8704 geometry and the corrected
+native gate-linear fused-SiLU control. It uses the audited upstream packer graft;
+the local header must again be restored when this active run terminates.

@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--device-weight-check', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     import torch
@@ -55,7 +56,20 @@ def main():
 
         device_gate, device_up, device_packed = [upload(value, ttnn.bfloat4_b, True) for value in (gate, up, packed)]
         report['weight_checks'] = []
-        for chip in range(2):
+        if options.device_weight_check:
+            from packed_weight_check import compare_packed_weights, read_comparison
+            report['weight_check_backend'] = 'Byte-exact device comparison with coverage and complementary counter validation'
+            report['weight_check_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                for name in ('packed_weight_check.py', 'packed_weight_check.cpp')}
+            for offset, separate in enumerate((device_gate, device_up)):
+                result = compare_packed_weights(mesh, device_packed, separate, offset, owned)
+                for check in read_comparison(ttnn, result, 160 * 272):
+                    chip = check['chip']
+                    source = (gate, up)[offset][chip, 0]
+                    source_packed = packed[chip, 0].reshape(5120, 272, 2, 32)[:, :, offset].reshape(5120, 8704)
+                    report['weight_checks'].append(dict(check, source_exact=torch.equal(source, source_packed),
+                        projection=('gate', 'up')[offset]))
+        for chip in (() if options.device_weight_check else range(2)):
             unpacked = ttnn.to_torch(ttnn.get_device_tensors(device_packed)[chip]).reshape(5120, 272, 2, 32)
             for offset, value in enumerate((device_gate, device_up)):
                 observed = unpacked[:, :, offset].reshape(5120, 8704)
