@@ -1030,6 +1030,9 @@ The learned attention pipeline is now implemented as a simulator diagnostic,
 but does not pass: explicit FP32 RoPE fixes its first failure, then learned
 attention exceeds the unchanged numerical bound. QK/softmax/PV stage errors
 are isolated in `20260907T113235Z-303`; no hardware promotion of this learned
-path. The host test suite now passes 512 tests.
+path. Further isolation fixes softmax via pairwise FP32 reduction (maximum
+error1.19e-7 on both ranks), but QK/PV matmuls still leave two attention values
+outside the unchanged bound (`20260907T114726Z-297`). No learned-layer hardware
+promotion or speedup claim. The host test suite now passes 515 tests.
 This removes a diagnostic host handoff, not the remaining draft layers or
 request-history integration. No committed-token throughput gain is established.

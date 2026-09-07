@@ -5,6 +5,19 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Learned attention precision isolation made progress, not a pass. Explicit
+  FP32 max/subtract/exp/sum/reciprocal/multiply (`20260907T113845Z-301`) reduces
+  failing valid first-rank attention values from30 to1, but still fails the same
+  .01 relative/absolute bound. Widening Q/K/V matmul operands (`114252Z-312`)
+  makes no difference to measured stage errors; keep it only as a negative control.
+- Pairwise FP32 column summation instead of native sum (`114726Z-297`) fixes
+  the softmax stage: max error1.1920928955078125e-7 and row-sum error
+  2.384185791015625e-7 on both ranks. Remaining QK errors .048759/.049358 and
+  PV errors .016573/.017663 still produce two failing attention values (worst
+  failing absolute error .023293). Matmul precision is now isolated from softmax.
+  This is an allocation-heavy diagnostic reference, not a fused speedup or a
+  hardware-promoted learned layer. All515 host tests pass, including odd-width
+  pairwise reduction, explicit-softmax dispatch and operand ownership.
 - Integrated learned attention simulator now exercises Q/K/V, per-head learned
   RMSNorm, absolute-position RoPE (start4096, context31, T8), composed attention,
   O projection and FP32 fabric reduction without an intermediate host handoff.

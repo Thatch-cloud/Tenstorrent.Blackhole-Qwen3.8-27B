@@ -39,10 +39,28 @@ def draft_sdpa(operations, query, key, value, mask, *, streaming=False):
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None):
+def pairwise_column_sum(operations, value, retain):
+    total = value
+    tails = []
+    while total.shape[-1] > 1:
+        shape = tuple(total.shape)
+        half = shape[-1] // 2
+        if shape[-1] % 2:
+            tails.append(retain(operations.slice(total, (0, 0, 0, shape[-1] - 1), shape)))
+        left = retain(operations.slice(total, (0, 0, 0, 0), (*shape[:-1], half)))
+        right = retain(operations.slice(total, (0, 0, 0, half), (*shape[:-1], half * 2)))
+        total = retain(operations.add(left, right, dtype=operations.float32))
+    for tail in tails:
+        total = retain(operations.add(total, tail, dtype=operations.float32))
+    return total
+
+
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
+    if pairwise_sum and not explicit_softmax:
+        raise ValueError('Pairwise reduction requires the explicit softmax control')
     protected = {addresses(operations, tensor) for tensor in (query, key, value, mask)}
     owned = []
 
@@ -57,14 +75,27 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
     try:
         keys = retain(operations.repeat_interleave(key, 4, dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
         values = retain(operations.repeat_interleave(value, 4, dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
+        if wide_operands:
+            query, keys, values = [retain(operations.typecast(tensor, operations.float32)) for tensor in (query, keys, values)]
         transposed = retain(operations.transpose(keys, -1, -2))
         scores = retain(operations.matmul(query, transposed, dtype=operations.float32,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         scaled = retain(operations.multiply(scores, 128 ** -0.5, dtype=operations.float32))
         wide_mask = retain(operations.typecast(mask, operations.float32))
         masked = retain(operations.add(scaled, wide_mask, dtype=operations.float32))
-        probabilities = retain(operations.softmax(masked, dim=-1, numeric_stable=True,
-            compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        if explicit_softmax:
+            maximum = retain(operations.max(masked, dim=-1, keepdim=True))
+            centered = retain(operations.subtract(masked, maximum, dtype=operations.float32))
+            exponentials = retain(operations.exp(centered, fast_and_approximate_mode=False))
+            if pairwise_sum:
+                total = pairwise_column_sum(operations, exponentials, retain)
+            else:
+                total = retain(operations.sum(exponentials, dim=-1, keepdim=True))
+            inverse = retain(operations.reciprocal(total))
+            probabilities = retain(operations.multiply(exponentials, inverse, dtype=operations.float32))
+        else:
+            probabilities = retain(operations.softmax(masked, dim=-1, numeric_stable=True,
+                compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         output = retain(operations.matmul(probabilities, values, dtype=operations.float32,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         operations.synchronize_device(mesh)

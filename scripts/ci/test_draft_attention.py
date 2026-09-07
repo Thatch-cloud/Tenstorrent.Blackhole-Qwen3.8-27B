@@ -4,10 +4,19 @@ from unittest.mock import Mock
 
 import torch
 
-from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention
+from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention, pairwise_column_sum
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_pairwise_sum_includes_odd_tails_and_keeps_rows_independent(self):
+        operations = SimpleNamespace(float32=torch.float32,
+            slice=lambda value, start, end: value[tuple(slice(begin, stop) for begin, stop in zip(start, end, strict=True))],
+            add=lambda left, right, **kwargs: left + right)
+        for width in (1, 2, 3, 32, 64, 65, 2080):
+            values = torch.arange(2 * width, dtype=torch.float32).reshape(1, 1, 2, width)
+            actual = pairwise_column_sum(operations, values, lambda value: value)
+            self.assertTrue(torch.equal(actual, values.sum(-1, keepdim=True)))
+
     def operations_fixture(self):
         query = SimpleNamespace(shape=(1, 16, 32, 128), dtype='bf16')
         key = SimpleNamespace(shape=(1, 4, 64, 128), dtype='bf16')
@@ -18,7 +27,7 @@ class DraftAttentionTests(unittest.TestCase):
             transformer=SimpleNamespace(scaled_dot_product_attention=Mock()), synchronize_device=Mock(), deallocate=Mock(),
             get_device_tensors=lambda tensor: [SimpleNamespace(buffer_address=lambda: id(tensor)),
                 SimpleNamespace(buffer_address=lambda: id(tensor) + 1)])
-        for name in ('repeat_interleave', 'transpose', 'matmul', 'multiply', 'typecast', 'add', 'softmax'):
+        for name in ('repeat_interleave', 'transpose', 'matmul', 'multiply', 'typecast', 'add', 'softmax', 'max', 'subtract', 'exp', 'sum', 'reciprocal'):
             setattr(operations, name, Mock(side_effect=lambda *args, **kwargs: object()))
         return operations, query, key, value, mask
 
@@ -40,6 +49,24 @@ class DraftAttentionTests(unittest.TestCase):
         operations.synchronize_device.assert_called_once_with(mesh)
         self.assertEqual(operations.softmax.call_args.kwargs['numeric_stable'], True)
         self.assertEqual(operations.matmul.call_count, 2)
+
+    def test_explicit_softmax_is_stable_and_preserves_float32_arithmetic(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        composed_draft_attention(operations, object(), query, key, value, mask, explicit_softmax=True)
+        operations.softmax.assert_not_called()
+        self.assertEqual(operations.max.call_args.kwargs, dict(dim=-1, keepdim=True))
+        self.assertEqual(operations.subtract.call_args.kwargs['dtype'], 'fp32')
+        self.assertFalse(operations.exp.call_args.kwargs['fast_and_approximate_mode'])
+        self.assertEqual(operations.sum.call_args.kwargs, dict(dim=-1, keepdim=True))
+        self.assertEqual(operations.deallocate.call_count, 13)
+
+    def test_wide_attention_casts_operands_without_changing_borrowed_inputs(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        output = composed_draft_attention(operations, object(), query, key, value, mask, wide_operands=True)
+        self.assertEqual(operations.typecast.call_count, 4)
+        self.assertTrue(all(call.args[1] == 'fp32' for call in operations.typecast.call_args_list))
+        for protected in (query, key, value, mask, output):
+            self.assertFalse(any(call.args[0] is protected for call in operations.deallocate.call_args_list))
 
     def test_all_proposals_visible_but_padding_hidden(self):
         mask = draft_attention_mask(31)
