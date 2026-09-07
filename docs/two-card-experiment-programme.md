@@ -1203,3 +1203,21 @@ with their streaming control. A separate cached learned-attention gate retains
 the unchanged numerical bounds. Arms run sequentially, not interleaved, so any
 timing comparison must retain that limitation and the five-sample variability.
 Host tests:524 passed. No serving defaults or reset authorization change.
+
+Hardware `34125324127` on `3c8e53c` passes streaming/cached dot correctness,
+exact cached-versus-streaming outputs, repeated-output stability, and the cached
+learned-attention integration (eight checks). Five-sample medians in milliseconds:
+
+| Shape | Streaming | L1 cached |
+| --- | ---: | ---: |
+| Short QK | 0.330212 | 0.248592 |
+| Long QK | 3.785210 | 2.361222 |
+| Long PV | 3.387797 | 1.581398 |
+
+Long QK/PV decrease approximately38%/53%, respectively. The sum of their medians
+drops7.173007->3.942620ms (45%), not a measured combined attention latency. This
+confirms L1 reuse helps, but32-fold fewer input tile reads does not imply32-fold
+speedup: row-broadcast/compute/output-column serialization remain. Follow-up
+should measure wider worker distribution and/or multiple output columns per
+compute iteration, retaining exact controls and the large PV L1-capacity gate.
+There is still no complete drafter, full request timing, or200tok/s result.
