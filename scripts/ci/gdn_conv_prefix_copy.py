@@ -16,9 +16,11 @@ def validate_prefix(source_shapes, destination_shapes, prefix):
     return rows
 
 
-def copy_prefix(mesh, source, destination, prefix):
+def copy_prefix(mesh, source, destination, prefix, *, reuse_zero_tile=False):
     import ttnn
 
+    if type(reuse_zero_tile) is not bool:
+        raise ValueError('Explicit zero-tile reuse policy required')
     validate_prefix([tuple(value.shape) for value in source], [tuple(value.shape) for value in destination], prefix)
     tensors = [*source, *destination]
     if any(value.dtype != ttnn.bfloat16 or value.layout != ttnn.TILE_LAYOUT or
@@ -42,6 +44,7 @@ def copy_prefix(mesh, source, destination, prefix):
             raise ValueError('Packed snapshots and restore destinations must not alias')
         descriptor = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_suffix('.cpp')),
             core_ranges=cores,
+            defines=[('QWEN_PREFIX_REUSE_ZERO_TILE', '1')] if reuse_zero_tile else [],
             compile_time_args=[argument for index in (0, 4) for argument in ttnn.TensorAccessorArgs(local[index]).get_compile_time_args()],
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                      noc=ttnn.NOC.RISCV_0_default))

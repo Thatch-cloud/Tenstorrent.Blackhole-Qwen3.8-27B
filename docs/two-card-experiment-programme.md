@@ -1710,3 +1710,29 @@ boundaries, missing/padded IDs and proposal rows1..7. This adapter is not yet
 simulator/hardware certified or integrated with the full drafter. Ties are
 deterministic among received candidates; matching MLX's unordered candidate
 selection at tied cutoffs is not claimed.
+
+### Kernel-level diagnostic and next copy optimization
+
+Streaming host metadata joined to selected candidate CSV rows identifies the
+packed baseline's convolution-prefix copies as144 calls and about4.24ms summed
+kernel duration per T8 block on chip0 at4095 context. State copies contribute
+about2.58ms and convolution-window construction about2.42ms. The streaming
+reader rejects absent metadata and changed per-kernel replay coverage, and
+does not expand the full warmup host-time log. This selected-arm diagnostic
+does not turn the failed full profiling run into a pass.
+
+The profiled configuration lacks the norm-batch/grouped-attention improvements
+of the historical64.44/66.11ms best static result; its costs must not be presented
+as attribution of that best result. Convolution-prefix copying is common work
+worth testing independently. `copy_prefix(..., reuse_zero_tile=True)` now offers
+an opt-in candidate that initializes each worker's output padding once, rather
+than once per page. Only the two active row segments are overwritten between
+pages, with the existing write barrier retained. The default remains unchanged;
+exact padded-output simulator and hardware timing gates are still required.
+
+Two-layer simulation164514Z failed at learned layer1's down projection:6 of40960
+values exceeded the unchanged comparison tolerance. It was closed normally,
+and the dependent selector gate correctly did not launch. Retry171550Z keeps
+the same numerical work but captures down inputs, actual/reference outputs,
+layer identity and pinned manifest on failure for offline ISA replay. No
+tolerance increase or hardware promotion was made.

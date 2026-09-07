@@ -58,15 +58,19 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         output=output, shards=shards, norm_weight=norm_weight, conv_weight=conv_weight, base_weight=base_weight)
 
 
-def validate_mlp_branch(state, host, chip):
+def validate_mlp_branch(state, host, chip, *, failure_capture=None, checkpoint=None, layer=0):
     import torch
 
     def exact(actual, expected, stage):
         if not torch.equal(actual, expected):
             raise AssertionError(f'Connected MLP {stage} must be exact')
 
-    def projection(actual, inputs, weight):
+    def projection(actual, inputs, weight, capture=False):
         expected = grouped_projection_reference(inputs, weight, destination_rounding=True, fidelity_span=32)
+        if capture and failure_capture is not None and not torch.isclose(actual.double(), expected, rtol=1e-4, atol=1e-4).all():
+            torch.save(dict(activation=inputs.contiguous(), actual=actual.double(), reference=expected,
+                chip=chip, checkpoint=checkpoint, layer=layer, fidelity_span=32), failure_capture)
+            print(f'Connected MLP down failure capture: {failure_capture}', flush=True)
         torch.testing.assert_close(actual.double(), expected, rtol=1e-4, atol=1e-4)
         return float((actual.double() - expected).abs().max())
 
@@ -91,7 +95,7 @@ def validate_mlp_branch(state, host, chip):
     activation_ulps = int(bf16_ulp_distance(activation, swiglu_reference(*projections)).max())
     if activation_ulps > 2:
         raise AssertionError('Connected MLP activation exceeds two BF16 ULPs')
-    down_error = projection(host(state['partial'], chip)[..., :8, :], activation[..., :8, :], state['shards'][chip][2])
+    down_error = projection(host(state['partial'], chip)[..., :8, :], activation[..., :8, :], state['shards'][chip][2], capture=True)
     reduced = host(state['reduced'], chip)
     exact(reduced, host(state['partial'], 0) + host(state['partial'], 1), 'fabric sum')
     finished = host(state['finished'], chip)

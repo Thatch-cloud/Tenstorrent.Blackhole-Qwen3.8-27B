@@ -8,6 +8,10 @@ void kernel_main() {
     const uint32_t staged = get_write_ptr(0);
     const uint32_t output = staged + 2048;
     const uint32_t offset = ((token / 16) * 512 + (token % 16) * 16) * 2;
+    auto words = reinterpret_cast<volatile uint32_t*>(output);
+#ifdef QWEN_PREFIX_REUSE_ZERO_TILE
+    for (uint32_t word = 0; word < 512; word++) { words[word] = 0; }
+#endif
     for (uint32_t task = worker; task < 640; task += 48) {
         const uint32_t slot = task / 160;
         const uint32_t page = task % 160;
@@ -15,8 +19,9 @@ void kernel_main() {
         const auto destination = TensorAccessor(destination_args, get_arg_val<uint32_t>(4 + slot), 2048);
         noc_async_read_tile(page, source, staged);
         noc_async_read_barrier();
-        auto words = reinterpret_cast<volatile uint32_t*>(output);
+#ifndef QWEN_PREFIX_REUSE_ZERO_TILE
         for (uint32_t word = 0; word < 512; word++) { words[word] = 0; }
+#endif
         for (uint32_t face = 0; face < 2; face++) {
             const auto input = reinterpret_cast<volatile const uint32_t*>(staged + offset + face * 512);
             auto target = reinterpret_cast<volatile uint32_t*>(output + face * 512);
