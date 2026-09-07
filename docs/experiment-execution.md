@@ -130,6 +130,16 @@ families. This plan is not yet wired into `VerifierEngine`; retained replay and
 request-owner/commit gates must pass first. No allocations under active traces or
 new request throughput claims are authorized by these host tests.
 
+`VerifierEngine` now has an unexposed opt-in `attention_replay` path using that
+plan: all native/family fixtures are allocated before capture, warmup uses each
+family's actual capture position, proposal limits expose safe widths, and
+publication uses the bucket key sealed during verification rather than rerouting
+after the decision. Default native bucket keys and behavior are unchanged. Three
+additional engine tests cover future-family forwarding, opt-in guards and exact
+bucket ownership during publication. The complete host suite passes393 tests;
+the speculative harness passes60. Request CLI/benchmark wiring remains disabled
+pending full-model retained replay34070163839.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,

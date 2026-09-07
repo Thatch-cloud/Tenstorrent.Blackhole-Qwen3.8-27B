@@ -12,6 +12,21 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_future_family_is_forwarded_to_the_model_fixture(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.model, engine.pages, engine.helpers = object(), object(), []
+        engine.position, engine.norm_batch, engine.attention_replay = 4078, True, True
+        with patch('verifier_engine.ModelBatch') as factory:
+            engine.fixture(32, [], retain=True, position=4096)
+        self.assertEqual(factory.call_args.args[2], 4096)
+        self.assertIs(factory.call_args.kwargs['attention_replay'], True)
+
+    def test_invalid_replay_selection_fails_before_request_access(self):
+        with patch.dict(sys.modules, ttnn=SimpleNamespace()):
+            for enabled, norm in ((True, False), ('true', True), (1, True)):
+                with self.assertRaisesRegex(ValueError, 'replay attention'):
+                    VerifierEngine(None, None, None, None, norm_batch=norm, attention_replay=enabled)
+
     def test_norm_batch_is_forwarded_to_warm_and_retained_fixtures(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []
@@ -99,6 +114,26 @@ class EngineLifecycleTests(unittest.TestCase):
             session.abort('request', ticket, engine.publish)
             self.assertEqual(engine.position, session.position)
             self.assertEqual(session.committed_decode_tokens, 4)
+
+    def test_family_bucket_publication_uses_the_verified_bucket_key(self):
+        from attention_request_plan import capture_plan
+        engine, unused_session, bucket = self.fixture(rows=16)
+        session = GreedySession('request', [index % 3 for index in range(4096)], 1, vocab_size=100,
+            max_new_tokens=64, prefer_full_suffix=True)
+        engine.session, engine.position = session, session.position
+        engine.replay_plan = capture_plan(session.position, 65536, 32, 63)
+        engine.buckets = {(16, 4352): bucket}
+        bucket['output'] = (None, torch.tensor([(index + 2) % 3 for index in range(16)]))
+        with patch('verifier_engine.stage_inputs'):
+            ticket = session.propose('request', max_rows=16)
+            self.assertEqual(len(ticket.tokens), 16)
+            predictions, _ = engine.verify(ticket)
+            self.assertEqual(engine.pending_key, (16, 4352))
+            engine.replay_plan = SimpleNamespace(select=Mock(side_effect=AssertionError('must not reroute publication')))
+            session.commit('request', ticket, predictions, engine.publish)
+        self.assertIsNone(engine.pending_key)
+        self.assertEqual(engine.position, session.position)
+        bucket['fixture'].retained.commit.assert_called_once()
 
     def test_single_token_abort_restores_entry_without_advancing(self):
         engine, session, bucket = self.fixture(rows=1)

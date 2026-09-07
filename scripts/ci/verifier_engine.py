@@ -19,12 +19,15 @@ def capture_widths(position, capacity, verifier_rows, remaining):
 
 
 class VerifierEngine:
-    def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False):
+    def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False):
         import ttnn
 
         if type(norm_batch) is not bool:
             raise ValueError('Explicit boolean norm-batch selection required')
+        if type(attention_replay) is not bool or (attention_replay and not norm_batch):
+            raise ValueError('Explicit replay attention requires norm batching')
         self.norm_batch = norm_batch
+        self.attention_replay = attention_replay
         if session.phase != 'idle' or session.pending is not None or session.finished or len(helpers) != 48:
             raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
         if len(pages.shape) != 2 or pages.shape[0] != 1:
@@ -36,6 +39,12 @@ class VerifierEngine:
         self.position = session.position
         self.phase, self.pending = 'preparing', None
         self.initial, self.buckets = [], {}
+        self.pending_key = None
+        self.replay_plan = None
+        if attention_replay:
+            from attention_request_plan import capture_plan
+            self.replay_plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
+                session.max_new_tokens - len(session.emitted))
         self.native_addresses = [[addresses(ttnn, value) for value in helper.live] for helper in helpers]
         self.widths = widths
         started = time.perf_counter()
@@ -45,15 +54,18 @@ class VerifierEngine:
                 self.initial.append(helper.allocate())
             for helper, snapshot in zip(helpers, self.initial, strict=True):
                 helper.save(snapshot)
-            for rows in self.widths:
-                bucket = dict(rows=rows, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
-                self.buckets[rows] = bucket
+            captures = [(rows, rows, self.position) for rows in self.widths] if self.replay_plan is None else [
+                (capture.key, capture.rows, capture.position) for capture in self.replay_plan.captures]
+            for key, rows, position in captures:
+                bucket = dict(rows=rows, capture_position=position, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
+                self.buckets[key] = bucket
                 for helper in helpers:
                     bucket['checkpoints'].append(helper.allocate())
-                bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1)
-            for rows, bucket in self.buckets.items():
+                bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position)
+            for bucket in self.buckets.values():
+                rows = bucket['rows']
                 self.restore_initial()
-                warm = self.fixture(rows, bucket['checkpoints'], retain=False)
+                warm = self.fixture(rows, bucket['checkpoints'], retain=False, position=bucket['capture_position'])
                 result = None
                 try:
                     result = self.operation(warm)
@@ -62,7 +74,8 @@ class VerifierEngine:
                     if result is not None:
                         release_owned(ttnn, [value for value in result if value is not None])
                     warm.close()
-            for rows, bucket in self.buckets.items():
+            for bucket in self.buckets.values():
+                rows = bucket['rows']
                 self.restore_initial()
                 bucket['trace'], bucket['output'] = capture_operation(ttnn, self.mesh,
                     lambda bucket=bucket: self.operation(bucket['fixture']))
@@ -88,12 +101,24 @@ class VerifierEngine:
             self.close()
             raise
 
-    def fixture(self, rows, checkpoints, *, retain):
-        return ModelBatch(self.model, [1] * rows, self.position, self.pages, self.helpers, checkpoints,
+    def fixture(self, rows, checkpoints, *, retain, position=None):
+        return ModelBatch(self.model, [1] * rows, self.position if position is None else position, self.pages, self.helpers, checkpoints,
             0 if rows == 1 else rows, serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
-            norm_batch=self.norm_batch)
+            norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False))
+
+    def proposal_rows(self):
+        remaining = self.session.max_new_tokens - len(self.session.emitted)
+        if getattr(self, 'replay_plan', None) is not None:
+            return self.replay_plan.max_rows(self.position, remaining)
+        return max(rows for rows in self.widths if rows <= remaining)
+
+    def bucket_key(self, ticket):
+        if getattr(self, 'replay_plan', None) is None:
+            return len(ticket.tokens)
+        remaining = self.session.max_new_tokens - len(self.session.emitted)
+        return self.replay_plan.select(ticket.position, len(ticket.tokens), remaining).key
 
     def operation(self, fixture):
         logits = fixture.run(sharded_logits=self.sampler is not None)
@@ -116,10 +141,12 @@ class VerifierEngine:
 
     def verify(self, ticket):
         self.session.check_ticket(self.session.request_id, ticket)
-        if self.phase != 'idle' or self.pending is not None or ticket.position != self.position or len(ticket.tokens) not in self.buckets:
+        key = self.bucket_key(ticket)
+        if self.phase != 'idle' or self.pending is not None or ticket.position != self.position or key not in self.buckets:
             raise ValueError('An idle engine and its next supported request ticket are required')
         self.phase, self.pending = 'verifying', ticket
-        bucket = self.buckets[len(ticket.tokens)]
+        self.pending_key = key
+        bucket = self.buckets[key]
         try:
             self.validate_bindings()
             started = time.perf_counter()
@@ -158,7 +185,7 @@ class VerifierEngine:
         if type(prefix) is not int or not 0 <= prefix <= len(ticket.tokens):
             raise ValueError('Selected prefix outside verified block')
         self.phase = 'committing'
-        bucket = self.buckets[len(ticket.tokens)]
+        bucket = self.buckets[self.pending_key]
         try:
             if bucket['fixture'].retained is not None:
                 bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
@@ -171,6 +198,7 @@ class VerifierEngine:
                 self.operations.synchronize_device(self.mesh)
             self.position += prefix
             self.phase, self.pending = 'idle', None
+            self.pending_key = None
         except BaseException:
             self.phase = 'failed'
             raise
