@@ -30,8 +30,12 @@ def main():
     parser.add_argument('--fused-row-sum', action='store_true')
     parser.add_argument('--fused-dots', action='store_true')
     parser.add_argument('--cache-dot-tiles', action='store_true')
+    parser.add_argument('--context', type=int, choices=(31, 2048), default=31)
+    parser.add_argument('--wide-dot-placement', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.hardware and (options.context != 31 or options.wide_dot_placement):
+        parser.error('Long-context and wide placement integration require simulator validation')
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
     if options.hardware and (not all((options.fp32_rope, options.explicit_softmax))
@@ -46,7 +50,12 @@ def main():
     from models.tt_transformers.tt.ccl import TT_CCL
 
     manifest, weights = load_attention(options.fixture)
-    report = dict(passed=False, scope=__doc__, checkpoint=manifest, context=31, block_rows=8,
+    context = options.context
+    valid_keys = context + 8
+    key_rows = ((valid_keys + 31) // 32) * 32
+    query_start = 4096 + context
+    report = dict(passed=False, scope=__doc__, checkpoint=manifest, context=context, block_rows=8,
+        wide_dot_placement=options.wide_dot_placement,
         backend='hardware' if options.hardware else 'simulator',
         fp32_rope=options.fp32_rope,
         explicit_softmax=options.explicit_softmax,
@@ -86,16 +95,16 @@ def main():
         collectives = TT_CCL(mesh)
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
-        key_hidden = torch.randn((1, 1, 64, 5120), generator=torch.Generator().manual_seed(8147)).bfloat16()
+        key_hidden = torch.randn((1, 1, key_rows, 5120), generator=torch.Generator().manual_seed(8147)).bfloat16()
         query_hidden = torch.zeros((1, 1, 32, 5120), dtype=torch.bfloat16)
-        query_hidden[..., :8, :] = key_hidden[..., 31:39, :]
+        query_hidden[..., :8, :] = key_hidden[..., context:valid_keys, :]
         inputs = {'q': upload(query_hidden), 'k': upload(key_hidden)}
         projected, heads, normalized, rotated, local_weights = {}, {}, {}, {}, {}
         for name, count in (('q', 16), ('k', 4), ('v', 4)):
             weight = weights[f'layers.0.self_attn.{name}_proj.weight']
             local_weights[name] = [part.T.contiguous() for part in weight.chunk(2, dim=0)]
             device_weight = upload(torch.cat(local_weights[name], dim=0), sharded=True)
-            rows = 32 if name == 'q' else 64
+            rows = 32 if name == 'q' else key_rows
             program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8),
                 in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=rows // 32,
                 per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)
@@ -108,7 +117,7 @@ def main():
                 norm_weight = upload(weights[f'layers.0.self_attn.{name}_norm.weight'].reshape(1, 1, 4, 32), layout=ttnn.ROW_MAJOR_LAYOUT)
                 normalized[name] = retain(ttnn.rms_norm(heads[name], epsilon=1e-6, weight=norm_weight,
                     compute_kernel_config=kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
-                cosine, sine = rope_tables(4127 if name == 'q' else 4096, rows)
+                cosine, sine = rope_tables(query_start if name == 'q' else 4096, rows)
                 rope_input, device_cosine, device_sine = normalized[name], upload(cosine), upload(sine)
                 if options.fp32_rope:
                     rope_input, device_cosine, device_sine = [retain(ttnn.typecast(value, ttnn.float32))
@@ -117,7 +126,7 @@ def main():
                     is_decode_mode=False, compute_kernel_config=kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
                 if options.fp32_rope:
                     rotated[name] = retain(ttnn.typecast(rotated[name], ttnn.bfloat16))
-        mask = draft_attention_mask(31)
+        mask = draft_attention_mask(context)
         def inspect_attention(query, keys, values, scores, masked, probabilities, result):
             for chip in range(2):
                 actual_query, actual_keys, actual_values, actual_scores, actual_masked, actual_probabilities, actual_result = [
@@ -135,7 +144,8 @@ def main():
         attention = retain(composed_draft_attention(ttnn, mesh, rotated['q'], rotated['k'], heads['v'], upload(mask),
             inspect=inspect_attention if options.inspect_attention else None, explicit_softmax=options.explicit_softmax,
             wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots,
-            fused_row_sum=options.fused_row_sum, fused_dots=options.fused_dots, cache_dot_tiles=options.cache_dot_tiles))
+            fused_row_sum=options.fused_row_sum, fused_dots=options.fused_dots, cache_dot_tiles=options.cache_dot_tiles,
+            wide_dot_placement=options.wide_dot_placement))
         rounded_attention = retain(ttnn.typecast(attention, ttnn.bfloat16))
         transposed = retain(ttnn.transpose(rounded_attention, 1, 2))
         merged = retain(ttnn.reshape(transposed, (1, 1, 32, 2048)))
@@ -151,16 +161,21 @@ def main():
         partials = [host(partial_output, chip) for chip in range(2)]
         for chip in range(2):
             for name, count in (('q', 16), ('k', 4), ('v', 4)):
-                valid = 8 if name == 'q' else 39
+                valid = 8 if name == 'q' else valid_keys
                 actual_projection = host(projected[name], chip)[..., :valid, :]
                 reference_input = query_hidden if name == 'q' else key_hidden
-                expected = grouped_projection_reference(reference_input[..., :valid, :], local_weights[name][chip], destination_rounding=True)
-                torch.testing.assert_close(actual_projection.double(), expected, rtol=1e-4, atol=1e-4)
+                max_projection_error = 0.
+                for start in range(0, valid, 32):
+                    stop = min(start + 32, valid)
+                    expected = grouped_projection_reference(reference_input[..., start:stop, :], local_weights[name][chip], destination_rounding=True)
+                    actual_chunk = actual_projection[..., start:stop, :].double()
+                    torch.testing.assert_close(actual_chunk, expected, rtol=1e-4, atol=1e-4)
+                    max_projection_error = max(max_projection_error, float((actual_chunk - expected).abs().max()))
                 actual_heads = host(heads[name], chip)
                 expected_heads = host(projected[name], chip).bfloat16().reshape(1, -1, count, 128).transpose(1, 2)
                 if not torch.equal(actual_heads, expected_heads):
                     raise AssertionError('Head layout changed learned projection channels')
-                check = dict(chip=chip, projection=name, max_projection_error=float((actual_projection.double() - expected).abs().max()))
+                check = dict(chip=chip, projection=name, validated_rows=valid, max_projection_error=max_projection_error)
                 if name != 'v':
                     actual_norm = host(normalized[name], chip)
                     expected_norm = head_norm_reference(actual_heads, weights[f'layers.0.self_attn.{name}_norm.weight'])
@@ -168,7 +183,7 @@ def main():
                     check['norm_max_ulps'] = int(distance.max())
                     if check['norm_max_ulps'] > 2:
                         raise AssertionError('Head normalization gate failed')
-                    tables = rope_tables(4127 if name == 'q' else 4096, actual_heads.shape[2])
+                    tables = rope_tables(query_start if name == 'q' else 4096, actual_heads.shape[2])
                     expected_rope = rope_reference(actual_norm, *tables)
                     actual_rope = host(rotated[name], chip)
                     torch.testing.assert_close(actual_rope.float(), expected_rope.float(), rtol=.01, atol=.01)

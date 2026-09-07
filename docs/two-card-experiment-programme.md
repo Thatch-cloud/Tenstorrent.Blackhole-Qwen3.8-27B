@@ -1271,3 +1271,19 @@ eight-column tasks (14.6% lower). Ranges1.516678..1.790549ms and
 improvement, not a robust whole-request gain. Next integrate the measured QK/PV
 placements into complete long-context learned attention and measure that pipeline
 before further microkernel tuning. No200 committed-token/s result is established.
+
+### Long-context learned-attention integration diagnostic (2026-09-08)
+
+The simulator diagnostic now accepts context2048 as well as its context31 control.
+It derives2080 padded K/V rows,2056 valid projection rows and absolute query
+position6144 from the same4096 context start. Projection validation processes all
+valid rows in32-row CPU reference chunks to bound reference memory, not to sample
+away rows. Head layout, normalization, RoPE, sliding/noncausal-block attention,
+O projection and fabric-sum gates retain their existing numerical bounds.
+
+`--wide-dot-placement` selects110-worker cached QK and eight-column110-worker
+cached PV tasks. It requires cached fused dots and remains simulator-only.
+Run `20260907T132957Z-306` was launched for the long-context integrated gate and
+is still running; there is no pass claim yet. Host tests:527 passed. Full target
+feature history, convolution/MLP integration and request throughput remain separate
+outstanding requirements; this diagnostic does not complete them.

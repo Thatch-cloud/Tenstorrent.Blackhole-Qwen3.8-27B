@@ -8,6 +8,13 @@ from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_att
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_wide_dot_placement_requires_cached_fused_dots(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        for fused, cache in ((False, False), (True, False)):
+            with self.assertRaises(ValueError):
+                composed_draft_attention(operations, object(), query, key, value, mask,
+                    fused_dots=fused, cache_dot_tiles=cache, wide_dot_placement=True)
+
     def test_cached_tiles_require_fused_dots(self):
         operations, query, key, value, mask = self.operations_fixture()
         with self.assertRaises(ValueError):
