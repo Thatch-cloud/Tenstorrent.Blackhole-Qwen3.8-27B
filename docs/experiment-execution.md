@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Full-model eight-row/shared-mask replay34081751556 (`20d9afa`) passed and its
+  artifacts were inspected:24 exact batch checks,16 rollback checks,4 negative
+  control pairs and36 changed-metadata replay cases at4096/16384. T16 captures
+  one mask program per forward, T32 two, and T2 zero with native fallback.
+  All logits, refreshed prefixes, valid KV, inactive slots and two corrected
+  continuation steps pass; helper/adapter hashes match the worktree. This
+  clears the full-model prerequisite for the matched request width benchmark,
+  but does not itself measure committed throughput.
 - Prepared `full-attention-engine-wide` and its explicit CLI option, not yet
   dispatched. It measures an ABBA block of actual lookup requests per context:
   four-row replay control versus eight-row replay candidate. Both arms use
