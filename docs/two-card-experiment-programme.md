@@ -1102,3 +1102,21 @@ for exact stability. Timing includes dispatch, allocation, synchronization and
 temporary cleanup, excluding uploads/readback/final output release. Simulator
 `20260907T123043Z-305` passes all twelve width/arm/rank correctness records.
 This is a reduction-only cost comparison, not full attention or request timing.
+
+Hardware `34122410907` on `53ccfef` passes twelve reduction checks, all thirty
+timed repeated-output checks, and both learned-attention control/candidate gates.
+The fused candidate retains the same reported attention errors and exact fabric
+sums. Five-sample warm medians (milliseconds) are:
+
+| Padded key width | Pairwise reduction | Fused SFPU reduction |
+| --- | ---: | ---: |
+| 32 | 0.617333 | 0.148081 |
+| 64 | 0.687814 | 0.146431 |
+| 2080 | 1.289776 | 0.169591 |
+
+The isolated measured speedup is about4.2x/4.7x/7.6x, saving0.469/0.541/1.120ms
+per measured reduction invocation across the mesh. These are synchronized host
+latencies including allocation/temporary cleanup, not pure device kernel time.
+Small sample counts and observed latency variation require end-to-end retesting;
+do not multiply this speedup into model throughput. QK/PV remain allocation-heavy,
+the full drafter remains incomplete, and200 committed tokens/s remains unproven.
