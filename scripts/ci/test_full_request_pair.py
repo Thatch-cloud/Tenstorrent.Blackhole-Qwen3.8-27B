@@ -5,6 +5,27 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_width_comparison_keeps_replay_and_masks_fixed(self):
+        def measure(*, attention_wide):
+            return dict(self.record(attention_wide), attention_wide=attention_wide, norm_batch=True,
+                family_routing=True, attention_replay=True, attention_mask_once=True,
+                replay_group_rows=8 if attention_wide else 4)
+
+        records, summary = measure_requests(measure, arm_key='attention_wide')
+        self.assertEqual([entry['replay_group_rows'] for entry in records], [4, 8, 8, 4])
+        self.assertEqual(summary['arm_key'], 'attention_wide')
+        self.assertEqual(summary['decode_speedup'], 1.25)
+        for key, value in (('norm_batch', False), ('family_routing', False), ('attention_replay', False),
+                           ('attention_mask_once', False), ('replay_group_rows', 4), ('replay_group_rows', 8.0)):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='attention_wide')
+        invalid = deepcopy(records)
+        invalid[0]['replay_group_rows'] = 8
+        with self.assertRaises(ValueError):
+            summarize_requests(invalid, arm_key='attention_wide')
+
     def test_attention_comparison_keeps_norm_and_family_routing_fixed(self):
         def measure(*, attention_replay):
             return dict(self.record(attention_replay), norm_batch=True, attention_replay=attention_replay, family_routing=True)

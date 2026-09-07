@@ -12,6 +12,15 @@ spec.loader.exec_module(full_prefix)
 
 
 class FullPrefixTests(unittest.TestCase):
+    def test_wide_request_requires_engine_and_native_scratch(self):
+        for flags, scratch in (([], '1'), (['--attention-engine'], '0')):
+            environment = {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1',
+                           'QWEN_SDPA_TREE_SCRATCH_ROUNDS': scratch}
+            with patch.dict('os.environ', environment, clear=True), patch(
+                    'sys.argv', ['full-prefix.py', '--attention-engine-wide', *flags]):
+                with self.assertRaisesRegex(ValueError, 'Wide request comparison'):
+                    full_prefix.main()
+
     def test_wide_replay_requires_attention_and_compact_native_scratch(self):
         for flags in ([], ['--attention-replay']):
             with patch.dict('os.environ', {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'}, clear=True), patch(

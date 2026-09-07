@@ -90,7 +90,10 @@ def main():
     parser.add_argument('--attention-mask-once', action='store_true')
     parser.add_argument('--replay-group-rows', type=int, choices=(4, 8), default=4)
     parser.add_argument('--attention-engine', action='store_true')
+    parser.add_argument('--attention-engine-wide', action='store_true')
     options = parser.parse_args()
+    if options.attention_engine_wide and (not options.attention_engine or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
+        raise ValueError('Wide request comparison requires attention engine and process-fixed compact scratch')
     if options.replay_group_rows == 8 and (not options.attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
         raise ValueError('Eight-row replay requires replay attention and process-fixed compact scratch')
     if options.attention_mask_once and not options.attention_replay:
@@ -190,11 +193,14 @@ def main():
         report['attention_mask_once_simulator_prerequisite'] = '20260907T030808Z-298'
         report['attention_mask_once_scope'] = f'One shared mask refresh per sixteen-layer forward; {options.replay_group_rows}-row reader, native math unchanged'
     report['attention_engine'] = options.attention_engine
+    report['attention_engine_wide'] = options.attention_engine_wide
     if options.attention_engine:
         from sdpa_tree_scratch import audit
-        report['attention_engine_native_sources'] = audit('/opt/tt-metal')
-        report['attention_engine_replay_prerequisite'] = 34070163839
+        report['attention_engine_native_sources'] = audit('/opt/tt-metal', patched=options.attention_engine_wide)
+        report['attention_engine_replay_prerequisite'] = 34081751556 if options.attention_engine_wide else 34070163839
         report['attention_engine_scope'] = 'Both request arms use norm batching and identical mask-family proposal limits'
+        if options.attention_engine_wide:
+            report['attention_engine_scope'] = 'Four versus eight-row replay; both arms share masks and identical compact native scratch'
         report['attention_engine_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('attention_request_plan.py', 'attention_replay.py', 'attention_mask_replay.py',
                          'attention_mask_replay.cpp', 'model_batch.py', 'verifier_engine.py', 'verifier_inputs.py')}
@@ -564,10 +570,14 @@ def main():
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
-                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False):
+                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False):
                     result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
                         live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
-                        norm_batch=norm_batch, attention_replay=attention_replay, family_routing=options.attention_engine)
+                        norm_batch=norm_batch, attention_replay=attention_replay or options.attention_engine_wide,
+                        family_routing=options.attention_engine, attention_mask_once=options.attention_engine_wide,
+                        replay_group_rows=8 if attention_wide else 4)
+                    if options.attention_engine_wide:
+                        result['attention_wide'] = attention_wide
                     report.setdefault('request_checks', []).append(result)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(result), flush=True)
@@ -578,7 +588,7 @@ def main():
                 if options.norm_batch:
                     from full_request_pair import measure_requests
                     unused_requests, comparison = measure_requests(request_measure,
-                        arm_key='attention_replay' if options.attention_engine else 'norm_batch')
+                        arm_key='attention_wide' if options.attention_engine_wide else 'attention_replay' if options.attention_engine else 'norm_batch')
                     comparison['length'] = len(prompt)
                     report.setdefault('request_comparisons', []).append(comparison)
                     output_path.write_text(json.dumps(report, indent=2))

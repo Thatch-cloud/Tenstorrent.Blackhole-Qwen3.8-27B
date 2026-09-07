@@ -4,7 +4,7 @@ import math
 
 
 def summarize_requests(requests, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide'):
         raise ValueError('Known matched request experiment required')
     if len(requests) != 4 or [entry[arm_key] for entry in requests] != [False, True, True, False]:
         raise ValueError('One complete control/candidate/candidate/control request block required')
@@ -18,6 +18,12 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
             raise ValueError('Explicit boolean arm selection required')
         if arm_key == 'attention_replay' and (entry.get('norm_batch') is not True or entry.get('family_routing') is not True):
             raise ValueError('Both attention arms require identical norm batching and family routing')
+        if arm_key == 'attention_wide':
+            if any(entry.get(key) is not True for key in ('norm_batch', 'family_routing', 'attention_replay', 'attention_mask_once')):
+                raise ValueError('Both width arms require identical replay, shared masks, norm batching and routing')
+            width = entry.get('replay_group_rows')
+            if type(width) is not int or width != (8 if entry[arm_key] else 4):
+                raise ValueError('Width comparison requires four-row control and eight-row candidate')
         if any(entry[key] is not True for key in ('exact', 'state_exact', 'inactive_exact')):
             raise ValueError('Every request must pass native correctness')
         if any(entry[key] != reference[key] for key in identity):
@@ -53,7 +59,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
 
 
 def measure_requests(measure, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide'):
         raise ValueError('Known matched request experiment required')
     requests = [measure(**{arm_key: enabled}) for enabled in (False, True, True, False)]
     return requests, summarize_requests(requests, arm_key=arm_key)

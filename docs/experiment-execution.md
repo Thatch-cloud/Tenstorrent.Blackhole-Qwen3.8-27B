@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Prepared `full-attention-engine-wide` and its explicit CLI option, not yet
+  dispatched. It measures an ABBA block of actual lookup requests per context:
+  four-row replay control versus eight-row replay candidate. Both arms use
+  shared masks, norm batching, identical native compact scratch, mask-family
+  routing and fresh request trace lifetimes. Summaries reject changed replay
+  settings, wrong group widths, different proposals/acceptance or failed native
+  output/state checks; setup and committed decode remain separate. All436 host
+  tests and shell syntax checks pass. Dispatch waits for inspection of the
+  full-model replay artifacts from34081751556, which is still running.
 - Full-model eight-row/shared-mask replay run34081751556 (`20d9afa`) is running.
   The next actual-request measurement helper now forwards and records replay
   group width and shared-mask selection, rejecting invalid geometry before
