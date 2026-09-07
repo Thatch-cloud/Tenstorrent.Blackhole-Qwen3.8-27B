@@ -1146,3 +1146,11 @@ Inspection-free learned attention `20260907T124315Z-759` also passes all eight
 checks with fused QK/PV and fused denominator reduction. Output head ordering and
 fabric sums remain exact. This establishes the short-context integrated numerical
 gate only; synthetic long-context dot checks are not full long-context attention.
+
+The opt-in CI suite now adds hardware gates for the three simulator-validated
+dot shapes plus fused learned attention. Each dot probe takes five warm samples,
+checking exact repeat stability on both ranks; timing includes output allocation,
+dispatch and synchronization, excluding uploads/readback/output release. This
+measures the new dot implementation's absolute cost, not a matched speedup over
+the earlier outer-product reference. Existing pairwise learned-attention and
+fused-denominator controls remain in the suite. Host tests:522 passed.

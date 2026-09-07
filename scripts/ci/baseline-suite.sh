@@ -20,6 +20,15 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
     OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/learned-attention-probe.py \
         --hardware --fp32-rope --explicit-softmax --fused-row-sum --pairwise-dots \
         --fixture /experiment-projection-fixture --output /experiment/results/learned-attention-fused-sum.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/draft-dot-probe.py \
+        --hardware --timing --keys 32 --width 128 --output /experiment/results/draft-dot-short.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/draft-dot-probe.py \
+        --hardware --timing --keys 2080 --width 128 --output /experiment/results/draft-dot-qk-long.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/draft-dot-probe.py \
+        --hardware --timing --keys 128 --width 2080 --output /experiment/results/draft-dot-pv-long.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/learned-attention-probe.py \
+        --hardware --fp32-rope --explicit-softmax --fused-row-sum --fused-dots \
+        --fixture /experiment-projection-fixture --output /experiment/results/learned-attention-fused-dots.json
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-convolution ]; then
