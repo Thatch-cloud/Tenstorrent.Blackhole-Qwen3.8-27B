@@ -2073,3 +2073,17 @@ executions, retaining full stage validation outside each timed region. Samples
 cover eager MLP dispatch, activation allocation, collectives and synchronization;
 weight/input transfer and host reference checks are excluded. This is a branch
 cost measurement, not traced latency, an upload-inclusive A/B or full drafter TPS.
+
+### Learned MLP trace-replay prerequisite
+
+Simulator223954Z preallocates all nine learned parameter tensors, both host input
+payloads and one persistent device input before capture. It first validates eager
+outputs for seeds731/732 against the existing stage references, then captures the
+unchanged prepared MLP execution. Input copies update the same device allocation
+for the731/732/731 replay sequence. Both-chip final outputs must exactly match
+their validated eager references, with immutable input contents and stable input,
+parameter and output addresses. An extra replay without an input update must
+retain the old output and fail comparison to the other input's reference.
+Trace ownership is released before activation/parameter buffers. This new gate
+has no hardware mode or timing claim until simulation passes. Hardware34167225933
+separately measures the already validated eager parameter-reuse path.

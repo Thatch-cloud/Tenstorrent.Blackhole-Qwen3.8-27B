@@ -12,6 +12,13 @@ from draft_mlp_branch import execute_mlp_branch, prepare_mlp_branch
 
 
 class DraftMLPParameterTests(unittest.TestCase):
+    def test_trace_gate_does_not_allow_unvalidated_hardware_promotion(self):
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('draft-mlp-trace-probe.py')),
+            '--fixture', '/missing', '--convolution-fixture', '/missing', '--output', '/missing', '--hardware'],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('unrecognized arguments: --hardware', result.stderr)
+
     def test_simulator_timing_is_rejected_before_fixture_loading(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SLOW_DISPATCH_MODE', 'TT_METAL_MOCK_CLUSTER_DESC_PATH')}
