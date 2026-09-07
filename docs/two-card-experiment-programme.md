@@ -1476,3 +1476,16 @@ All542 host tests pass, including rejection of complete-layer hardware before
 fixture access. Hardware attention run34138908364 remains a separate gate.
 Five learned layers, projected target-feature inputs, selector, transactional
 history and real coding acceptance/committed throughput remain outstanding.
+
+While the complete layer-zero simulator runs, the remaining four learned
+layers are being staged from the same pinned DFlash2 checkpoint. Each layer
+selects15 attention/convolution/normalization/MLP tensors,665948672 bytes;
+four layers require2663794688 bytes. Layer-zero fixtures are not downloaded
+again. The staging utility retains bounded range reads, pinned header and
+geometry checks, streaming hashes and refusal to overwrite existing data.
+Each layer has a separate directory under
+`hardware-evidence.local/dflash2-remaining-layers-dedf8df`. No remote code is
+executed and these new tensors are not yet accepted by a loader: complete
+download, hash pinning and finite BF16 verification remain required. All545
+host tests pass, including exact tensor counts/bytes and invalid-selection
+rejection before network access. No five-layer runtime pass is claimed.
