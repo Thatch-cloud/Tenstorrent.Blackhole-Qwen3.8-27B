@@ -1585,3 +1585,28 @@ were independently rehashed, pinned and verified as finite BF16 in WSL.
 Layers0-2 and selector/final norm are now available as verified fixtures;
 layers3-4 continue downloading. No layer2 or selector device pass is claimed.
 The existing long-context simulation and queued two-layer test are unchanged.
+
+## Eight-token cycle budget: verifier optimization is mandatory
+
+Reinspection of hardware34075945160's actual T8 timing records gives median
+static verifier costs64.4438705ms at4095 context and66.1075116ms at16383.
+These are captured full-logit blocks with one preselected end checkpoint,
+excluding drafting, dynamic selection and complete speculative commit. They are
+historical measurements, not a fresh end-to-end DFlash2 benchmark.
+
+For the trained block-eight path (seven proposals plus one target correction/
+bonus), even perfect acceptance and zero other overhead would allow only
+124.139/121.015 committed tokens/s if those verifier costs remain applicable.
+200 tokens/s requires the entire eight-token cycle to fit within40ms. Thus the
+verifier alone needs at least37.9/39.5 percent lower latency before allocating
+any time to drafting, selection or commit; real acceptance requires more headroom.
+Finishing the drafter port alone cannot satisfy the target on this baseline.
+
+`verification_budget.py` derives these bounds from the saved hardware JSON,
+records its SHA256 and assumptions, and rejects failed/missing timing evidence.
+Output: `hardware-evidence.local/dflash2-eight-row-verifier-budget.json`.
+All560 host tests pass. Priority alongside completing the trained drafter is a
+matched T8 verifier-cost attribution/optimization gate, not reliance on a T32
+timing or a selector speedup as proof of200 committed tokens/s. Wider proposal
+experiments must separately establish acceptance and target-state correctness;
+the trained block-eight contract is not silently widened.
