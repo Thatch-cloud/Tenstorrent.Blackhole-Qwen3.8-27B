@@ -372,6 +372,8 @@ if [ "${QWEN_RUN_MODE:-baseline}" = gdn-inplace-timing ]; then
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = gdn-checkpoint-cost ]; then
+    PYTHONPATH="/experiment-scripts/ci:$PYTHONPATH" timeout -k 30 240 python3 /experiment-optimisation/sim/gdn-prefix-copy.py \
+        --hardware --output /experiment/results/gdn-prefix-copy.json
     timeout -k 30 1800 python3 /experiment-scripts/ci/gdn-prefix.py --batch-output --active-snapshot --direct-snapshot --working-state --paired-timing --checkpoint-diagnostics
     exit 0
 fi

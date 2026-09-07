@@ -1779,3 +1779,13 @@ the simulator correctness gate for opt-in zero-tile reuse, not its hardware
 timing or full-model promotion gates. A five-distinct-layer simulator run with
 the final learned norm/selector projection is next; the earlier intermittent
 two-layer mismatch remains unexplained and numerical tolerances stay fixed.
+
+The checkpoint-cost CI suite now begins with the simulator-validated prefix-copy
+gate on explicitly allocated hardware. It preserves all63 exact padding cases,
+then captures48 copies to shared hot buffers per arm for each width, alternating
+five measured control/candidate replay pairs after warmup. Every replay checks
+both ranks' physical output. Timings include blocking host dispatch and exclude
+uploads/readback; this isolates the copy candidate but is not a model-level
+speedup or a realistic distinct-layer working-set measurement. Existing GDN
+checkpoint diagnostics still run afterward. No production call site enables
+zero-tile reuse. The five-layer simulator and profiler CI remain independent.

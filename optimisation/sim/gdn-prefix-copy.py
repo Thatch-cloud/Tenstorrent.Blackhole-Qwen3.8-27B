@@ -1,10 +1,12 @@
-"""Simulator-only prefix-copy comparison including every physical padding element."""
+"""Prefix-copy physical-padding correctness and optional hardware-only trace timing."""
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/ci'))
 from gdn_conv_prefix_copy import copy_prefix
@@ -12,19 +14,32 @@ from gdn_multitoken_conv import release_owned
 
 
 def main():
-    if not os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE') != '1':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--output', type=Path)
+    options = parser.parse_args()
+    if options.hardware:
+        from feature_projection import require_projection_environment
+        require_projection_environment(os.environ, True)
+        if options.output is None:
+            parser.error('Hardware output path required')
+    elif not os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE') != '1':
         raise RuntimeError('Dedicated slow-dispatch simulator required')
     import torch
     import ttnn
 
-    root = Path(__file__).resolve().parents[2] / 'scripts/ci'
-    path = Path(os.environ['QWEN_SIM_REPORT'])
-    report = dict(passed=False, scope=__doc__, checks=[], hashes={suffix:
+    root = Path(copy_prefix.__code__.co_filename).resolve().parent
+    path = options.output or Path(os.environ['QWEN_SIM_REPORT'])
+    report = dict(passed=False, scope=__doc__, checks=[], timings=[], backend='hardware' if options.hardware else 'simulator',
+        timing_scope='48 copies to shared hot buffers per trace; blocking host replay time, not full-model latency', hashes={suffix:
         hashlib.sha256((root / f'gdn_conv_prefix_copy.{suffix}').read_bytes()).hexdigest() for suffix in ('py', 'cpp')})
     mesh = None
     owned = []
     try:
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        if options.hardware:
+            ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576,
+            trace_region_size=8388608 if options.hardware else 0)
         mesh.enable_program_cache()
         generator = torch.Generator().manual_seed(38148)
 
@@ -60,6 +75,35 @@ def main():
                                 raise AssertionError(f'Prefix or physical padding mismatch: rows={rows}, prefix={prefix}, candidate={candidate}')
                 report['checks'].append(dict(rows=rows, prefix=prefix, both_chips=True, physical_padding_exact=True))
                 path.write_text(json.dumps(report, indent=2))
+            if options.hardware:
+                from attention_batch import capture_operation
+                traces = {}
+                try:
+                    for candidate, targets in zip((False, True), destinations, strict=True):
+                        def block():
+                            for _ in range(48):
+                                copy_prefix(mesh, sources, targets, rows, reuse_zero_tile=candidate)
+                        block()
+                        ttnn.synchronize_device(mesh)
+                        traces[candidate], _ = capture_operation(ttnn, mesh, block)
+                    for repetition in range(6):
+                        for candidate in ((False, True) if repetition % 2 == 0 else (True, False)):
+                            ttnn.synchronize_device(mesh)
+                            started = time.perf_counter()
+                            ttnn.execute_trace(mesh, traces[candidate], cq_id=0, blocking=True)
+                            elapsed = (time.perf_counter() - started) * 1000
+                            for slot, target in enumerate(destinations[int(candidate)]):
+                                expected = torch.zeros((1, 32, 5120), dtype=torch.bfloat16)
+                                expected[:, :1] = host_sources[slot][:, -1:]
+                                for shard in ttnn.get_device_tensors(target):
+                                    if not torch.equal(shard.cpu().to_torch_with_padded_shape(), expected):
+                                        raise AssertionError('Trace replay changed prefix or physical padding')
+                            if repetition:
+                                report['timings'].append(dict(rows=rows, candidate=candidate,
+                                    repetition=repetition, copies=48, ms=elapsed, exact=True))
+                finally:
+                    for trace in traces.values():
+                        ttnn.release_trace(mesh, trace)
             for source, expected in zip(sources, host_sources, strict=True):
                 if not all(torch.equal(ttnn.to_torch(shard), expected) for shard in ttnn.get_device_tensors(source)):
                     raise AssertionError('Read-only packed source changed')
@@ -76,6 +120,8 @@ def main():
         path.write_text(json.dumps(report, indent=2))
     if len(report['checks']) != 63:
         raise AssertionError('All supported prefixes required')
+    if options.hardware and len(report['timings']) != 60:
+        raise AssertionError('Six widths and five paired timing repetitions required')
     report['passed'] = True
     path.write_text(json.dumps(report, indent=2))
 

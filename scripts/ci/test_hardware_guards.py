@@ -44,6 +44,13 @@ class HardwareGuardTests(unittest.TestCase):
         script = Path(__file__).resolve().parents[2] / "optimisation/sim/prefill-state.py"
         self.assertIn("Simulator required", self.run_guard(script, [], TT_METAL_SIMULATOR=""))
 
+    def test_prefix_copy_requires_explicit_backend(self):
+        script = Path(__file__).resolve().parents[2] / 'optimisation/sim/gdn-prefix-copy.py'
+        self.assertIn('Dedicated slow-dispatch simulator required',
+            self.run_guard(script, [], TT_METAL_SIMULATOR=''))
+        self.assertIn('Explicit allocation and non-simulated hardware required',
+            self.run_guard(script, ['--hardware'], TT_METAL_SLOW_DISPATCH_MODE=''))
+
     def allocation_probe(self, device_count=2):
         spec = importlib.util.spec_from_file_location("device_owners", Path(__file__).with_name("device-owners.py"))
         module = importlib.util.module_from_spec(spec)
