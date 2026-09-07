@@ -1341,3 +1341,21 @@ The operation-sequence CPU test and existing suite pass535 tests; the device gat
 has not yet run because the long-context attention simulator remains active.
 No second simulator process is started concurrently, and no MLP hardware pass,
 fused-kernel speedup or complete draft-layer integration is claimed.
+
+The long-context simulator diagnostic `20260907T140423Z-302` completed all
+numerical checks and mesh cleanup, writing `passed=true`. Both ranks validate
+all2056 valid K/V rows, eight Q rows, normalization within one BF16 ULP,
+unchanged RoPE tolerances, attention/output projection and exact fabric sums.
+Maximum attention errors are1.8119812e-5 and1.4305115e-5. This validates the
+cached110-worker QK and split-column PV integration, not request throughput.
+The outer shell exited1 after the diagnostic completed: editing its live script
+to add the MLP probe changed its read offsets, producing an EOF parse error.
+Consequently there is no wrapper exit-status file and this is a numerical
+diagnostic pass, not a clean wrapper run. The JSON is written true only after
+successful tensor release and mesh close. Do not edit running shell scripts.
+
+The hardware attention suite now includes only this precise validated long
+configuration, with3600 seconds for its complete CPU references inside the
+existing4800-second suite deadline. Short-context controls remain intact.
+No long-context hardware result is claimed yet. The separate learned MLP
+simulator gate has started after the attention process terminated.

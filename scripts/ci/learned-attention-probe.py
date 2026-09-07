@@ -34,8 +34,10 @@ def main():
     parser.add_argument('--wide-dot-placement', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.hardware and (options.context != 31 or options.wide_dot_placement):
-        parser.error('Long-context and wide placement integration require simulator validation')
+    if options.hardware and (options.context != 31 or options.wide_dot_placement) and not (
+            options.context == 2048 and options.wide_dot_placement and options.cache_dot_tiles
+            and options.fused_dots and options.fused_row_sum):
+        parser.error('Long-context hardware requires the simulator-validated cached wide fused path')
     if not options.hardware and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required for output reduction')
     if options.hardware and (not all((options.fp32_rope, options.explicit_softmax))

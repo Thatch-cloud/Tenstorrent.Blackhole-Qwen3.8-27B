@@ -44,6 +44,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-attention ]; then
     OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/draft-dot-probe.py \
         --hardware --timing --cache-tiles --workers 110 --keys 128 --width 2080 --columns-per-task 8 \
         --output /experiment/results/draft-dot-cached-pv-split110.json
+    OMP_NUM_THREADS=1 timeout -k 30 3600 python3 /experiment-scripts/ci/learned-attention-probe.py \
+        --hardware --context 2048 --fp32-rope --explicit-softmax --fused-row-sum --fused-dots \
+        --cache-dot-tiles --wide-dot-placement --fixture /experiment-projection-fixture \
+        --output /experiment/results/learned-attention-long-wide.json
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-convolution ]; then
