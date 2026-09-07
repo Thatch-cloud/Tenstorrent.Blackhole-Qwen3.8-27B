@@ -8,6 +8,7 @@ from pathlib import Path
 
 from draft_projection_fixture import MODEL, REVISION
 from feature_projection import concatenate_local_features, projection_shards, sparse_input_permutation
+from projection_rounding import grouped_projection_reference
 
 
 def main():
@@ -43,7 +44,7 @@ def main():
         tolerance=dict(rtol=1e-4, atol=1e-4), active_k=options.active_k, k_stride=options.k_stride,
         fidelity=options.fidelity, matched_operands=True, packer_l1_acc=False, sources={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ('feature-projection-probe.py', 'feature_projection.py', 'draft_projection_fixture.py')})
+            for name in ('feature-projection-probe.py', 'feature_projection.py', 'draft_projection_fixture.py', 'projection_rounding.py')})
     mesh = device_weight = None
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
@@ -96,7 +97,14 @@ def main():
                 if torch.allclose(wrong, reference, rtol=1e-4, atol=1e-4):
                     raise AssertionError('Fixture cannot distinguish rank-major from tap-major feature order')
                 for chip, (value, expected) in enumerate(zip(actual, partials, strict=True)):
+                    phase_count = dict(LoFi=1, HiFi2=2, HiFi3=3, HiFi4=4)[options.fidelity]
+                    grouped = grouped_projection_reference(local_inputs[chip], packed[chip], phases=phase_count)
+                    reversed_grouped = grouped_projection_reference(local_inputs[chip], packed[chip],
+                        phases=phase_count, reverse_sources=True)
                     check = dict(rows=rows, chip=chip, shape=list(value.shape), dtype=str(value.dtype),
+                        grouped_product_max_error=float((value.double() - grouped).abs().max()),
+                        reversed_grouped_product_max_error=float((value.double() - reversed_grouped).abs().max()),
+                        grouped_reference_scope='Diagnostic only; excludes FP32 destination rounding',
                         max_abs_error=float((value.double() - expected).abs().max()), layout_exact=True,
                         wrong_order_detected=True, passed=False,
                         bf16_representable=bool(torch.equal(value, value.bfloat16().float())),

@@ -5,6 +5,25 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Added an independent CPU grouped-product diagnostic in
+  `scripts/ci/projection_rounding.py`, following the pinned MVMUL phase widths
+  and group-eight exponent alignment described below. It deliberately excludes
+  destination accumulator rounding, rejects unsupported subnormal/nonfinite
+  inputs and does not replace the existing pass gate. Two-term run
+  `20260907T093402Z-313` agrees EXACTLY with this reference in all six
+  row/chip checks; reversed SrcA/SrcB precision is a negative control and
+  differs in all six. This confirms operand orientation as well as grouping.
+  Full12800-term run `20260907T093516Z-484` still fails the original float64
+  gate, but residual max errors against grouped products are
+  0.00066805/0.00080834 (T1),0.00085064/0.00091236 (T8), and
+  0.00109073/0.00097644 (T32), versus0.01069..0.02122 against exact products.
+  Thus grouped-product rounding explains most, but not all, dense discrepancy.
+  Next model destination normalization/rounding and actual phase accumulation
+  order; do not label the remaining residual as proven hardware behavior.
+  All478 host tests pass, including independent single-product, equal-exponent,
+  group-boundary, zero-shape and invalid-input reference checks. No changed
+  tolerance, hardware promotion, speed claim or serving defaults.
+
 - Numerical root narrowed to TTsim's grouped product alignment, not simply
   missing HiFi4 phases or FP32 output truncation. The installed simulator is
   v1.10.3; its source commit is `8cad2b0c48340f5de6f6ab9b80be13a85ce16b2d`.

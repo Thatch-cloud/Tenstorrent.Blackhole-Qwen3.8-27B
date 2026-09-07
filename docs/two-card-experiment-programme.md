@@ -14,6 +14,10 @@ separating by four fails. This is not a viable dense-projection optimization
 by itself. Next distinguish ISA-expected error from implementation error, then
 measure trained-drafter acceptance with exact target verification rather than
 treating an arbitrary float64 comparison tolerance as coding quality.
+The new grouped-product CPU diagnostic exactly matches the two-term simulator
+case; on the dense12800-term slice it reduces unexplained maximum errors to
+0.00067..0.00109. Destination rounding and accumulation order remain to be
+modeled before this reference can serve as an implementation-correctness gate.
 
 Actual matched request run34084598829 passes native token/state/KV checks at
 **23.883 committed decode tok/s at4078 tokens and20.608 at16363 tokens**
