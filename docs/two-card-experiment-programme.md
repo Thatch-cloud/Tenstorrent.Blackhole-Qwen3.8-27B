@@ -1861,3 +1861,16 @@ and requires exact native separate-projection/SwiGLU output on both chips.
 This is prepared, not yet executed, and does not validate target-model weights,
 coding quality, or batched performance. It follows the active learned-stack and
 queued shared-head gates rather than contending for simulator devices.
+
+### Five-layer simulator gate completed
+
+Run174646Z passed all five distinct pinned learned layers, both chips and the
+final learned normalization/selector hidden projection; exit0 and clean mesh
+closure were verified. Final normalization is within one BF16 ULP, selector
+projection error is zero and its BF16 cast is exact on both chips. The earlier
+intermittent two-layer down mismatch did not recur. Evidence is preserved as
+hardware-evidence.local/sim-five-layers-20260907T174646Z.json with its exit status.
+This remains a synthetic-input31-context mathematical gate, not real target
+feature history, full shared-head/selector token selection, acceptance, coding
+quality or throughput validation. The independent full-vocabulary shared-head
+simulator test started only after this process terminated.
