@@ -91,6 +91,14 @@ Re-register the exact graft sources and verify the loaded-library ABI before
 another scratch experiment; this issue is separate from the passing unmodified
 runtime attention tests.
 
+Next hardware gate `attention-replay`: twelve fixtures across T8/T16/T32,4K/16K
+and two seeds. Each captures one prepared reader, refreshes both query and position
+inputs at the same addresses, checks forward/end-of-family/rollback tickets against
+independently computed native B1 outputs on both chips, and verifies full K/V
+buffers remain unchanged. Expected coverage is96 chip/ticket checks and48 trace
+replays. No cache writes or GDN histories are involved yet; real-layer and retained
+full-model replay certification remain required before request-path integration.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,

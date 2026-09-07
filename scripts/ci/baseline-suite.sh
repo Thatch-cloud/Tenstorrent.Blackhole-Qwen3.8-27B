@@ -99,6 +99,11 @@ if [ "${QWEN_RUN_MODE:-baseline}" = attention-mask-replay ]; then
     timeout -k 30 600 python3 /experiment-scripts/ci/attention-mask-replay.py
     exit 0
 fi
+if [ "${QWEN_RUN_MODE:-baseline}" = attention-replay ]; then
+    timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    timeout -k 30 1800 python3 /experiment-scripts/ci/attention-replay.py
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = attention-timing ]; then
     timeout -k 30 1800 python3 /experiment-scripts/ci/attention-batch.py --timing --ordered-cache
     exit 0
