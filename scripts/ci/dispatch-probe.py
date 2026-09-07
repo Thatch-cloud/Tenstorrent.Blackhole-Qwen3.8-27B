@@ -39,12 +39,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dispatch', choices=('worker', 'ethernet'), required=True)
     parser.add_argument('--fabric', choices=('1d', 'none'), default='1d')
+    parser.add_argument('--mesh-graph', choices=('auto', 'p300'), default='auto')
     parser.add_argument('--output', type=Path, required=True)
     options = parser.parse_args()
     report = dict(passed=False, backend=backend(os.environ), dispatch=options.dispatch, fabric=options.fabric, checks=[],
         scope='Explicit fabric configuration, reported grid, replicated transfers and exact changed-input add trace; no collective or model performance claim')
     report['probe_sha256'] = file_hash(__file__)
     root = Path(os.environ['TT_METAL_HOME'])
+    if options.mesh_graph == 'p300':
+        graph = root / 'tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto'
+        if not graph.is_file():
+            raise ValueError('Installed P300 mesh graph required')
+        os.environ['TT_MESH_GRAPH_DESC_PATH'] = str(graph)
+        report['mesh_graph'] = dict(path=str(graph), sha256=file_hash(graph))
     report['source_hashes'] = {name: file_hash(root / name) for name in (
         'ttnn/core/device.cpp', 'tt_metal/llrt/core_descriptor.cpp',
         'tt_metal/impl/context/metal_env_impl.hpp',
@@ -55,6 +62,11 @@ def main():
     if os.environ.get('TT_METAL_MOCK_CLUSTER_DESC_PATH'):
         report['mock_cluster'] = dict(path=os.environ['TT_METAL_MOCK_CLUSTER_DESC_PATH'],
             sha256=file_hash(os.environ['TT_METAL_MOCK_CLUSTER_DESC_PATH']))
+    if os.environ.get('TT_METAL_SIMULATOR'):
+        simulator = Path(os.environ['TT_METAL_SIMULATOR'])
+        sidecar = simulator.parent / 'cluster_descriptor.yaml'
+        report['simulator'] = dict(path=str(simulator), sha256=file_hash(simulator),
+            cluster_sidecar_sha256=file_hash(sidecar) if sidecar.is_file() else None)
     mesh, trace = None, None
     owned = []
 

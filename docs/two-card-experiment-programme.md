@@ -2,6 +2,11 @@
 
 ## Current measured result - 2026-09-07
 
+The simulator fabric-startup blocker is resolved: a missing adjacent cluster
+descriptor caused isolated simulator instances. Opt-in shared BDF loading now
+passes FABRIC_1D startup and changed-input traces. This enables simulator-first
+collective tests; it is not yet a collective, ETH-dispatch or spare-column result.
+
 Full-width simulator projection now passes all5120 outputs on both chips;
 learned RMSNorm on its host-reduced result passes within one BF16 ULP. The
 80-core grid is simulator-tested, not yet a target-model throughput result.

@@ -16,6 +16,14 @@ unset TT_METAL_SLOW_DISPATCH_MODE TT_MESH_GRAPH_DESC_PATH QWEN_HARDWARE_TESTS QW
 test -f "$TT_METAL_SIMULATOR"
 test -f "$TT_METAL_MOCK_CLUSTER_DESC_PATH"
 cp "$TT_METAL_HOME/tt_metal/soc_descriptors/blackhole_140_arch.yaml" "$SIM_ROOT/simulator/soc_descriptor.yaml"
+if [ "${QWEN_SIM_SHARED_BDF:-0}" = 1 ]; then
+    shared="$SIM_ROOT/simulator/shared-bdf"
+    mkdir -p "$shared"
+    cp "$TT_METAL_SIMULATOR" "$shared/libttsim_bh_x2.so"
+    cp "$SIM_ROOT/simulator/soc_descriptor.yaml" "$shared/soc_descriptor.yaml"
+    cp "$TT_METAL_MOCK_CLUSTER_DESC_PATH" "$shared/cluster_descriptor.yaml"
+    export TT_METAL_SIMULATOR="$shared/libttsim_bh_x2.so"
+fi
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 PROBE=${QWEN_SIM_DISPATCH_PROBE:-dispatch-probe}

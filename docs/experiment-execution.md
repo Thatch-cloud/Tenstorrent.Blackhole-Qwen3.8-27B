@@ -5,6 +5,28 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- TTsim fabric-startup blocker resolved without SDK/kernel changes. Explicit
+  P300 mesh graph alone (`20260907T100714Z-288`) still fails at router STARTED,
+  waiting15000ms for the remote handshake. Installed UMD
+  `67b3c0da2bd1e6d960b62dfdd5be98c0772811e0` selects shared BDF multichip
+  loading only when `cluster_descriptor.yaml` sits beside the simulator .so;
+  the externally supplied mock descriptor does not trigger that mode.
+  Previously it loaded isolated simulator instances, explaining the missing
+  cross-chip handshake. `QWEN_SIM_SHARED_BDF=1` now stages an isolated
+  `simulator/shared-bdf` directory containing the SAME .so and both sidecars.
+  Existing simulator defaults are preserved for comparison. No runtime rebuild,
+  timeout relaxation or hardware/serving change was needed.
+  Runs `20260907T101127Z-300` and final-source `20260907T101314Z-299` PASS
+  WORKER/FABRIC_1D startup plus six changed-input transfer/trace checks on the
+ 11x10 grid. Logs confirm shared BDF mode for chip0 and chip1. Simulator SHA
+  remains79287bd7cc1fc0fab28ca7b82567c39311f0dcc6ec2704ab7c4386dfc71abfd4;
+  sidecar and mock hashes both27b7ec074f81fe4b4a1be89a5c39fd6c7eaf2c2d68da8f49bd8faf02a7d3df15.
+  Earlier independent-chip numerical checks remain useful (and the slice was
+  confirmed on hardware), but were NOT fabric validation. Next run the actual
+  learned-feature collective in shared mode. No collective throughput or ETH
+  dispatch/spare-column success is claimed by this startup gate. Host tests491
+  pass. Hardware run34109548525 remains live at this ledger entry.
+
 - Full-width TTsim `20260907T095558Z-298` PASSED: one row,5120 outputs
   on each chip,80-core grids, with every output checked. Arithmetic-reference
   maxima are3.814697265625e-5 /3.0517578125e-5; float64 maxima remain
