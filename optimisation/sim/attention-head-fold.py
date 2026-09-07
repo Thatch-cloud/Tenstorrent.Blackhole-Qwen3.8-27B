@@ -27,10 +27,17 @@ def main():
     parser.add_argument('--parallel-groups', type=int, choices=(1, 2, 3), default=1)
     parser.add_argument('--device-layout', action='store_true')
     parser.add_argument('--dma-layout', action='store_true')
+    parser.add_argument('--dynamic-mask', action='store_true')
     parser.add_argument('--seed', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--capacity', type=int, choices=(64, 128, 256, 4352, 16640), default=256)
     parser.add_argument('--chunk-size', type=int, choices=(32, 64, 128, 256), default=32)
     args = parser.parse_args()
+    if args.dynamic_mask:
+        from attention_mask_replay import validate_ticket
+        if not args.dma_layout or args.parallel_groups != 3:
+            parser.error('Dynamic mask composition requires three DMA groups')
+        validate_ticket(args.start, args.rows, args.capacity)
+        validate_ticket(args.start + 7, args.rows, args.capacity)
     if args.parallel_groups > 1 and (not args.grouped or args.max_group_rows != 4 or args.finite_mask):
         parser.error('Parallel probe requires four-row groups with native masks')
     if args.dma_layout and not args.device_layout:
@@ -49,7 +56,7 @@ def main():
         grouped=args.grouped, seed=args.seed,
         max_group_rows=args.max_group_rows, tree_scratch_rounds=os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') == '1',
         parallel_groups=args.parallel_groups,
-        device_layout=args.device_layout, dma_layout=args.dma_layout,
+        device_layout=args.device_layout, dma_layout=args.dma_layout, dynamic_mask=args.dynamic_mask,
         scope='Query grouping and explicit masks versus native causal B1; optional stock or DMA device layout correctness, no speed certification')
     report['runtime_library_sha256'] = hashlib.sha256((Path(os.environ['TT_METAL_HOME']) /
         'build_Release/lib/_ttnncpp.so').read_bytes()).hexdigest()
@@ -204,6 +211,50 @@ def main():
                 if any(not torch.equal(reference, actual) for reference, actual in zip(expected, host(result), strict=True)):
                     raise AssertionError('Reusable parallel adapter differs from native B1')
                 report['parallel_adapter_exact'] = True
+                if args.dynamic_mask:
+                    from attention_mask_replay import execute as refresh_mask, prepare, source_hashes, validate_ticket
+                    report['mask_sources'] = source_hashes()
+                    words = torch.zeros(8, dtype=torch.int32)
+                    words[0] = args.start
+                    position_input = upload(words, ttnn.int32)
+                    mask_programs = [prepare(mesh, position_input, mask, rows=bundle[0]['rows'],
+                        batches=len(bundle), offset=bundle[0]['offset'], capacity=args.capacity)
+                        for bundle, group_pages, mask, config in metadata]
+                    before_addresses = [tuple(part.buffer_address() for part in ttnn.get_device_tensors(mask))
+                                        for bundle, group_pages, mask, config in metadata]
+                    report['dynamic_checks'] = []
+                    for delta in (7, 0):
+                        start = args.start + delta
+                        validate_ticket(start, args.rows, args.capacity)
+                        stage(f'dynamic-native-{delta}')
+                        if delta:
+                            shifted_outputs = []
+                            for token in range(args.rows):
+                                native = ttnn.transformer.paged_scaled_dot_product_attention_decode(
+                                    upload(query[:, token:token + 1].contiguous()), keys, values,
+                                    page_table_tensor=pages,
+                                    cur_pos_tensor=upload(torch.tensor([start + token], dtype=torch.int32), ttnn.int32),
+                                    scale=0.0625, program_config=native_config, memory_config=ttnn.L1_MEMORY_CONFIG)
+                                owned.append(native)
+                                shifted_outputs.append(host(native))
+                            dynamic_expected = [torch.cat([value[chip] for value in shifted_outputs], dim=1) for chip in range(2)]
+                        else:
+                            dynamic_expected = expected
+                        words[0] = start
+                        staged = ttnn.from_torch(words, dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT,
+                            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                        ttnn.copy_host_to_device_tensor(staged, position_input)
+                        for entry, program in zip(metadata, mask_programs, strict=True):
+                            refresh_mask(position_input, entry[2], program)
+                        result = execute(mesh, ttnn, device_query, keys, values, metadata, owned,
+                            scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)
+                        for chip, (reference, actual) in enumerate(zip(dynamic_expected, host(result), strict=True)):
+                            if not torch.equal(reference, actual):
+                                raise AssertionError('Refreshed mask attention differs from changed-position native B1')
+                            report['dynamic_checks'].append(dict(start=start, chip=chip, exact=True))
+                        if before_addresses != [tuple(part.buffer_address() for part in ttnn.get_device_tensors(mask))
+                                                for bundle, group_pages, mask, config in metadata]:
+                            raise AssertionError('Dynamic mask refresh replaced existing mask buffers')
         if args.device_layout and args.grouped and args.rows >= 8 and args.max_group_rows == 4 and (args.parallel_groups == 1 or args.dma_layout):
             from attention_grouped import GroupedAttentionReader
             stage('prepared-reader-lifetime')

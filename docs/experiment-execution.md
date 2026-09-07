@@ -53,6 +53,18 @@ uses this yet. The hardware `attention-mask-replay` gate will capture the same
 preallocated program and refresh its position input across24 trace replays; it
 does not claim attention correctness, cache-write correctness or request speed.
 
+The queued mask run34068081774 was cancelled before hardware execution after a
+container-layout source-audit path bug was found. Corrected gate34068177963 is
+queued behind full-model34067681095; source hashes now resolve beside the imported
+helper, independent of the simulator harness mount path.
+
+Dynamic mask plus parallel attention composition passes TTsim
+`20260906T235604Z-310`: T16/start4096/seed1, both chips, changed start4103 then
+rollback4096 with the same query/mask buffers. All four changed-position output
+checks match native causal B1 exactly; prepared-reader lifetime also passes.
+The probe is read-only K/V and slow dispatch, not a retained full-model verifier
+or hardware trace certification. The16K composition counterpart is next.
+
 Parallel simulator evidence: `20260906T224631Z-303` T16/start4096/seed2 uses host
 packing; `20260906T225115Z-307` T16/start4096/seed0 includes DMA packing and
 output layout; `20260906T225312Z-461` T16/start16383/seed1 covers the boundary,
