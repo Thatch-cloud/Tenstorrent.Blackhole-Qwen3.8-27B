@@ -6,8 +6,8 @@ from attention_fold_dma import device_layout_dma
 def execute(mesh, operations, query, keys, values, metadata, owned, *, scale, memory_config):
     chunks = []
     for bundle, pages, mask, config in metadata:
-        if not 1 <= len(bundle) <= 3 or not 1 <= bundle[0]['rows'] <= 4:
-            raise ValueError('At most three groups of up to four queries required')
+        if not 1 <= len(bundle) <= 3 or not 1 <= bundle[0]['rows'] <= 8:
+            raise ValueError('At most three groups of up to eight queries required')
         count = bundle[0]['rows']
         if any(group['rows'] != count or group['signature'] != bundle[0]['signature'] for group in bundle):
             raise ValueError('Parallel groups must share shape and native chunk workload')

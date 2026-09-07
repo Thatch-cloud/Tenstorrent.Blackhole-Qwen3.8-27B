@@ -11,7 +11,7 @@ void kernel_main() {
     const uint32_t task = get_arg_val<uint32_t>(5);
     const uint32_t column = task % 8;
     const uint32_t staged = get_write_ptr(0);
-    const uint32_t output = staged + 8192;
+    const uint32_t output = staged + (rows > 4 ? rows : 4) * 2048;
     const uint32_t source_tiles = inverse ? (rows * 12 + 31) / 32 : rows;
     for (uint32_t tile = 0; tile < source_tiles; tile++) {
         const uint32_t page = (tile + (inverse ? 0 : offset)) * 8 + column;

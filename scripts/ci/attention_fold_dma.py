@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 def source_row(rows, output_index, *, inverse=False):
-    if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 4 or type(output_index) is not int or not 0 <= output_index < rows * 12:
-        raise ValueError('One to four complete query rows required')
+    if type(inverse) is not bool or type(rows) is not int or not 1 <= rows <= 8 or type(output_index) is not int or not 0 <= output_index < rows * 12:
+        raise ValueError('One to eight complete query rows required')
     if inverse:
         token, head = divmod(output_index, 12)
         return (head // 6) * rows * 6 + token * 6 + head % 6
@@ -17,7 +17,7 @@ def source_row(rows, output_index, *, inverse=False):
 def device_layout_dma(mesh, source, rows, owned, *, inverse=False, offset=0):
     import ttnn
 
-    if type(rows) is not int or not 1 <= rows <= 4 or type(inverse) is not bool or type(offset) is not int or offset < 0:
+    if type(rows) is not int or not 1 <= rows <= 8 or type(inverse) is not bool or type(offset) is not int or offset < 0:
         raise ValueError('Bounded explicit tile permutation required')
     expected = (1, 1, rows * 12, 256) if inverse else None
     shape = tuple(source.shape)
@@ -39,7 +39,7 @@ def device_layout_dma(mesh, source, rows, owned, *, inverse=False, offset=0):
     if len(source_shards) != 2 or len(output_shards) != 2:
         raise ValueError('Both chips required')
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(7, tiles // 8 - 1))])
-    buffer = ttnn.CBDescriptor(total_size=10240, core_ranges=cores,
+    buffer = ttnn.CBDescriptor(total_size=(max(4, rows) + 1) * 2048, core_ranges=cores,
         format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=0, data_format=ttnn.bfloat16,
             page_size=2048, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
     program = ttnn.MeshProgramDescriptor()

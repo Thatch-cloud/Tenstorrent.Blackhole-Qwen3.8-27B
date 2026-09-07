@@ -37,19 +37,19 @@ def main():
         parser.error('Replay reader requires dynamic-mask composition checks')
     if args.dynamic_mask:
         from attention_mask_replay import validate_ticket
-        if not args.dma_layout or args.parallel_groups != 3:
-            parser.error('Dynamic mask composition requires three DMA groups')
+        if not args.dma_layout or args.parallel_groups != 3 or args.max_group_rows != 4:
+            parser.error('Dynamic mask composition requires three four-row DMA groups')
         validate_ticket(args.start, args.rows, args.capacity)
         validate_ticket(args.start + 7, args.rows, args.capacity)
-    if args.parallel_groups > 1 and (not args.grouped or args.max_group_rows != 4 or args.finite_mask):
-        parser.error('Parallel probe requires four-row groups with native masks')
+    if args.parallel_groups > 1 and (not args.grouped or args.max_group_rows not in (4, 8) or args.finite_mask):
+        parser.error('Parallel probe requires four or eight-row groups with native masks')
     if args.dma_layout and not args.device_layout:
         parser.error('DMA layout requires the device-layout oracle checks')
-    if args.device_layout and args.max_group_rows > (4 if args.dma_layout else 8):
+    if args.device_layout and args.max_group_rows > 8:
         parser.error('Group exceeds the selected device layout implementation')
     if args.start + args.rows > args.capacity or args.capacity % args.chunk_size:
         parser.error('Candidate cache view must cover positions and contain complete chunks')
-    if args.device_layout and not args.grouped and args.rows > (4 if args.dma_layout else 8):
+    if args.device_layout and not args.grouped and args.rows > 8:
         parser.error('Device layout exceeds its supported group width')
     if args.grouped and any(group['signature'][1] % 64 for group in chunk_groups(args.start, args.rows, max_group_rows=args.max_group_rows)):
         parser.error('Grouped probe requires complete native cache-page views')
@@ -160,7 +160,7 @@ def main():
         if any(not check['exact'] for check in report['checks']):
             raise AssertionError('Folded attention differs from native causal B1')
         if args.parallel_groups > 1:
-            bundles = parallel_groups(args.start, args.rows, max_batches=args.parallel_groups)
+            bundles = parallel_groups(args.start, args.rows, max_batches=args.parallel_groups, max_group_rows=args.max_group_rows)
             report['parallel_plan'] = bundles
             parallel_outputs = []
             for bundle in bundles:

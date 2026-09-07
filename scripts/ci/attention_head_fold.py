@@ -48,11 +48,13 @@ def chunk_groups(start, rows, *, max_chunk_tiles=8, max_group_rows=4):
     return groups
 
 
-def parallel_groups(start, rows, *, max_batches=3):
+def parallel_groups(start, rows, *, max_batches=3, max_group_rows=4):
     if type(max_batches) is not int or not 1 <= max_batches <= 3:
         raise ValueError('At most three TP2 groups preserve sixteen workers per KV head on110 cores')
+    if type(max_group_rows) is not int or max_group_rows not in (4, 8):
+        raise ValueError('Parallel groups require a four or eight row limit')
     bundles = []
-    for group in chunk_groups(start, rows):
+    for group in chunk_groups(start, rows, max_group_rows=max_group_rows):
         signature = (group['rows'], group['signature'])
         if bundles and len(bundles[-1]) < max_batches and (bundles[-1][0]['rows'], bundles[-1][0]['signature']) == signature:
             bundles[-1].append(group)

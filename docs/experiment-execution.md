@@ -5,6 +5,24 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Actual-request run34072489815 passed eight native-exact matched requests.
+  At4078 tokens, committed decode is22.799244->23.762756 tok/s; at16363,
+  18.587617->20.127396 tok/s. Both arms use norm batching and identical family
+  routing. Each arm/context contributes256 committed post-seed tokens.
+  Setup-inclusive rates regress13.236825->10.284346 and11.528452->9.523821
+  tok/s respectively, with prefill excluded from both rates. Candidate owns
+  eight capture buckets versus six control buckets. This is not an adoption
+  recommendation or coding-quality certification. The200 tok/s target is unmet.
+  Identical routing commits128 tokens in89/99 verifier blocks at4K/16K,
+  accepting39/29 draft tokens respectively: drafting remains a major limit.
+- DMA eight-row extension passed TTsim20260907T011925Z-426 atT8/4096,
+  both chips bitwise exact against native B1, with the compact native scratch
+  allocation. Staging grows to18432 bytes per worker for eight rows so input
+  tiles cannot overwrite the output tile. Four-row paths retain10240 bytes.
+  Parallel eight-row composition TTsim20260907T012041Z-303 also passed at
+  T32/4096: native B1, serial groups, three-way parallel groups and the reusable
+  adapter are exact on both chips. Long-context boundary and legacy four-row
+  regression gates remain before hardware; no simulator timing is a speed claim.
 - Native scratch run34070379248 (`081f2bd`) passed the repaired cold build,
   runtime import and36 exact attention fixtures,4320 timed replays and72
   changed-query checks. Both arms use compact tree scratch and stock device

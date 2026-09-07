@@ -20,7 +20,7 @@ class ParallelAdapterTests(unittest.TestCase):
             return result
 
         for rows in (1, 2, 4, 8, 16, 32):
-            for start in (4095, 4096):
+            for start, group_rows in ((4095, 4), (4096, 4), (4095, 8), (4096, 8)):
                 operations = SimpleNamespace(DRAM_MEMORY_CONFIG='dram',
                     concat=lambda values, dim, **kwargs: tensor(torch.cat([value.value for value in values], dim=dim)),
                     slice=lambda value, first, last, **kwargs: tensor(value.value[tuple(slice(begin, end)
@@ -28,7 +28,7 @@ class ParallelAdapterTests(unittest.TestCase):
                     transformer=SimpleNamespace(paged_scaled_dot_product_attention_decode=Mock(
                         side_effect=lambda query, *args, **kwargs: tensor(query.value.clone()))))
                 query = tensor(torch.arange(rows * 12 * 256).reshape(1, rows, 12, 256))
-                bundles = parallel_groups(start, rows)
+                bundles = parallel_groups(start, rows, max_group_rows=group_rows)
                 metadata = [(bundle, None, None, None) for bundle in bundles]
                 owned = []
                 with patch('attention_parallel.device_layout_dma', side_effect=layout):
