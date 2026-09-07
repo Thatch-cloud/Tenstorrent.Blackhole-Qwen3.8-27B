@@ -5,6 +5,23 @@ from pathlib import Path
 
 
 COMPUTE = "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp"
+
+
+def native_gate_up_control(operations, inputs, gate, up, kernel, owned):
+    projections = []
+    for weight, activation in ((gate, operations.UnaryOpType.SILU), (up, None)):
+        program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),
+            in0_block_w=8, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=7,
+            fuse_batch=True, fused_activation=activation, mcast_in0=True)
+        projection = operations.linear(inputs, weight, program_config=program, compute_kernel_config=kernel,
+            memory_config=operations.L1_MEMORY_CONFIG)
+        owned.append(projection)
+        projections.append(projection)
+    result = operations.multiply(*projections)
+    owned.append(result)
+    return result
+
+
 BF16_PRODUCT = """MATH((SFPU_BINARY_CALL(
             DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul,
             (APPROX, ckernel::BinaryOp::MUL, 8, false), 0, 1, 0, VectorMode::RC)));"""

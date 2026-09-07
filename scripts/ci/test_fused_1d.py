@@ -1,10 +1,24 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping
+from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping, native_gate_up_control
 
 
 class Fused1DTests(unittest.TestCase):
+    def test_control_fuses_silu_before_gate_output_rounding(self):
+        operations = Mock()
+        operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.side_effect = lambda **options: options
+        operations.linear.side_effect = ['activated_gate', 'up']
+        operations.multiply.return_value = 'product'
+        owned = []
+        self.assertEqual(native_gate_up_control(operations, 'input', 'gate_weight', 'up_weight', 'kernel', owned), 'product')
+        gate, up = operations.linear.call_args_list
+        self.assertEqual(gate.kwargs['program_config']['fused_activation'], operations.UnaryOpType.SILU)
+        self.assertIsNone(up.kwargs['program_config']['fused_activation'])
+        operations.silu.assert_not_called()
+        operations.multiply.assert_called_once_with('activated_gate', 'up')
+        self.assertEqual(owned, ['activated_gate', 'up', 'product'])
+
     def test_token_rows_are_explicit_and_do_not_change_compute(self):
         source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
         with patch('pathlib.Path.read_text', return_value=source):

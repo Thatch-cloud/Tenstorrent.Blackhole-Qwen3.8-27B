@@ -12,6 +12,11 @@ export TT_METAL_SIMULATOR="$SIM_ROOT/simulator/libttsim_bh_x2.so"
 export TT_METAL_DISABLE_SFPLOADMACRO=1
 export TT_METAL_MOCK_CLUSTER_DESC_PATH="$SIM_ROOT/simulator/blackhole_P300_both_mmio.yaml"
 export TT_METAL_CACHE="$SIM_ROOT/kernel-cache"
+if [ "${QWEN_SIM_PACKER_ZERO_GRAFT:-0}" = 1 ]; then
+    packer="$TT_METAL_HOME/tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h"
+    [[ "$(sha256sum "$packer" | cut -d ' ' -f 1)" = 8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7 ]]
+    export TT_METAL_CACHE="$SIM_ROOT/kernel-cache-packer-zero-a00d91e"
+fi
 unset TT_METAL_SLOW_DISPATCH_MODE TT_MESH_GRAPH_DESC_PATH QWEN_HARDWARE_TESTS QWEN_CARDS_ALLOCATED
 test -f "$TT_METAL_SIMULATOR"
 test -f "$TT_METAL_MOCK_CLUSTER_DESC_PATH"

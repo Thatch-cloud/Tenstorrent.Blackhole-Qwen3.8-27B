@@ -1951,3 +1951,32 @@ The opt-in learned_stack hardware suite now runs this cached64-worker,
 keys32/width256 gate after health and before the five-layer gate, including
 bounded repeated latency measurements. Other shapes/placements remain guarded;
 the default suite and serving configuration are unchanged.
+
+### Upstream packer compatibility investigation
+
+Upstream [PR53805](https://github.com/tenstorrent/tt-metal/pull/53805), merged
+as a00d91e585e49282e54c28a442a8fcc31764afca, removes the unused pack-zero
+tracking flag write while retaining Pack_L1_Acc. Its stated rationale is no
+change to the pack data path. The exact Blackhole hunk is preserved in
+optimisation/sim/blackhole-packer-zero-flags.patch. Local source header SHA
+changes from87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181
+to8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7.
+
+Simulator193027Z tests this audited graft with packer accumulation still on,
+unchanged exact equality requirements and an isolated JIT cache. The wrapper's
+opt-in QWEN_SIM_PACKER_ZERO_GRAFT=1 verifies the modified header hash; the probe
+records that hash and flag. The local simulator header is temporarily patched
+for this run and must be restored after it finishes. Neither CI runtime nor
+serving is changed. This is an explicit upstream-grafted configuration, not
+proof that the original unpatched kernel passed simulation.
+
+Simulator193027Z completed weight validation and executed both native and fused
+kernels under that graft, then failed T1/chip0 equality with3618 differences.
+Review found an incorrect probe oracle: it used an unfused gate matmul followed
+by standalone SiLU, inserting BF16 rounding before activation. The existing
+target projection gate in projection-1d.py and MLP configuration in mlp-sweep.py
+use native gate-linear fused SiLU, then BF16 pack. The probe now uses that
+control through native_gate_up_control, with a regression test protecting the
+activation placement. Neither candidate math nor exact equality is loosened.
+Simulator194000Z is testing the corrected control under the same audited graft;
+the local header remains temporarily patched until this run finishes.

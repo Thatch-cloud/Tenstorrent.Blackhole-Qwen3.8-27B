@@ -1,13 +1,14 @@
 """Simulator-only multi-row fusion check using pinned draft MLP weights as geometry-matched operands."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 
 from draft_mlp_fixture import load_mlp
 from feature_projection import require_projection_environment
-from fused_1d import FusedProjection
+from fused_1d import FusedProjection, native_gate_up_control
 from gdn_multitoken_conv import release_owned
 
 
@@ -36,6 +37,9 @@ def main():
     gate, up, packed = pair_pack(weights['layers.0.mlp.gate_proj.weight'], weights['layers.0.mlp.up_proj.weight'])
     report = dict(passed=False, scope=__doc__, fixture=manifest, checks=[],
         precision='BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality')
+    packer = Path(os.environ['TT_METAL_HOME']) / 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
+    report['packer_header_sha256'] = hashlib.sha256(packer.read_bytes()).hexdigest()
+    report['packer_zero_graft'] = os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1'
     mesh, owned = None, []
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
@@ -89,21 +93,13 @@ def main():
         options.output.write_text(json.dumps(report, indent=2))
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)
-        program = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),
-            in0_block_w=8, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=7,
-            fuse_batch=True, fused_activation=None, mcast_in0=True)
+        report['control_epilogue'] = 'Native gate linear fused SILU before BF16 pack; separate BF16 up; BF16 multiply'
         for rows in (1, 2, 4, 8, 16, 32):
             generator = torch.Generator().manual_seed(3891 + rows)
             inputs = upload(torch.randn((1, 1, rows, 5120), generator=generator).bfloat16(), ttnn.bfloat16)
             report.update(phase='native_projection', active_rows=rows)
             options.output.write_text(json.dumps(report, indent=2))
-            projections = [ttnn.linear(inputs, value, program_config=program, compute_kernel_config=kernel,
-                memory_config=ttnn.L1_MEMORY_CONFIG) for value in (device_gate, device_up)]
-            owned.extend(projections)
-            activated = ttnn.silu(projections[0])
-            owned.append(activated)
-            expected = ttnn.multiply(activated, projections[1])
-            owned.append(expected)
+            expected = native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, owned)
             operation = FusedProjection(mesh, device_packed, pairs_per_worker=3, token_rows=rows,
                 source_root=os.environ['TT_METAL_HOME'])
             report['phase'] = 'fused_projection'
