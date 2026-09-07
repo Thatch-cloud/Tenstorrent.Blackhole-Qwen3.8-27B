@@ -32,6 +32,13 @@ and decode continuation. Learned feature projection, transactional history and
 long/chunked/traced prefill remain port prerequisites. These feature gates are
 not yet a neural drafter or an acceptance result.
 
+Learned projection packing now has a pinned first32-output-neuron checkpoint
+slice and TP2 tap-order tests. TTsim input/weight layouts are exact, but its
+float32 matmul does not meet the current numerical gate (maximum absolute error
+up to0.02122 across T1/T8/T32); the tolerance remains unchanged and no hardware
+projection pass is claimed. Full projection, normalization and drafter execution
+are still outstanding.
+
 Full-model parallel attention verification reaches95.884/102.058ms atT32;
 retained replay and actual-request integration are exact. Native compact scratch
 also passes hardware correctness and component timing; its combination with

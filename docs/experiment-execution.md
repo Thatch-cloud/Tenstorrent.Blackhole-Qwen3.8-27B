@@ -5,6 +5,26 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Started learned TP2 feature projection with checkpoint
+  `incoai/Qwen3.8-27B-DFlash2@dedf8df68adfb1afeaf7b7480c0a0243108177b4`.
+  Bounded HTTP range audit finds BF16 `fc.weight` [5120,25600]; only its first32
+  output neurons were fetched (1,647,336 bytes including header, not the3.85GB
+  checkpoint). Slice SHA256 is
+  `882b3405c0eb1e9bc0d502e0ff241e43c25f405c8e10c4ba469129008f161a33`.
+  Weight packing selects each chip's2560 columns separately within every tap;
+  blindly joining rank-local tap lists produces the wrong global feature order.
+  Host tests establish the decomposition and detect that incorrect ordering.
+  TTsim verifies exact uploaded weights and local feature concatenation, but
+  the projection numerical gate has NOT passed. Packer L1 accumulation triggered
+  unsupported `Disable_pack_zero_flags` (20260907T090556Z-300). Disabling it
+  permits execution, but automatic/explicit1D K-block4 and K-block100 retain
+  a discrepancy against independent float64 dot products. Complete diagnostic
+  20260907T091355Z-304 fails all six T1/T8/T32 chip comparisons at unchanged
+  rtol/atol1e-4; maximum absolute errors range0.01069-0.02122. Output is float32,
+  not merely BF16 readback. This is synthetic input with real learned weights,
+  host-side TP reduction only, no fabric/normalization/full-projection proof.
+  No hardware promotion or serving change. Next: isolate native matmul numerical
+  behavior before full-width projection and real drafter integration.
 - Real-target prefill34102267362 (`1d72ea4`) passes all six boundary contexts
   63/64/65/127/128/129. Independent artifact checks verify60 exact tap/chip
   matrices covering5760 valid token rows, all five configured taps, full
