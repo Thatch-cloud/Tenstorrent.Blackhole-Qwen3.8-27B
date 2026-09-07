@@ -1550,3 +1550,17 @@ Source: https://github.com/z-lab/dflash/blob/07ebd93db9f472af339b644bb70221ad842
 Selector hashes/loading, arithmetic, token path and shared target LM-head wiring
 remain unvalidated. Long-context simulator155120Z-300 has completed device
 execution and is advancing through all-row CPU references, without a final pass yet.
+
+Complete layer-zero hardware34140315007 passed at context31. The downloaded
+`learned-layer-complete.json` confirms the actual connected branch option:
+both ranks have zero MLP projection error, exact activation/convolution/residual/
+fabric checks and one-ULP normalization. This is a complete single learned layer
+on the two physical cards, not a five-layer drafter or measured coding throughput.
+
+`draft_selector.greedy_selector_reference` now provides an ideal FP64 oracle for
+the sequential candidate path. Tests cover predecessor-dependent choices,
+independent batches, unary-vs-transition scoring, supplied candidate-order ties,
+input immutability and invalid geometry/IDs/nonfinite data. It consumes already
+projected hidden states and supplied LM-head candidates; it does not implement
+the shared LM head or claim BF16/device equivalence. Selector arithmetic must
+still be calibrated and validated on simulator/hardware. All555 host tests pass.
