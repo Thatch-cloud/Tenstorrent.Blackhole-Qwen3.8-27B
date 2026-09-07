@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_attention
@@ -13,24 +14,31 @@ from feature_projection import require_projection_environment
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--timing', action='store_true')
     parser.add_argument('--uniform-query', action='store_true')
     parser.add_argument('--streaming', action='store_true')
     parser.add_argument('--composed', action='store_true')
     options = parser.parse_args()
     if options.composed and options.streaming:
         parser.error('Composed and native streaming are separate controls')
-    require_projection_environment(os.environ, False)
+    if options.hardware and not options.composed:
+        parser.error('Only the simulator-validated composed path is enabled for hardware')
+    if options.timing and not (options.hardware and options.composed):
+        parser.error('Timing requires hardware and the composed path')
+    require_projection_environment(os.environ, options.hardware)
     import torch
     import ttnn
 
     report = dict(passed=False, scope=__doc__, checks=[], uniform_query=options.uniform_query,
         streaming=options.streaming, tolerance=dict(rtol=.01, atol=.01),
         composed=options.composed,
+        backend='hardware' if options.hardware else 'simulator', timings=[],
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('draft-attention-probe.py', 'draft_attention.py')})
     mesh = None
     try:
-        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware else ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
         for context in (0, 31, 2048):
@@ -83,6 +91,23 @@ def main():
                     report['checks'].append(check)
                     if not check['passed']:
                         raise AssertionError('Draft GQA numerical or mask gate failed')
+                if options.timing:
+                    samples = []
+                    for repeat in range(5):
+                        repeated = None
+                        started = time.perf_counter()
+                        try:
+                            repeated = composed_draft_attention(ttnn, mesh, *tensors)
+                            elapsed = time.perf_counter() - started
+                            for chip, shard in enumerate(ttnn.get_device_tensors(repeated)):
+                                if not torch.equal(ttnn.to_torch(shard), ttnn.to_torch(shards[chip])):
+                                    raise AssertionError('Repeated composed attention differs from validated output')
+                            samples.append(elapsed)
+                        finally:
+                            if repeated is not None:
+                                ttnn.deallocate(repeated)
+                    report['timings'].append(dict(context=context, block_rows=8, seconds=samples,
+                        scope='Warm composed attention only: includes operation dispatch, temporary allocation and synchronization; excludes uploads, output readback, final output release and all other draft/target work'))
             finally:
                 if output is not None:
                     ttnn.deallocate(output)

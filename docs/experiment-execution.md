@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current frontier (2026-09-07)
 
+- Hardware `learned-convolution` suite now also checks the simulator-validated
+  composed draft attention, retaining the learned convolution control. Native
+  SDPA modes are explicitly refused by the hardware probe while unresolved.
+  Five warm attention-only samples per context include device dispatch, temporary
+  allocations and synchronization, but exclude uploads/readback/output release
+  and all other draft/target work. Every repeated output must match the validated
+  output exactly. These samples cannot be reported as committed-token throughput.
+  Hardware result is pending; no reset or serving-default changes.
 - Composed device draft attention `20260907T111306Z-301` PASSED all six
   rank/context checks (context0/31/2048, eight proposal rows, 16Q/4KV local heads).
   It explicitly expands GQA heads, performs QK matmul, FP32 scale/mask/softmax

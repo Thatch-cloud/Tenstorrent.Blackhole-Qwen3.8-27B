@@ -15,6 +15,8 @@ if [ "${QWEN_RUN_MODE:-baseline}" = learned-convolution ]; then
     OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/learned-convolution-probe.py \
         --hardware --fp32-intermediates --fixture /experiment-projection-fixture \
         --output /experiment/results/learned-convolution.json
+    OMP_NUM_THREADS=1 timeout -k 30 900 python3 /experiment-scripts/ci/draft-attention-probe.py \
+        --hardware --composed --timing --output /experiment/results/draft-attention-composed.json
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = feature-projection-full ]; then
