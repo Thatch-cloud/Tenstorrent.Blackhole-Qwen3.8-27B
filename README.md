@@ -4,12 +4,17 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Latest completed result: 53.60 committed tok/s**, versus **49.79** with padded
+**Best validated paired result: 53.60 committed tok/s**, versus **49.79** with padded
 sampling and a matched native reference of **19.82 tok/s**.
 [Two-card MTP comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
 passes all four complete requests with identical tokens and cache state.
 Removing unused sampling rows improves decode by **7.7%** in this ABBA block.
 This is not 200 TG, a held-out coding-quality score or a serving benchmark.
+
+**Latest experiment rejected:** short-context parallel attention passed its component
+test but changed the full response at token 138 in [run 34202741880](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34202741880).
+It is not a speed result. Real-query comparison against native attention is next;
+the exact serial-attention MTP path remains the qualified baseline.
 
 ## Setup
 

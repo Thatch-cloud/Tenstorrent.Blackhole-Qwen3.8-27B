@@ -9,6 +9,20 @@ from greedy_session import GreedySession
 from verifier_engine import VerifierEngine, validate_replay_options
 
 
+class RequestMismatch(AssertionError):
+    def __init__(self, evidence):
+        self.evidence = evidence
+        super().__init__(f"Actual drafted generation differs from native at token {evidence['token_index']}")
+
+
+def check_committed_prefix(actual, expected, block):
+    for index, token in enumerate(actual):
+        if index >= len(expected) or token != expected[index]:
+            raise RequestMismatch(dict(kind='committed-token-mismatch', token_index=index,
+                actual_token=token, expected_token=expected[index] if index < len(expected) else None,
+                actual_prefix=list(actual), expected_prefix=expected[:len(actual)], block=block))
+
+
 def terminal_ids(weights, vocab_size):
     config = json.loads((Path(weights) / 'generation_config.json').read_text())
     tokens = config.get('eos_token_id')
@@ -22,7 +36,10 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
-                    mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False):
+                    mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
+                    attention_audit=False):
+    if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
+        raise ValueError('Attention diagnostics require explicit short-context parallel attention')
     if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
         raise ValueError('Native-row experiment requires explicit device sampling')
     if type(short_context) is not bool or (short_context and
@@ -99,6 +116,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 replay_group_rows=replay_group_rows,
                 **(dict(native_sampling_rows=True) if native_sampling_rows else {}),
                 **(dict(short_context=True) if short_context else {}),
+                **(dict(attention_audit=True) if attention_audit else {}),
                 **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
             if mtp_runtime is not None:
@@ -124,6 +142,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     committed=len(decision.emitted), draft_ms=(drafted - block_started) * 1000,
                     select_commit_ms=(finished - verified) * 1000,
                     cycle_ms=(finished - block_started) * 1000, **components))
+                check_committed_prefix(session.emitted, gold, dict(blocks[-1],
+                    predictions=list(predictions), emitted=list(decision.emitted)))
                 if progress is not None:
                     progress(blocks[-1])
             decode_ms = (time.perf_counter() - started) * 1000
@@ -142,6 +162,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
             lookup_max_rows=lookup_max_rows, native_sampling_rows=native_sampling_rows, short_context=short_context,
+            attention_audit=attention_audit, instrumented_timing=attention_audit,
             selected_drafter=selected_drafter,
             drafting_policy='lookup-first' if lookup_enabled else 'neural-with-target-fallback',
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
@@ -152,7 +173,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             accepted=session.accepted_proposals, prefill_ms=prefill_ms, engine_setup_ms=setup_ms,
             decode_ms=decode_ms, mtp_setup_ms=mtp_setup_ms,
             native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,
-            committed_tokens_per_second=1000 * session.committed_decode_tokens / decode_ms if decode_ms else None,
+            committed_tokens_per_second=1000 * session.committed_decode_tokens / decode_ms
+                if decode_ms and not attention_audit else None,
             post_seed_including_setup_ms=mtp_setup_ms + setup_ms + decode_ms,
             prefill_setup_decode_ms=prefill_ms + mtp_setup_ms + setup_ms + decode_ms,
             setup_amortized=False, cross_request_trace_reuse=False)

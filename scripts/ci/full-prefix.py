@@ -791,7 +791,10 @@ def main():
                     from full_mtp_request import measure_mtp_request
                     from full_request_pair import summarize_requests
                     output_path = root / 'full-mtp-request.json'
-                    report['scope'] = 'Matched ABBA coding requests: serial/parallel short-context attention with native-row K7 MTP'
+                    report['scope'] = 'Diagnostic real-query native B1 versus folded attention; no candidate throughput claim'
+                    report['instrumented_timing'] = True
+                    report['attention_audit_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                        for name in ('attention_replay_audit.py', 'attention_replay.py', 'model_batch.py', 'verifier_engine.py')}
                     report['context_lengths'] = [len(prompt)]
                     report['mtp_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                         for name in ('full_mtp_request.py', 'mtp_device_step.py', 'mtp_prefill.py',
@@ -804,13 +807,13 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        for attention_replay in (False, True, True, False):
+                        for attention_replay in (False, True):
                             print(json.dumps(dict(mtp_short_attention=attention_replay, repetition=len(report['request_checks']))), flush=True)
                             result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 max_drafts=int(mtp_drafts), native_sampling_rows=True,
-                                short_context=True, attention_replay=attention_replay)
+                                short_context=True, attention_replay=attention_replay, attention_audit=attention_replay)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -819,9 +822,9 @@ def main():
                             output_path.write_text(json.dumps(report, indent=2))
                             if result['committed_decode_tokens'] == 0:
                                 raise AssertionError('MTP request must exercise decode')
-                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_short_attention')
+                    report['attention_audit_passed'] = True
                     report['passed'] = True
-                    print(json.dumps(report['request_summary']), flush=True)
+                    print(json.dumps(dict(attention_audit_passed=True, throughput_claim=False)), flush=True)
                     return
 
                 def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False, sampling_links=False):
@@ -1089,6 +1092,8 @@ def main():
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
+        if hasattr(error, 'evidence'):
+            report['failure_evidence'] = error.evidence
         raise
     finally:
         output_path.write_text(json.dumps(report, indent=2))

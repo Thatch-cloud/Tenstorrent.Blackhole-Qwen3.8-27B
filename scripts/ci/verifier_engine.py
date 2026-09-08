@@ -34,7 +34,7 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                 native_sampling_rows=False, short_context=False):
+                 native_sampling_rows=False, short_context=False, attention_audit=False):
         import ttnn
 
         if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
@@ -44,6 +44,9 @@ class VerifierEngine:
                 (max_verify_rows != 8 or not norm_batch or not native_sampling_rows or replay_group_rows != 4)):
             raise ValueError('Short-context verifier requires native-row sampling, batched norm and a T8 cap')
         self.short_context = short_context
+        if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
+            raise ValueError('Attention diagnostics require explicit short-context replay')
+        self.attention_audit = attention_audit
         if type(retain_mtp_hidden) is not bool:
             raise ValueError('Explicit boolean MTP hidden retention required')
         self.retain_mtp_hidden = retain_mtp_hidden
@@ -155,7 +158,8 @@ class VerifierEngine:
             norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False),
             attention_mask_once=getattr(self, 'attention_mask_once', False),
             replay_group_rows=getattr(self, 'replay_group_rows', 4),
-            short_context=getattr(self, 'short_context', False) and getattr(self, 'attention_replay', False))
+            short_context=getattr(self, 'short_context', False) and getattr(self, 'attention_replay', False),
+            attention_audit=getattr(self, 'attention_audit', False))
 
     def proposal_rows(self):
         remaining = self.session.max_new_tokens - len(self.session.emitted)
@@ -211,6 +215,8 @@ class VerifierEngine:
                 self.operations.synchronize_device(self.mesh)
             else:
                 bucket['fixture'].retained.replay(operation)
+            if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
+                bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             logits, ids = bucket['output']
             tensor = logits if ids is None else ids
             parts = self.operations.get_device_tensors(tensor)

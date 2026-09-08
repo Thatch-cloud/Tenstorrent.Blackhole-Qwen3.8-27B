@@ -3,7 +3,26 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
-## Current frontier (2026-09-07)
+## Current attention failure (2026-09-08)
+
+Run 34202741880 (`f5a4403`) failed full-request token equality at emitted index
+138 after its short-attention component passed. The serial control completed
+150 tokens and exact final state; the parallel candidate is not a TG result.
+Both used T4 at position254 and resumed T8 at258; the first recorded acceptance
+count difference was position284. Native image source SHA
+`e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a`
+confirms no explicit SDPA compute config and `exp_approx_mode=False`, so a
+dropped compute config is not the cause established by this failure.
+
+The next hardware run captures native B1 shadow SDPA beside folded SDPA on the
+same actual query/KV for all16 attention layers and compares both chips before
+commit. The first difference retains layer/position/value evidence and a bounded
+CPU query/cache fixture for TTSim. This instrumented run cannot claim candidate
+TG. A separate per-block guard now stops and records the first committed-token
+mismatch, rather than letting incorrect output continue to the512-token limit.
+No cache tolerances, serving defaults or hardware reset policy are changed.
+
+## Earlier frontier (2026-09-07)
 
 - Learned attention precision isolation made progress, not a pass. Explicit
   FP32 max/subtract/exp/sum/reciprocal/multiply (`20260907T113845Z-301`) reduces

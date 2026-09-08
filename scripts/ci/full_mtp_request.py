@@ -94,7 +94,7 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
-                        native_sampling_rows=False, short_context=False, attention_replay=False):
+                        native_sampling_rows=False, short_context=False, attention_replay=False, attention_audit=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
@@ -176,6 +176,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
     try:
         result = measure_request(model, sampler, prompt, pages, helpers,
             prefill=captured_prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest,
+            attention_audit=attention_audit,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=513, norm_batch=True,
             lookup_max_rows=max_drafts + 1, mtp_factory=factory, native_sampling_rows=native_sampling_rows,
             short_context=short_context, family_routing=short_context,

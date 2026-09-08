@@ -2,10 +2,28 @@
 
 ## Current programme position - 2026-09-08
 
+Latest hardware attempt **34202741880**, code `f5a4403`, is rejected. The short
+attention component gate passed, but the first full-request parallel candidate
+changed emitted token 138. The serial arm passed all 150 tokens and state checks
+at 54.16 TG; that one control is not a new paired best. The qualified paired best
+remains **53.60 TG**, run 34200129693.
+
+Both arms crossed position 254 using native T4 and resumed T8 at 258. The serial
+control passed that transition, so blaming routing is unsupported. The first
+observed acceptance-count difference is position 284. The pinned image's native
+SDPA uses the same non-approximate exponent mode and no explicit compute config;
+a dropped compute config is not the explanation either.
+
+Next diagnostic compares folded and native B1 attention on identical captured
+real queries and KV in all sixteen layers, on both chips, before accepting a
+block. It saves the first mismatching query/cache fixture for local simulation.
+Instrumented candidate timing is not TG. Full requests now stop on the first
+committed-token mismatch rather than continuing wrong generation to the limit.
+
 | Priority | Verified position / next gate |
 | --- | --- |
 | Single-stream target | 200 committed TG not achieved; native-row MTP: 53.60 TG, CTX 170; matched padded MTP 49.79 and native reference 19.82 |
-| Latest hardware result | [34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693) passes K7/T8 ABBA: all four requests finish 150 decode tokens to EOS with exact tokens/GDN/valid KV/inactive slots |
+| Qualified paired hardware result | [34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693) passes K7/T8 ABBA: all four requests finish 150 decode tokens to EOS with exact tokens/GDN/valid KV/inactive slots |
 | MTP integration | Full-vocabulary device drafting, 169-row prompt initialization and rejection repair execute; 125/182 proposals accepted in 26 blocks; 709 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
@@ -23,14 +41,15 @@ in the candidate repetitions. The target is already loaded; this is not a cold
 process launch or sustained serving result. Setup is not amortized.
 Latest report SHA256: `cda6127029826c86cc59b9c2e3ea775d0850840a0ef580cce0afc113d5398b9d`.
 
-Next hardware comparison is short-context serial versus parallel attention with
+Rejected run 34202741880 compared short-context serial versus parallel attention with
 the qualified native-row sampler fixed in both arms. Simulator075510Z-308 passes
 24 native-output checks, 24 mask checks, 12 KV-preservation checks and 6 stale
 controls at capacities256/512/768, including actual CTX170. The default long-
 context path remains unchanged. A shared bounded routing plan retains native
 small-width boundary fallback without padding the prompt; full-request exactness
-and paired TG, not the simulator pass, determine whether this is adopted.
-All 722 host tests and 60 harness tests pass.
+and paired TG, not the simulator pass, determine whether this is adopted. The
+real-query diagnostic above replaces an unchanged benchmark retry.
+Current diagnostic host suite: 727 tests pass; the prior harness suite has 60 tests.
 
 ### First complete MTP request (historical baseline)
 

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
-from full_request import measure_request, terminal_ids
+from full_request import RequestMismatch, check_committed_prefix, measure_request, terminal_ids
 
 
 class RequestPilotTests(unittest.TestCase):
@@ -23,7 +23,8 @@ class RequestPilotTests(unittest.TestCase):
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
-                    mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False):
+                    mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False,
+                    attention_audit=False):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -31,7 +32,7 @@ class RequestPilotTests(unittest.TestCase):
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
                     attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                    native_sampling_rows=False, short_context=False):
+                    native_sampling_rows=False, short_context=False, attention_audit=False):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             engine.retain_mtp_hidden = retain_mtp_hidden
             engine.verified_mtp_hidden_for_publication = lambda ticket: [[token] for token in ticket.tokens]
@@ -63,8 +64,18 @@ class RequestPilotTests(unittest.TestCase):
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
                 lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
-                native_sampling_rows=native_sampling_rows, short_context=short_context)
+                native_sampling_rows=native_sampling_rows, short_context=short_context, attention_audit=attention_audit)
         return result, constructor
+
+    def test_instrumented_attention_cannot_claim_decode_throughput(self):
+        result, constructor = self.run_fixture(norm_batch=True, native_sampling_rows=True,
+            lookup_max_rows=8, short_context=True, attention_replay=True, attention_mask_once=True,
+            attention_audit=True)
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertTrue(result['instrumented_timing'])
+        self.assertTrue(constructor.call_args.kwargs['attention_audit'])
+        with self.assertRaises(ValueError):
+            self.run_fixture(attention_audit=True)
 
     def test_short_attention_compares_matched_native_row_t8_requests(self):
         records = []
@@ -234,5 +245,17 @@ class RequestPilotTests(unittest.TestCase):
         self.assertEqual(result['committed_decode_tokens'], 2)
 
     def test_wrong_target_output_cannot_produce_successful_result(self):
+        progress = Mock()
         with self.assertRaisesRegex(AssertionError, 'differs from native'):
-            self.run_fixture(wrong=True)
+            self.run_fixture(wrong=True, progress=progress)
+        progress.assert_not_called()
+
+    def test_prefix_guard_keeps_first_bad_block_evidence(self):
+        block = dict(position=307, input_tokens=[1, 2], predictions=[5, 6])
+        check_committed_prefix([1, 2], [1, 2, 3], block)
+        for actual, expected, index in (([1, 9], [1, 2, 3], 1), ([1, 2], [1], 1)):
+            with self.assertRaises(RequestMismatch) as caught:
+                check_committed_prefix(actual, expected, block)
+            self.assertEqual(caught.exception.evidence['token_index'], index)
+            self.assertEqual(caught.exception.evidence['block'], block)
+            self.assertEqual(caught.exception.evidence['actual_prefix'], actual)

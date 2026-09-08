@@ -36,6 +36,7 @@ class ReplayAttentionReader:
         self.failed = False
         self.calls, self.refresh_calls = 0, 0
         self.mask_scope = None
+        self.audit = None
         self.start = first
         grid = mesh.compute_with_storage_grid_size()
         try:
@@ -126,6 +127,9 @@ class ReplayAttentionReader:
             result = execute(self.mesh, self.operations, query, keys, values, self.metadata, owned,
                 scale=kwargs['scale'], memory_config=kwargs['memory_config'])
             protected.add(addresses(self.operations, result))
+            if self.audit is not None:
+                self.audit.capture(query, keys, values, result,
+                    page_table_tensor=page_table_tensor, cur_pos_tensor=cur_pos_tensor, **kwargs)
             self.calls += 1
             return result
         except BaseException:
@@ -139,6 +143,8 @@ class ReplayAttentionReader:
             return
         if self.mask_scope is not None:
             raise RuntimeError('Cannot close a reader during a shared-mask forward')
+        if self.audit is not None:
+            self.audit.close()
         release_owned(self.operations, self.owned)
         self.owned.clear()
         self.closed = True
