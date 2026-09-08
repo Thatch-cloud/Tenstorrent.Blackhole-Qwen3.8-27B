@@ -4,6 +4,11 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
 mtp_drafts=0
 dflash_drafts=0
+dflash_capture=0
+if [[ "$mode" = full-dflash-trace-request || "$mode" = full-dflash-wide-trace-request ]]; then
+    dflash_capture=1
+    mode=${mode/-trace/}
+fi
 if [[ "$mode" = full-dflash-request || "$mode" = full-dflash-wide-request ]]; then
     [[ "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
     dflash_drafts=7
@@ -132,6 +137,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_CCL_LAZY_BUILD=$ccl_build" \
     -e "QWEN_MTP_DRAFTS=$mtp_drafts" \
     -e "QWEN_DFLASH_DRAFTS=$dflash_drafts" \
+    -e "QWEN_DFLASH_CAPTURE=$dflash_capture" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \

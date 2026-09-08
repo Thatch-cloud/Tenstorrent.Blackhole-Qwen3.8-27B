@@ -20,8 +20,9 @@ not more host-side tweaks, must fall substantially to approach 200 TG.
 The complete five-layer DFlash2 path now passes hardware correctness through EOS:
 **37.64 committed tok/s**, slower than MTP. It accepts 83.77% of draft tokens,
 but drafting costs 110.58 ms/block and verification another 65.37 ms.
-Next experiment: 32 verification rows instead of eight, followed by reducing
-drafter overhead. Native SDPA remains disabled after its failed numerical gate.
+The wider 32-row request reaches **41.03 tok/s**, also exact, but still spends
+111.00 ms drafting and 98.26 ms verifying each block. Capturing the complete
+drafter is next. Native SDPA remains disabled after its failed numerical gate.
 [Integration and test boundaries](docs/dflash-full-request-2026-09-09.md).
 
 ## Setup
@@ -108,6 +109,7 @@ TG includes drafting, verification/readback and publication; excludes prefill/se
 | CTX | Streams (B) | Verify rows (T) | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: | ---: |
 | 170 | 1 | Up to 8 | 568.82 | **37.64** |
+| 170 | 1 | Up to 32, trained-width extrapolation | 554.23 | **41.03** |
 
 Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
 129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
@@ -116,8 +118,12 @@ Prefill + unamortized setup + decode takes **8.24 / 8.17 s**, with the target lo
 This is one coding task, not held-out quality or a matched comparison against MTP.
 [Hardware run and artifacts](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34232609121).
 
-The opt-in 32-row test extrapolates beyond the checkpoint's trained eight-token
-block. Target verification remains mandatory; no wider-block speed is claimed yet.
+The opt-in 32-row test extrapolates beyond the trained eight-token block. It
+completes two exact 150-token requests at 40.79/41.26 TG, 17 blocks each.
+Complete prefill/setup/decode takes9.82/9.22s. The first attempt exhausted DRAM;
+reserving KV pages for one stream fixes that without reducing its65,536-token
+capacity. This is not a matched T8 comparison or an eight-stream configuration.
+[Wider hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34236992387).
 
 ### Earlier lookup experiments
 
@@ -224,7 +230,7 @@ was resolved by restoring the exact runtime image.
 | Workstream | Current position |
 | --- | --- |
 | MTP | Device chain + KV-only repair: 58.33 TG, +1.90% matched; setup-inclusive latency is worse; wider parallel proposals needed |
-| DFlash2 | Complete exact coding requests: 37.64 TG; wider proposals, captured drafting and per-layer history KV caching remain |
+| DFlash2 | Complete exact requests: T8 37.64 TG / T32 41.03 TG; captured drafting and per-layer history KV caching remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
 | Prefill/decode disaggregation | End-to-end placement, scheduling and responsiveness tests remain |

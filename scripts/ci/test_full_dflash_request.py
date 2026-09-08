@@ -62,6 +62,20 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertEqual(layers[layer][0], {'layers.0.q_proj.weight': layer, 'norm.weight': 'global'})
         self.assertEqual(loaders['load_layer'].call_count, 4)
 
+    def test_captured_request_requires_exact_proposer_audit_and_matching_contexts(self):
+        records = self.requests()
+        for record in records:
+            record['dflash'].update(proposal_capture=True, proposal_contexts=[256, 512],
+                proposal_trace_checks=[dict(exact=True)] if record['instrumented_timing'] else [])
+        self.assertTrue(summarize_dflash_requests(records)['proposal_capture'])
+        records[0]['dflash']['proposal_trace_checks'][0]['exact'] = False
+        with self.assertRaises(ValueError):
+            summarize_dflash_requests(records)
+        records[0]['dflash']['proposal_trace_checks'][0]['exact'] = True
+        records[2]['dflash']['proposal_contexts'] = [256]
+        with self.assertRaises(ValueError):
+            summarize_dflash_requests(records)
+
     def test_active_codebook_selection_preserves_full_fp64_result_and_ties(self):
         generator = torch.Generator().manual_seed(17)
         hidden = torch.randn((2, 7, 4), generator=generator)
@@ -78,12 +92,13 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertTrue(all(torch.equal(left, right) for left, right in zip(actual, expected)))
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
-        environment = dict(os.environ, QWEN_RUN_MODE='full-dflash-request', QWEN_CARDS_ALLOCATED='1',
-            QWEN_LOOKUP_CAP_ABBA='1')
-        result = subprocess.run(['bash', str(Path(__file__).with_name('run-baseline.sh'))],
-            env=environment, capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('docker', result.stdout + result.stderr)
+        for suite in ('full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request', 'full-dflash-wide-trace-request'):
+            environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
+                QWEN_LOOKUP_CAP_ABBA='1')
+            result = subprocess.run(['bash', str(Path(__file__).with_name('run-baseline.sh'))],
+                env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('docker', result.stdout + result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

@@ -2,7 +2,7 @@
 
 ## Current programme position - 2026-09-09
 
-**Full DFlash2 generation passes: 37.64 committed TG; MTP remains best at 58.33.**
+**Full DFlash2 generation passes: T8 37.64 / T32 41.03 TG; MTP remains best at 58.33.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the
 target's embedding/head and five post-layer feature taps. Only committed target
 input rows enter the drafter history; two preallocated history buffers survive
@@ -19,11 +19,20 @@ The earlier CTX178 stall was a V-head tiled reshape, fixed with native head spli
 and concatenation after40 exact simulator checks. Attention math is unchanged;
 the failed native SDPA candidate remains disabled.
 
-**Next: explicit T32 extrapolation, then reduce drafter execution cost.**
+**T32 passes after fixing the single-stream harness allocation; capture drafting next.**
 The checkpoint was trained for eight-token blocks. `full-dflash-wide-request`
 tests31 parallel proposals and up to32 target rows without changing defaults.
 The dense draft layers already use physical32-row tiles. Full target token/state
-and feature-publication checks remain mandatory; this is not yet a measured gain.
+and feature-publication checks remain mandatory. Run34236992387 (`7539fae`)
+passes three150-token requests through EOS; two timed requests aggregate41.027829
+TG in17 blocks each, mean8.82 committed/block. Draft111.00ms, verify98.26ms;
+PP554.23, complete prefill/setup/decode9.82/9.22s. This is not a matched T8 gain.
+The first T32 attempt exhausted DRAM: the harness reserved8200 physical KV pages
+while one request addresses1024. Reserving1032 retains65536-token capacity and
+all eight GDN slots. Serving defaults stay unchanged.
+The next opt-in candidate captures the complete five-layer proposer with
+fixed-context masked padding; every audited proposal must match its eager
+equivalent before the two complete timed requests count.
 [Integration details](dflash-full-request-2026-09-09.md).
 
 **Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**

@@ -39,6 +39,7 @@ def main():
             device = DFlashDevice.__new__(DFlashDevice)
             device.operations, device.mesh = ttnn, mesh
             device.closed, device.pending, device.owned = False, None, []
+            device.proposal_capture = None
             device.position = device.history_rows = initial_rows
             device.published_rows = 0
             padded = torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16)

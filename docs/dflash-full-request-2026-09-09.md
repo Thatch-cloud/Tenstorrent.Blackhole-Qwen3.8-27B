@@ -31,6 +31,21 @@ already loaded. This is not held-out coding quality or a matched MTP comparison.
 Artifact: `full-dflash-request.json`, SHA256:
 `692bc8250f4940c364e3c1c5166820585d17abb0bd25dddac63052f416deeb58`.
 
+## Complete T32 hardware result: 41.03 TG
+
+After reducing unused KV capacity,
+[34236992387](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34236992387)
+(`7539fae`) passes three complete150-token requests through EOS. The audit checks
+all1500 row/chip/tap combinations; tokens, GDN, valid KV and inactive slots are exact.
+Two timed requests measure40.794180/41.264171 TG, aggregate **41.027829**.
+Each takes17 blocks,134/527 accepted proposals and8.823529 committed tokens/block.
+Mean draft111.002911ms, verifier98.264095ms, publication3.425272ms; PP554.23 tok/s.
+Complete prefill/setup/decode9824.703749/9224.555511ms. The memory allocation
+also changed, so this is not a matched T8-only attribution.
+Report SHA256: `5e1f597ee5ce2e44f1f5dff842df9b7b4ca6b8ee27a1fba6ac173ca0507f381a`.
+The captured-proposal candidate now targets the111ms drafting cost; see
+[capture boundaries](dflash-captured-proposals-2026-09-09.md).
+
 ## Historical stall diagnosis
 
 The first T32 run,

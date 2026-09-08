@@ -45,6 +45,7 @@ def summarize_dflash_requests(requests):
         if (any(entry.get(key) is not True for key in ('exact', 'state_exact', 'inactive_exact', 'ended_with_eos'))
                 or any(entry[key] != reference[key] for key in identity)
                 or entry['dflash'].get('block_rows') != reference['dflash'].get('block_rows')
+                or entry['dflash'].get('proposal_capture', False) != reference['dflash'].get('proposal_capture', False)
                 or entry.get('selected_drafter') != 'dflash2' or entry.get('sampler_num_links') != 4
                 or not entry.get('fabric_sources') or entry['fabric_sources'] != reference.get('fabric_sources')):
             raise ValueError('Complete identical outputs, exact target state and the audited four-link pair required')
@@ -61,6 +62,13 @@ def summarize_dflash_requests(requests):
         if entry.get('setup_amortized') is not False or entry.get('cross_request_trace_reuse') is not False:
             raise ValueError('Do not hide eager request setup or imply cross-request trace reuse')
     checks = reference['dflash']['feature_checks']
+    if reference['dflash'].get('proposal_capture'):
+        trace_checks = reference['dflash'].get('proposal_trace_checks', [])
+        if (len(trace_checks) != reference['dflash']['proposal_calls']
+                or any(check.get('exact') is not True for check in trace_checks)
+                or any(entry['dflash'].get('proposal_contexts') != reference['dflash'].get('proposal_contexts') for entry in requests)
+                or not reference['dflash'].get('proposal_contexts')):
+            raise ValueError('Complete same-context eager-versus-trace proposal audit required')
     if (reference.get('committed_tokens_per_second') is not None or not checks
             or sum(check['rows'] for check in checks) != 2 * len(TARGET_TAPS) * reference['committed_decode_tokens']
             or any(check['exact'] is not True for check in checks)):
@@ -74,6 +82,7 @@ def summarize_dflash_requests(requests):
         committed_tokens=tokens, measured_requests=2, feature_audit_requests=1,
         context=len(reference['prompt_tokens']), streams=1, target_reached=throughput >= 200,
         block_rows=reference['dflash'].get('block_rows', 8),
+        proposal_capture=reference['dflash'].get('proposal_capture', False),
         prefill_setup_decode_ms=[entry['prefill_setup_decode_ms'] for entry in measured],
         feature_setup_ms=[entry['feature_setup_ms'] for entry in measured],
         scope='Complete coding-request pilot; not a component rate, MTP comparison or held-out quality certification')
@@ -99,11 +108,11 @@ def load_dflash_fixtures(root):
 
 def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *, fixtures,
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
-                          audit_features=False, max_new_tokens=513, block_rows=8):
+                          audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
 
-    if (type(audit_features) is not bool or len(prompt) > 2048
+    if (type(audit_features) is not bool or type(proposal_capture) is not bool or len(prompt) > 2048
             or type(block_rows) is not int or block_rows not in (8, 32)):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
     manifests, layers, projection, selector = fixtures
@@ -162,8 +171,10 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         if prefill_count != 2 or capture is None:
             raise ValueError('DFlash2 setup requires fresh candidate prefill features')
         status('prepare-five-layer-device-drafter')
+        faulthandler.dump_traceback_later(180, exit=True)
         device = DFlashDevice(operations, model, TT_CCL(model.mesh_device), layers, projection, selector,
-            capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows)
+            capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows,
+            proposal_capture=proposal_capture, max_new_tokens=max_new_tokens)
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
@@ -184,10 +195,17 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             head_layout='Native QKV head split and concatenation; no generic sub-tile reshape',
             feature_history='Two preallocated 2048-row buffers; only committed prefixes are projected and published',
             execution='Eager request integration; setup, dispatch and compilation costs are not amortized',
+            proposal_capture=proposal_capture,
+            proposal_contexts=list(device.proposal_capture.buckets) if proposal_capture else [],
+            proposal_trace_checks=device.proposal_capture.checks if proposal_capture else [],
             proposal_calls=device.proposal_calls if device is not None else 0,
             committed_feature_rows=runtime.committed_feature_rows if runtime is not None else 0,
             feature_checks=feature_checks, audit_features=audit_features)
         result['dflash']['synchronized_stage_diagnostics'] = audit_features
+        if proposal_capture:
+            result['dflash']['execution'] = 'Fixed-context captured five-layer proposals; per-request setup is not amortized'
+            if audit_features and len(device.proposal_capture.checks) != device.proposal_calls:
+                raise AssertionError('Every audited proposal requires exact eager-versus-trace checks')
         result['instrumented_timing'] = audit_features
         if audit_features:
             result['committed_tokens_per_second'] = None
@@ -195,7 +213,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['qualification'] = __doc__
         result['sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py',
-                         'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py', 'draft_selector.py')}
+                         'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py',
+                         'draft_selector.py', 'dflash_proposal_inputs.py', 'dflash_proposal_trace.py')}
         return result
     finally:
         try:
