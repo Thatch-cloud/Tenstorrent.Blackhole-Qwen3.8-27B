@@ -5,10 +5,10 @@ from draft_head_preparation import rope_tables
 
 
 def proposal_contexts(position, max_new_tokens):
-    if (type(position) is not int or not 1 <= position <= 2048
+    if (type(position) is not int or not 1 <= position <= 262111
             or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 262144 - position - 32):
         raise ValueError('Bounded prefill position and complete request budget required')
-    first = next(rows for rows in (256, 512, 1024, 2048) if rows >= position)
+    first = next(rows for rows in (256, 512, 1024, 2048) if rows >= min(position, 2048))
     last = next(rows for rows in (256, 512, 1024, 2048) if rows >= min(2048, position + max_new_tokens))
     return tuple(rows for rows in (256, 512, 1024, 2048) if first <= rows <= last)
 

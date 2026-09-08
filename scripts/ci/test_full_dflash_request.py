@@ -10,6 +10,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from draft_selector import greedy_selector_reference, select_active_candidates
+from dflash_prefill_window import prefill_window
 from full_dflash_request import (load_dflash_fixtures, summarize_dflash_requests,
     summarize_dflash_commit_requests, summarize_dflash_convolution_requests)
 
@@ -34,6 +35,29 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertEqual(result['committed_tokens'], 4)
         self.assertEqual(result['prefill_setup_decode_ms'], [100, 120])
         self.assertFalse(result['target_reached'])
+
+    def test_long_context_requires_both_prefill_tail_audits_with_absolute_positions(self):
+        for mutation in (None, 'missing', 'start', 'measured', 'window'):
+            records = self.requests()
+            window = prefill_window(4093)
+            for record in records:
+                record['prompt_tokens'] = [10] * 4093
+                record['dflash']['prefill_window'] = dict(window)
+                record['dflash']['prefill_checks'] = [dict(chip=chip, **window, exact=True)
+                    for prefill in range(2) for tap in range(5) for chip in range(2)] if record['instrumented_timing'] else []
+            if mutation == 'missing':
+                records[0]['dflash']['prefill_checks'].pop()
+            elif mutation == 'start':
+                records[0]['dflash']['prefill_checks'][0]['start'] = 0
+            elif mutation == 'measured':
+                records[1]['dflash']['prefill_checks'] = records[0]['dflash']['prefill_checks']
+            elif mutation == 'window':
+                records[2]['dflash']['prefill_window']['rows'] = 4093
+            if mutation is None:
+                self.assertEqual(summarize_dflash_requests(records)['benchmark']['ctx_tokens'], 4093)
+            else:
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    summarize_dflash_requests(records)
 
     def test_pp_ctx_tg_use_actual_prompt_and_time_weighted_uninstrumented_samples(self):
         records = self.requests()
@@ -207,7 +231,7 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertTrue(all(torch.equal(left, right) for left, right in zip(actual, expected)))
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
-        for suite in ('full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
+        for suite in ('full-dflash-4k-request', 'full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
                 'full-dflash-wide-trace-request', 'full-dflash-commit-request', 'full-dflash-convolution-request'):
             environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
                 QWEN_LOOKUP_CAP_ABBA='1')
@@ -215,6 +239,16 @@ class FullDFlashRequestTests(unittest.TestCase):
                 env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('docker', result.stdout + result.stderr)
+
+    def test_long_context_request_cannot_enable_an_unqualified_runtime_combination(self):
+        for context, capture, abba in (('8192', '1', '0'), ('4096', '0', '0'), ('4096', '1', '1')):
+            environment = dict(os.environ, QWEN_DFLASH_CONTEXT=context, QWEN_DFLASH_CAPTURE=capture,
+                QWEN_DFLASH_DRAFTS='7', QWEN_DFLASH_COMMIT_ABBA=abba,
+                QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
+                '--request-pilot', '--norm-batch'], env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('4K qualification requires', result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

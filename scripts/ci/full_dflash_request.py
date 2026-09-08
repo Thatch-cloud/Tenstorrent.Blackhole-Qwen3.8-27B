@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dflash_device import DFlashDevice
 from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
+from dflash_prefill_window import prefill_window, snapshot_prefill_tail
 from draft_attention_fixture import load_attention
 from draft_convolution_fixture import load_convolution
 from draft_mlp_fixture import load_mlp
@@ -19,18 +20,19 @@ from target_features import LayerOutputCapture
 
 
 def warm_dflash_prefill(operations, model, prompt, prefill):
+    window = prefill_window(len(prompt))
     native_seed = prefill(prompt)
     captured = LayerOutputCapture(model, TARGET_TAPS,
-        snapshot=lambda value: operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG),
+        snapshot=lambda value: snapshot_prefill_tail(operations, value, len(prompt)),
         release=operations.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
     try:
         with captured.capture():
             captured_seed = prefill(prompt)
         outputs = captured.outputs()
-        if native_seed != captured_seed or any(value.shape[2] < len(prompt) for value in outputs):
-            raise AssertionError('DFlash2 prefill capture must preserve seed and all prompt rows')
+        if native_seed != captured_seed or any(value.shape[2] != window['rows'] for value in outputs):
+            raise AssertionError('DFlash2 prefill capture must preserve the seed and exact valid tail window')
         return dict(native_seed=native_seed, captured_seed=captured_seed, taps=list(TARGET_TAPS),
-            shapes=[list(value.shape) for value in outputs], before_native_trace=True)
+            shapes=[list(value.shape) for value in outputs], feature_window=window, before_native_trace=True)
     finally:
         captured.close()
 
@@ -70,6 +72,14 @@ def summarize_dflash_requests(requests):
                 or not math.isclose(entry['committed_tokens_per_second'], 1000 * count / entry['decode_ms'], rel_tol=1e-12)):
             raise ValueError('Uninstrumented throughput must describe the measured complete decode')
     checks = reference['dflash']['feature_checks']
+    if len(reference['prompt_tokens']) > 2048 or 'prefill_window' in reference['dflash']:
+        window = prefill_window(len(reference['prompt_tokens']))
+        expected = [dict(chip=chip, **window, exact=True)
+            for prefill in range(2) for tap in TARGET_TAPS for chip in range(2)]
+        if (reference['dflash'].get('prefill_checks') != expected
+                or any(entry['dflash'].get('prefill_window') != window for entry in requests)
+                or any(entry['dflash'].get('prefill_checks') for entry in requests[1:])):
+            raise ValueError('Both audited prefills require exact tail-window snapshots; measured requests must not audit')
     if fused_convolution:
         convolution_checks = reference['dflash'].get('convolution_checks', [])
         expected_convolutions = [(block['position'], layer, chip) for block in reference['blocks']
@@ -197,30 +207,35 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
     from models.tt_transformers.tt.ccl import TT_CCL
 
     if (type(audit_features) is not bool or type(proposal_capture) is not bool or type(commit_only_gdn) is not bool
-            or type(fused_convolution) is not bool or (fused_convolution and not proposal_capture) or len(prompt) > 2048
+            or type(fused_convolution) is not bool or (fused_convolution and not proposal_capture)
+            or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 65536 - len(prompt) - 32
             or type(block_rows) is not int or block_rows not in (8, 32)):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
+    window = prefill_window(len(prompt))
     manifests, layers, projection, selector = fixtures
     capture = device = runtime = None
     prefill_count = 0
     golden_features = {}
     feature_checks = []
+    prefill_checks = []
 
     def status(stage, **values):
         if stage == 'committed-block':
             faulthandler.dump_traceback_later(180, exit=True)
         print(json.dumps(dict(dflash_stage=stage, **values)), flush=True)
 
-    def new_capture():
+    def new_capture(*, prefill=False):
         return LayerOutputCapture(model, TARGET_TAPS,
-            snapshot=lambda value: operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG),
+            snapshot=(lambda value: snapshot_prefill_tail(operations, value, len(prompt),
+                checks=prefill_checks if audit_features else None)) if prefill else
+                (lambda value: operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG)),
             release=operations.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
 
     def captured_prefill(tokens):
         nonlocal capture, prefill_count
         if capture is not None:
             capture.close()
-        capture = new_capture()
+        capture = new_capture(prefill=True)
         with capture.capture():
             seed = prefill(tokens)
         prefill_count += 1
@@ -259,7 +274,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         faulthandler.dump_traceback_later(180, exit=True)
         device = DFlashDevice(operations, model, TT_CCL(model.mesh_device), layers, projection, selector,
             capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows,
-            proposal_capture=proposal_capture, max_new_tokens=max_new_tokens, fused_convolution=fused_convolution)
+            proposal_capture=proposal_capture, max_new_tokens=max_new_tokens, fused_convolution=fused_convolution,
+            feature_start=window['start'])
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
@@ -275,6 +291,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             feature_factory=factory, progress=lambda block: status('committed-block', **block))
         result['fused_convolution'] = fused_convolution
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
+            prefill_window=window, prefill_checks=prefill_checks,
             convolution_checks=device.convolution_checks,
             block_rows=block_rows, max_drafts=block_rows - 1, mask_token_id=248070,
             checkpoint_trained_block_rows=8, block_width_extrapolation=block_rows != 8,
@@ -303,6 +320,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py',
                          'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py',
                          'draft_selector.py', 'dflash_proposal_inputs.py', 'dflash_proposal_trace.py',
+                         'dflash_prefill_window.py', 'coding_context_request.py',
                          'gdn_device_loop_state.py', 'model_batch.py', 'verifier_engine.py', 'full_request.py',
                          'draft_convolution.py', 'draft_convolution_fused.py',
                          'draft_convolution_fused_compute.cpp', 'draft_convolution_fused_io.cpp')}

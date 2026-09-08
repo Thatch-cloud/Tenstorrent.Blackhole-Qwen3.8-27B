@@ -12,11 +12,18 @@ class ProposalInputTests(unittest.TestCase):
         self.assertEqual(proposal_contexts(170, 513), (256, 512, 1024))
         self.assertEqual(proposal_contexts(2047, 513), (2048,))
         self.assertEqual(proposal_contexts(256, 1), (256, 512))
+        self.assertEqual(proposal_contexts(4093, 513), (2048,))
+        self.assertEqual(proposal_contexts(64504, 513), (2048,))
+
+    def test_request_contexts_reject_invalid_absolute_positions_and_budgets(self):
+        for position, budget in ((True, 513), (0, 513), (262112, 1), (4096, 0), (4096, True), (262111, 2)):
+            with self.subTest(position=position, budget=budget), self.assertRaises(ValueError):
+                proposal_contexts(position, budget)
 
     def test_mask_and_rope_relocation_preserve_every_visible_token(self):
         for block in (8, 32):
             for position, rows, context in ((170, 170, 256), (178, 178, 256), (256, 256, 256),
-                    (257, 257, 512), (3072, 2048, 2048)):
+                    (257, 257, 512), (3072, 2048, 2048), (4093, 2048, 2048), (64504, 2048, 2048)):
                 with self.subTest(block=block, position=position):
                     values = proposal_inputs(248044, position, rows, block, context)
                     mask, rope = values['mask'], values['rope']

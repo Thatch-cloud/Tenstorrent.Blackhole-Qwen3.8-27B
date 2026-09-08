@@ -49,14 +49,15 @@ the short pilot's 150 decode tokens. This matrix is not held-out coding quality.
 
 | Finding | Required change / evidence |
 | --- | --- |
-| DFlash constructor, request wrapper and proposal bucket selector reject prefill >2,048 | Separate absolute target position from bounded draft history length. |
-| Initial feature projection starts at row zero | Initialize from the final 2,048 valid prefill feature rows, excluding padding; keep ownership bounded. |
+| Former constructor/request/bucket guards limited prefill to 2,048 | Absolute target position and bounded draft history are now separate in the opt-in 4K path; hardware qualification pending. |
+| Initial feature projection previously received the full prompt | It now receives only the final 2,048 valid feature rows, with an explicit absolute start; padding is excluded. |
 | Proposal input builder already supports absolute positions with a rolling window | Test initial 4K position and continuation, not only a short prompt that later crosses 2K. |
 | Target KV is independent of the draft window | Preserve the full target context; compare tokens, GDN, valid KV and inactive slots against native decoding. |
 
 Do not remove the guards and call the result qualified. Simulator coverage is
 for window/position/ownership correctness, never a hardware speed claim. Then
 run the 4K complete-request hardware gate before extending the matrix.
+[Implementation and gate evidence](dflash-long-context-2026-09-09.md).
 
 ## Rebuild a table from artifacts
 

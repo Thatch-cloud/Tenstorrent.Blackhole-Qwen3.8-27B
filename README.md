@@ -69,7 +69,8 @@ At CTX 170, mean prefill is **0.333 s**; prefill + fresh setup + decode is
 **6.42 s**, excluding model loading. TG excludes prefill/setup; PP includes
 target feature capture and first-token selection, but not drafter initialization.
 The drafter's rolling 2,048-token history is separate from the target's full KV
-context. Its current prefill initializer rejects inputs above 2,048 tokens.
+context. An opt-in 4K initializer now captures the valid tail and retains absolute
+positions; its hardware qualification is pending, so no longer-context TG is claimed.
 [Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
 
 ## Serving baseline

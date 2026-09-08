@@ -108,6 +108,10 @@ def main():
     dflash_capture = os.environ.get('QWEN_DFLASH_CAPTURE', '0')
     dflash_commit_abba = os.environ.get('QWEN_DFLASH_COMMIT_ABBA', '0')
     dflash_convolution_abba = os.environ.get('QWEN_DFLASH_CONVOLUTION_ABBA', '0')
+    dflash_context = os.environ.get('QWEN_DFLASH_CONTEXT', '0')
+    if dflash_context not in ('0', '4096') or (dflash_context != '0' and
+            (dflash_capture != '1' or dflash_drafts != '7' or dflash_commit_abba != '0' or dflash_convolution_abba != '0')):
+        parser.error('4K qualification requires the isolated captured T8 lead, without an ABBA experiment')
     if dflash_convolution_abba not in ('0', '1') or (dflash_convolution_abba == '1' and
             (dflash_capture != '1' or dflash_drafts != '7' or dflash_commit_abba != '0')):
         parser.error('Convolution ABBA requires the isolated captured T8 DFlash2 request')
@@ -469,6 +473,16 @@ def main():
         weights = os.environ["MODEL_WEIGHTS_DIR"]
         config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)
         tokenizer = AutoTokenizer.from_pretrained(weights, local_files_only=True, trust_remote_code=False)
+        if coding_request == '1':
+            if dflash_context != '0':
+                from coding_context_request import make_context_prompt
+                coding_prompt, context_metadata = make_context_prompt(tokenizer, context_tokens=int(dflash_context))
+                report['coding_context'] = context_metadata
+                report['coding_task'] = context_metadata['task']
+            else:
+                from coding_request import make_prompt
+                coding_prompt = make_prompt(tokenizer)
+                report['coding_task'] = 'merge_intervals_v1'
         generator = Qwen36ForCausalLM.initialize_vllm_model(config, mesh, max_batch_size=8, max_seq_len=65536)
         model = generator.model[0]
         if len(model.layers) != 64 or model.args.vocab_size != 248320:
@@ -659,8 +673,7 @@ def main():
         kv_digest(128)
         warm_lengths, warm_widths = lengths, widths
         if mtp_drafts != '0' or dflash_drafts != '0':
-            from coding_request import make_prompt
-            mtp_prompt = make_prompt(tokenizer)
+            mtp_prompt = coding_prompt
             warm_lengths = (len(mtp_prompt),)
             warm_widths = tuple(rows for rows in widths if rows <= (int(dflash_drafts) + 1 if dflash_drafts != '0' else 8))
         if options.batch:
@@ -764,10 +777,7 @@ def main():
                 prefix_zero_reuse=options.prefix_zero_reuse)
 
         if coding_request == '1':
-            from coding_request import make_prompt
-            coding_prompt = make_prompt(tokenizer)
             lengths = (len(coding_prompt),)
-            report['coding_task'] = 'merge_intervals_v1'
             report['thinking_enabled'] = False
         for length in lengths:
             prompt = baseline.make_prompt(tokenizer, length, 0) if options.request_pilot else base_prompt[:length]
@@ -798,6 +808,8 @@ def main():
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('DFlash2 target sampler must use four physical-pair links')
                         arms = ((False, False, True), (False, False, False), (False, False, False))
+                        if dflash_context != '0':
+                            arms = ((True, True, True), (True, True, False), (True, True, False))
                         if dflash_commit_abba == '1':
                             arms = tuple((candidate, False, audit) for candidate, audit in
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))

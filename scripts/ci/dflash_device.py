@@ -14,20 +14,24 @@ from feature_collective import gather_add_projection
 from feature_projection import concatenate_local_features, projection_shards
 from gdn_multitoken_conv import addresses, release_owned
 from projection_link_policy import projection_links
+from dflash_prefill_window import prefill_window
 
 
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
-                 block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False):
+                 block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0):
         import torch
 
+        window = prefill_window(position)
+        features = tuple(features)
         if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
-                or len(layers) != 5 or type(position) is not int or not 1 <= position <= 2048
+                or len(layers) != 5 or type(feature_start) is not int or feature_start != window['start']
+                or len(features) != 5 or any(len(value.shape) != 4 or value.shape[2] != window['rows'] for value in features)
                 or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
                 or type(fused_convolution) is not bool):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
-        self.position, self.history_rows = position, position
+        self.position, self.history_rows = position, window['rows']
         self.block_rows, self.max_drafts = block_rows, block_rows - 1
         self.owned, self.layers = [], []
         self.history = self.pending = None
@@ -53,8 +57,8 @@ class DFlashDevice:
             self.selector_projection = self.upload(selector['candidate_selector.hidden_projection.weight'].T.contiguous())
             self.predecessors = selector['candidate_selector.predecessor_codebook'].double()
             self.successors = selector['candidate_selector.successor_codebook'].double()
-            self.history = self.project_features(features, position)
-            padded = operations.pad(self.history, [(0, 0), (0, 0), (0, 2048 - position), (0, 0)], 0.0)
+            self.history = self.project_features(features, self.history_rows)
+            padded = operations.pad(self.history, [(0, 0), (0, 0), (0, 2048 - self.history_rows), (0, 0)], 0.0)
             if addresses(operations, padded) != addresses(operations, self.history):
                 operations.deallocate(self.history)
             self.history = padded

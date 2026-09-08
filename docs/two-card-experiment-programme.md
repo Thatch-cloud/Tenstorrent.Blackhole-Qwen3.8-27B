@@ -7,9 +7,10 @@ CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness
 audits and keeping ABBA arms separate. An offline artifact reporter recomputes
 the rates and preserves run/hash provenance; it does not rerun hardware.
-Next is 4K, then 8K/16K/32K/64,504. The drafter currently rejects prefill above
-2,048 tokens: qualify tail-window initialization with absolute positions and
-unchanged full target KV before dispatching those tests. Multi-stream DFlash
+Next is 4K, then 8K/16K/32K/64,504. The former 2,048-token prefill limit now has
+an opt-in tail-window initializer with absolute positions; full target KV stays
+unchanged. Simulator tail copies, ownership and 4K proposal replay pass; hardware qualification
+is still pending. [Initialization gate](dflash-long-context-2026-09-09.md). Multi-stream DFlash
 remains unmeasured. [Matrix and gates](pp-ctx-tg-benchmark-matrix.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**

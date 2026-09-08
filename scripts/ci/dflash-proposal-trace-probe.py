@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace, MethodType
+from itertools import product
 
 from attention_batch import capture_operation
 from dflash_device import DFlashDevice
@@ -33,18 +34,20 @@ def main():
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=268435456)
         mesh.enable_program_cache()
         mapper = ttnn.ReplicateTensorToMesh(mesh)
-        for block in (8, 32):
+        for block, initial_position in product((8, 32), (170, 4093)):
             def history_pattern(position):
+                rows = min(position, 2048)
                 value = torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16)
-                value[..., :position, :] = (torch.arange(position).reshape(1, 1, position, 1) % 64 + position % 17).bfloat16()
+                value[..., :rows, :] = (torch.arange(position - rows, position).reshape(1, 1, rows, 1) % 64 + position % 17).bfloat16()
                 return value
             def upload(value):
                 tensor = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)
                 owned.append(tensor)
                 return tensor
-            device = SimpleNamespace(operations=ttnn, mesh=mesh, position=170, history_rows=170, block_rows=block,
-                owned=[], history=upload(history_pattern(170)), spare_history=upload(history_pattern(170)),
+            device = SimpleNamespace(operations=ttnn, mesh=mesh, position=initial_position,
+                history_rows=min(initial_position, 2048), block_rows=block,
+                owned=[], history=upload(history_pattern(initial_position)), spare_history=upload(history_pattern(initial_position)),
                 progress=lambda *args, **kwargs: None)
             device.temporaries = MethodType(DFlashDevice.temporaries, device)
             def execute(identifiers, history, mask, rope, *, retain, **kwargs):
@@ -75,8 +78,9 @@ def main():
             ttnn.deallocate(warm)
             other_trace, other_output = capture_operation(ttnn, mesh, operation)
             owned.append(other_output)
-            for repetition, position in enumerate((170, 178, 256, 257, 300)):
-                device.position = device.history_rows = position
+            positions = (170, 178, 256, 257, 300) if initial_position == 170 else (4093, 4096, 4101, 4125, 4133)
+            for repetition, position in enumerate(positions):
+                device.position, device.history_rows = position, min(position, 2048)
                 device.history, device.spare_history = device.spare_history, device.history
                 payload = ttnn.from_torch(history_pattern(position), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper)
                 ttnn.copy_host_to_device_tensor(payload, device.history)
@@ -96,7 +100,7 @@ def main():
             prepared = None
             release_owned(ttnn, owned)
             owned.clear()
-        report['passed'] = len(report['checks']) == 140
+        report['passed'] = len(report['checks']) == 280
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise
