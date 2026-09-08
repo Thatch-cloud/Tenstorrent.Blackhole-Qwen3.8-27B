@@ -33,6 +33,18 @@ Artifact: `full-dflash-request.json`, SHA256:
 
 ## Historical stall diagnosis
 
+The first T32 run,
+[34235517714](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34235517714),
+advances through CTX257 but exhausts DRAM while padding the final vocabulary-head
+chunk. It does not complete a request or establish T32 throughput. The allocator
+reports only17,723,392 bytes free per bank, with a145,600-byte largest free block.
+The single-stream harness had reserved8200 physical KV pages while its identity
+page table addresses only1024. DFlash2 now reserves1032 pages: the same65536-token
+request capacity plus eight spare pages. All eight GDN slots remain for inactive
+state checks; cache format, page mapping, target math and serving defaults stay
+unchanged. The wider request must pass again before claiming a result.
+Failed report SHA256: `f38efce3156cbcfd3d3c210b5593227e01090d5250ffa46f950c0724aaa934b3`.
+
 **First hardware attempt: [34225857819](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34225857819), cancelled after a stall.**
 At CTX170, its first T8 block accepts all seven drafts and commits eight tokens;
 all published target-feature checks pass. First-block draft time is5429.31ms,

@@ -469,7 +469,10 @@ def main():
             sampler = SamplingGenerator(args=model.args, mesh_device=mesh, tt_ccl=TT_CCL(mesh))
             sampler.set_trace_bucket(1)
             report['sampling_generator_sha256'] = hashlib.sha256(Path(inspect.getsourcefile(SamplingGenerator)).read_bytes()).hexdigest()
-        kv_cache = generator.allocate_kv_cache((8200, model.args.n_local_kv_heads, 64, model.args.head_dim),
+        from dflash_memory import request_kv_allocation
+        allocation = request_kv_allocation(dflash_drafts)
+        report['kv_allocation'] = allocation
+        kv_cache = generator.allocate_kv_cache((allocation['physical_pages'], model.args.n_local_kv_heads, 64, model.args.head_dim),
                                                ttnn.bfloat16, len(model.layers))
         page_table = torch.arange(1024, dtype=torch.int32).reshape(1, 1024)
         layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
