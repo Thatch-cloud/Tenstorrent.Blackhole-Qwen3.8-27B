@@ -102,6 +102,9 @@ def main():
     parser.add_argument('--target-feature-replay', action='store_true')
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
+    coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
+    if coding_request not in ('0', '1') or (coding_request == '1' and not options.request_pilot):
+        raise ValueError('Coding workload requires explicit request-pilot mode')
     if options.prefix_zero_reuse and (not options.batch or not options.coding_cost or not options.packed_checkpoints
             or any((options.request_pilot, options.replay_inputs, options.deferred_commit,
                 options.attribution, options.device_selection, options.target_features, options.target_feature_batch))):
@@ -690,8 +693,16 @@ def main():
                 attention_tree=options.attention_tree, device_profile=options.device_profile,
                 prefix_zero_reuse=options.prefix_zero_reuse)
 
+        if coding_request == '1':
+            from coding_request import make_prompt
+            coding_prompt = make_prompt(tokenizer)
+            lengths = (len(coding_prompt),)
+            report['coding_task'] = 'merge_intervals_v1'
+            report['thinking_enabled'] = False
         for length in lengths:
             prompt = baseline.make_prompt(tokenizer, length, 0) if options.request_pilot else base_prompt[:length]
+            if coding_request == '1':
+                prompt = coding_prompt
             if not options.request_pilot and len(prompt) != length:
                 raise AssertionError("Insufficient fixed prompt tokens")
             if options.request_pilot:
@@ -700,6 +711,8 @@ def main():
                 report['terminal_ids'] = eos_ids
                 report['generation_config_sha256'] = hashlib.sha256((Path(weights) / 'generation_config.json').read_bytes()).hexdigest()
                 report.update(scope='Actual lookup request pilot on synthetic repeated code; not a coding-quality benchmark')
+                if coding_request == '1':
+                    report['scope'] = 'Single non-repeated coding request with lookup drafting; exact native token/state comparison, not held-out coding-quality certification'
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
@@ -711,6 +724,11 @@ def main():
                         replay_group_rows=8 if attention_wide else 4)
                     if options.attention_engine_wide:
                         result['attention_wide'] = attention_wide
+                    if coding_request == '1':
+                        result['kind'] = report['scope']
+                        result['coding_task'] = report['coding_task']
+                        result['output_text'] = tokenizer.decode(result['emitted'], skip_special_tokens=False)
+                        result['ended_with_eos'] = result['emitted'][-1] in eos_ids
                     report.setdefault('request_checks', []).append(result)
                     output_path.write_text(json.dumps(report, indent=2))
                     print(json.dumps(result), flush=True)

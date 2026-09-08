@@ -52,7 +52,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
             engine_setup_ms=setup, prefill_ms=prefill, committed_tokens_per_second=1000 * count / decode,
             post_seed_including_setup_tokens_per_second=1000 * count / (setup + decode),
             prefill_setup_decode_ms=prefill + setup + decode)
-    return dict(scope='One ABBA block of actual synthetic lookup requests; not coding-quality certification',
+    return dict(scope='One ABBA block of actual lookup-drafted requests; not coding-quality certification',
         arm_key=arm_key,
         arms=arms, decode_speedup=arms['control']['decode_ms'] / arms['candidate']['decode_ms'],
         setup_amortized=False, exact=True)

@@ -16,6 +16,10 @@ on:
         description: Operator confirms both cards allocated exclusively for this run
         type: boolean
         default: false
+      coding_request:
+        description: One non-repeated coding task; full-attention-engine-wide only
+        type: boolean
+        default: false
       reset_authorized:
         description: Explicit approval for one reset of the two allocated cards (recovery suite only)
         type: boolean
@@ -39,6 +43,7 @@ concurrency:
 jobs:
   inventory:
     env:
+      QWEN_CODING_REQUEST: ${{ inputs.coding_request && '1' || '0' }}
       QWEN_PREFIX_ZERO_REUSE: ${{ inputs.prefix_zero_reuse && '1' || '0' }}
       QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]

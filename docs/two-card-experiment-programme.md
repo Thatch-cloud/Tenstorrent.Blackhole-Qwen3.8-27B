@@ -2,6 +2,21 @@
 
 ## Current programme position - 2026-09-08
 
+Priority correction after operator feedback: stop expanding minor kernel matrices.
+The next hardware measurement is one non-repeated `merge_intervals` coding request
+through the existing certified request engine, comparing T4/T8 attention grouping
+in ABBA order and retaining exact native token/state checks, setup costs and output
+text. This remains lookup drafting, not completed DFlash integration or a coding
+quality certification. It replaces repeated-code input for this opt-in run only;
+actual templated context length is reported and thinking is explicitly disabled.
+No serving default changes. Future component work must justify its expected
+end-to-end impact rather than being promoted on isolated green checks alone.
+
+Deferred-publication T8 simulator023840Z-315 has completed cleanly:9 adapter-prefix
+checks,9 two-token continuation checks and1 stale-state control, with norm batching
+enabled. Further width expansion is paused in favor of the integrated request
+measurement. The new coding prompt and existing suite pass640 Linux host tests.
+
 Captured fusion hardware run34179917205 on35654ca passed on the restored exact
 runtime. Transfer health, standalone learned MLP and integrated MLP also passed.
 The fusion report contains12 eager checks,4 byte/source weight checks,36 exact
