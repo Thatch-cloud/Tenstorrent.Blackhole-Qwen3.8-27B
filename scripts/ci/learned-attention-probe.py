@@ -43,8 +43,16 @@ def main():
     parser.add_argument('--stack-fixtures', type=Path)
     parser.add_argument('--stack-layers', type=int, choices=(2, 3, 4, 5), default=2)
     parser.add_argument('--selector-fixture', type=Path)
+    parser.add_argument('--captured-stack', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.captured_stack and (options.hardware or not options.stack_fixtures
+            or options.stack_layers != 5 or not options.selector_fixture or not options.convolution_fixture
+            or not options.mlp_fixture or options.context != 31 or not options.fp32_rope
+            or not options.explicit_softmax or not options.fused_row_sum or not options.fused_dots
+            or not options.cache_dot_tiles or options.inspect_attention or options.wide_attention
+            or options.pairwise_softmax or options.pairwise_dots or options.wide_dot_placement):
+        parser.error('Captured stack requires the complete precise short-context simulator stack')
     if options.selector_fixture and (not options.mlp_fixture or not options.convolution_fixture):
         parser.error('Selector projection requires complete layer fixtures')
     if options.stack_fixtures and (not options.mlp_fixture or not options.convolution_fixture):
@@ -110,6 +118,7 @@ def main():
             attention_rtol=.01, attention_atol=.01, norm_ulps=2), sources={name:
                 hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ('learned-attention-probe.py', 'draft_head_preparation.py', 'draft_attention.py',
+                    'draft_attention_branch.py',
                     'draft_attention_fixture.py', 'feature_collective.py', 'projection_rounding.py',
                     'draft_convolution.py', 'draft_convolution_fixture.py',
                     'draft_mlp_branch.py', 'draft_mlp.py', 'draft_mlp_fixture.py',
@@ -118,6 +127,7 @@ def main():
                     'draft_row_sum.py', 'draft_row_sum_io.cpp', 'draft_row_sum_compute.cpp',
                     'draft_dot.py', 'draft_dot_io.cpp', 'draft_dot_compute.cpp')})
     mesh = None
+    stack_trace = None
     tensors = []
     active_layer = 0
 
@@ -141,13 +151,14 @@ def main():
     try:
         checkpoint('opening_mesh')
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576,
+            **(dict(trace_region_size=536870912) if options.captured_stack else {}))
         mesh.enable_program_cache()
         collectives = TT_CCL(mesh)
-        def run_layer(weights, conv_weights, mlp_weights, device_query=None):
+        def run_layer(weights, conv_weights, mlp_weights, device_query=None, *, seed=8147):
             kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
                 math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
-            key_hidden = torch.randn((1, 1, key_rows, 5120), generator=torch.Generator().manual_seed(8147)).bfloat16()
+            key_hidden = torch.randn((1, 1, key_rows, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
             query_hidden = torch.zeros((1, 1, 32, 5120), dtype=torch.bfloat16)
             query_hidden[..., :8, :] = key_hidden[..., context:valid_keys, :]
             inputs = {'q': upload(query_hidden) if device_query is None else device_query, 'k': upload(key_hidden)}
@@ -383,11 +394,98 @@ def main():
                     projection_max_error=float((actual_projection - expected_projection).abs().max()), cast_exact=True,
                     proposal_rows=list(range(1, 8))))
             checkpoint('selector_projection_complete')
+        if options.captured_stack:
+            from attention_batch import capture_operation
+            from draft_attention_branch import prepare_attention_branch, execute_attention_branch
+            from draft_mlp_branch import prepare_mlp_branch
+            from gdn_multitoken_conv import addresses
+
+            checkpoint('preparing_captured_stack')
+            entries = [(weights, conv_weights, mlp_weights),
+                *((layer_weights, layer_weights, layer_weights) for _, layer_weights in stack_entries)]
+            references = [[host(final_normalized, chip).clone() for chip in range(2)]]
+            changed = None
+            for active_layer, (attention_weights, convolution_weights, feedforward_weights) in enumerate(entries):
+                changed = run_layer(attention_weights, convolution_weights, feedforward_weights, changed, seed=8148)
+            changed_normalized = retain(ttnn.rms_norm(changed, epsilon=1e-6, weight=device_final_norm,
+                compute_kernel_config=final_kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+            ttnn.synchronize_device(mesh)
+            references.append([host(changed_normalized, chip).clone() for chip in range(2)])
+            if any(torch.equal(references[0][chip], references[1][chip]) for chip in range(2)):
+                raise AssertionError('Changed stack inputs must change final hidden output')
+            prepared = [(prepare_attention_branch(ttnn, mesh, attention_weights, convolution_weights, retain),
+                prepare_mlp_branch(ttnn, mesh, feedforward_weights, convolution_weights, retain))
+                for attention_weights, convolution_weights, feedforward_weights in entries]
+            patterns = []
+            for seed in (8147, 8148):
+                history = torch.randn((1, 1, key_rows, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
+                hidden = torch.zeros((1, 1, 32, 5120), dtype=torch.bfloat16)
+                hidden[..., :8, :] = history[..., context:valid_keys, :]
+                patterns.append((hidden, history))
+            persistent = [upload(value) for value in patterns[0]]
+            payloads = [[ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)) for value in pattern] for pattern in patterns]
+            tables = {name: tuple(upload(value) for value in rope_tables(start, rows))
+                for name, start, rows in (('q', query_start, 32), ('k', 4096, key_rows))}
+            device_mask = upload(draft_attention_mask(context))
+            initial_addresses = [addresses(ttnn, value) for value in persistent]
+
+            def stage(pattern):
+                for source, destination in zip(payloads[pattern], persistent, strict=True):
+                    ttnn.copy_host_to_device_tensor(source, destination)
+                ttnn.synchronize_device(mesh)
+
+            def execute_stack():
+                hidden = persistent[0]
+                for (attention_weights, convolution_weights, feedforward_weights), (attention_parameters, mlp_parameters) in zip(entries, prepared, strict=True):
+                    hidden = execute_attention_branch(ttnn, mesh, collectives, hidden, persistent[1], device_mask,
+                        tables, retain, parameters=attention_parameters, context=context)
+                    hidden = execute_mlp_branch(ttnn, mesh, collectives, hidden, feedforward_weights,
+                        convolution_weights, retain, parameters=mlp_parameters, trace_safe=True)['output']
+                return retain(ttnn.rms_norm(hidden, epsilon=1e-6, weight=device_final_norm,
+                    compute_kernel_config=final_kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+
+            report['captured_stack'] = dict(scope='Five learned layers plus final norm; synthetic feature history, no shared head or proposal selection',
+                eager_checks=[], replay_checks=[], negative_controls=[])
+            for pattern in range(2):
+                stage(pattern)
+                result = execute_stack()
+                ttnn.synchronize_device(mesh)
+                for chip in range(2):
+                    if not torch.equal(host(result, chip), references[pattern][chip]):
+                        raise AssertionError('Prepared stack differs from independently checked eager stack')
+                    report['captured_stack']['eager_checks'].append(dict(pattern=pattern, chip=chip, exact=True))
+                checkpoint('prepared_stack_eager_complete', pattern=pattern)
+            stage(0)
+            stack_trace, result = capture_operation(ttnn, mesh, execute_stack)
+            output_addresses = addresses(ttnn, result)
+            for repetition, pattern in enumerate((0, 1, 0)):
+                stage(pattern)
+                ttnn.execute_trace(mesh, stack_trace, cq_id=0, blocking=True)
+                if initial_addresses != [addresses(ttnn, value) for value in persistent] or output_addresses != addresses(ttnn, result):
+                    raise AssertionError('Captured stack addresses changed')
+                for chip in range(2):
+                    if not torch.equal(host(result, chip), references[pattern][chip]):
+                        raise AssertionError('Captured stack differs from independently checked eager stack')
+                    for value, expected in zip(persistent, patterns[pattern], strict=True):
+                        if not torch.equal(host(value, chip), expected):
+                            raise AssertionError('Captured stack mutated caller inputs')
+                    report['captured_stack']['replay_checks'].append(dict(pattern=pattern, chip=chip, exact=True))
+                if repetition == 0:
+                    ttnn.execute_trace(mesh, stack_trace, cq_id=0, blocking=True)
+                    for chip in range(2):
+                        actual = host(result, chip)
+                        if not torch.equal(actual, references[0][chip]) or torch.equal(actual, references[1][chip]):
+                            raise AssertionError('Captured stack stale-input control failed')
+                        report['captured_stack']['negative_controls'].append(dict(chip=chip, stale_input_detected=True))
+                checkpoint('prepared_stack_replay_complete', pattern=pattern)
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise
     finally:
         if mesh is not None:
+            if stack_trace is not None:
+                ttnn.release_trace(mesh, stack_trace)
             release_owned(ttnn, tensors)
             ttnn.close_mesh_device(mesh)
         options.output.write_text(json.dumps(report, indent=2))

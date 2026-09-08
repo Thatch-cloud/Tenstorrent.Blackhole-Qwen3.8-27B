@@ -2,6 +2,15 @@
 
 ## Current programme position - 2026-09-08
 
+The next learned-draft integration gate is a single captured five-layer stack,
+including final normalization. Attention parameters are now prepared once outside
+the forward, matching the existing prepared MLP path. The simulator-only opt-in
+compares two changing input patterns against the independently checked eager
+stack, then replays A/B/A with input-ownership and stale-input controls. All646
+Linux host tests pass; simulator correctness is not yet established. This is
+synthetic feature history, not a live target-feature cache, shared-head selection,
+accepted proposals or an end-to-end speed result. Hardware promotion is disabled.
+
 Priority correction after operator feedback: stop expanding minor kernel matrices.
 The next hardware measurement is one non-repeated `merge_intervals` coding request
 through the existing certified request engine, comparing T4/T8 attention grouping
