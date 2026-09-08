@@ -115,3 +115,11 @@ The hardware suite rebuilds the audited lazy-link fix, then proceeds directly to
 the coding request rather than exiting after another collective microbenchmark.
 It uses the physical `p150_x2` descriptor and four-link sampler, not a global
 four-link override. No serving defaults or device reset are part of this run.
+
+First hardware launch `34191983233` failed before drafting: native and fresh
+candidate prefill seeds differed. It produced no MTP throughput result. The
+launcher had skipped prefill warmup before parking the native decode trace,
+contrary to the runtime's prefill/JIT ordering requirement. The retry restores
+bounded warmup at the actual coding context and needed verifier widths, warms
+the feature capture and norm before trace capture, and checks seed equality
+there as well. Hardware confirmation is still required; the guard is not relaxed.

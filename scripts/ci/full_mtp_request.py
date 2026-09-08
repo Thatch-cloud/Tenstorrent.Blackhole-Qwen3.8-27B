@@ -43,11 +43,29 @@ def load_embedding(weights):
     return embedding, dict(embedding_key=key, index_sha256=hashlib.sha256(index.read_bytes()).hexdigest())
 
 
+def prefill_with_hidden(operations, model, prompt, prefill):
+    from models.tt_transformers.tt.common import Mode
+
+    capture = LayerOutputCapture(model, (63,), snapshot=operations.clone,
+        release=operations.deallocate,
+        storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
+    normalized = None
+    try:
+        with capture.capture():
+            seed = prefill(prompt)
+        normalized = model.norm(capture.outputs()[0], mode=Mode.PREFILL)
+        parts = [operations.to_torch(part) for part in operations.get_device_tensors(normalized)]
+        return seed, validate_prompt_hidden(parts, len(prompt))
+    finally:
+        if normalized is not None:
+            operations.deallocate(normalized)
+        capture.close()
+
+
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
-    from models.tt_transformers.tt.common import Mode
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
     if (type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
@@ -69,25 +87,16 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         prefill_calls += 1
         status('native-prefill' if prefill_calls == 1 else 'candidate-prefill')
         if prefill_calls == 1:
-            return prefill(tokens)
+            seed = prefill(tokens)
+            status('native-prefill-complete', seed=seed)
+            return seed
         if prefill_calls != 2:
             raise AssertionError('MTP gate must initialize exactly one fresh candidate request')
-        capture = LayerOutputCapture(model, (63,), snapshot=operations.clone,
-            release=operations.deallocate,
-            storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
-        normalized = None
-        try:
-            with capture.capture():
-                seed = prefill(tokens)
-            normalized = model.norm(capture.outputs()[0], mode=Mode.PREFILL)
-            parts = [operations.to_torch(part) for part in operations.get_device_tensors(normalized)]
-            prompt_rows.append(validate_prompt_hidden(parts, len(tokens)))
-            metadata['prefill_hidden_shape'] = list(prompt_rows[0].shape)
-            return seed
-        finally:
-            if normalized is not None:
-                operations.deallocate(normalized)
-            capture.close()
+        seed, hidden = prefill_with_hidden(operations, model, tokens, prefill)
+        prompt_rows.append(hidden)
+        metadata['prefill_hidden_shape'] = list(hidden.shape)
+        status('candidate-prefill-complete', seed=seed)
+        return seed
 
     def factory():
         nonlocal step

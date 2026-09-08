@@ -2,15 +2,38 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
-from full_mtp_request import validate_prompt_hidden
+from full_mtp_request import prefill_with_hidden, validate_prompt_hidden
 
 
 class FullMTPRequestTests(unittest.TestCase):
+    def test_prefill_snapshot_preserves_seed_and_releases_only_owned_device_rows(self):
+        hidden = torch.ones(1, 1, 32, 5120, dtype=torch.bfloat16)
+        model = SimpleNamespace(layers=[SimpleNamespace(forward=Mock(return_value=hidden)) for _ in range(64)],
+            norm=Mock(side_effect=lambda value, mode: value.clone()))
+        operations = SimpleNamespace(clone=torch.clone, deallocate=Mock(), to_torch=lambda value: value,
+            get_device_tensors=lambda value: [value, value.clone()])
+        def prefill(prompt):
+            self.assertEqual(prompt, [10, 11, 12])
+            model.layers[63].forward()
+            return 37
+        module = SimpleNamespace(Mode=SimpleNamespace(PREFILL='prefill'))
+        with patch.dict(sys.modules, {'models.tt_transformers.tt.common': module}), patch(
+                'full_mtp_request.addresses', side_effect=lambda operations, value: (id(value), id(value))):
+            seed, rows = prefill_with_hidden(operations, model, [10, 11, 12], prefill)
+        self.assertEqual(seed, 37)
+        self.assertTrue(torch.equal(rows, hidden))
+        self.assertNotEqual(rows.data_ptr(), hidden.data_ptr())
+        self.assertEqual(operations.deallocate.call_count, 2)
+        self.assertTrue(all(call.args[0] is not hidden for call in operations.deallocate.call_args_list))
+        model.norm.assert_called_once()
+
     def test_prompt_replica_validation_excludes_padding_and_owns_copy(self):
         first = torch.ones(1, 1, 32, 5120, dtype=torch.bfloat16)
         second = first.clone()

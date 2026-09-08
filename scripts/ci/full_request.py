@@ -65,7 +65,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     seed = prefill(prompt)
     prefill_ms = (time.perf_counter() - started) * 1000
     if seed != gold[0]:
-        raise AssertionError('Fresh request prefill changed the native seed')
+        raise AssertionError(f'Fresh request prefill changed the native seed: native={gold[0]}, candidate={seed}')
     mtp_setup_ms = 0.0
     if mtp_factory is not None:
         started = time.perf_counter()

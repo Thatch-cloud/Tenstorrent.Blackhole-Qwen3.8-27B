@@ -630,13 +630,19 @@ def main():
         save(scratch)
         restore()
         kv_digest(128)
-        if options.batch and mtp_drafts == '0':
+        warm_lengths, warm_widths = lengths, widths
+        if mtp_drafts != '0':
+            from coding_request import make_prompt
+            mtp_prompt = make_prompt(tokenizer)
+            warm_lengths = (len(mtp_prompt),)
+            warm_widths = tuple(rows for rows in widths if rows <= int(mtp_drafts) + 1)
+        if options.batch:
             from model_batch import ModelBatch
             save(replay_initial)
             restore(replay_initial)
-            for length in lengths:
+            for length in warm_lengths:
                 kv_digest(length + options.max_rows + 2)
-                for rows in widths:
+                for rows in warm_widths:
                     fixture = ModelBatch(model, [1] * rows, length, page_table, helpers, candidate_saved, rows,
                                          serial_sdpa=options.serial_sdpa, compact_gdn=options.compact_gdn,
                                          reuse_gdn_input=options.reuse_gdn_input, skip_row_clones=options.skip_row_clones,
@@ -649,6 +655,16 @@ def main():
                     fixture.close()
         if mtp_drafts == '0':
             generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
+        else:
+            from full_mtp_request import prefill_with_hidden
+            print(json.dumps(dict(mtp_stage='warm-prefill-before-native-trace', length=len(mtp_prompt))), flush=True)
+            warm_seed = prefill(mtp_prompt)
+            captured_seed, warm_hidden = prefill_with_hidden(ttnn, model, mtp_prompt, prefill)
+            report['mtp_prefill_warmup'] = dict(native_seed=warm_seed, captured_seed=captured_seed,
+                hidden_shape=list(warm_hidden.shape), before_native_trace=True)
+            del warm_hidden
+            if warm_seed != captured_seed:
+                raise AssertionError(f'MTP prefill capture changed the seed before any trace: {warm_seed} != {captured_seed}')
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch), max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
         if options.target_feature_batch:
