@@ -94,6 +94,23 @@ These are **block timings, not generated throughput**, excluding draft/commit ov
 
 ## Latest kernel and drafter results — September 8
 
+Four-channel fabric sampling now passes exact argmax and input-preservation checks
+on both cards, including ties and changing traced inputs. Three ABBA blocks per
+comparison measured the following warmed sampler latency (not model TG):
+
+| Comparison | One-link control | Candidate |
+| --- | ---: | ---: |
+| Two links | 2.671 ms | 2.098 ms |
+| Four links | 2.702 ms | 1.827 ms |
+
+This uses the `p150_x2` descriptor and a sampler-only override of the hardcoded
+link helper. Serving defaults are unchanged.
+[Fabric sampling evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185352446).
+
+The new five-layer captured-drafter simulator gate is **not passed**: its eager
+reference stage failed in layer three's gate/up MLP projection. It has not been
+promoted to hardware; this does not invalidate the earlier isolated branch tests.
+
 | Experiment | Measured outcome | Meaning |
 | --- | --- | --- |
 | Learned MLP, T8 captured replay | 1.911 ms median | One isolated MLP branch, not a complete draft |

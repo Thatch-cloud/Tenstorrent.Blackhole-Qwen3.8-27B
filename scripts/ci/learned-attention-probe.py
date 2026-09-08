@@ -345,7 +345,7 @@ def main():
                     if connected_mlp['hidden'] is not branch_output:
                         raise AssertionError('Attention output must feed MLP without host reconstruction')
                     report['checks'].append(validate_mlp_branch(connected_mlp, host, chip,
-                        failure_capture=options.output.with_suffix(f'.layer{active_layer}.rank{chip}-down-failure.pt'),
+                        failure_capture=options.output.with_suffix(f'.layer{active_layer}.rank{chip}-projection-failure.pt'),
                         checkpoint=mlp_manifest if active_layer == 0 else stack_entries[active_layer - 1][0], layer=active_layer))
                 checkpoint('rank_checks_complete', chip=chip)
             return connected_mlp['output'] if mlp_weights is not None else (branch_output if conv_weights is not None else output)
