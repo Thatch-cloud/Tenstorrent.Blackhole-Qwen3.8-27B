@@ -59,7 +59,7 @@ These are offline complete requests, not endpoint streaming measurements.
 | PP tok/s | CTX tokens | Committed TG tok/s | Status |
 | ---: | ---: | ---: | --- |
 | 510.65 | 170 | **78.06** | Measured: two 150-token decode samples through EOS |
-| — | 4,096 | — | Next: long-prefill correctness gate |
+| — | 4,096 | — | First run hit a capture-boundary error; fix passes local gates, hardware retry next |
 | — | 8,192 | — | Planned |
 | — | 16,384 | — | Planned |
 | — | 32,768 | — | Planned |

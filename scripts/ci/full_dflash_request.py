@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dflash_device import DFlashDevice
 from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
-from dflash_prefill_window import prefill_window, snapshot_prefill_tail
+from dflash_prefill_window import PrefillWindowCapture, prefill_window, validate_prefill_chunks
 from draft_attention_fixture import load_attention
 from draft_convolution_fixture import load_convolution
 from draft_mlp_fixture import load_mlp
@@ -22,9 +22,7 @@ from target_features import LayerOutputCapture
 def warm_dflash_prefill(operations, model, prompt, prefill):
     window = prefill_window(len(prompt))
     native_seed = prefill(prompt)
-    captured = LayerOutputCapture(model, TARGET_TAPS,
-        snapshot=lambda value: snapshot_prefill_tail(operations, value, len(prompt)),
-        release=operations.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
+    captured = PrefillWindowCapture(operations, model, len(prompt), TARGET_TAPS)
     try:
         with captured.capture():
             captured_seed = prefill(prompt)
@@ -32,9 +30,29 @@ def warm_dflash_prefill(operations, model, prompt, prefill):
         if native_seed != captured_seed or any(value.shape[2] != window['rows'] for value in outputs):
             raise AssertionError('DFlash2 prefill capture must preserve the seed and exact valid tail window')
         return dict(native_seed=native_seed, captured_seed=captured_seed, taps=list(TARGET_TAPS),
-            shapes=[list(value.shape) for value in outputs], feature_window=window, before_native_trace=True)
+            shapes=[list(value.shape) for value in outputs], feature_window=window,
+            chunks=captured.chunks, before_native_trace=True)
     finally:
         captured.close()
+
+
+def audit_prefill_assembly(operations, captured):
+    import torch
+
+    pieces = [child.outputs() for child in captured.children]
+    checks = []
+    for index, (tap, feature) in enumerate(zip(TARGET_TAPS, captured.outputs(), strict=True)):
+        actual = operations.get_device_tensors(feature)
+        parts = [operations.get_device_tensors(piece[index]) for piece in pieces]
+        if len(actual) != 2 or any(len(part) != 2 for part in parts):
+            raise AssertionError('Both chips required for assembled prefill features')
+        for chip, shard in enumerate(actual):
+            expected = torch.cat([operations.to_torch(part[chip]) for part in parts], dim=2).contiguous()
+            output = operations.to_torch(shard).contiguous()
+            if not torch.equal(output.view(torch.int16), expected.view(torch.int16)):
+                raise AssertionError('Assembled prefill features differ from their exact ordered chunk snapshots')
+            checks.append(dict(tap=tap, chip=chip, **captured.window, exact=True))
+    return checks
 
 
 def summarize_dflash_requests(requests):
@@ -74,11 +92,19 @@ def summarize_dflash_requests(requests):
     checks = reference['dflash']['feature_checks']
     if len(reference['prompt_tokens']) > 2048 or 'prefill_window' in reference['dflash']:
         window = prefill_window(len(reference['prompt_tokens']))
-        expected = [dict(chip=chip, **window, exact=True)
+        prefills = reference['dflash'].get('prefill_chunks', [])
+        if len(prefills) != 2:
+            raise ValueError('Both complete native and candidate prefill chunk records required')
+        expected = [dict(chip=chip, **piece, exact=True)
+            for chunks in prefills for piece in validate_prefill_chunks(len(reference['prompt_tokens']), chunks)
+            for tap in TARGET_TAPS for chip in range(2)]
+        assembled = [dict(tap=tap, chip=chip, **window, exact=True)
             for prefill in range(2) for tap in TARGET_TAPS for chip in range(2)]
         if (reference['dflash'].get('prefill_checks') != expected
+                or reference['dflash'].get('prefill_assembly_checks') != assembled
                 or any(entry['dflash'].get('prefill_window') != window for entry in requests)
-                or any(entry['dflash'].get('prefill_checks') for entry in requests[1:])):
+                or any(entry['dflash'].get('prefill_chunks') != prefills for entry in requests)
+                or any(entry['dflash'].get('prefill_checks') or entry['dflash'].get('prefill_assembly_checks') for entry in requests[1:])):
             raise ValueError('Both audited prefills require exact tail-window snapshots; measured requests must not audit')
     if fused_convolution:
         convolution_checks = reference['dflash'].get('convolution_checks', [])
@@ -218,26 +244,31 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
     golden_features = {}
     feature_checks = []
     prefill_checks = []
+    prefill_chunks = []
+    prefill_assembly_checks = []
 
     def status(stage, **values):
         if stage == 'committed-block':
             faulthandler.dump_traceback_later(180, exit=True)
         print(json.dumps(dict(dflash_stage=stage, **values)), flush=True)
 
-    def new_capture(*, prefill=False):
+    def new_capture():
         return LayerOutputCapture(model, TARGET_TAPS,
-            snapshot=(lambda value: snapshot_prefill_tail(operations, value, len(prompt),
-                checks=prefill_checks if audit_features else None)) if prefill else
-                (lambda value: operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG)),
+            snapshot=lambda value: operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG),
             release=operations.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
 
     def captured_prefill(tokens):
         nonlocal capture, prefill_count
         if capture is not None:
             capture.close()
-        capture = new_capture(prefill=True)
+        capture = PrefillWindowCapture(operations, model, len(prompt), TARGET_TAPS,
+            checks=prefill_checks if audit_features else None)
         with capture.capture():
             seed = prefill(tokens)
+        capture.outputs()
+        if audit_features:
+            prefill_assembly_checks.extend(audit_prefill_assembly(operations, capture))
+        prefill_chunks.append(list(capture.chunks))
         prefill_count += 1
         return seed
 
@@ -291,7 +322,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             feature_factory=factory, progress=lambda block: status('committed-block', **block))
         result['fused_convolution'] = fused_convolution
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
-            prefill_window=window, prefill_checks=prefill_checks,
+            prefill_window=window, prefill_checks=prefill_checks, prefill_chunks=prefill_chunks,
+            prefill_assembly_checks=prefill_assembly_checks,
             convolution_checks=device.convolution_checks,
             block_rows=block_rows, max_drafts=block_rows - 1, mask_token_id=248070,
             checkpoint_trained_block_rows=8, block_width_extrapolation=block_rows != 8,

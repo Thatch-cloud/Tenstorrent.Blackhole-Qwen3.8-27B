@@ -10,8 +10,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from draft_selector import greedy_selector_reference, select_active_candidates
-from dflash_prefill_window import prefill_window
-from full_dflash_request import (load_dflash_fixtures, summarize_dflash_requests,
+from dflash_prefill_window import prefill_window, validate_prefill_chunks
+from full_dflash_request import (audit_prefill_assembly, load_dflash_fixtures, summarize_dflash_requests,
     summarize_dflash_commit_requests, summarize_dflash_convolution_requests)
 
 
@@ -37,14 +37,20 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertFalse(result['target_reached'])
 
     def test_long_context_requires_both_prefill_tail_audits_with_absolute_positions(self):
-        for mutation in (None, 'missing', 'start', 'measured', 'window'):
+        for mutation in (None, 'missing', 'start', 'measured', 'window', 'assembly', 'chunks'):
             records = self.requests()
             window = prefill_window(4093)
+            chunks = [dict(chunk_start=0, valid_rows=2048, bucket=2048, retained_rows=3),
+                dict(chunk_start=2048, valid_rows=2045, bucket=2048, retained_rows=2045)]
             for record in records:
                 record['prompt_tokens'] = [10] * 4093
                 record['dflash']['prefill_window'] = dict(window)
-                record['dflash']['prefill_checks'] = [dict(chip=chip, **window, exact=True)
-                    for prefill in range(2) for tap in range(5) for chip in range(2)] if record['instrumented_timing'] else []
+                record['dflash']['prefill_chunks'] = copy.deepcopy([chunks, chunks])
+                record['dflash']['prefill_assembly_checks'] = [dict(tap=tap, chip=chip, **window, exact=True)
+                    for prefill in range(2) for tap in (5, 19, 33, 47, 61) for chip in range(2)] if record['instrumented_timing'] else []
+                record['dflash']['prefill_checks'] = [dict(chip=chip, **piece, exact=True)
+                    for prefill in range(2) for piece in validate_prefill_chunks(4093, chunks)
+                    for tap in range(5) for chip in range(2)] if record['instrumented_timing'] else []
             if mutation == 'missing':
                 records[0]['dflash']['prefill_checks'].pop()
             elif mutation == 'start':
@@ -53,11 +59,29 @@ class FullDFlashRequestTests(unittest.TestCase):
                 records[1]['dflash']['prefill_checks'] = records[0]['dflash']['prefill_checks']
             elif mutation == 'window':
                 records[2]['dflash']['prefill_window']['rows'] = 4093
+            elif mutation == 'assembly':
+                records[0]['dflash']['prefill_assembly_checks'].pop()
+            elif mutation == 'chunks':
+                records[2]['dflash']['prefill_chunks'][1][0]['retained_rows'] = 2048
             if mutation is None:
                 self.assertEqual(summarize_dflash_requests(records)['benchmark']['ctx_tokens'], 4093)
             else:
                 with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                     summarize_dflash_requests(records)
+
+    def test_prefill_assembly_audit_detects_reversed_or_corrupted_chunk_rows(self):
+        from types import SimpleNamespace
+
+        pieces = [tuple(torch.full((1, 1, rows, 2560), index + chunk, dtype=torch.bfloat16)
+            for index in range(5)) for chunk, rows in ((1, 3), (2, 2045))]
+        merged = tuple(torch.cat([piece[index] for piece in pieces], dim=2) for index in range(5))
+        capture = SimpleNamespace(children=[SimpleNamespace(outputs=lambda piece=piece: piece) for piece in pieces],
+            outputs=lambda: merged, window=prefill_window(4093))
+        operations = SimpleNamespace(get_device_tensors=lambda value: [value, value], to_torch=lambda value: value)
+        self.assertEqual(len(audit_prefill_assembly(operations, capture)), 10)
+        merged[2][..., 0, 0] = -7
+        with self.assertRaises(AssertionError):
+            audit_prefill_assembly(operations, capture)
 
     def test_pp_ctx_tg_use_actual_prompt_and_time_weighted_uninstrumented_samples(self):
         records = self.requests()

@@ -31,7 +31,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | Not measured | Qualify long-prefill initialization first |
+| 4,096 | 1 | Not measured | Retry after native chunk-capture fix; local gates pass |
 | 8,192 | 1 | Not measured | Run after 4K correctness passes |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |

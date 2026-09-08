@@ -9,8 +9,10 @@ audits and keeping ABBA arms separate. An offline artifact reporter recomputes
 the rates and preserves run/hash provenance; it does not rerun hardware.
 Next is 4K, then 8K/16K/32K/64,504. The former 2,048-token prefill limit now has
 an opt-in tail-window initializer with absolute positions; full target KV stays
-unchanged. Simulator tail copies, ownership and 4K proposal replay pass; hardware qualification
-is still pending. [Initialization gate](dflash-long-context-2026-09-09.md). Multi-stream DFlash
+unchanged. The first 4K hardware run34282865344 failed before timing: slot-prefill
+delivers 2K chunks, not a full-sequence layer output. Chunk-aware capture now
+passes its simulator gate and 889 host tests; hardware retry is next. No 4K rate exists.
+[Initialization gate](dflash-long-context-2026-09-09.md). Multi-stream DFlash
 remains unmeasured. [Matrix and gates](pp-ctx-tg-benchmark-matrix.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
