@@ -50,3 +50,21 @@ def greedy_selector_reference(projected_hidden, candidates, unary_logits, predec
         path.append(predecessor)
         score_rows.append(scores)
     return torch.stack(path, dim=1), torch.stack(score_rows, dim=1)
+
+
+def select_active_candidates(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors):
+    import torch
+
+    if (candidates.dtype != torch.int64 or anchors.dtype != torch.int64
+            or candidates.device.type != 'cpu' or anchors.device.type != 'cpu'
+            or predecessor_codes.ndim != 2 or successor_codes.shape != predecessor_codes.shape
+            or predecessor_codes.device.type != 'cpu' or successor_codes.device.type != 'cpu'):
+        raise ValueError('CPU global candidate IDs and matching full codebooks required')
+    if any(torch.any(value < 0) or torch.any(value >= predecessor_codes.shape[0]) for value in (candidates, anchors)):
+        raise ValueError('Selector token IDs outside vocabulary')
+    identifiers, inverse = torch.unique(torch.cat((anchors.flatten(), candidates.flatten())), sorted=True, return_inverse=True)
+    local_anchors = inverse[:anchors.numel()].reshape(anchors.shape)
+    local_candidates = inverse[anchors.numel():].reshape(candidates.shape)
+    selected, scores = greedy_selector_reference(projected_hidden, local_candidates, unary_logits,
+        predecessor_codes[identifiers], successor_codes[identifiers], local_anchors)
+    return identifiers[selected], scores

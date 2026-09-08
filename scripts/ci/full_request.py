@@ -37,7 +37,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
-                    attention_audit=False):
+                    attention_audit=False, feature_factory=None):
     if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
         raise ValueError('Attention diagnostics require explicit short-context parallel attention')
     if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
@@ -49,6 +49,11 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         raise ValueError('Request progress must be callable')
     if mtp_factory is not None and (not callable(mtp_factory) or mtp_runtime is not None):
         raise ValueError('Choose a prepared MTP runtime or one post-prefill factory')
+    if feature_factory is not None:
+        if (not callable(feature_factory) or mtp_factory is not None or mtp_runtime is not None
+                or neural or selected_drafter is not None or engine_factory is not None):
+            raise ValueError('One post-prefill feature-drafter factory must own request routing')
+        neural, selected_drafter, lookup_enabled = {'dflash2': feature_factory}, 'dflash2', False
     if mtp_runtime is not None or mtp_factory is not None:
         if (neural or selected_drafter is not None or engine_factory is not None
                 or (mtp_runtime is not None and not all(
@@ -89,6 +94,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     if seed != gold[0]:
         raise AssertionError(f'Fresh request prefill changed the native seed: native={gold[0]}, candidate={seed}')
     mtp_setup_ms = 0.0
+    feature_setup_ms = 0.0
+    feature_runtime = None
     if mtp_factory is not None:
         started = time.perf_counter()
         mtp_runtime = mtp_factory()
@@ -96,6 +103,17 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         if not all(callable(getattr(mtp_runtime, name, None)) for name in ('bind', 'publish', '__call__')):
             raise ValueError('MTP factory must return a prepared request runtime')
         neural = {'mtp': mtp_runtime}
+    if feature_factory is not None:
+        from dflash_request_runtime import TARGET_TAPS
+
+        started = time.perf_counter()
+        feature_runtime = feature_factory()
+        feature_setup_ms = (time.perf_counter() - started) * 1000
+        if (not all(callable(getattr(feature_runtime, name, None)) for name in ('bind', 'publish', '__call__'))
+                or tuple(feature_runtime.tap_ids) != TARGET_TAPS):
+            raise ValueError('DFlash2 factory must return a complete target-feature request bridge')
+        neural = {'dflash2': feature_runtime}
+    runtime = mtp_runtime if mtp_runtime is not None else feature_runtime
     inactive_before = inactive_digest()
     session = GreedySession('lookup-pilot', prompt, seed, vocab_size=model.args.vocab_size,
         max_new_tokens=max_new_tokens, eos_ids=eos_ids, verifier_rows=32, neural=neural, lookup_enabled=lookup_enabled)
@@ -118,10 +136,11 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 **(dict(short_context=True) if short_context else {}),
                 **(dict(attention_audit=True) if attention_audit else {}),
                 **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
+                **(dict(retain_feature_taps=feature_runtime.tap_ids) if feature_runtime is not None else {}),
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
-            if mtp_runtime is not None:
-                mtp_runtime.bind(session, engine)
-            publish = engine.publish if mtp_runtime is None else mtp_runtime.publish
+            if runtime is not None:
+                runtime.bind(session, engine)
+            publish = engine.publish if runtime is None else runtime.publish
             capture_count = len(engine.buckets)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
@@ -171,17 +190,17 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
             committed_decode_tokens=session.committed_decode_tokens, proposed=session.committed_block_proposals,
             accepted=session.accepted_proposals, prefill_ms=prefill_ms, engine_setup_ms=setup_ms,
-            decode_ms=decode_ms, mtp_setup_ms=mtp_setup_ms,
+            decode_ms=decode_ms, mtp_setup_ms=mtp_setup_ms, feature_setup_ms=feature_setup_ms,
             native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,
             committed_tokens_per_second=1000 * session.committed_decode_tokens / decode_ms
                 if decode_ms and not attention_audit else None,
-            post_seed_including_setup_ms=mtp_setup_ms + setup_ms + decode_ms,
-            prefill_setup_decode_ms=prefill_ms + mtp_setup_ms + setup_ms + decode_ms,
+            post_seed_including_setup_ms=mtp_setup_ms + feature_setup_ms + setup_ms + decode_ms,
+            prefill_setup_decode_ms=prefill_ms + mtp_setup_ms + feature_setup_ms + setup_ms + decode_ms,
             setup_amortized=False, cross_request_trace_reuse=False)
     finally:
         if engine is not None:
             if engine.phase == 'verified' and session.phase == 'pending':
                 session.abort(session.request_id, session.pending,
-                              engine.publish if mtp_runtime is None else mtp_runtime.publish)
+                              engine.publish if runtime is None else runtime.publish)
             engine.close()
         session.close(session.request_id)

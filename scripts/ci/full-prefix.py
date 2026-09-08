@@ -104,6 +104,14 @@ def main():
     options = parser.parse_args()
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
     mtp_drafts = os.environ.get('QWEN_MTP_DRAFTS', '0')
+    dflash_drafts = os.environ.get('QWEN_DFLASH_DRAFTS', '0')
+    if dflash_drafts not in ('0', '7') or (dflash_drafts != '0' and
+            (mtp_drafts != '0' or coding_request != '1' or not options.norm_batch or not options.request_pilot
+             or options.attention_engine or options.attention_engine_wide or options.replay_inputs
+             or os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0') != '0'
+             or os.environ.get('QWEN_FABRIC_LINK_PROBE', '0') != '1'
+             or os.environ.get('QWEN_PROJECTION_LINKS', '0') != '4')):
+        parser.error('DFlash2 requires the isolated coding norm-engine request and explicit four-link pair')
     if mtp_drafts not in ('0', '7') or (mtp_drafts != '0' and
             (coding_request != '1' or not options.norm_batch or not options.request_pilot
              or options.attention_engine or options.attention_engine_wide
@@ -432,6 +440,11 @@ def main():
         baseline = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(baseline)
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        dflash_fixtures = None
+        if dflash_drafts != '0':
+            from full_dflash_request import load_dflash_fixtures
+            print(json.dumps(dict(dflash_stage='verify-complete-checkpoint-before-device-open')), flush=True)
+            dflash_fixtures = load_dflash_fixtures('/experiment-dflash-fixture')
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=1073741824)
         mesh.enable_program_cache()
         if options.target_feature_prefix:
@@ -538,7 +551,7 @@ def main():
             generator.prev_page_table = None
             logits, _ = generator.prefill_forward(torch.tensor([prompt], dtype=torch.int32), page_table,
                 kv_cache, [len(prompt)], empty_slots=[0],
-                enable_trace=not (options.target_features or options.target_feature_batch or mtp_drafts != '0'))
+                enable_trace=not (options.target_features or options.target_feature_batch or mtp_drafts != '0' or dflash_drafts != '0'))
             if addresses() != original_addresses:
                 raise AssertionError("Prefill replaced persistent decode state")
             return logits.clone() if return_logits else argmax(logits)
@@ -631,11 +644,11 @@ def main():
         restore()
         kv_digest(128)
         warm_lengths, warm_widths = lengths, widths
-        if mtp_drafts != '0':
+        if mtp_drafts != '0' or dflash_drafts != '0':
             from coding_request import make_prompt
             mtp_prompt = make_prompt(tokenizer)
             warm_lengths = (len(mtp_prompt),)
-            warm_widths = tuple(rows for rows in widths if rows <= int(mtp_drafts) + 1)
+            warm_widths = tuple(rows for rows in widths if rows <= 8)
         if options.batch:
             from model_batch import ModelBatch
             save(replay_initial)
@@ -653,7 +666,10 @@ def main():
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
-        if mtp_drafts == '0':
+        if dflash_drafts != '0':
+            from full_dflash_request import warm_dflash_prefill
+            report['dflash_prefill_warmup'] = warm_dflash_prefill(ttnn, model, mtp_prompt, prefill)
+        elif mtp_drafts == '0':
             generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
         else:
             from full_mtp_request import prefill_with_hidden
@@ -755,6 +771,34 @@ def main():
                     report['scope'] = 'Single non-repeated coding request with lookup drafting; exact native token/state comparison, not held-out coding-quality certification'
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
+
+                if dflash_drafts != '0':
+                    from full_dflash_request import measure_dflash_request, summarize_dflash_requests
+                    output_path = root / 'full-dflash-request.json'
+                    report.update(scope='Complete five-layer DFlash2 coding request; exact target verification, not held-out quality certification',
+                        context_lengths=[len(prompt)], request_checks=[])
+                    with sampler_links(sampler.tt_sampling, 4):
+                        axis = sampler.tt_sampling._get_sampling_cluster_axis()
+                        actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
+                        if actual != 4 or topology != ttnn.Topology.Linear:
+                            raise AssertionError('DFlash2 target sampler must use four physical-pair links')
+                        for feature_audit in (True, False, False):
+                            print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
+                                repetition=len(report['request_checks']))), flush=True)
+                            result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
+                                fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
+                                kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
+                                audit_features=feature_audit)
+                            result.update(kind=report['scope'], coding_task=report['coding_task'],
+                                output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
+                                ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
+                                fabric_sources=fabric_sources)
+                            report['request_checks'].append(result)
+                            output_path.write_text(json.dumps(report, indent=2))
+                    report['request_summary'] = summarize_dflash_requests(report['request_checks'])
+                    report['passed'] = True
+                    print(json.dumps(report['request_summary']), flush=True)
+                    return
 
                 if mtp_drafts != '0':
                     from full_mtp_request import measure_mtp_request

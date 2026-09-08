@@ -24,7 +24,7 @@ class RequestPilotTests(unittest.TestCase):
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
                     mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False,
-                    attention_audit=False):
+                    attention_audit=False, feature_factory=None):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -32,9 +32,11 @@ class RequestPilotTests(unittest.TestCase):
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
                     attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                    native_sampling_rows=False, short_context=False, attention_audit=False):
+                    native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=()):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             engine.retain_mtp_hidden = retain_mtp_hidden
+            engine.retain_feature_taps, engine.session = retain_feature_taps, session
+            engine.verified_features_for_publication = lambda ticket: ('features',)
             engine.verified_mtp_hidden_for_publication = lambda ticket: [[token] for token in ticket.tokens]
             if attention_replay:
                 from attention_request_plan import capture_plan
@@ -44,6 +46,7 @@ class RequestPilotTests(unittest.TestCase):
 
             def verify(ticket):
                 engine.phase = 'verified'
+                engine.pending = ticket
                 return [99 if wrong else (token + 1) % 3 for token in ticket.tokens], dict(input_ms=0, verify_readback_ms=0)
 
             def publish(prefix):
@@ -64,8 +67,32 @@ class RequestPilotTests(unittest.TestCase):
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
                 lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
-                native_sampling_rows=native_sampling_rows, short_context=short_context, attention_audit=attention_audit)
+                native_sampling_rows=native_sampling_rows, short_context=short_context, attention_audit=attention_audit,
+                feature_factory=feature_factory)
         return result, constructor
+
+    def test_feature_drafter_owns_neural_route_and_prefix_publication(self):
+        from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
+
+        drafter = SimpleNamespace(position=36,
+            propose=lambda seed, count: tuple((seed + offset + 1) % 3 for offset in range(count)),
+            prepare_publication=lambda features, prefix, **kwargs: prefix,
+            discard_publication=Mock())
+        def commit(prefix):
+            drafter.position += prefix
+        drafter.commit_publication = commit
+        runtime = DFlashRequestRuntime(drafter, position=36)
+        factory = Mock(return_value=runtime)
+        result, constructor = self.run_fixture(feature_factory=factory, lookup_max_rows=8)
+        self.assertEqual(result['selected_drafter'], 'dflash2')
+        self.assertEqual(result['drafting_policy'], 'neural-with-target-fallback')
+        self.assertEqual(constructor.call_args.kwargs['retain_feature_taps'], TARGET_TAPS)
+        self.assertNotIn('retain_mtp_hidden', constructor.call_args.kwargs)
+        self.assertEqual(runtime.committed_feature_rows, 32)
+        self.assertEqual(drafter.position, 68)
+        self.assertGreater(result['feature_setup_ms'], 0)
+        self.assertEqual(result['mtp_setup_ms'], 0)
+        factory.assert_called_once()
 
     def test_instrumented_attention_cannot_claim_decode_throughput(self):
         result, constructor = self.run_fixture(norm_batch=True, native_sampling_rows=True,

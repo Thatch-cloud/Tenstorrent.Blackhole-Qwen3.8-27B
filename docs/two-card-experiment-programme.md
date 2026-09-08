@@ -1,6 +1,17 @@
 # Qwen3.8-27B: two-card experiment programme
 
-## Current programme position - 2026-09-08
+## Current programme position - 2026-09-09
+
+**Full DFlash2 request integration replaces more isolated numerical experiments.**
+The opt-in `full-dflash-request` suite connects all five learned layers to the
+target's embedding/head and five post-layer feature taps. Only committed target
+input rows enter the drafter history; two preallocated history buffers survive
+verifier trace replay. The first complete coding request audits every published
+feature row against native decoding; two further requests measure committed TG,
+with setup reported separately. All three must match native tokens, GDN state,
+valid KV and inactive slots. This is implemented, not yet a measured DFlash2 gain.
+It uses the previously qualified composed precise attention, not the failing
+native candidate. [Integration details](dflash-full-request-2026-09-09.md).
 
 **Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**
 The native kernel hardcodes an approximate main exponential despite
@@ -11,8 +22,8 @@ bound; FP32 intermediate buffers reduce this to41 but do not pass. A single
 64-key chunk also fails44 values on captured rank-zero operands. No hardware
 job was dispatched for these known failures; latest committed TG stays58.33.
 Captured, hash-pinned operands now reproduce the failure without reloading
-weights or repeating projections/fabric setup. Next: diagnose that operand case,
-then qualify the connected native branch before full DFlash2 request integration.
+weights or repeating projections/fabric setup. That native-kernel investigation
+is retained separately; it no longer blocks the composed-path request integration.
 [Evidence and scope](native-draft-sdpa-2026-09-08.md). Serving defaults unchanged.
 
 **Latest qualified:34216164140 (`3772f3b`), device chain exact, small TG gain.**

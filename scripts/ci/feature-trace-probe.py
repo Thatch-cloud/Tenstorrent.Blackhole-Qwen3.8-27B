@@ -19,7 +19,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--prefix-copy', action='store_true')
-    parser.add_argument('--rows', type=int, choices=(2, 16, 32), default=32)
+    parser.add_argument('--rows', type=int, choices=(1, 2, 4, 8, 16, 32), default=32)
+    parser.add_argument('--prepared', action='store_true')
     parser.add_argument('--two-publications', action='store_true')
     parser.add_argument('--prior-trace', action='store_true')
     parser.add_argument('--late-prefix-pool', action='store_true')
@@ -34,13 +35,14 @@ def main():
     import ttnn
 
     taps = (5, 19, 33, 47, 61)
-    report = dict(passed=False, scope=__doc__, checks=[], backend='ttsim-fast-dispatch',
+    report = dict(passed=False, scope=__doc__, checks=[], backend='ttsim-fast-dispatch', prepared=options.prepared,
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                 for name in ('feature-trace-probe.py', 'target_features.py', 'full_replay.py')})
+                 for name in ('feature-trace-probe.py', 'target_features.py', 'prepared_target_features.py', 'full_replay.py')})
     mesh = tensor = output = trace = features = None
     published = []
     second_published = []
     prefix_pool = {}
+    prepared_destinations = []
     prior_trace = prior_output = None
     prefixes = tuple(dict.fromkeys((0, 1, min(17, options.rows), options.rows)))
     try:
@@ -67,6 +69,10 @@ def main():
                        for value in expected]
         tensor = ttnn.from_torch(expected[0], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
             device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)
+        if options.prepared:
+            for tap in taps:
+                prepared_destinations.append(ttnn.from_torch(torch.zeros_like(expected[0]), dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
         model = SimpleNamespace(layers=[SimpleNamespace(forward=lambda value: ttnn.add(value, 1.0,
             memory_config=ttnn.DRAM_MEMORY_CONFIG)) for index in range(64)])
 
@@ -80,6 +86,11 @@ def main():
             return value
 
         def capture_features():
+            if options.prepared:
+                from prepared_target_features import PreparedTargetFeatures
+
+                return PreparedTargetFeatures(model, taps, prepared_destinations, copy=ttnn.copy,
+                    storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
             return LayerOutputCapture(model, taps,
                 snapshot=lambda value: ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG),
                 release=ttnn.deallocate, storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
@@ -184,6 +195,8 @@ def main():
                     ttnn.deallocate(value)
             if features is not None:
                 features.close()
+            for value in prepared_destinations:
+                ttnn.deallocate(value)
             if output is not None:
                 ttnn.deallocate(output)
             if prior_output is not None:

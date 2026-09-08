@@ -23,7 +23,7 @@ if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     bash /experiment-scripts/ci/ccl-links-build.sh
-    if [ "${QWEN_MTP_DRAFTS:-0}" = 0 ]; then
+    if [[ "${QWEN_MTP_DRAFTS:-0}" = 0 && "${QWEN_DFLASH_DRAFTS:-0}" = 0 ]]; then
         OMP_NUM_THREADS=1 timeout -k 15 900 python3 -u /experiment-scripts/ci/ccl-link-probe.py \
             --hardware --output /experiment/results/ccl-link-hardware.json 2>&1 | tee /experiment/results/ccl-link-hardware.log
         if grep -q 'Failed to discover available ethernet links' /experiment/results/ccl-link-hardware.log; then

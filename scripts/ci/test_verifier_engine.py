@@ -232,6 +232,27 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(session.committed_decode_tokens, 0)
         self.assertEqual(engine.position, 36)
 
+    def test_features_are_visible_only_to_current_verified_publication(self):
+        engine, session, bucket = self.fixture(rows=4)
+        engine.retain_feature_taps = (5, 19, 33, 47, 61)
+        expected = tuple(object() for index in engine.retain_feature_taps)
+        bucket['feature_capture'] = SimpleNamespace(outputs=Mock(return_value=expected))
+        ticket = session.propose('request', max_rows=4)
+        with self.assertRaises(ValueError):
+            engine.verified_features_for_publication(ticket)
+        with patch('verifier_engine.stage_inputs'):
+            predictions, unused = engine.verify(ticket)
+        with self.assertRaises(ValueError):
+            engine.verified_features_for_publication(ticket)
+        def publish(prefix):
+            with self.assertRaises(ValueError):
+                engine.verified_features_for_publication(object())
+            self.assertIs(engine.verified_features_for_publication(ticket), expected)
+            engine.publish(prefix)
+        session.commit('request', ticket, predictions, publish)
+        with self.assertRaises(ValueError):
+            engine.verified_features_for_publication(ticket)
+
     def test_failed_staging_or_execution_poison_request_without_accounting(self):
         for failure in ('stage', 'execute', 'binding'):
             engine, session, bucket = self.fixture()

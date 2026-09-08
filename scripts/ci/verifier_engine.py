@@ -2,7 +2,7 @@
 
 import os
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack
 
 from attention_batch import capture_operation
 from force_argmax import sample_rows
@@ -34,7 +34,7 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                 native_sampling_rows=False, short_context=False, attention_audit=False):
+                 native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=()):
         import ttnn
 
         if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
@@ -50,6 +50,10 @@ class VerifierEngine:
         if type(retain_mtp_hidden) is not bool:
             raise ValueError('Explicit boolean MTP hidden retention required')
         self.retain_mtp_hidden = retain_mtp_hidden
+        self.retain_feature_taps = tuple(retain_feature_taps)
+        if (len(set(self.retain_feature_taps)) != len(self.retain_feature_taps)
+                or any(type(index) is not int or not 0 <= index < len(model.layers) for index in self.retain_feature_taps)):
+            raise ValueError('Unique native target-layer feature taps required')
         if type(norm_batch) is not bool:
             raise ValueError('Explicit boolean norm-batch selection required')
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
@@ -93,6 +97,21 @@ class VerifierEngine:
             for key, rows, position in captures:
                 bucket = dict(rows=rows, capture_position=position, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
                 self.buckets[key] = bucket
+                if self.retain_feature_taps:
+                    import torch
+                    from prepared_target_features import PreparedTargetFeatures
+
+                    bucket['target_features'] = []
+                    for index in self.retain_feature_taps:
+                        feature = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                            device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(self.mesh, dim=3))
+                        bucket['target_features'].append(feature)
+                    bucket['feature_capture'] = PreparedTargetFeatures(model, self.retain_feature_taps,
+                        bucket['target_features'], copy=ttnn.copy,
+                        storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
+            for key, rows, position in captures:
+                bucket = self.buckets[key]
                 if retain_mtp_hidden:
                     import torch
                     from mtp_hidden_capture import MTPHiddenCapture
@@ -115,7 +134,8 @@ class VerifierEngine:
                 warm = self.fixture(rows, bucket['checkpoints'], retain=False, position=bucket['capture_position'])
                 result = None
                 try:
-                    result = self.operation(warm, hidden_capture=bucket.get('mtp_capture'))
+                    result = self.operation(warm, hidden_capture=bucket.get('mtp_capture'),
+                        feature_capture=bucket.get('feature_capture'))
                     ttnn.synchronize_device(self.mesh)
                 finally:
                     if result is not None:
@@ -127,7 +147,8 @@ class VerifierEngine:
                 rows = bucket['rows']
                 self.restore_initial()
                 bucket['trace'], bucket['output'] = capture_operation(ttnn, self.mesh,
-                    lambda bucket=bucket: self.operation(bucket['fixture'], hidden_capture=bucket.get('mtp_capture')))
+                    lambda bucket=bucket: self.operation(bucket['fixture'], hidden_capture=bucket.get('mtp_capture'),
+                        feature_capture=bucket.get('feature_capture')))
                 if rows > 1:
                     layers = [[*state.entry, result['states'], *result['packed_conv_states'],
                                state.gdn.rec_state, *state.gdn.conv_states, *checkpoint]
@@ -173,10 +194,13 @@ class VerifierEngine:
         remaining = self.session.max_new_tokens - len(self.session.emitted)
         return self.replay_plan.select(ticket.position, len(ticket.tokens), remaining).key
 
-    def operation(self, fixture, *, hidden_capture=None):
+    def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
         logits = None
         try:
-            with hidden_capture.capture() if hidden_capture is not None else nullcontext():
+            with ExitStack() as captures:
+                for capture in (hidden_capture, feature_capture):
+                    if capture is not None:
+                        captures.enter_context(capture.capture())
                 logits = fixture.run(sharded_logits=self.sampler is not None)
             ids = sample_rows(self.sampler, logits, fixture.rows, self.operations,
                 native_rows=self.native_sampling_rows) if self.sampler is not None else None
@@ -256,6 +280,12 @@ class VerifierEngine:
             raise ValueError('Hidden row extraction is restricted to current target publication')
         return self.mtp_row_reader(source, row)
 
+    def verified_features_for_publication(self, ticket):
+        if (self.phase != 'verified' or self.pending is not ticket or self.session.pending is not ticket
+                or self.session.phase != 'committing' or not self.retain_feature_taps):
+            raise ValueError('Feature publication requires the current committing verifier ticket')
+        return self.buckets[self.pending_key]['feature_capture'].outputs()
+
     def publish(self, prefix):
         ticket = self.pending
         if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
@@ -295,6 +325,9 @@ class VerifierEngine:
             if bucket['trace'] is not None:
                 self.operations.release_trace(self.mesh, bucket['trace'])
         for bucket in self.buckets.values():
+            if bucket.get('feature_capture') is not None:
+                bucket['feature_capture'].close()
+            release_owned(self.operations, bucket.get('target_features', []))
             if bucket.get('mtp_hidden') is not None:
                 release_owned(self.operations, [bucket['mtp_hidden']])
             if bucket['output'] is not None:
