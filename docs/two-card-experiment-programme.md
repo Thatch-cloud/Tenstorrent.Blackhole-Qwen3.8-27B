@@ -5,8 +5,8 @@
 | Priority | Verified position / next gate |
 | --- | --- |
 | Single-stream target | 200 committed TG not achieved; completed four-link coding request: 19.10 TG, CTX 170 |
-| Current hardware run | [34195514722](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34195514722): native MTP K7/T8 coding retry with corrected HF blob loading; results pending |
-| MTP integration | Prompt features and shifted KV initialization, traced drafting, accepted-row extraction and teacher-forced cache repair wired; 708 host tests pass |
+| Current hardware run | [34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661): native MTP K7/T8 coding retry with corrected hidden-row extraction; results pending |
+| MTP integration | Hardware executes MTP load, trace setup and 169-row prompt initialization; row-layout fix passes real-TTNN simulation; 709 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
 | DFlash2 | Complete captured stack remains unqualified; cancelled simulator runs are not passes |
@@ -21,6 +21,10 @@ Run 34193704110 confirms matching prefill seeds (`71093`) but stops on an overly
 strict embedding-path guard. The corrected guard permits this pinned HF cache's
 snapshot-to-blob symlinks. All 16 required tensor headers have been checked on
 the host; the next CI run repeats that preflight before its native build.
+Run 34195514722 passes checkpoint loading and executes MTP prompt initialization,
+then fails on an unaligned slice's tiled output padding. The corrected composition
+passes 90 real-TTNN simulator row checks, 24 input-preservation checks and 30 stale
+controls. The next hardware run checks those rows, then runs the coding request.
 
 ### Earlier checkpoints (historical, not current run status)
 

@@ -4,11 +4,11 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Current test:** [real coding MTP retry](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34195514722)
+**Current test:** [real coding MTP retry](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661)
 on both cards: seven draft tokens, eight-row target verification, full-vocabulary
 device argmax, and cache repair after rejection. TG includes all four steps.
-Prefill equality now passes on hardware. The next retry fixes checkpoint symlink
-loading and checks weight headers before building. No MTP TG yet.
+Hardware executes MTP loading, trace setup and prompt initialization. The retry
+fixes hidden-row extraction; its changing-input TTNN simulator checks pass. No MTP TG yet.
 Completed four-link lookup: **19.10 tok/s**.
 
 ## Setup
