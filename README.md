@@ -4,15 +4,12 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Latest completed result: 48.83 committed tok/s**, versus a matched native
-**19.74 tok/s**. [Two-card MTP run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661)
-finishes one coding response with all 150 decode tokens and final cache state exact.
-This is a 2.47x decode improvement, not 200 TG or a held-out coding-quality score.
-Setup is not amortized yet: the request including preparation remains slower than native.
-
-**Running now:** [native-row sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693).
-It removes 32-row sampling padding from MTP and verification, with paired complete
-requests and exact checks. Simulator reduction checks pass; hardware results are pending.
+**Latest completed result: 53.60 committed tok/s**, versus **49.79** with padded
+sampling and a matched native reference of **19.82 tok/s**.
+[Two-card MTP comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
+passes all four complete requests with identical tokens and cache state.
+Removing unused sampling rows improves decode by **7.7%** in this ABBA block.
+This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 
 ## Setup
 
@@ -69,15 +66,21 @@ TG includes drafting, verification/readback and commit; excludes prefill/setup.
 
 | CTX | Streams (B) | Path | Verify rows (T) | PP tok/s | Committed TG tok/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 170 | 1 | Matched native | 1 | 566.82 | 19.74 |
-| 170 | 1 | Native MTP K7 | 8 | 570.35 | **48.83** |
+| 170 | 1 | Native reference, candidate repetitions | 1 | 526.60 | 19.82 |
+| 170 | 1 | MTP K7, padded sampling | 8 | 531.14 | 49.79 |
+| 170 | 1 | MTP K7, native-row sampling | 8 | 525.92 | **53.60** |
 
 PP measures the target prefill helper; MTP feature capture is included, draft
-initialization is not. MTP accepts 125/182 proposals over 26 blocks and reaches EOS.
+initialization is not. Both MTP arms accept 125/182 proposals over 26 blocks per
+request and reach EOS. Each produces 150 committed decode tokens; two repetitions
+per arm run in padded/native/native/padded order. This is one coding task.
 Tokens, active GDN, valid KV and inactive slots match the native reference exactly.
-Prefill + unamortized setup + decode: **10.77 s MTP versus 7.90 s native**.
+Mean prefill + unamortized setup + decode: **7.69 s candidate versus 7.89 s native**.
 These totals start with the target model already loaded, not a cold process launch.
 Trace/setup reuse across requests and longer-context measurements remain to do.
+The earlier first MTP request measured 48.83 TG and 10.77 s including preparation;
+setup costs vary with warm caches. The paired comparison, not that cross-run
+difference, establishes the sampling improvement.
 
 ### Earlier lookup experiments
 
@@ -95,20 +98,21 @@ Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
 
 ## What currently limits 200 tok/s?
 
-MTP now produces useful drafts, but the full cycle averages **118.10 ms** for
+MTP now produces useful drafts, but the full cycle averages **107.60 ms** for
 **5.77 committed tokens**. Measured mean costs in the completed request:
 
 | Work per block | Time |
 | --- | ---: |
-| Target verification and readback | 66.29 ms |
-| Seven sequential MTP drafts | 38.82 ms |
-| Cache repair and commit | 12.04 ms |
-| Input staging | 0.54 ms |
+| Target verification and readback | 65.31 ms |
+| Seven sequential MTP drafts | 29.01 ms |
+| Cache repair and commit | 12.18 ms |
+| Input staging | 0.71 ms |
 
-At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 118 ms.
+At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 108 ms.
 Even perfect T8 acceptance and free drafting cannot overcome the current verifier.
-Next: remove unnecessary sampler rows and qualify parallel attention at the actual
-short context. Both need exact checks and a complete-request hardware comparison.
+Next: retain the qualified native-row sampler and reduce verifier cost. Parallel
+attention at the actual short context still needs exact replay qualification;
+earlier larger-grid MLP sweeps did not show a useful gain and will not be repeated.
 
 The earlier September 8 coding requests expose weak lookup proposals.
 All four requests reach EOS after 150 committed decode tokens and match native
@@ -183,7 +187,7 @@ was resolved by restoring the exact runtime image.
 
 | Workstream | Current position |
 | --- | --- |
-| MTP | Complete exact coding request: 48.83 TG; setup reuse and held-out/context tests remain |
+| MTP | Exact coding-request ABBA: 53.60 TG; setup reuse and held-out/context tests remain |
 | DFlash2 | Five-layer hardware correctness passes; full captured drafting and live request integration remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |

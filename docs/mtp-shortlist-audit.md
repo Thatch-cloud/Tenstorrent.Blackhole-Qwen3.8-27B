@@ -205,3 +205,30 @@ Report SHA256: `c109f779e3454be96144be2536ddc9f61ed82b8d83cc8f52e382b2aaf8473b8e
 Sampler helper SHA256: `86f86a286a860529b95232e0251227fb9dca4df261d783932570750a4d50f744`.
 [Hardware comparison 34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
 is running on `fb17bbb`; no native-row TG claim until its complete requests pass.
+
+### Native-row hardware result
+
+Run `34200129693` completes successfully on `fb17bbb`. The full four-link sampler
+passes 96 exact output checks, 48 source checks and 16 stale controls. All four
+coding requests then pass exact tokens, final active GDN, valid KV and inactive
+slots, with identical proposal routes and 125/182 accepted drafts per request.
+
+| Metric | Padded control | Native-row candidate |
+| --- | ---: | ---: |
+| Complete requests / committed decode tokens | 2 / 300 | 2 / 300 |
+| Committed TG | 49.7851 | 53.6001 |
+| Mean draft block ms | 37.2168 | 29.0068 |
+| Mean verifier/readback ms | 66.1132 | 65.3123 |
+| Mean repair/commit ms | 11.6290 | 12.1784 |
+| Mean complete cycle ms | 115.8518 | 107.5969 |
+| Setup-inclusive post-seed TG | 19.3967 | 20.3595 |
+
+Decode improves 7.66% in this ABBA block. Candidate repetitions individually
+measure 52.8842/54.3356 TG; the reported 53.6001 uses both, not the faster sample.
+Their matched native reference is 19.8221 TG. Mean candidate prefill + setup +
+decode is 7690.81 ms versus 7890.12 ms native, with target weights already loaded.
+No serving default changes, 200 TG claim, held-out quality or context sweep.
+The remaining verifier cost, not another sampling sweep, is the next bottleneck.
+
+Artifact `full-mtp-request.json` SHA256:
+`cda6127029826c86cc59b9c2e3ea775d0850840a0ef580cce0afc113d5398b9d`.

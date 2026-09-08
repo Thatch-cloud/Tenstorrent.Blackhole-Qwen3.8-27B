@@ -4,13 +4,26 @@
 
 | Priority | Verified position / next gate |
 | --- | --- |
-| Single-stream target | 200 committed TG not achieved; complete native-MTP coding request: 48.83 TG, CTX 170, versus matched native 19.74 |
-| Latest hardware result | [34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661) passes: K7/T8, 150 committed tokens to EOS, exact tokens/GDN/valid KV/inactive slots |
-| Running experiment | [34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693): padded/native-row MTP sampling ABBA; full sampler hardware gate before complete requests |
+| Single-stream target | 200 committed TG not achieved; native-row MTP: 53.60 TG, CTX 170; matched padded MTP 49.79 and native reference 19.82 |
+| Latest hardware result | [34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693) passes K7/T8 ABBA: all four requests finish 150 decode tokens to EOS with exact tokens/GDN/valid KV/inactive slots |
 | MTP integration | Full-vocabulary device drafting, 169-row prompt initialization and rejection repair execute; 125/182 proposals accepted in 26 blocks; 709 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
 | DFlash2 | Complete captured stack remains unqualified; cancelled simulator runs are not passes |
+
+The native-row sampler improves complete decode by 7.66% in one paired ABBA block,
+without changing any proposal, acceptance or token. Mean candidate block costs:
+65.312 ms verification/readback, 29.007 ms drafting, 12.178 ms repair/commit and
+0.709 ms staging, 107.597 ms total. The 200 TG budget at this acceptance remains
+28.846 ms. Keep the qualified sampler in the next MTP candidate, then address
+the verifier; do not repeat earlier larger-grid sweeps that failed to show a
+useful gain. Short-context parallel attention remains gated, not assumed exact.
+Mean prefill + preparation + decode is 7.691 s candidate versus 7.890 s native
+in the candidate repetitions. The target is already loaded; this is not a cold
+process launch or sustained serving result. Setup is not amortized.
+Latest report SHA256: `cda6127029826c86cc59b9c2e3ea775d0850840a0ef580cce0afc113d5398b9d`.
+
+### First complete MTP request (historical baseline)
 
 No device resets or serving-default changes. One coding request is not a held-out
 coding-quality suite. Decode is 3.072 s; prefill + setup + decode is 10.773 s versus
@@ -31,9 +44,10 @@ Report SHA256: `86a92b560ced248ce91e20a1ec19ea2007ac7a73be64748b5c517b724bfc305c
 Native-row simulator reduction gate `20260908T072747Z-398` passes: T1/T2/T4/T8,
 48 exact token checks across both chips, 48 input checks and 8 stale controls.
 The scope is post-gather native untilize/argmax, not simulated fabric or speed.
-Hardware run 34200129693 on `fb17bbb` checks both complete four-link samplers,
-then runs padded/native/native/padded coding requests. All 716 host tests and
-60 harness tests pass. No candidate hardware throughput result is available yet.
+Hardware run 34200129693 on `fb17bbb` passes both complete four-link samplers:
+96 exact token checks, 48 input checks and 16 stale controls, then the four
+complete coding requests summarized above. All 716 host tests and 60 harness
+tests pass. This resolves the pending native-row hardware gate.
 
 ### MTP bring-up failures (resolved by run 34196777661)
 
