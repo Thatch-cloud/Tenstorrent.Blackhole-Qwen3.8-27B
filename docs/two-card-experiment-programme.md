@@ -11,8 +11,12 @@ The 4K row now passes: PP3355.04 / CTX4096 / TG58.18, B1. Run34285614832
 (`afaedc7`) produces two121-token EOS responses at57.28/59.10TG, with separate
 native token/GDN/valid-KV/inactive and learned-feature/proposal audits. Drafting
 costs54.57ms/block, verification61.87ms; complete mean request7.05s. This is not
-a matched comparison against the different CTX170 prompt/output. Next is 8K,
-then16K/32K/64,504. The former 2,048-token prefill limit now has
+a matched comparison against the different CTX170 prompt/output. The8K run
+34286889429 (`868dcbc`) also passes: PP3149.33 / CTX8192 / TG46.20, with
+121-token EOS responses. Samples41.94/51.43 include a424ms publication stall;
+the combined rate retains it. Host/runtime attribution is needed before making
+a context-scaling claim. [8K detail](dflash-8k-context-2026-09-09.md).
+16K/32K/64,504 remain unmeasured. The former 2,048-token prefill limit now has
 an opt-in tail-window initializer with absolute positions; full target KV stays
 unchanged. The first 4K hardware run34282865344 failed before timing: slot-prefill
 delivers 2K chunks, not a full-sequence layer output. Chunk-aware capture now

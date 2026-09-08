@@ -125,3 +125,4 @@ expired window. Preserve absolute rotated K positions, BF16 rounding, stable
 trace addresses and atomic publication/abort ownership. Require exact eager
 proposal parity and a matched complete-request comparison; no speed gain is
 claimed from this source inspection alone.
+[Cache components, gates and the remaining verifier budget](dflash-kv-cache-2026-09-09.md).
