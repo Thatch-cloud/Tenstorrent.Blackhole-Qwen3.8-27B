@@ -12,6 +12,12 @@ slower: **54.36 tok/s**, so it is **not adopted for short contexts**.
 The earlier native-row sampler comparison improved 49.79 to 53.60 TG (+7.7%).
 This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 
+**Next experiment: reuse accepted MTP draft cache.** Avoid recomputing accepted
+draft inputs, keep the next draft anchored on verified target features, and
+measure whether reduced repair time outweighs any acceptance loss. This changes
+draft history only; target tokens and cache must still match native execution.
+No performance gain is claimed before the complete paired hardware requests.
+
 ## Setup
 
 | Component | Experiment setup |

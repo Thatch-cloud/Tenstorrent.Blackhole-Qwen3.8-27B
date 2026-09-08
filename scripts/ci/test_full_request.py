@@ -156,6 +156,30 @@ class RequestPilotTests(unittest.TestCase):
             self.assertEqual(constructor.call_args.kwargs['max_verify_rows'], width)
             self.assertTrue(all(block['rows'] <= width for block in result['blocks']))
 
+    def test_mtp_reuse_keeps_native_outputs_through_accept_reject_and_eos(self):
+        from mtp_request_runtime import MTPRequestRuntime
+
+        for wrong_drafts, eos_ids in ((False, ()), (True, ()), (False, (2,)), (True, (2,))):
+            for reuse in (False, True):
+                calls = []
+                def step(token, hidden, position, *, select):
+                    calls.append((position, select))
+                    increment = 2 if wrong_drafts and position % 3 == 0 else 1
+                    return [token], (token + increment) % 3 if select else None
+                runtime = MTPRequestRuntime(step, [0],
+                    copy_hidden=lambda source, destination: destination.__setitem__(0, source[0]),
+                    verified_row=lambda rows, index: rows[index], max_drafts=3, reuse_accepted_cache=reuse)
+                result, _ = self.run_fixture(mtp_runtime=runtime, norm_batch=True, lookup_max_rows=4, eos_ids=eos_ids)
+                self.assertTrue(result['exact'] and result['state_exact'] and result['inactive_exact'])
+                accounting = runtime.cache_accounting
+                self.assertEqual(sum(accounting.values()), result['committed_decode_tokens'])
+                self.assertEqual(accounting['teacher_forced_rows'], sum(not select for _, select in calls))
+                if reuse:
+                    self.assertGreater(accounting['reused_rows'], 0)
+                    self.assertLess(accounting['teacher_forced_rows'], result['committed_decode_tokens'])
+                else:
+                    self.assertEqual(accounting['reused_rows'], 0)
+
     def test_neural_adapter_runs_inside_verified_request_loop(self):
         def propose(request_id, history, count):
             self.assertEqual(request_id, 'lookup-pilot')

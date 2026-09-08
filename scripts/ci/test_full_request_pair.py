@@ -5,6 +5,41 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_draft_cache_reuse_allows_changed_acceptance_not_changed_target(self):
+        def measure(*, mtp_reuse_cache):
+            record = dict(self.record(mtp_reuse_cache), mtp_reuse_cache=mtp_reuse_cache, native_sampling_rows=True,
+                norm_batch=True, family_routing=True, short_context=True, attention_replay=False,
+                attention_mask_once=False, replay_group_rows=4, lookup_max_rows=8,
+                sampler_num_links=4, ended_with_eos=True, fabric_sources={'descriptor': 'audited'},
+                selected_drafter='mtp', drafting_policy='neural-with-target-fallback', mtp_setup_ms=50,
+                mtp=dict(max_drafts=7, head='native-full-vocabulary-force-argmax', native_sampling_rows=True,
+                    mtp_weight_names=['mtp.fc.weight'], index_sha256='index', embedding_key='embedding',
+                    prompt_alignment={'initialized_mtp_rows': 1}, reuse_accepted_cache=mtp_reuse_cache,
+                    approximate_draft_cache=mtp_reuse_cache,
+                    cache_accounting=dict(reused_rows=1 if mtp_reuse_cache else 0,
+                                          teacher_forced_rows=1 if mtp_reuse_cache else 2)))
+            record['blocks'][0].update(source='mtp', match_length=0)
+            if mtp_reuse_cache:
+                record['proposed'], record['accepted'] = 2, 0
+                record['blocks'] = [dict(rows=2, source='mtp', accepted=0, committed=1, match_length=0,
+                    position=2 + offset, input_tokens=[offset, 8]) for offset in range(2)]
+            return record
+        records, summary = measure_requests(measure, arm_key='mtp_reuse_cache')
+        self.assertTrue(summary['exact'])
+        self.assertNotEqual(records[0]['accepted'], records[1]['accepted'])
+        for key, value in (('emitted', [0, 8, 2]), ('attention_replay', True), ('native_sampling_rows', False),
+                           ('sampler_num_links', 1), ('state_exact', False), ('proposed', 0)):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_reuse_cache')
+        for key, value in (('reuse_accepted_cache', False), ('approximate_draft_cache', False),
+                           ('cache_accounting', dict(reused_rows=0, teacher_forced_rows=2))):
+            invalid = deepcopy(records)
+            invalid[1]['mtp'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_reuse_cache')
+
     def test_instrumented_diagnostics_cannot_enter_throughput_summary(self):
         for key in ('attention_audit', 'instrumented_timing'):
             with self.assertRaisesRegex(ValueError, 'not paired throughput'):

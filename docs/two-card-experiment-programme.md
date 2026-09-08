@@ -2,6 +2,17 @@
 
 ## Current programme position - 2026-09-08
 
+**Prepared next: accepted MTP cache reuse, full-request ABBA.** Control keeps
+teacher-forcing every committed draft input. Candidate reuses already-written
+accepted draft KV, computes only a missing tail input, and anchors the next
+proposal on the last verified target hidden row. This is explicitly approximate
+draft history, not equivalent MTP state; the full-vocabulary target stays exact.
+Both arms retain serial attention, K7, native-row sampling and four links.
+Acceptance may differ between arms but must repeat within each arm. Reports
+count reused and teacher-forced rows against every committed decode token.
+740 host tests and 60 harness tests pass, including rejection, EOS, fallback,
+tail failure and publication guards. No new kernel math or simulator speed claim.
+
 **Latest completed:34208889762 (`2f5ab9c`) passes correctness, not a speedup.**
 The repaired instrumented request passes all150 tokens, final active GDN/valid
 KV/inactive slots and all16 attention layers on both chips. It reports no TG.

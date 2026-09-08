@@ -94,11 +94,15 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
-                        native_sampling_rows=False, short_context=False, attention_replay=False, attention_audit=False):
+                        native_sampling_rows=False, short_context=False, attention_replay=False, attention_audit=False,
+                        reuse_accepted_cache=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
+    if type(reuse_accepted_cache) is not bool or (reuse_accepted_cache and
+            (not native_sampling_rows or attention_replay or attention_audit)):
+        raise ValueError('Draft-cache reuse experiment requires native sampling and unchanged serial target attention')
     if (type(short_context) is not bool or type(attention_replay) is not bool
             or (attention_replay and not short_context)
             or (short_context and (not native_sampling_rows or max_drafts != 7 or len(prompt) < 128))):
@@ -109,10 +113,11 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         raise ValueError('Pinned short coding request, identity pages and explicit MTP draft width required')
     mesh = model.mesh_device
     owned, prompt_rows = [], []
-    step = None
+    step = runtime = None
     prefill_calls = 0
     metadata = dict(max_drafts=max_drafts, head='native-full-vocabulary-force-argmax', native_sampling_rows=native_sampling_rows,
-                    mtp_weight_names=list(NAMES), kernel_math='reused native MTP, no new kernel math')
+                    mtp_weight_names=list(NAMES), kernel_math='reused native MTP, no new kernel math',
+                    reuse_accepted_cache=reuse_accepted_cache, approximate_draft_cache=reuse_accepted_cache)
 
     def status(stage, **values):
         print(json.dumps(dict(mtp_stage=stage, **values)), flush=True)
@@ -134,7 +139,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         return seed
 
     def factory():
-        nonlocal step
+        nonlocal step, runtime
         if prefill_calls != 2 or len(prompt_rows) != 1:
             raise AssertionError('Real MTP preparation requires the fresh candidate prompt features')
         status('load-native-mtp')
@@ -171,7 +176,9 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         operations.synchronize_device(mesh)
         metadata['mtp_prompt_ms'] = 1000 * (time.perf_counter() - started)
         status('prepare-target-verifier', max_rows=max_drafts + 1)
-        return MTPRequestRuntime(AlignedMTPStep(step), anchor, copy_hidden=operations.copy, max_drafts=max_drafts)
+        runtime = MTPRequestRuntime(AlignedMTPStep(step), anchor, copy_hidden=operations.copy, max_drafts=max_drafts,
+            reuse_accepted_cache=reuse_accepted_cache)
+        return runtime
 
     try:
         result = measure_request(model, sampler, prompt, pages, helpers,
@@ -183,6 +190,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
             attention_replay=attention_replay, attention_mask_once=attention_replay,
             progress=lambda block: status('committed-block', **{key: block[key] for key in (
                 'position', 'rows', 'accepted', 'committed', 'draft_ms', 'select_commit_ms', 'cycle_ms')}))
+        metadata['cache_accounting'] = dict(runtime.cache_accounting) if runtime is not None else dict(reused_rows=0, teacher_forced_rows=0)
         result['mtp'] = metadata
         result['native_committed_tokens_per_second'] = (
             1000 * result['committed_decode_tokens'] / result['native_decode_ms'] if result['native_decode_ms'] else None)

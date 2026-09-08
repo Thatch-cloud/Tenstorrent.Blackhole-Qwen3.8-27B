@@ -2,7 +2,7 @@
 
 
 class MTPRequestRuntime:
-    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row=None, max_drafts=31):
+    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row=None, max_drafts=31, reuse_accepted_cache=False):
         if (type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
                 or not all(callable(callback) for callback in (step, copy_hidden))
                 or (verified_row is not None and not callable(verified_row))):
@@ -10,9 +10,14 @@ class MTPRequestRuntime:
         self.step, self.copy_hidden, self.verified_row = step, copy_hidden, verified_row
         self.anchor = initial_hidden
         self.max_drafts = max_drafts
+        if type(reuse_accepted_cache) is not bool:
+            raise ValueError('Explicit draft-cache reuse selection required')
+        self.reuse_accepted_cache = reuse_accepted_cache
+        self.cache_accounting = dict(reused_rows=0, teacher_forced_rows=0)
         self.engine = self.session = None
         self.phase = 'unbound'
         self.proposed = ()
+        self.drafted_inputs = ()
 
     def bind(self, session, engine):
         if self.phase != 'unbound' or not engine.retain_mtp_hidden or session.phase != 'idle':
@@ -39,6 +44,7 @@ class MTPRequestRuntime:
                     raise ValueError('MTP head returned an invalid global token ID')
                 proposed.append(token)
             self.proposed = tuple(proposed)
+            self.drafted_inputs = (self.session.seed, *self.proposed[:-1])
             self.phase = 'proposed'
             return self.proposed
         except BaseException:
@@ -55,15 +61,21 @@ class MTPRequestRuntime:
         self.phase = 'committing'
         try:
             hidden_rows = self.engine.verified_mtp_hidden_for_publication(ticket)
+            reused = min(prefix, len(self.drafted_inputs)) if self.reuse_accepted_cache else 0
+            if tuple(ticket.tokens[:reused]) != self.drafted_inputs[:reused]:
+                raise ValueError('Only the actual verified prefix of this MTP proposal can reuse draft KV')
             if prefix:
-                previous = self.anchor
-                for offset in range(prefix):
+                previous = self.verified_row(hidden_rows, reused - 1) if reused else self.anchor
+                for offset in range(reused, prefix):
                     self.step(ticket.tokens[offset], previous, ticket.position + offset, select=False)
                     previous = self.verified_row(hidden_rows, offset)
                 self.copy_hidden(previous, self.anchor)
             self.engine.publish(prefix)
+            self.cache_accounting['reused_rows'] += reused
+            self.cache_accounting['teacher_forced_rows'] += prefix - reused
             self.position += prefix
             self.proposed = ()
+            self.drafted_inputs = ()
             self.phase = 'idle'
         except BaseException:
             self.phase = 'failed'

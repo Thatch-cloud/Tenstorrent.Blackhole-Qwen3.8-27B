@@ -633,22 +633,9 @@ def main():
         warm_lengths, warm_widths = lengths, widths
         if mtp_drafts != '0':
             from coding_request import make_prompt
-            from attention_request_plan import capture_plan
             mtp_prompt = make_prompt(tokenizer)
             warm_lengths = (len(mtp_prompt),)
             warm_widths = tuple(rows for rows in widths if rows <= int(mtp_drafts) + 1)
-            short_plan = capture_plan(len(mtp_prompt), 65536, 32, 512, max_verify_rows=8, short_context=True)
-            component = json.loads((root / 'short-attention-replay.json').read_text())
-            short_sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                for name in ('attention_replay.py', 'attention_mask_replay.py', 'attention_mask_replay.cpp',
-                             'attention_parallel.py', 'attention_fold_dma.py', 'attention_fold_dma.cpp')}
-            if (component.get('passed') is not True or component.get('backend') != 'hardware'
-                    or component.get('sources') != short_sources or len(component.get('checks', [])) != 24
-                    or len(component.get('mask_checks', [])) != 24 or len(component.get('source_checks', [])) != 12
-                    or component.get('mask_poison_controls') != 12
-                    or component.get('stale_controls') != 6):
-                raise AssertionError('Same-source hardware short-context attention gate required')
-            report['short_attention_sources'] = short_sources
         if options.batch:
             from model_batch import ModelBatch
             save(replay_initial)
@@ -666,25 +653,6 @@ def main():
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
-            if mtp_drafts != '0':
-                report['short_attention_warmup'] = []
-                for capture in short_plan.captures:
-                    if capture.rows != 8:
-                        continue
-                    fixture = ModelBatch(model, [1] * 8, capture.position, page_table, helpers, candidate_saved, 8,
-                        serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
-                        hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
-                        packed_checkpoints=True, ordered_cache=True, norm_batch=True, attention_replay=True,
-                        attention_mask_once=True, short_context=True)
-                    output = None
-                    try:
-                        output = fixture.run()
-                        ttnn.synchronize_device(mesh)
-                        report['short_attention_warmup'].append(dict(position=capture.position, capacity=capture.capacity))
-                    finally:
-                        if output is not None:
-                            ttnn.deallocate(output)
-                        fixture.close()
         if mtp_drafts == '0':
             generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
         else:
@@ -792,10 +760,8 @@ def main():
                     from full_mtp_request import measure_mtp_request
                     from full_request_pair import summarize_requests
                     output_path = root / 'full-mtp-request.json'
-                    report['scope'] = 'Repaired short-context mask: real-query audit, then matched serial/parallel MTP ABBA'
+                    report['scope'] = 'MTP accepted draft-cache reuse ABBA; approximate draft history, unchanged lossless target'
                     report['instrumented_timing'] = False
-                    report['attention_audit_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('attention_replay_audit.py', 'attention_replay.py', 'model_batch.py', 'verifier_engine.py')}
                     report['context_lengths'] = [len(prompt)]
                     report['mtp_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                         for name in ('full_mtp_request.py', 'mtp_device_step.py', 'mtp_prefill.py',
@@ -808,27 +774,23 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        for attention_replay, attention_audit in ((True, True), (False, False), (True, False), (True, False), (False, False)):
-                            print(json.dumps(dict(mtp_short_attention=attention_replay, attention_audit=attention_audit,
+                        for reuse_accepted_cache in (False, True, True, False):
+                            print(json.dumps(dict(mtp_reuse_cache=reuse_accepted_cache,
                                 repetition=len(report['request_checks']))), flush=True)
                             result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 max_drafts=int(mtp_drafts), native_sampling_rows=True,
-                                short_context=True, attention_replay=attention_replay, attention_audit=attention_audit)
+                                short_context=True, reuse_accepted_cache=reuse_accepted_cache)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
-                                fabric_sources=fabric_sources, mtp_short_attention=attention_replay)
-                            if attention_audit:
-                                report['attention_audit_request'] = result
-                                report['attention_audit_passed'] = True
-                            else:
-                                report['request_checks'].append(result)
+                                fabric_sources=fabric_sources, mtp_reuse_cache=reuse_accepted_cache)
+                            report['request_checks'].append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             if result['committed_decode_tokens'] == 0:
                                 raise AssertionError('MTP request must exercise decode')
-                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_short_attention')
+                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_reuse_cache')
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)
                     return

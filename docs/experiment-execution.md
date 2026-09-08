@@ -3,6 +3,16 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
+## Accepted MTP cache reuse (2026-09-08, prepared)
+
+New ABBA compares full teacher-forced repair with retained accepted draft KV.
+The candidate explicitly approximates drafter history; target sampling, tokens,
+GDN, valid KV and inactive-slot guards are unchanged. Both arms use native-row
+K7 MTP, serial attention and four-link sampling. Changed acceptance is allowed
+between arms, not between repeats of the same arm. Reused plus teacher-forced
+input rows must account for every committed decode token. Local validation:
+740 host tests and 60 harness tests pass. Hardware speedup remains unmeasured.
+
 ## Current attention failure (2026-09-08)
 
 **Resolved and measured by34208889762 (`2f5ab9c`).** The full150-token
