@@ -6,6 +6,38 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_commit_only_allocates_no_speculative_working_state(self):
+        adapter, active = self.fixture(commit_only=True)
+        self.assertEqual(adapter.state, [])
+        active.allocate.assert_called_once_with()
+
+    def test_commit_only_retains_histories_without_speculative_state_publication(self):
+        for rows in (2, 4, 8, 16, 32):
+            for prefix in range(rows + 1):
+                adapter, active = self.fixture()
+                adapter.commit_only = adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = True
+                with patch('gdn_device_loop_state.copy_compact') as copy, \
+                        patch('gdn_device_loop_state.run_batched_projected', return_value=dict(
+                            owned=[], deferred_conv_publication=True)) as run, \
+                        patch('gdn_device_loop_state.restore_prefix') as restore:
+                    result = adapter.decode(SimpleNamespace(shape=(1, rows, 5120)), [], prefix)
+                active.save.assert_called_once_with(adapter.entry)
+                copy.assert_not_called()
+                restore.assert_not_called()
+                active.restore.assert_not_called()
+                self.assertEqual(run.call_args.args[3], adapter.entry[1:])
+                self.assertTrue(result['commit_only_gdn'])
+
+    def test_commit_only_requires_retained_geometry_and_preserves_native_t1(self):
+        adapter, active = self.fixture()
+        for invalid in (True, 1, '1', None):
+            with self.assertRaises(ValueError):
+                DeviceLoopState(active, adapter.operations, 'kernels', commit_only=invalid)
+        adapter.commit_only = True
+        with self.assertRaises(ValueError):
+            adapter.decode(SimpleNamespace(shape=(1, 1, 5120)), [], 0)
+        active.save.assert_not_called()
+
     def test_norm_source_override_is_forwarded_without_changing_publication(self):
         adapter, active = self.fixture()
         adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.norm_batch = True
@@ -110,7 +142,7 @@ class DeviceLoopStateTests(unittest.TestCase):
                 adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], prefix)
             self.assertEqual(run.call_args.kwargs, dict(conv_checkpoints=expected, hoist_input=True))
 
-    def fixture(self):
+    def fixture(self, *, commit_only=False):
         live = [object() for index in range(5)]
         entry = [object() for index in range(5)]
         state = [object() for index in range(5)]
@@ -121,7 +153,8 @@ class DeviceLoopStateTests(unittest.TestCase):
             allocate=Mock(side_effect=[entry, state]), save=Mock(), restore=Mock())
         operations = SimpleNamespace(L1_MEMORY_CONFIG='l1',
             get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2)
-        return DeviceLoopState(active, operations, 'kernels'), active
+        return DeviceLoopState(active, operations, 'kernels', commit_only=commit_only,
+            batch_conv=commit_only, dma_windows=commit_only, packed_checkpoints=commit_only), active
 
     def test_selected_checkpoint_and_final_state_are_distinct_publications(self):
         adapter, active = self.fixture()

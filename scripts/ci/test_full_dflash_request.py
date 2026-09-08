@@ -1,3 +1,4 @@
+import copy
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +10,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from draft_selector import greedy_selector_reference, select_active_candidates
-from full_dflash_request import load_dflash_fixtures, summarize_dflash_requests
+from full_dflash_request import load_dflash_fixtures, summarize_dflash_requests, summarize_dflash_commit_requests
 
 
 class FullDFlashRequestTests(unittest.TestCase):
@@ -32,6 +33,58 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertEqual(result['committed_tokens'], 4)
         self.assertEqual(result['prefill_setup_decode_ms'], [100, 120])
         self.assertFalse(result['target_reached'])
+
+    def commit_requests(self):
+        control = self.requests()
+        for record in control:
+            record.update(commit_only_gdn=False, sources={'runtime': 'hash'}, gdn_verify_checks=[])
+            record['blocks'][0].update(rows=8, source='dflash2', accepted=1, match_length=0,
+                position=2, input_tokens=[12, 13, 15, 16, 17, 18, 19, 20])
+            record['dflash'].update(checkpoints={'revision': 'pinned'}, block_rows=8, proposal_capture=True,
+                proposal_contexts=[256, 512], target_taps=[5, 19, 33, 47, 61], policy='qualified',
+                proposal_trace_checks=[dict(exact=True)] if record['instrumented_timing'] else [])
+        candidate = copy.deepcopy(control)
+        for record in candidate:
+            record['commit_only_gdn'] = True
+            if record['instrumented_timing']:
+                record['gdn_verify_checks'] = [dict(position=2, rows=8, unchanged=True)]
+            else:
+                record['decode_ms'] /= 2
+                record['prefill_setup_decode_ms'] = record['decode_ms'] + 60
+                record['committed_tokens_per_second'] *= 2
+        return [control[0], candidate[0], control[1], candidate[1], candidate[2], control[2]]
+
+    def test_commit_only_abba_excludes_both_audits_and_preserves_setup_costs(self):
+        result = summarize_dflash_commit_requests(self.commit_requests())
+        self.assertEqual(result['control']['committed_tokens_per_second'], 40)
+        self.assertEqual(result['candidate']['committed_tokens_per_second'], 80)
+        self.assertEqual(result['candidate_over_control'], 2)
+        self.assertEqual(result['candidate']['prefill_setup_decode_ms'], [80, 90])
+        self.assertEqual(result['measured_order'], ['control', 'candidate', 'candidate', 'control'])
+        self.assertFalse(result['target_reached'])
+
+    def test_commit_only_abba_rejects_order_instrumentation_or_different_proposals(self):
+        for index, key, value in ((3, 'commit_only_gdn', False), (4, 'instrumented_timing', True),
+                (4, 'sources', {'runtime': 'other'}), (1, 'emitted', [12, 17, 14]),
+                (3, 'committed_tokens_per_second', 200), (1, 'gdn_verify_checks', []),
+                (3, 'gdn_verify_checks', [dict(position=2, rows=8, unchanged=True)])):
+            records = self.commit_requests()
+            records[index][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_dflash_commit_requests(records)
+        for field, value in (('accepted', 0), ('input_tokens', [12] * 8), ('position', 3)):
+            records = self.commit_requests()
+            records[3]['blocks'][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                summarize_dflash_commit_requests(records)
+
+    def test_commit_only_audit_rejects_changed_state_or_wrong_prefix_coverage(self):
+        for check in (dict(position=2, rows=8, unchanged=False), dict(position=3, rows=8, unchanged=True),
+                dict(position=2, rows=4, unchanged=True)):
+            records = self.commit_requests()
+            records[1]['gdn_verify_checks'] = [check]
+            with self.subTest(check=check), self.assertRaises(ValueError):
+                summarize_dflash_commit_requests(records)
 
     def test_rejects_missing_audit_or_incomplete_or_changed_request(self):
         for index, key, value in ((0, 'instrumented_timing', False), (1, 'ended_with_eos', False),
@@ -92,7 +145,8 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertTrue(all(torch.equal(left, right) for left, right in zip(actual, expected)))
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
-        for suite in ('full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request', 'full-dflash-wide-trace-request'):
+        for suite in ('full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
+                'full-dflash-wide-trace-request', 'full-dflash-commit-request'):
             environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
                 QWEN_LOOKUP_CAP_ABBA='1')
             result = subprocess.run(['bash', str(Path(__file__).with_name('run-baseline.sh'))],

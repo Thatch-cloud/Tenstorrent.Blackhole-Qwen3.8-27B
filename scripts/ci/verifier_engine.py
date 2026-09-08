@@ -34,8 +34,13 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                 native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=()):
+                 native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
+                 commit_only_gdn=False):
         import ttnn
+
+        if type(commit_only_gdn) is not bool:
+            raise ValueError('Explicit commit-only GDN policy required')
+        self.commit_only_gdn = commit_only_gdn
 
         if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
             raise ValueError('Native-row sampling requires an explicit device sampler')
@@ -131,7 +136,8 @@ class VerifierEngine:
             for bucket in self.buckets.values():
                 rows = bucket['rows']
                 self.restore_initial()
-                warm = self.fixture(rows, bucket['checkpoints'], retain=False, position=bucket['capture_position'])
+                warm = self.fixture(rows, bucket['checkpoints'], retain=self.commit_only_gdn and rows > 1,
+                    position=bucket['capture_position'])
                 result = None
                 try:
                     result = self.operation(warm, hidden_capture=bucket.get('mtp_capture'),
@@ -180,7 +186,8 @@ class VerifierEngine:
             attention_mask_once=getattr(self, 'attention_mask_once', False),
             replay_group_rows=getattr(self, 'replay_group_rows', 4),
             short_context=getattr(self, 'short_context', False) and getattr(self, 'attention_replay', False),
-            attention_audit=getattr(self, 'attention_audit', False))
+            attention_audit=getattr(self, 'attention_audit', False),
+            **(dict(commit_only_gdn=True) if getattr(self, 'commit_only_gdn', False) and rows > 1 else {}))
 
     def proposal_rows(self):
         remaining = self.session.max_new_tokens - len(self.session.emitted)

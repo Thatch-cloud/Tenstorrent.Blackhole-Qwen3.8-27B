@@ -46,7 +46,10 @@ def main():
     parser.add_argument('--batch-norm-value-split', action='store_true')
     parser.add_argument('--norm-batch-layer', action='store_true')
     parser.add_argument('--defer-conv-publication', action='store_true')
+    parser.add_argument('--commit-only-gdn', action='store_true')
     args = parser.parse_args()
+    if args.commit_only_gdn and not (args.defer_conv_publication and args.packed_checkpoints and args.model_adapter and args.continuation):
+        parser.error('--commit-only-gdn requires the complete deferred-publication adapter and continuation gate')
     if args.defer_conv_publication and not (args.packed_checkpoints and args.model_adapter and args.continuation):
         parser.error('--defer-conv-publication requires packed checkpoints, model adapter and continuation')
     if args.norm_batch_layer and not (args.conv and args.norm_gate and args.packed_checkpoints):
@@ -215,6 +218,7 @@ def main():
                     full_entry = [upload(value) for value in full_host]
                     live = [upload(value) for value in full_host]
                     projected_device = upload(projected)
+                    projected_source = [projected_device]
                     dummy = upload(torch.zeros(1, args.rows, 5120).bfloat16())
                     def slice_along(value, dimension, start, end):
                         begins, ends = [0] * len(value.shape), list(value.shape)
@@ -222,20 +226,38 @@ def main():
                         return ttnn.slice(value, begins, ends, memory_config=ttnn.DRAM_MEMORY_CONFIG)
                     layer = SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh,
                         _slice_along=slice_along,
-                        _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                        _project_qkvzab_raw=lambda *unused: ttnn.clone(projected_source[0], memory_config=ttnn.DRAM_MEMORY_CONFIG),
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
                     adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows,
                                               args.packed_checkpoints, norm_batch=args.norm_batch_layer,
                                               defer_conv_publication=args.defer_conv_publication,
+                                              commit_only=args.commit_only_gdn,
                                               norm_source_root=args.source_root if args.norm_batch_layer else None)
                     checkpoint = active.allocate()
+                    correction = upload((torch.randn(1, 2, 8256) * 0.1).bfloat16()) if args.commit_only_gdn else None
+                    correction_dummy = upload(torch.zeros(1, 2, 5120).bfloat16()) if args.commit_only_gdn else None
+                    report['commit_only_gdn'] = args.commit_only_gdn
+                    report['precommit_unchanged_checks'] = 0
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):
                         stage('model-adapter-active-slot', accepted=accepted)
                         for source, destination in zip(full_entry, live, strict=True):
                             ttnn.copy(source, destination)
+                        if args.commit_only_gdn:
+                            active.save(checkpoint)
                         actual = adapter.decode(dummy, checkpoint, accepted)
+                        if args.commit_only_gdn:
+                            from gdn_commit_dma import publish
+                            for index, value in enumerate(live):
+                                if not all(torch.equal(item, full_host[index]) for item in host(value)):
+                                    raise AssertionError('Commit-only adapter modified native state during verification')
+                            for index, value in enumerate(checkpoint):
+                                reference = initial_host if index == 0 else conv_host[index - 1]
+                                if not all(torch.equal(item, reference) for item in host(value)):
+                                    raise AssertionError('Commit-only adapter published a speculative checkpoint')
+                            report['precommit_unchanged_checks'] += 1
+                            publish(mesh, [[*adapter.entry, actual['states'], *actual['packed_conv_states'], *live, *checkpoint]], accepted)
                         if args.defer_conv_publication:
                             for index, value in enumerate(adapter.entry):
                                 entry_reference = initial_host if index == 0 else conv_host[index - 1]
@@ -252,14 +274,55 @@ def main():
                                 active_row = actual_live[:1] if index == 0 else actual_live[:, :1]
                                 inactive = actual_live[1:] if index == 0 else actual_live[:, 1:]
                                 original_inactive = full_host[index][1:] if index == 0 else full_host[index][:, 1:]
-                                if not torch.equal(active_row, final_reference[chip]) or not torch.equal(saved, prefix_reference[chip]):
+                                live_reference = prefix_reference if args.commit_only_gdn else final_reference
+                                if not torch.equal(active_row, live_reference[chip]) or not torch.equal(saved, prefix_reference[chip]):
                                     raise AssertionError(f'Model adapter publication mismatch {accepted=} {index=} {chip=}')
                                 if not torch.equal(inactive, original_inactive):
                                     raise AssertionError('Model adapter modified an inactive slot')
+                        if args.commit_only_gdn:
+                            stage('commit-only-adapter-continuation', accepted=accepted)
+                            initial_reference = initial if accepted == 0 else serial_results[accepted - 1]['states']
+                            conv_reference = [upload(value) for value in conv_host] if accepted == 0 else [
+                                ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                                for value in serial_results[accepted - 1]['conv_prefixes'][0]]
+                            control = run_projected(mesh, correction, initial_reference, conv_reference,
+                                taps, dt_bias, neg_exp_A, norm_w, kernels)
+                            before = [host(value) for value in live]
+                            projected_source[0] = correction
+                            continued = adapter.decode(correction_dummy, checkpoint, 2)
+                            for value, reference in zip(live, before, strict=True):
+                                if not all(torch.equal(left, right) for left, right in zip(host(value), reference, strict=True)):
+                                    raise AssertionError('Continuation modified native state before commit')
+                            for value, reference in zip((continued['output'], continued['states']),
+                                    (control['output'], control['states']), strict=True):
+                                if not all(torch.equal(left, right) for left, right in zip(host(value), host(reference), strict=True)):
+                                    raise AssertionError('Commit-only continuation differs from native serial state')
+                            publish(mesh, [[*adapter.entry, continued['states'], *continued['packed_conv_states'], *live, *checkpoint]], 2)
+                            for index, value in enumerate(live):
+                                reference = [item[-1:] for item in host(control['states'])] if index == 0 else host(control['conv_prefixes'][-1][index - 1])
+                                for chip, item in enumerate(host(value)):
+                                    active_row = item[:1] if index == 0 else item[:, :1]
+                                    inactive = item[1:] if index == 0 else item[:, 1:]
+                                    expected_inactive = full_host[index][1:] if index == 0 else full_host[index][:, 1:]
+                                    if not torch.equal(active_row, reference[chip]) or not torch.equal(inactive, expected_inactive):
+                                        raise AssertionError('Committed continuation or inactive slots differ')
+                            report['continuation_checks'] += 1
+                            if accepted == 0:
+                                restore_prefix(ttnn, actual, adapter.entry, checkpoint, args.rows)
+                                active.restore(checkpoint)
+                                stale = adapter.decode(correction_dummy, checkpoint, 2)
+                                if all(torch.equal(left, right) for left, right in zip(host(stale['states']), host(control['states']), strict=True)):
+                                    raise AssertionError('Stale-state continuation control was not detected')
+                                report['stale_controls'] += 1
+                                release_owned(ttnn, stale['owned'])
+                            projected_source[0] = projected_device
+                            release_owned(ttnn, [*conv_reference, *continued['owned'], *control['owned']])
                         release_owned(ttnn, actual['owned'])
                         report['model_adapter_checks'] += 1
                     adapter.close()
                     release_owned(ttnn, [*checkpoint, *full_entry, *live, projected_device, dummy])
+                    if args.commit_only_gdn:
+                        release_owned(ttnn, [correction, correction_dummy])
                 if args.window_prefix:
                     from gdn_conv_prefix_copy import copy_prefix
                     destinations = [upload(value) for value in conv_host]
@@ -288,7 +351,7 @@ def main():
                             if not torch.equal(projected_outputs[chip][:, :, token:token + 1], expected_output):
                                 raise AssertionError(f'Local output projection mismatch {token=} {chip=}')
                     report['output_projection_exact'] = True
-                if args.continuation:
+                if args.continuation and not args.commit_only_gdn:
                     entry = [initial, *[upload(value) for value in conv_host]]
                     destinations = [upload(torch.zeros_like(initial_host)), *[upload(torch.zeros_like(value)) for value in conv_host]]
                     reference_conv = [upload(torch.zeros_like(value)) for value in conv_host]

@@ -50,13 +50,17 @@ class ModelBatch:
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
-                 attention_audit=False):
+                 attention_audit=False, commit_only_gdn=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if type(commit_only_gdn) is not bool or (commit_only_gdn and self.rows > 1 and not (
+                device_loop_gdn and packed_checkpoints and batch_conv and retain_records)):
+            raise ValueError('Commit-only GDN requires a retained packed-history verifier and an explicit decision')
+        self.commit_only_gdn = commit_only_gdn and self.rows > 1
         if type(short_context) is not bool or (short_context and (not attention_replay or replay_group_rows != 4)):
             raise ValueError('Short-context attention requires explicit four-row replay groups')
         self.short_context = short_context
@@ -246,7 +250,8 @@ class ModelBatch:
             state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True),
                                     self.compact_prologue, self.batch_conv, self.batch_conv, self.packed_checkpoints,
                                     norm_batch=self.norm_batch, prefix_zero_reuse=self.prefix_zero_reuse,
-                                    defer_conv_publication=self.defer_conv_publication)
+                                    defer_conv_publication=self.defer_conv_publication,
+                                    **(dict(commit_only=True) if self.commit_only_gdn else {}))
             self.working_states.append(state)
 
             def device_forward(value):
@@ -255,6 +260,8 @@ class ModelBatch:
                     raise ValueError('Unexpected full-model GDN input geometry')
                 packed = operations.reshape(value, (1, self.rows, 5120))
                 result = state.decode(packed, checkpoint, self.prefix)
+                if result.get('commit_only_gdn', False) != self.commit_only_gdn:
+                    raise AssertionError('Commit-only GDN must engage in every selected layer')
                 finish_output(layer, result, operations, tt_all_reduce)
                 output = result['layer_output']
                 if self.retained is not None:

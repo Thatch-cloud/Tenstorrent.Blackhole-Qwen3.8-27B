@@ -40,12 +40,16 @@ def summarize_dflash_requests(requests):
     if len(requests) != 3 or [entry.get('instrumented_timing') for entry in requests] != [True, False, False]:
         raise ValueError('One complete feature audit followed by two uninstrumented requests required')
     reference = requests[0]
+    commit_only = reference.get('commit_only_gdn', False)
+    if type(commit_only) is not bool:
+        raise ValueError('Explicit Boolean commit-only GDN arm required')
     identity = ('prompt_tokens', 'emitted', 'max_new_tokens', 'eos_ids', 'vocab_size', 'committed_decode_tokens')
     for entry in requests:
         if (any(entry.get(key) is not True for key in ('exact', 'state_exact', 'inactive_exact', 'ended_with_eos'))
                 or any(entry[key] != reference[key] for key in identity)
                 or entry['dflash'].get('block_rows') != reference['dflash'].get('block_rows')
                 or entry['dflash'].get('proposal_capture', False) != reference['dflash'].get('proposal_capture', False)
+                or entry.get('commit_only_gdn', False) is not commit_only
                 or entry.get('selected_drafter') != 'dflash2' or entry.get('sampler_num_links') != 4
                 or not entry.get('fabric_sources') or entry['fabric_sources'] != reference.get('fabric_sources')):
             raise ValueError('Complete identical outputs, exact target state and the audited four-link pair required')
@@ -61,6 +65,9 @@ def summarize_dflash_requests(requests):
                 raise ValueError('Positive finite request and setup measurements required')
         if entry.get('setup_amortized') is not False or entry.get('cross_request_trace_reuse') is not False:
             raise ValueError('Do not hide eager request setup or imply cross-request trace reuse')
+        if not entry['instrumented_timing'] and (entry.get('gdn_verify_checks')
+                or not math.isclose(entry['committed_tokens_per_second'], 1000 * count / entry['decode_ms'], rel_tol=1e-12)):
+            raise ValueError('Uninstrumented throughput must describe the measured complete decode')
     checks = reference['dflash']['feature_checks']
     if reference['dflash'].get('proposal_capture'):
         trace_checks = reference['dflash'].get('proposal_trace_checks', [])
@@ -73,6 +80,11 @@ def summarize_dflash_requests(requests):
             or sum(check['rows'] for check in checks) != 2 * len(TARGET_TAPS) * reference['committed_decode_tokens']
             or any(check['exact'] is not True for check in checks)):
         raise ValueError('Feature audit is correctness evidence, not a throughput sample')
+    if commit_only:
+        expected = [dict(position=block['position'], rows=block['rows'], unchanged=True)
+            for block in reference['blocks'] if block['rows'] > 1]
+        if not expected or reference.get('gdn_verify_checks') != expected:
+            raise ValueError('Every multirow verification must leave native GDN unchanged before the decision')
     measured = requests[1:]
     tokens = sum(entry['committed_decode_tokens'] for entry in measured)
     decode_ms = sum(entry['decode_ms'] for entry in measured)
@@ -83,9 +95,38 @@ def summarize_dflash_requests(requests):
         context=len(reference['prompt_tokens']), streams=1, target_reached=throughput >= 200,
         block_rows=reference['dflash'].get('block_rows', 8),
         proposal_capture=reference['dflash'].get('proposal_capture', False),
+        commit_only_gdn=commit_only,
         prefill_setup_decode_ms=[entry['prefill_setup_decode_ms'] for entry in measured],
         feature_setup_ms=[entry['feature_setup_ms'] for entry in measured],
         scope='Complete coding-request pilot; not a component rate, MTP comparison or held-out quality certification')
+
+
+def summarize_dflash_commit_requests(requests):
+    if (len(requests) != 6
+            or [entry.get('commit_only_gdn') for entry in requests] != [False, True, False, True, True, False]
+            or [entry.get('instrumented_timing') for entry in requests] != [True, True, False, False, False, False]):
+        raise ValueError('Two arm audits followed by measured control/candidate/candidate/control requests required')
+    reference = requests[0]
+    identity = ('prompt_tokens', 'emitted', 'max_new_tokens', 'eos_ids', 'vocab_size', 'committed_decode_tokens',
+        'fabric_sources', 'sources')
+    block_identity = ('rows', 'source', 'accepted', 'match_length', 'position', 'input_tokens', 'committed')
+    draft_identity = ('checkpoints', 'block_rows', 'proposal_capture', 'proposal_contexts', 'proposal_calls',
+        'committed_feature_rows', 'target_taps', 'policy')
+    if reference['dflash'].get('proposal_capture') is not True or reference['dflash'].get('block_rows') != 8:
+        raise ValueError('Commit-only comparison requires the qualified captured T8 proposer')
+    expected_blocks = [tuple(block[key] for key in block_identity) for block in reference['blocks']]
+    for entry in requests:
+        if (any(entry[key] != reference[key] for key in identity)
+                or any(entry['dflash'][key] != reference['dflash'][key] for key in draft_identity)
+                or [tuple(block[key] for key in block_identity) for block in entry['blocks']] != expected_blocks):
+            raise ValueError('Matched ABBA requires identical inputs, proposals, acceptance, sources and four-link configuration')
+    control = summarize_dflash_requests([requests[index] for index in (0, 2, 5)])
+    candidate = summarize_dflash_requests([requests[index] for index in (1, 3, 4)])
+    return dict(control=control, candidate=candidate, measured_order=['control', 'candidate', 'candidate', 'control'],
+        committed_tokens_per_second=candidate['committed_tokens_per_second'],
+        candidate_over_control=candidate['committed_tokens_per_second'] / control['committed_tokens_per_second'],
+        target_reached=candidate['target_reached'],
+        scope='Matched complete coding-request ABBA; audit requests excluded; not held-out coding-quality certification')
 
 
 def load_dflash_fixtures(root):
@@ -108,11 +149,11 @@ def load_dflash_fixtures(root):
 
 def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *, fixtures,
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
-                          audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False):
+                          audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False, commit_only_gdn=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
 
-    if (type(audit_features) is not bool or type(proposal_capture) is not bool or len(prompt) > 2048
+    if (type(audit_features) is not bool or type(proposal_capture) is not bool or type(commit_only_gdn) is not bool or len(prompt) > 2048
             or type(block_rows) is not int or block_rows not in (8, 32)):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
     manifests, layers, projection, selector = fixtures
@@ -186,6 +227,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             prefill=captured_prefill, decode=gold_decode, live_digest=live_digest, kv_digest=kv_digest,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=max_new_tokens,
             norm_batch=True, lookup_max_rows=block_rows, native_sampling_rows=True,
+            commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=commit_only_gdn and audit_features,
             feature_factory=factory, progress=lambda block: status('committed-block', **block))
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
             block_rows=block_rows, max_drafts=block_rows - 1, mask_token_id=248070,
@@ -214,7 +256,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py',
                          'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py',
-                         'draft_selector.py', 'dflash_proposal_inputs.py', 'dflash_proposal_trace.py')}
+                         'draft_selector.py', 'dflash_proposal_inputs.py', 'dflash_proposal_trace.py',
+                         'gdn_device_loop_state.py', 'model_batch.py', 'verifier_engine.py', 'full_request.py')}
         return result
     finally:
         try:

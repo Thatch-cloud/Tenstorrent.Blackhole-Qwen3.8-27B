@@ -106,6 +106,10 @@ def main():
     mtp_drafts = os.environ.get('QWEN_MTP_DRAFTS', '0')
     dflash_drafts = os.environ.get('QWEN_DFLASH_DRAFTS', '0')
     dflash_capture = os.environ.get('QWEN_DFLASH_CAPTURE', '0')
+    dflash_commit_abba = os.environ.get('QWEN_DFLASH_COMMIT_ABBA', '0')
+    if dflash_commit_abba not in ('0', '1') or (dflash_commit_abba == '1' and
+            (dflash_capture != '1' or dflash_drafts != '7')):
+        parser.error('Commit-only GDN ABBA requires the captured T8 DFlash2 request')
     if dflash_capture not in ('0', '1') or (dflash_capture == '1' and dflash_drafts == '0'):
         parser.error('Captured drafting requires an explicit DFlash2 request')
     if dflash_drafts not in ('0', '7', '31') or (dflash_drafts != '0' and
@@ -779,7 +783,7 @@ def main():
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
                 if dflash_drafts != '0':
-                    from full_dflash_request import measure_dflash_request, summarize_dflash_requests
+                    from full_dflash_request import measure_dflash_request, summarize_dflash_requests, summarize_dflash_commit_requests
                     output_path = root / 'full-dflash-request.json'
                     report.update(scope='Complete five-layer DFlash2 coding request; exact target verification, not held-out quality certification',
                         context_lengths=[len(prompt)], request_checks=[])
@@ -788,21 +792,25 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('DFlash2 target sampler must use four physical-pair links')
-                        for feature_audit in (True, False, False):
+                        arms = ((False, True), (False, False), (False, False))
+                        if dflash_commit_abba == '1':
+                            arms = ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False))
+                        for commit_only, feature_audit in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
-                                repetition=len(report['request_checks']))), flush=True)
+                                commit_only_gdn=commit_only, repetition=len(report['request_checks']))), flush=True)
                             result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
-                                proposal_capture=dflash_capture == '1')
+                                proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
                                 fabric_sources=fabric_sources)
                             report['request_checks'].append(result)
                             output_path.write_text(json.dumps(report, indent=2))
-                    report['request_summary'] = summarize_dflash_requests(report['request_checks'])
+                    summarize = summarize_dflash_commit_requests if dflash_commit_abba == '1' else summarize_dflash_requests
+                    report['request_summary'] = summarize(report['request_checks'])
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)
                     return

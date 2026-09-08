@@ -12,6 +12,17 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_commit_only_only_reaches_retained_multirow_fixtures(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.model, engine.pages, engine.helpers = object(), object(), []
+        engine.position, engine.norm_batch, engine.attention_replay = 170, True, False
+        for enabled in (False, True):
+            engine.commit_only_gdn = enabled
+            for rows in (1, 2, 4, 8):
+                with patch('verifier_engine.ModelBatch') as factory:
+                    engine.fixture(rows, [], retain=rows > 1)
+                self.assertEqual(factory.call_args.kwargs.get('commit_only_gdn', False), enabled and rows > 1)
+
     def test_short_context_reaches_only_replay_fixtures(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []

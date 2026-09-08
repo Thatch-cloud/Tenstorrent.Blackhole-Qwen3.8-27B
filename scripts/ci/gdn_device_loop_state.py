@@ -9,7 +9,10 @@ from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
                  packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False,
-                 norm_source_root=None):
+                 norm_source_root=None, commit_only=False):
+        if type(commit_only) is not bool or (commit_only and not (batch_conv and dma_windows and packed_checkpoints)):
+            raise ValueError('Commit-only GDN requires packed batched DMA histories and an explicit decision owner')
+        self.commit_only = commit_only
         if norm_source_root is not None and not norm_batch:
             raise ValueError('Norm source override requires batched normalization')
         self.norm_source_root = norm_source_root
@@ -33,7 +36,7 @@ class DeviceLoopState:
         self.packed_checkpoints = packed_checkpoints
         self.norm_batch = norm_batch
         self.entry = active.allocate()
-        self.state = active.allocate()
+        self.state = [] if commit_only else active.allocate()
         self.calls = self.checkpoint_calls = self.skipped_clones = 0
         self.native_addresses = [addresses(operations, value) for value in active.live]
 
@@ -41,11 +44,13 @@ class DeviceLoopState:
         rows = validate_rows(tuple(packed.shape))
         if type(prefix) is not int or not 0 <= prefix <= rows:
             raise ValueError('Selected prefix must lie within the block')
+        if self.commit_only and rows == 1:
+            raise ValueError('Commit-only GDN requires a multirow retained decision; T1 uses the native path')
         native = [self.gdn.rec_state, *self.gdn.conv_states]
         if self.gdn.B != 8 or [addresses(self.operations, value) for value in native] != self.native_addresses:
             raise ValueError('Native state binding changed')
         operations, layer = self.operations, self.gdn
-        deferred = self.defer_conv_publication and rows > 1
+        deferred = (self.defer_conv_publication or self.commit_only) and rows > 1
         self.active.save(self.entry)
         if not deferred:
             copy_compact(self.entry, self.state)
@@ -69,9 +74,11 @@ class DeviceLoopState:
                 raise AssertionError('Norm-batch recurrence adapter did not engage as selected')
             if result.get('prefix_zero_reuse', False) != (self.prefix_zero_reuse and rows > 1):
                 raise AssertionError('Prefix zero reuse did not engage as selected')
-            restore_prefix(operations, result, self.entry, checkpoint, prefix)
-            restore_prefix(operations, result, self.entry, self.state, rows)
-            self.active.restore(self.state)
+            if not self.commit_only:
+                restore_prefix(operations, result, self.entry, checkpoint, prefix)
+                restore_prefix(operations, result, self.entry, self.state, rows)
+                self.active.restore(self.state)
+            result['commit_only_gdn'] = self.commit_only
             self.calls += 1
             self.checkpoint_calls += 1
             return result

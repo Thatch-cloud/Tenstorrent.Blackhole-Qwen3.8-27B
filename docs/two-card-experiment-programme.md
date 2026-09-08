@@ -15,6 +15,12 @@ draft32.156012ms, verify98.436125ms,133/558 accepted proposals. T8 remains the
 lead candidate; target-verifier kernel cost is next, not another wider-draft
 assumption. [Captured results](dflash-captured-proposals-2026-09-09.md).
 
+**Active experiment: commit-only GDN verification.** Remove redundant state
+copies and speculative native-state writes from the verifier, then publish the
+selected prefix only after acceptance. Simulator checks every prefix and actual
+continuation; hardware will compare identical captured T8 requests in ABBA order.
+No new throughput claim yet. [Experiment](dflash-commit-only-gdn-2026-09-09.md).
+
 **Earlier eager integration: T8 37.64 / T32 41.03 TG; MTP58.33 TG.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the
 target's embedding/head and five post-layer feature taps. Only committed target

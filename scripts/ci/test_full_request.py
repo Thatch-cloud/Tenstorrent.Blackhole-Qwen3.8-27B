@@ -24,7 +24,8 @@ class RequestPilotTests(unittest.TestCase):
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
                     mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False,
-                    attention_audit=False, feature_factory=None):
+                    attention_audit=False, feature_factory=None, commit_only_gdn=False,
+                    audit_commit_only_gdn=False, live_digest=None, verify_hook=None):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -32,7 +33,8 @@ class RequestPilotTests(unittest.TestCase):
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
                     attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                    native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=()):
+                    native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
+                    commit_only_gdn=False):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             engine.retain_mtp_hidden = retain_mtp_hidden
             engine.retain_feature_taps, engine.session = retain_feature_taps, session
@@ -45,6 +47,8 @@ class RequestPilotTests(unittest.TestCase):
                 engine.proposal_rows = lambda: plan.max_rows(session.position, session.max_new_tokens - len(session.emitted))
 
             def verify(ticket):
+                if verify_hook is not None:
+                    verify_hook()
                 engine.phase = 'verified'
                 engine.pending = ticket
                 return [99 if wrong else (token + 1) % 3 for token in ticket.tokens], dict(input_ms=0, verify_readback_ms=0)
@@ -61,15 +65,42 @@ class RequestPilotTests(unittest.TestCase):
                 ([0, 1, 2] * 56 + [0, 1]) if short_context else [0, 1, 2] * (1365 if attention_replay else 12),
                 SimpleNamespace(shape=(1, 1024)), [],
                 prefill=prefill or (lambda prompt: seed), decode=decode,
-                live_digest=lambda: 'state', kv_digest=lambda position: position,
+                live_digest=live_digest or (lambda: 'state'), kv_digest=lambda position: position,
                 inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch,
                 attention_replay=attention_replay, family_routing=attention_replay or short_context,
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
                 lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
                 native_sampling_rows=native_sampling_rows, short_context=short_context, attention_audit=attention_audit,
-                feature_factory=feature_factory)
+                feature_factory=feature_factory, commit_only_gdn=commit_only_gdn,
+                audit_commit_only_gdn=audit_commit_only_gdn)
         return result, constructor
+
+    def test_commit_only_audit_checks_every_multirow_before_decision_and_excludes_timing(self):
+        result, constructor = self.run_fixture(norm_batch=True, commit_only_gdn=True, audit_commit_only_gdn=True)
+        self.assertTrue(constructor.call_args.kwargs['commit_only_gdn'])
+        expected = [dict(position=block['position'], rows=block['rows'], unchanged=True)
+            for block in result['blocks'] if block['rows'] > 1]
+        self.assertTrue(expected)
+        self.assertEqual(result['gdn_verify_checks'], expected)
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertTrue(result['instrumented_timing'])
+
+    def test_commit_only_measured_request_has_no_hidden_state_audit(self):
+        result, constructor = self.run_fixture(norm_batch=True, commit_only_gdn=True)
+        self.assertEqual(result['gdn_verify_checks'], [])
+        self.assertFalse(result['instrumented_timing'])
+        self.assertGreater(result['committed_tokens_per_second'], 0)
+
+    def test_commit_only_rejects_premature_native_state_mutation(self):
+        state = []
+        with self.assertRaisesRegex(AssertionError, 'before the decision'):
+            self.run_fixture(norm_batch=True, commit_only_gdn=True, audit_commit_only_gdn=True,
+                live_digest=lambda: tuple(state), verify_hook=lambda: state.append('mutated'))
+
+    def test_commit_only_audit_requires_explicit_candidate(self):
+        with self.assertRaises(ValueError):
+            self.run_fixture(audit_commit_only_gdn=True)
 
     def test_feature_drafter_owns_neural_route_and_prefix_publication(self):
         from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS

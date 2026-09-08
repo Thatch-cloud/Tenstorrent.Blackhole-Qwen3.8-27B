@@ -37,7 +37,10 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
-                    attention_audit=False, feature_factory=None):
+                    attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False):
+    if (type(commit_only_gdn) is not bool or type(audit_commit_only_gdn) is not bool
+            or (audit_commit_only_gdn and not commit_only_gdn)):
+        raise ValueError('Explicit commit-only GDN selection required before auditing deferred state')
     if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
         raise ValueError('Attention diagnostics require explicit short-context parallel attention')
     if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
@@ -121,6 +124,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     blocks = []
     setup_ms = decode_ms = 0.0
     capture_count = 0
+    gdn_verify_checks = []
     try:
         if not session.finished:
             plan = None
@@ -137,6 +141,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 **(dict(attention_audit=True) if attention_audit else {}),
                 **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
                 **(dict(retain_feature_taps=feature_runtime.tap_ids) if feature_runtime is not None else {}),
+                **(dict(commit_only_gdn=True) if commit_only_gdn else {}),
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
             if runtime is not None:
                 runtime.bind(session, engine)
@@ -152,7 +157,12 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     raise AssertionError('Engine and matched request disagree on safe proposal width')
                 ticket = session.propose(session.request_id, max_rows=maximum, selected=selected_drafter)
                 drafted = time.perf_counter()
+                before_verify = live_digest() if audit_commit_only_gdn and len(ticket.tokens) > 1 else None
                 predictions, components = engine.verify(ticket)
+                if before_verify is not None:
+                    if live_digest() != before_verify:
+                        raise AssertionError('Commit-only verification modified native GDN state before the decision')
+                    gdn_verify_checks.append(dict(position=ticket.position, rows=len(ticket.tokens), unchanged=True))
                 verified = time.perf_counter()
                 decision = session.commit(session.request_id, ticket, predictions, publish)
                 finished = time.perf_counter()
@@ -178,10 +188,11 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             raise AssertionError('Actual request final active GDN, valid KV or inactive slots differ')
         return dict(length=len(prompt), kind='Synthetic repeated-code lookup pilot; not a coding-quality benchmark',
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
+            commit_only_gdn=commit_only_gdn, gdn_verify_checks=gdn_verify_checks,
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
             lookup_max_rows=lookup_max_rows, native_sampling_rows=native_sampling_rows, short_context=short_context,
-            attention_audit=attention_audit, instrumented_timing=attention_audit,
+            attention_audit=attention_audit, instrumented_timing=attention_audit or audit_commit_only_gdn,
             selected_drafter=selected_drafter,
             drafting_policy='lookup-first' if lookup_enabled else 'neural-with-target-fallback',
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
@@ -193,7 +204,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             decode_ms=decode_ms, mtp_setup_ms=mtp_setup_ms, feature_setup_ms=feature_setup_ms,
             native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,
             committed_tokens_per_second=1000 * session.committed_decode_tokens / decode_ms
-                if decode_ms and not attention_audit else None,
+                if decode_ms and not (attention_audit or audit_commit_only_gdn) else None,
             post_seed_including_setup_ms=mtp_setup_ms + feature_setup_ms + setup_ms + decode_ms,
             prefill_setup_decode_ms=prefill_ms + mtp_setup_ms + feature_setup_ms + setup_ms + decode_ms,
             setup_amortized=False, cross_request_trace_reuse=False)
