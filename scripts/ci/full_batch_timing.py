@@ -19,7 +19,16 @@ def summarize(samples):
 def paired_control_flags(*, compact_gdn, reuse_gdn_input, skip_row_clones, hoist_row_layout,
                          device_loop_gdn, compact_prologue, batch_conv, packed_checkpoints=False, ordered_cache=False,
                          norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False,
-                         prefix_zero_reuse=False):
+                         prefix_zero_reuse=False, defer_conv_publication=False):
+    if type(defer_conv_publication) is not bool or (defer_conv_publication and not packed_checkpoints):
+        raise ValueError('Deferred publication requires explicit packed checkpoints')
+    if defer_conv_publication:
+        return dict(compact_gdn=compact_gdn, reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
+            hoist_row_layout=hoist_row_layout, device_loop_gdn=device_loop_gdn, compact_prologue=compact_prologue,
+            batch_conv=batch_conv, packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache,
+            norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=attention_dma,
+            attention_parallel=attention_parallel, attention_tree=attention_tree, prefix_zero_reuse=prefix_zero_reuse,
+            defer_conv_publication=False)
     if prefix_zero_reuse:
         if type(prefix_zero_reuse) is not bool or not packed_checkpoints:
             raise ValueError('Prefix zero reuse requires explicit packed checkpoints')
@@ -77,7 +86,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
             compact_gdn=False, checkpoint_digest=None, reuse_gdn_input=False, skip_row_clones=False, hoist_row_layout=False,
             device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False, ordered_cache=False,
             norm_batch=False, grouped_attention=False, attention_dma=False, attention_parallel=False, attention_tree=False,
-            device_profile=False, prefix_zero_reuse=False):
+            device_profile=False, prefix_zero_reuse=False, defer_conv_publication=False):
     import torch
     import ttnn
 
@@ -95,7 +104,7 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                            compact_prologue=compact_prologue, batch_conv=batch_conv, packed_checkpoints=packed_checkpoints,
                            ordered_cache=ordered_cache, norm_batch=norm_batch, grouped_attention=grouped_attention,
                            attention_dma=attention_dma, attention_parallel=attention_parallel, attention_tree=attention_tree,
-                           prefix_zero_reuse=prefix_zero_reuse)
+                           prefix_zero_reuse=prefix_zero_reuse, defer_conv_publication=defer_conv_publication)
     control = ModelBatch(model, tokens, length, pages, helpers, checkpoints, rows,
                          serial_sdpa=serial_sdpa, **paired_control_flags(compact_gdn=compact_gdn,
                              reuse_gdn_input=reuse_gdn_input, skip_row_clones=skip_row_clones,
@@ -104,13 +113,13 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                              packed_checkpoints=packed_checkpoints, ordered_cache=ordered_cache,
                              norm_batch=norm_batch, grouped_attention=grouped_attention, attention_dma=attention_dma,
                              attention_parallel=attention_parallel, attention_tree=attention_tree,
-                             prefix_zero_reuse=prefix_zero_reuse)) if compact_gdn else None
+                             prefix_zero_reuse=prefix_zero_reuse, defer_conv_publication=defer_conv_publication)) if compact_gdn else None
     singleton = [ModelBatch(model, [token], length + index, pages, helpers, checkpoints, 1)
                  for index, token in enumerate(tokens)]
     traces = {}
     outputs = {}
     report = dict(length=length, rows=rows, blocks=[], restore_samples_ms=[], exact=False, serial_sdpa=serial_sdpa,
-                  prefix_zero_reuse=candidate.prefix_zero_reuse,
+                  prefix_zero_reuse=candidate.prefix_zero_reuse, deferred_conv_publication=candidate.defer_conv_publication,
                   compact_gdn_enabled=candidate.compact_gdn,
                   reuse_gdn_input_enabled=candidate.reuse_gdn_input,
                   paired_control="compact GDN with distinct input slices" if reuse_gdn_input else "batched native GDN state",
@@ -167,6 +176,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                       paired_control='Identical parallel DMA attention, compact native scratch and GDN; T4 versus T8 groups')
     if prefix_zero_reuse:
         report['paired_control'] = 'Identical attention, GDN and checkpoint configuration; per-page zeroing versus per-worker zero reuse'
+    if defer_conv_publication:
+        report['paired_control'] = 'Identical attention, norm, cache and prefix-zero settings; eager versus deferred convolution state publication'
 
     def serial():
         return [model._forward_decode(fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages)
@@ -277,6 +288,8 @@ def measure(model, tokens, length, pages, helpers, checkpoints, *, prefill, save
                 report['compact_comparison']['scope'] = 'Full-model T4 versus T8 parallel attention groups; identical compact scratch, DMA and GDN; static positions only, no committed tok/s'
             if prefix_zero_reuse:
                 report['compact_comparison']['scope'] = 'Full-model per-page zeroing versus per-worker zero reuse; identical attention, GDN and checkpoint configuration; static positions only, no committed tok/s'
+            if defer_conv_publication:
+                report['compact_comparison']['scope'] = 'Full-model deferred convolution publication versus identical current verifier; static positions only, no committed tok/s'
 
         restore_initial()
         trace, unused = capture_operation(ttnn, mesh, restore_initial)

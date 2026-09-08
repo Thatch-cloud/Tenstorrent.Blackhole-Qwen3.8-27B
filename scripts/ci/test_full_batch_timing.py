@@ -4,6 +4,19 @@ from full_batch_timing import paired_control_flags, summarize
 
 
 class TimingTests(unittest.TestCase):
+    def test_deferred_publication_control_changes_only_publication_flag(self):
+        flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+            hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
+            packed_checkpoints=True, ordered_cache=True, norm_batch=True, grouped_attention=True,
+            attention_dma=True, attention_parallel=True, attention_tree=True, prefix_zero_reuse=True)
+        self.assertEqual(paired_control_flags(**flags, defer_conv_publication=True),
+            dict(flags, defer_conv_publication=False))
+        with self.assertRaises(ValueError):
+            paired_control_flags(**dict(flags, packed_checkpoints=False), defer_conv_publication=True)
+        for invalid in (1, 'true', None):
+            with self.assertRaises(ValueError):
+                paired_control_flags(**flags, defer_conv_publication=invalid)
+
     def test_prefix_copy_control_preserves_best_attention_and_gdn_configuration(self):
         flags = dict(compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
             hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,

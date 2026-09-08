@@ -48,6 +48,13 @@ avoids comparing an optimized component with a differently configured adapter.
 The11 targeted adapter tests pass. Full-model wiring and hardware remain gated
 on this wider simulator result; existing production defaults are unchanged.
 
+Full-model library wiring is prepared via explicit `ModelBatch` and timing-helper
+arguments. The paired control retains every current attention, normalization,
+cache and prefix-zero-reuse setting; only deferred publication differs. Existing
+CLI/CI paths do not enable it. The638-test Linux host suite passes. T8 simulator
+023840Z-315 is still running through all-prefix checks; do not treat this prepared
+wiring or passing host tests as hardware correctness or a latency improvement.
+
 Runtime recovery superseding the failure notes below: the operator supplied a
 jump-host route. Read-only registry inspection established that `f1e9b1a64b4f`
 is the OCI image-index digest, not the platform config digest. The original tag
