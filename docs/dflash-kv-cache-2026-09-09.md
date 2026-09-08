@@ -1,13 +1,43 @@
 # Historical K/V cache for DFlash2
 
-**Status: integrated simulator gate passed; opt-in 4K hardware ABBA running.**
-No cached-drafter hardware speed or correctness result exists yet. Serving
-defaults and the measured lead are unchanged.
+**Passed at CTX4096: cached60.33 TG versus uncached58.81 TG, +2.58%.**
+Full requests are slower with caching:7.41 s versus7.09 s including fresh setup.
+This small decode gain does not meet200 TG or justify changing serving defaults.
 
 [Hardware run34291073085](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34291073085)
-tests code `20915fe` on the dedicated two-card runner. Its gate is two separate
+passes code `20915fe` on the dedicated two-card runner. Its gate is two separate
 audits followed by four uninstrumented requests, in uncached/cached/cached/
-uncached order. A running job is not a result.
+uncached order. Both arms retain captured T8, commit-only GDN, fused convolution
+and four links. Artifact SHA256:
+`1d82e677eb1d3ceb7ee574fed1f066fcd5da14c1a842397bf47a471e7c877fbe`.
+
+## Hardware result
+
+| Metric | Uncached control | Cached candidate |
+| --- | ---: | ---: |
+| PP tok/s | 3,293.42 | 3,307.88 |
+| CTX / streams | 4,096 / 1 | 4,096 / 1 |
+| Committed TG tok/s | 58.81 | 60.33 |
+| Individual TG samples | 59.50 /58.14 | 59.66 /61.02 |
+| Mean complete prefill + setup + decode | 7.09 s | 7.41 s |
+| Draft ms/block | 53.59 | 41.11 |
+| Verifier input staging ms/block | 1.53 | 3.01 |
+| Verify/readback ms/block | 61.72 | 61.69 |
+| Publication/commit ms/block | 3.75 | 11.72 |
+| Complete cycle ms/block | 120.90 | 117.86 |
+
+All six requests produce the same121 committed decode tokens through EOS,
+17 blocks and105/119 accepted drafts. The prompt and output also match the
+earlier4K pilot. Native target tokens, GDN, valid KV and inactive-slot checks
+pass. Each separate audit checks1,210 feature row/chip/tap comparisons,17
+eager/trace proposals and680 learned convolutions. The cached audit additionally
+passes17 cached-versus-uncached proposals and360 full-history K/V comparisons:
+initialization plus every publication, five layers, both heads and both chips.
+
+Caching saves12.48 ms of drafting but adds7.97 ms to publication/commit;
+input staging also rises1.49 ms, without an isolated cause established for
+that rise. Verifier time is unchanged. Do not hide initialization, omit the
+publication cost or describe this as a broad coding-quality certification.
 
 ## Why this experiment
 
@@ -39,8 +69,8 @@ draft-side optimization; these bounds are calculations, not benchmark results.
 | Transaction host tests | Five pass; multiple layers, prefixes1/7/8/32, short-window growth, eviction, abort, failed spare write, stale ticket rejection and full-history corruption detection |
 | Learned numerical simulator | Passed `20260908T222847Z-416-draft-kv-projection-probe`: 20 bit-exact comparisons and four detected stale-history controls, pinned layer1 weights, both chips |
 | Actual cached/uncached attention operands and cache publication/replay | Passed `20260908T230732Z-297-draft-kv-history-probe`; real learned layer1, native head layout and fused convolution |
-| Full eager proposal comparison against uncached lead | Implemented as a separate hardware audit for every proposal; hardware evidence pending |
-| Matched complete-request hardware ABBA | Running34291073085; no result yet |
+| Full eager proposal comparison against uncached lead | Passed all17 cached proposals in the separate hardware audit |
+| Matched complete-request hardware ABBA | Passed34291073085; +2.58% decode, worse full-request time |
 
 The numerical probe compares full versus separate history/live projection at
 CTX170 and4093, then seven-row eviction/append at4100. It also requires changed
@@ -82,3 +112,12 @@ Hardware promotion requires unchanged committed target tokens/GDN/valid-KV/
 inactive slots, exact audited eager/trace proposal outputs, accepted-prefix
 publication and separate uninstrumented PP/CTX/TG. Keep the current uncached
 lead as the paired control and retain four-link communication.
+
+## Next optimization
+
+The new K/V projections still dispatch eagerly during each publication.
+Next test a fixed32-row captured projection with updated accepted features and
+absolute rotary inputs, retaining the full-history audit and atomic bank swap.
+This is not implemented or measured yet. It targets the newly measured update
+cost, not a claim that cache work alone can reach200. The target verifier still
+needs a substantial independent reduction from61.69 ms/block.

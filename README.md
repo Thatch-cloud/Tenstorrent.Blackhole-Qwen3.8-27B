@@ -16,8 +16,9 @@ This is a single-task experiment, not held-out coding quality or a serving resul
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**4K passes at 58.18 TG; the 8K repeat passes at 53.48 TG.**
-Cached drafter K/V passes its simulator gate; [hardware comparison is running](docs/dflash-kv-cache-2026-09-09.md).
+**4K caching reaches60.33 TG; the uncached 8K repeat reaches53.48 TG.**
+Caching improves matched4K decode by2.58%, but full requests worsen7.09->7.41 s.
+[Cache results and remaining overhead](docs/dflash-kv-cache-2026-09-09.md).
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
@@ -81,6 +82,10 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 46.20 TG and 10.24 s initially. This is repeatability evidence, not a code gain.
 [8K result and timing spread](docs/dflash-8k-context-2026-09-09.md).
 [Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
+
+The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
+against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
+the drafting saving; caching is not enabled in serving or the8K ladder rows.
 
 ## Serving baseline
 

@@ -34,7 +34,12 @@ against full-history recomputation. Integrated gate20260908T230732Z-297 passes
 eight attention-operand,36 replay,12 unchanged-state and four full-history
 comparisons, plus four detected stale controls. All11 source hashes match;
 846 CI and60 harness tests pass. The opt-in4K ABBA run34291073085 (`20915fe`)
-is now running; there is no cache-enabled hardware rate yet.
+passes: cached PP3307.88 /CTX4096 /TG60.33 versus uncached PP3293.42 /TG58.81
+(+2.58%). All six121-token requests and cached/full-history audits are exact.
+Drafting falls53.59->41.11ms/block, but publication rises3.75->11.72ms;
+verification stays61.69ms. Full request time worsens7.09->7.41s. No serving
+adoption. Next capture incremental K/V projection, while retaining the separate
+target-verifier optimization requirement; neither is a200-TG claim.
 [Gates](dflash-kv-cache-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**

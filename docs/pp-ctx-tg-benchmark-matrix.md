@@ -9,6 +9,8 @@
 | Lead at 4K, separate context pilot | **3,355.04** | **4,096** | **58.18** | **1** | Up to 8 | 121, 121 | **7.05 s** |
 | Lead at 8K, separate context pilot | **3,149.33** | **8,192** | **46.20** | **1** | Up to 8 | 121, 121 | **10.24 s** |
 | Lead at 8K, same-code repeat | **3,298.59** | **8,192** | **53.48** | **1** | Up to 8 | 121, 121 | **8.70 s** |
+| 4K cache ABBA, uncached control | **3,293.42** | **4,096** | **58.81** | **1** | Up to 8 | 121, 121 | **7.09 s** |
+| 4K cache ABBA, cached candidate | **3,307.88** | **4,096** | **60.33** | **1** | Up to 8 | 121, 121 | **7.41 s** |
 
 CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
@@ -27,6 +29,10 @@ context-scaling evidence. [8K result and artifact](dflash-8k-context-2026-09-09.
 The unchanged-code repeat34289671592 measures53.40 /53.57 TG, combined53.48.
 Both runs remain separate: the repeat is not an optimization gain and does not
 explain the original stall.
+The separate4K cache ABBA34291073085 passes all correctness checks and measures
+2.58% faster decode but worse full-request time. New-row K/V projection remains
+eager during publication; this is not the runtime used for the8K measurements.
+[Cache result and bottleneck](dflash-kv-cache-2026-09-09.md).
 
 | Metric | Definition |
 | --- | --- |
@@ -46,7 +52,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | 3,355.04 / 58.18 measured | Retain long-context control |
+| 4,096 | 1 | Cached3,307.88 /60.33; matched control3,293.42 /58.81 | Reduce cache publication and target verification cost |
 | 8,192 | 1 | Repeat3,298.59 /53.48; first3,149.33 /46.20 | Retain both runs; original stall remains unexplained |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |
