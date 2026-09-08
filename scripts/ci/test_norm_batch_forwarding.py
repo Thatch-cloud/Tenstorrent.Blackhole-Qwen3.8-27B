@@ -22,11 +22,17 @@ class NormBatchForwardingTests(unittest.TestCase):
         contracts = {
             'full_device_selection.py': {'ModelBatch': 1},
             'full_replay.py': {'ModelBatch': 1},
-            'full_request.py': {'VerifierEngine': 1},
+            'full_request.py': {'factory': 1},
             'full-prefix.py': {'measure_request': 1, 'measure_selection': 1, 'verify_replay': 1},
         }
         for filename, expected in contracts.items():
             tree = ast.parse((root / filename).read_text())
+            if filename == 'full_request.py':
+                assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == 'factory' for target in node.targets)]
+                self.assertEqual(len(assignments), 1)
+                self.assertEqual(ast.unparse(assignments[0].value),
+                    'VerifierEngine if engine_factory is None else engine_factory')
             for name, count in expected.items():
                 calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                          and isinstance(node.func, ast.Name) and node.func.id == name]

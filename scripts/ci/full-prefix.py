@@ -736,6 +736,10 @@ def main():
                     links = 4 if sampling_links else 1
                     scope = sampler_links(sampler.tt_sampling, links) if fabric_link_probe == '1' else nullcontext()
                     with scope:
+                        engine_factory = None
+                        if fabric_link_probe == '1' and sampling_links:
+                            from candidate_runtime import CandidateRuntime
+                            engine_factory = CandidateRuntime
                         if fabric_link_probe == '1':
                             axis = sampler.tt_sampling._get_sampling_cluster_axis()
                             actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
@@ -747,9 +751,13 @@ def main():
                             max_new_tokens=513 if coding_request == '1' else 129,
                             lookup_max_rows=8 if lookup_cap or fabric_link_probe == '1' else 32,
                             family_routing=options.attention_engine, attention_mask_once=options.attention_engine_wide,
-                            replay_group_rows=8 if attention_wide else 4)
+                            replay_group_rows=8 if attention_wide else 4, engine_factory=engine_factory)
                     if fabric_link_probe == '1':
                         result.update(sampling_links=sampling_links, sampler_num_links=links, fabric_sources=fabric_sources)
+                        if sampling_links:
+                            from candidate_runtime import PROFILE, EVIDENCE_RUN
+                            result.update(candidate_profile=PROFILE, candidate_basis_run=EVIDENCE_RUN,
+                                candidate_runtime_sha256=hashlib.sha256(Path(__file__).with_name('candidate_runtime.py').read_bytes()).hexdigest())
                     if options.attention_engine_wide:
                         result['attention_wide'] = attention_wide
                     if lookup_cap_abba == '1':

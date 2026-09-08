@@ -21,7 +21,7 @@ def terminal_ids(weights, vocab_size):
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
-                    lookup_max_rows=32):
+                    lookup_max_rows=32, engine_factory=None):
     if type(lookup_max_rows) is not int or lookup_max_rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Explicit supported lookup width cap required')
     if lookup_max_rows != 32 and (family_routing or attention_replay):
@@ -62,7 +62,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 from attention_request_plan import capture_plan
                 plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
                     session.max_new_tokens - len(session.emitted))
-            engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
+            factory = VerifierEngine if engine_factory is None else engine_factory
+            engine = factory(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
                 attention_replay=attention_replay, attention_mask_once=attention_mask_once,
                 replay_group_rows=replay_group_rows,
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))

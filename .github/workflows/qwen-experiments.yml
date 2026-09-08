@@ -40,6 +40,10 @@ on:
         description: Opt-in five-layer learned gate, learned-attention suite only
         type: boolean
         default: false
+      simulator_only:
+        description: CPU-only learned-attention five-layer simulator; requires learned_stack, no physical card access
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -56,6 +60,7 @@ jobs:
       QWEN_FABRIC_LINK_PROBE: ${{ inputs.fabric_link_probe && '1' || '0' }}
       QWEN_PREFIX_ZERO_REUSE: ${{ inputs.prefix_zero_reuse && '1' || '0' }}
       QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
+      QWEN_SIM_ONLY: ${{ inputs.simulator_only && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 120
     steps:
@@ -63,6 +68,11 @@ jobs:
         shell: bash
         run: |
           test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+          if [ "${{ inputs.simulator_only }}" = true ]; then
+            test "${{ inputs.suite }}" = learned-attention
+            test "${{ inputs.learned_stack }}" = true
+            test "${{ inputs.reset_authorized }}" = false
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -108,12 +118,16 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 2400 bash scripts/ci/run-hardware.sh
       - name: Learned projection numerical diagnostic
-        if: inputs.suite == 'learned-mlp' || inputs.suite == 'learned-attention' || inputs.suite == 'learned-convolution' || inputs.suite == 'feature-projection' || inputs.suite == 'feature-projection-full'
+        if: ${{ !inputs.simulator_only && (inputs.suite == 'learned-mlp' || inputs.suite == 'learned-attention' || inputs.suite == 'learned-convolution' || inputs.suite == 'feature-projection' || inputs.suite == 'feature-projection-full') }}
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout -k 30 ${{ inputs.learned_stack && '7000' || '4800' }} bash scripts/ci/run-baseline.sh
+      - name: CPU-only five-layer draft simulator
+        if: inputs.simulator_only && inputs.suite == 'learned-attention'
+        shell: bash
+        run: timeout -k 30 7000 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'
         shell: bash
