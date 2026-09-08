@@ -20,7 +20,12 @@ def terminal_ids(weights, vocab_size):
 
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
-                    attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4):
+                    attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
+                    lookup_max_rows=32):
+    if type(lookup_max_rows) is not int or lookup_max_rows not in (1, 2, 4, 8, 16, 32):
+        raise ValueError('Explicit supported lookup width cap required')
+    if lookup_max_rows != 32 and (family_routing or attention_replay):
+        raise ValueError('Lookup width-cap experiment requires native attention')
     if type(norm_batch) is not bool:
         raise ValueError('Explicit boolean norm-batch selection required')
     if type(attention_replay) is not bool or type(family_routing) is not bool:
@@ -59,13 +64,15 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     session.max_new_tokens - len(session.emitted))
             engine = VerifierEngine(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
                 attention_replay=attention_replay, attention_mask_once=attention_mask_once,
-                replay_group_rows=replay_group_rows)
+                replay_group_rows=replay_group_rows,
+                **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
             capture_count = len(engine.buckets)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
             while not session.finished:
                 block_started = time.perf_counter()
                 maximum = plan.max_rows(session.position, session.max_new_tokens - len(session.emitted)) if plan else 32
+                maximum = min(maximum, lookup_max_rows)
                 if attention_replay and maximum != engine.proposal_rows():
                     raise AssertionError('Engine and matched request disagree on safe proposal width')
                 ticket = session.propose(session.request_id, max_rows=maximum)
@@ -94,6 +101,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
+            lookup_max_rows=lookup_max_rows,
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
             vocab_size=model.args.vocab_size,
             prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),

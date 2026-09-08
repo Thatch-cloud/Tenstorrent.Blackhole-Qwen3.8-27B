@@ -21,14 +21,14 @@ class RequestPilotTests(unittest.TestCase):
                     terminal_ids('/frozen-weights', 100)
 
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
-                    attention_replay=False, attention_mask_once=False, replay_group_rows=4):
+                    attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
             return logits
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
-                    attention_mask_once=False, replay_group_rows=4):
+                    attention_mask_once=False, replay_group_rows=4, max_verify_rows=32):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             if attention_replay:
                 from attention_request_plan import capture_plan
@@ -53,8 +53,26 @@ class RequestPilotTests(unittest.TestCase):
                 live_digest=lambda: 'state', kv_digest=lambda position: position,
                 inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch,
                 attention_replay=attention_replay, family_routing=attention_replay,
-                attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows)
+                attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
+                lookup_max_rows=lookup_max_rows)
         return result, constructor
+
+    def test_lookup_cap_bounds_proposals_and_capture_configuration(self):
+        for width in (1, 2, 4, 8, 16):
+            result, constructor = self.run_fixture(norm_batch=True, lookup_max_rows=width)
+            self.assertEqual(result['committed_decode_tokens'], 32)
+            self.assertEqual(result['lookup_max_rows'], width)
+            self.assertEqual(constructor.call_args.kwargs['max_verify_rows'], width)
+            self.assertTrue(all(block['rows'] <= width for block in result['blocks']))
+
+    def test_lookup_cap_rejects_invalid_or_replay_options_before_prefill(self):
+        for configuration in (dict(lookup_max_rows=True), dict(lookup_max_rows=3),
+                dict(lookup_max_rows=8, family_routing=True)):
+            prefill = Mock()
+            with self.assertRaises(ValueError):
+                measure_request(None, None, None, None, None, prefill=prefill, decode=None,
+                    live_digest=None, kv_digest=None, inactive_digest=None, **configuration)
+            prefill.assert_not_called()
 
     def test_norm_batch_selection_is_forwarded_and_recorded(self):
         for enabled in (False, True):

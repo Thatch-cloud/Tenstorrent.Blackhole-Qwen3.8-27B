@@ -11,12 +11,14 @@ from model_batch import ModelBatch
 from verifier_inputs import stage_inputs
 
 
-def capture_widths(position, capacity, verifier_rows, remaining):
+def capture_widths(position, capacity, verifier_rows, remaining, max_verify_rows=32):
+    if type(max_verify_rows) is not int or max_verify_rows not in (1, 2, 4, 8, 16, 32):
+        raise ValueError('Explicit supported verification width cap required')
     if any(type(value) is not int for value in (position, capacity, verifier_rows, remaining)):
         raise ValueError('Integer request geometry required')
     if position < 0 or remaining < 1 or position + remaining > capacity or verifier_rows not in (16, 32):
         raise ValueError('The complete decode budget must fit the request page capacity')
-    return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining))
+    return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining, max_verify_rows))
 
 
 def validate_replay_options(attention_replay, attention_mask_once, replay_group_rows):
@@ -30,7 +32,7 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
-                 attention_mask_once=False, replay_group_rows=4):
+                 attention_mask_once=False, replay_group_rows=4, max_verify_rows=32):
         import ttnn
 
         if type(norm_batch) is not bool:
@@ -38,6 +40,8 @@ class VerifierEngine:
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
             raise ValueError('Explicit replay attention requires norm batching')
         validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
+        if attention_replay and max_verify_rows != 32:
+            raise ValueError('Width-cap experiment currently requires native attention')
         self.norm_batch = norm_batch
         self.attention_replay = attention_replay
         self.attention_mask_once = attention_mask_once
@@ -47,7 +51,7 @@ class VerifierEngine:
         if len(pages.shape) != 2 or pages.shape[0] != 1:
             raise ValueError('One request page table required')
         widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
-                                session.max_new_tokens - len(session.emitted))
+                                session.max_new_tokens - len(session.emitted), max_verify_rows)
         self.model, self.session, self.pages, self.helpers = model, session, pages, helpers
         self.operations, self.mesh, self.sampler = ttnn, model.mesh_device, sampler
         self.position = session.position

@@ -4,18 +4,30 @@ import math
 
 
 def summarize_requests(requests, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap'):
         raise ValueError('Known matched request experiment required')
     if len(requests) != 4 or [entry[arm_key] for entry in requests] != [False, True, True, False]:
         raise ValueError('One complete control/candidate/candidate/control request block required')
     reference = requests[0]
     identity = ('prompt_tokens', 'emitted', 'max_new_tokens', 'eos_ids', 'vocab_size',
                 'committed_decode_tokens', 'proposed', 'accepted')
+    if arm_key == 'lookup_cap':
+        identity = identity[:-2]
     routing = ('rows', 'source', 'accepted', 'committed', 'match_length', 'position', 'input_tokens')
     expected_blocks = [tuple(block[key] for key in routing) for block in reference['blocks']]
     for entry in requests:
         if type(entry[arm_key]) is not bool:
             raise ValueError('Explicit boolean arm selection required')
+        if arm_key == 'lookup_cap':
+            if (entry.get('norm_batch') is not True or any(entry.get(key) is not False for key in
+                    ('family_routing', 'attention_replay', 'attention_mask_once'))
+                    or entry.get('replay_group_rows') != 4
+                    or type(entry.get('lookup_max_rows')) is not int
+                    or entry.get('lookup_max_rows') != (8 if entry[arm_key] else 32)):
+                raise ValueError('Lookup cap comparison requires identical native attention and norm batching')
+            if (entry['proposed'] != sum(block['rows'] - 1 for block in entry['blocks'])
+                    or entry['accepted'] != sum(block['accepted'] for block in entry['blocks'])):
+                raise ValueError('Lookup cap proposal accounting differs from recorded blocks')
         if arm_key == 'attention_replay' and (entry.get('norm_batch') is not True or entry.get('family_routing') is not True):
             raise ValueError('Both attention arms require identical norm batching and family routing')
         if arm_key == 'attention_wide':
@@ -28,6 +40,9 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
             raise ValueError('Every request must pass native correctness')
         if any(entry[key] != reference[key] for key in identity):
             raise ValueError('Matched requests must use identical prompt, generation and proposal accounting')
+        if arm_key == 'lookup_cap':
+            arm_reference = next(record for record in requests if record[arm_key] is entry[arm_key])
+            expected_blocks = [tuple(block[key] for key in routing) for block in arm_reference['blocks']]
         if [tuple(block[key] for key in routing) for block in entry['blocks']] != expected_blocks:
             raise ValueError('Matched requests changed proposal routing or acceptance')
         count = entry['committed_decode_tokens']
@@ -59,7 +74,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
 
 
 def measure_requests(measure, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap'):
         raise ValueError('Known matched request experiment required')
     requests = [measure(**{arm_key: enabled}) for enabled in (False, True, True, False)]
     return requests, summarize_requests(requests, arm_key=arm_key)

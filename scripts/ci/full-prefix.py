@@ -107,6 +107,10 @@ def main():
         raise ValueError('Coding workload requires explicit request-pilot mode')
     if coding_request == '1' and (options.attention_engine or options.attention_engine_wide):
         raise ValueError('Short coding workload is not qualified for long-context attention replay')
+    lookup_cap_abba = os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0')
+    if lookup_cap_abba not in ('0', '1') or (lookup_cap_abba == '1' and
+            (coding_request != '1' or not options.norm_batch)):
+        raise ValueError('Lookup cap comparison requires the explicit norm-batched coding request')
     if options.prefix_zero_reuse and (not options.batch or not options.coding_cost or not options.packed_checkpoints
             or any((options.request_pilot, options.replay_inputs, options.deferred_commit,
                 options.attribution, options.device_selection, options.target_features, options.target_feature_batch))):
@@ -718,14 +722,18 @@ def main():
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
-                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False):
+                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False):
                     result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
                         live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                         norm_batch=norm_batch, attention_replay=attention_replay or options.attention_engine_wide,
+                        max_new_tokens=513 if coding_request == '1' else 129,
+                        lookup_max_rows=8 if lookup_cap else 32,
                         family_routing=options.attention_engine, attention_mask_once=options.attention_engine_wide,
                         replay_group_rows=8 if attention_wide else 4)
                     if options.attention_engine_wide:
                         result['attention_wide'] = attention_wide
+                    if lookup_cap_abba == '1':
+                        result['lookup_cap'] = lookup_cap
                     if coding_request == '1':
                         result['kind'] = report['scope']
                         result['coding_task'] = report['coding_task']
@@ -741,7 +749,7 @@ def main():
                 if options.norm_batch:
                     from full_request_pair import measure_requests
                     unused_requests, comparison = measure_requests(request_measure,
-                        arm_key='attention_wide' if options.attention_engine_wide else 'attention_replay' if options.attention_engine else 'norm_batch')
+                        arm_key='lookup_cap' if lookup_cap_abba == '1' else 'attention_wide' if options.attention_engine_wide else 'attention_replay' if options.attention_engine else 'norm_batch')
                     comparison['length'] = len(prompt)
                     report.setdefault('request_comparisons', []).append(comparison)
                     output_path.write_text(json.dumps(report, indent=2))

@@ -12,6 +12,12 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_width_cap_excludes_unused_large_traces(self):
+        self.assertEqual(capture_widths(170, 65536, 32, 512, 8), (1, 2, 4, 8))
+        self.assertEqual(capture_widths(170, 65536, 32, 3, 8), (1, 2))
+        for cap in (True, 3, 8.0, 0, 64):
+            with self.assertRaises(ValueError):
+                capture_widths(170, 65536, 32, 512, cap)
     def test_replay_options_reach_all_warm_and_retained_buckets(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []

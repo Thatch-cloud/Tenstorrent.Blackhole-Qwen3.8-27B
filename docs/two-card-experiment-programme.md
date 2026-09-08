@@ -2,6 +2,24 @@
 
 ## Current programme position - 2026-09-08
 
+Coding retry 34182900581 passed exact native tokens, final state and inactive-slot
+checks. CTX 170, one stream, 128 committed tokens: norm-off 15.0196 TG; norm-on 16.1075
+TG; native reference in the candidate repetitions 19.6694 TG. Lookup is a regression,
+not an overall acceleration: 20/1234 proposals accepted across 108 verification calls.
+The output truncates before completing the function and does not reach EOS.
+Report SHA256:`b4da1d807d44a3c1b178afeff2c16f68bf5519b8e219149ef2cd9f8bd08fed44`.
+
+Offline replay first reproduces every recorded routing decision, then finds that
+an eight-row cap retains all 20 accepted tokens with 450 rather than 1234 proposals.
+This is a counterfactual work-count result, not measured speed. A new opt-in ABBA
+compares T32/T8 lookup caps with identical native attention and norm batching,
+including only the needed trace widths. The coding generation budget rises to 513
+in both arms to permit completion; the previous 128-token timing is not a matched
+control for that longer run. Output/state equality remains mandatory; proposal
+routes may differ across policy arms but must repeat exactly within each arm.
+No serving or default synthetic-workload changes. Learned-stack simulator remains
+active and is not promoted to hardware.
+
 Coding run34181363845 failed before request verification: the short prompt was
 incorrectly routed into an attention replay family qualified only from capacity
 4096. No committed throughput result was produced. Do not relax that kernel

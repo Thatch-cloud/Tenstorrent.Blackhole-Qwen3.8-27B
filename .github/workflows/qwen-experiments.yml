@@ -20,6 +20,10 @@ on:
         description: One short non-repeated coding task; full-norm-engine only
         type: boolean
         default: false
+      lookup_cap_abba:
+        description: Compare lookup T32 versus T8 cap; requires coding_request and full-norm-engine
+        type: boolean
+        default: false
       reset_authorized:
         description: Explicit approval for one reset of the two allocated cards (recovery suite only)
         type: boolean
@@ -44,6 +48,7 @@ jobs:
   inventory:
     env:
       QWEN_CODING_REQUEST: ${{ inputs.coding_request && '1' || '0' }}
+      QWEN_LOOKUP_CAP_ABBA: ${{ inputs.lookup_cap_abba && '1' || '0' }}
       QWEN_PREFIX_ZERO_REUSE: ${{ inputs.prefix_zero_reuse && '1' || '0' }}
       QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]

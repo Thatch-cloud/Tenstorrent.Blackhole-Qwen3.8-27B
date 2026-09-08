@@ -5,6 +5,28 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_lookup_cap_allows_only_between_arm_routing_changes(self):
+        def measure(*, lookup_cap):
+            record = dict(self.record(lookup_cap), lookup_cap=lookup_cap, norm_batch=True,
+                family_routing=False, attention_replay=False, attention_mask_once=False,
+                replay_group_rows=4, lookup_max_rows=8 if lookup_cap else 32)
+            if lookup_cap:
+                record.update(proposed=0, accepted=0, blocks=[dict(rows=1, source='target',
+                    accepted=0, committed=1, match_length=0, position=position, input_tokens=[token])
+                    for position, token in ((2, 0), (3, 1))])
+            return record
+        records, summary = measure_requests(measure, arm_key='lookup_cap')
+        self.assertTrue(summary['exact'])
+        for key, value in (('norm_batch', False), ('family_routing', True), ('lookup_max_rows', 32),
+                ('lookup_max_rows', 8.0), ('proposed', 7), ('accepted', 1), ('emitted', [0, 2, 1])):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='lookup_cap')
+        invalid = deepcopy(records)
+        invalid[2]['blocks'][0]['input_tokens'] = [9]
+        with self.assertRaisesRegex(ValueError, 'changed proposal routing'):
+            summarize_requests(invalid, arm_key='lookup_cap')
     def test_width_comparison_keeps_replay_and_masks_fixed(self):
         def measure(*, attention_wide):
             return dict(self.record(attention_wide), attention_wide=attention_wide, norm_batch=True,

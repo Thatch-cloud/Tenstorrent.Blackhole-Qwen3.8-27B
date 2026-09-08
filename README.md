@@ -65,6 +65,22 @@ Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
 
 ## What currently limits 200 tok/s?
 
+The September 8 non-repeated coding request exposes a regression from weak lookup
+proposals. Both paths produce identical tokens, but the 129-token output limit
+truncates the function; this is not a completed coding-quality result.
+
+| CTX | Streams | Path | PP tok/s | Committed TG tok/s |
+| ---: | ---: | --- | ---: | ---: |
+| 170 | 1 | Native reference, paired candidate repetitions | Not isolated | 19.67 |
+| 170 | 1 | Lookup, norm batching off | Not isolated | 15.02 |
+| 170 | 1 | Lookup, norm batching on | Not isolated | 16.11 |
+
+Only 20 of 1234 proposed tokens are accepted: 128 committed tokens need 108 verifier
+calls. TG excludes prefill/setup; the norm-batched rate including setup is 9.38.
+[Coding request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34182900581).
+The next matched test caps lookup verification at eight rows and allows the
+function to finish. This is not adoption of a learned drafter or a serving change.
+
 Even perfect acceptance needs an eight-token draft/verify/commit cycle within **40 ms**.
 Our best static target verification alone still takes longer:
 
