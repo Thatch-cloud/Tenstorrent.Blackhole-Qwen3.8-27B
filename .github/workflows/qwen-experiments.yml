@@ -54,8 +54,19 @@ jobs:
       - name: Recover exact pinned runtime without device access
         if: inputs.suite == 'inventory' && inputs.recover_runtime
         shell: bash
+        env:
+          REGISTRY_USER: ${{ secrets.THATCH_REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.THATCH_REGISTRY_PASSWORD }}
         run: |
           mkdir -p experiment-results
+          if [ -n "$REGISTRY_USER" ] || [ -n "$REGISTRY_PASSWORD" ]; then
+            test -n "$REGISTRY_USER" && test -n "$REGISTRY_PASSWORD"
+            config=$(mktemp -d "$RUNNER_TEMP/qwen-registry.XXXXXX")
+            trap 'rm -rf -- "$config"' EXIT
+            export DOCKER_CONFIG="$config"
+            printf '%s' "$REGISTRY_PASSWORD" | timeout 60 docker login zot.thatch.local:5000 --username "$REGISTRY_USER" --password-stdin
+          fi
+          unset REGISTRY_USER REGISTRY_PASSWORD
           timeout -k 15 1980 python3 -u scripts/ci/recover_runtime.py 2>&1 | tee experiment-results/runtime-recovery.log
       - name: Read-only inventory
         if: inputs.suite == 'inventory'

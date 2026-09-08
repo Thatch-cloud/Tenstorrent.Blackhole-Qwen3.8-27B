@@ -14,6 +14,14 @@ pinned image ID before any benchmark. Do not substitute the available image.
 The [README](../README.md) now separates serving, synthetic request and kernel
 results; absent PP measurements are explicit rather than inferred from TTFT.
 
+Exact-image registry recovery34179195465 reached the historical registry but
+failed with `no basic auth credentials`; no image was pulled or cards opened.
+This repo has no repository secrets configured. Recovery needs a pull-only
+registry account or operator restoration of the exact pinned image. The optional
+login uses a job-owned temporary Docker config, never another agent's credentials.
+Host suite on the Linux TT-Sim environment passed630 tests at f5c60dd; the Windows
+full-suite attempt is not a valid pass because Linux-only dependencies failed.
+
 The200 committed coding tokens/s objective is not achieved. Serving defaults
 remain unchanged. The following is the current checkpoint; dated entries below
 are preserved historical evidence, including failures and superseded next steps.
