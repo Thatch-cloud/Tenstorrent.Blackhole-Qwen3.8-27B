@@ -8,7 +8,9 @@ git -C /opt/tt-metal apply --check /tmp/ccl-graft-registration.patch
 git -C /opt/tt-metal apply /tmp/ccl-graft-registration.patch
 python3 /experiment-scripts/ci/lazy_ccl_links.py --root /opt/tt-metal \
     --output /experiment/results/ccl-links-source.json
-timeout -k 30 1800 ninja -C /opt/tt-metal/build_Release -j 2 ttnncpp
+jobs=2
+if [[ "${QWEN_HARDWARE_TESTS:-0}" = 1 && "${QWEN_CARDS_ALLOCATED:-0}" = 1 && -z "${TT_METAL_SIMULATOR:-}" ]]; then jobs=8; fi
+timeout -k 30 1800 ninja -C /opt/tt-metal/build_Release -j "$jobs" ttnncpp
 source=/opt/tt-metal/build_Release/ttnn/_ttnncpp.so
 destination=/opt/tt-metal/build_Release/lib/_ttnncpp.so
 test -f "$source"

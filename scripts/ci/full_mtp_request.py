@@ -26,6 +26,38 @@ def validate_prompt_hidden(parts, length):
     return parts[0].clone()
 
 
+def checkpoint_shard(weights, filename):
+    root = Path(weights).resolve()
+    if (not isinstance(filename, str) or Path(filename).name != filename or '\\' in filename
+            or Path(filename).suffix != '.safetensors'):
+        raise ValueError('Checkpoint index must name a local safetensors shard')
+    shard = (root / filename).resolve(strict=True)
+    allowed = [root]
+    if (root.parent.name == 'snapshots' and root.parent.parent.name == 'models--Qwen--Qwen3.8-27B'
+            and root.name == '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'):
+        allowed.append(root.parent.parent / 'blobs')
+    if not shard.is_file() or not any(shard.is_relative_to(directory) for directory in allowed):
+        raise ValueError('Weight shard must belong to the checkpoint or its pinned Hugging Face blob store')
+    return shard
+
+
+def audit_checkpoint(weights):
+    from safetensors import safe_open
+    from mtp_module import NAMES
+
+    index = Path(weights) / 'model.safetensors.index.json'
+    mapping = json.loads(index.read_text())['weight_map']
+    shapes = {}
+    for name in ['model.language_model.embed_tokens.weight', *NAMES]:
+        shard = checkpoint_shard(weights, mapping[name])
+        with safe_open(str(shard), framework='pt') as source:
+            shapes[name] = list(source.get_slice(name).get_shape())
+    if shapes['model.language_model.embed_tokens.weight'] != [248320, 5120] or shapes['mtp.fc.weight'] != [5120, 10240]:
+        raise ValueError('Pinned target embedding and MTP fusion geometry required')
+    return dict(index_sha256=hashlib.sha256(index.read_bytes()).hexdigest(), shapes=shapes,
+        scope='Checkpoint names, paths and safetensors headers only; no card access or tensor loading')
+
+
 def load_embedding(weights):
     import torch
     from safetensors import safe_open
@@ -33,9 +65,7 @@ def load_embedding(weights):
     root = Path(weights)
     key = 'model.language_model.embed_tokens.weight'
     index = root / 'model.safetensors.index.json'
-    shard = (root / json.loads(index.read_text())['weight_map'][key]).resolve()
-    if not shard.is_relative_to(root.resolve()) or shard.suffix != '.safetensors':
-        raise ValueError('Embedding shard must belong to the frozen checkpoint')
+    shard = checkpoint_shard(root, json.loads(index.read_text())['weight_map'][key])
     with safe_open(str(shard), framework='pt') as source:
         embedding = source.get_tensor(key).to(torch.bfloat16)
     if tuple(embedding.shape) != (248320, 5120):
@@ -154,3 +184,15 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         if step is not None:
             step.close()
         release_owned(operations, owned)
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Read-only MTP checkpoint preflight, before a build or hardware access')
+    parser.add_argument('--weights', type=Path, required=True)
+    parser.add_argument('--audit-output', type=Path, required=True)
+    options = parser.parse_args()
+    report = audit_checkpoint(options.weights)
+    options.audit_output.write_text(json.dumps(report, indent=2))
+    print(json.dumps(report), flush=True)

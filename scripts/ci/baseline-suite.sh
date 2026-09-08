@@ -16,6 +16,11 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
+    PYTHONPATH="/experiment-speculative:$PYTHONPATH" python3 /experiment-scripts/ci/full_mtp_request.py \
+        --weights /models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+        --audit-output /experiment/results/mtp-checkpoint.json
+fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     bash /experiment-scripts/ci/ccl-links-build.sh
     if [ "${QWEN_MTP_DRAFTS:-0}" = 0 ]; then

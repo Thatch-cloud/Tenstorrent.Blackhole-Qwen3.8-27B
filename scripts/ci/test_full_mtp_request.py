@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -9,10 +10,39 @@ from unittest.mock import Mock, patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
-from full_mtp_request import prefill_with_hidden, validate_prompt_hidden
+from full_mtp_request import checkpoint_shard, prefill_with_hidden, validate_prompt_hidden
 
 
 class FullMTPRequestTests(unittest.TestCase):
+    def test_local_checkpoint_and_pinned_hf_blob_symlinks(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            local = root / 'local'
+            local.mkdir()
+            (local / 'model.safetensors').write_bytes(b'fixture')
+            self.assertEqual(checkpoint_shard(local, 'model.safetensors'), local / 'model.safetensors')
+            cache = root / 'models--Qwen--Qwen3.8-27B'
+            snapshot = cache / 'snapshots' / '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
+            snapshot.mkdir(parents=True)
+            (cache / 'blobs').mkdir()
+            blob = cache / 'blobs' / ('a' * 64)
+            blob.write_bytes(b'fixture')
+            (snapshot / 'model.safetensors').symlink_to(Path('../../blobs') / blob.name)
+            self.assertEqual(checkpoint_shard(snapshot, 'model.safetensors'), blob)
+
+    def test_shard_path_traversal_and_external_symlink_are_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            local = root / 'local'
+            local.mkdir()
+            external = root / 'outside.safetensors'
+            external.write_bytes(b'fixture')
+            (local / 'model.safetensors').symlink_to(external)
+            for name in ('../outside.safetensors', str(external), '..\\outside.safetensors', 'model.bin',
+                         'model.safetensors'):
+                with self.assertRaises(ValueError):
+                    checkpoint_shard(local, name)
+
     def test_prefill_snapshot_preserves_seed_and_releases_only_owned_device_rows(self):
         hidden = torch.ones(1, 1, 32, 5120, dtype=torch.bfloat16)
         model = SimpleNamespace(layers=[SimpleNamespace(forward=Mock(return_value=hidden)) for _ in range(64)],

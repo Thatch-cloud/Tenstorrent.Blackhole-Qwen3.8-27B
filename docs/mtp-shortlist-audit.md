@@ -123,3 +123,17 @@ contrary to the runtime's prefill/JIT ordering requirement. The retry restores
 bounded warmup at the actual coding context and needed verifier widths, warms
 the feature capture and norm before trace capture, and checks seed equality
 there as well. Hardware confirmation is still required; the guard is not relaxed.
+
+Retry `34193704110` confirms the prefill fix: native and captured warmup seeds
+match, and both post-trace request prefills return token `71093`. It then fails
+before MTP construction because the new embedding path guard rejects ordinary
+Hugging Face snapshot symlinks into the sibling `blobs` directory. The corrected
+guard permits that store only for the pinned model/revision, while rejecting
+index traversal and external symlinks. Read-only host header inspection confirms
+the exact embedding and all 15 `mtp.*` tensors; index SHA256:
+`77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df`.
+
+The next launch validates checkpoint paths and headers before rebuilding or
+opening cards. Allocated hardware builds use eight compile jobs within the
+existing 24-CPU/96-GiB container limits; CPU simulator builds retain two jobs.
+Neither change is a model throughput improvement. MTP TG remains unmeasured.
