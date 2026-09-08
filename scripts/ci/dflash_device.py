@@ -17,12 +17,14 @@ from projection_link_policy import projection_links
 
 
 class DFlashDevice:
-    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None, block_rows=8, proposal_capture=False, max_new_tokens=513):
+    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
+                 block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False):
         import torch
 
         if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
                 or len(layers) != 5 or type(position) is not int or not 1 <= position <= 2048
-                or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool):
+                or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
+                or type(fused_convolution) is not bool):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, position
@@ -31,6 +33,7 @@ class DFlashDevice:
         self.history = self.pending = None
         self.spare_history = None
         self.proposal_capture = None
+        self.fused_convolution, self.convolution_checks = fused_convolution, []
         self.closed = False
         self.proposal_calls = self.published_rows = 0
         if progress is not None and not callable(progress):
@@ -171,8 +174,11 @@ class DFlashDevice:
         publication.status = 'discarded'
         self.pending = None
 
-    def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True):
+    def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
+                         audit_convolution=False):
         operations = self.operations
+        if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
+            raise ValueError('Convolution audit requires the explicit fused candidate')
         stage('borrowed-embedding')
         local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
         local = retain(operations.reshape(local, (1, 1, self.block_rows, 2560)))
@@ -185,14 +191,22 @@ class DFlashDevice:
         if self.block_rows != 32:
             hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - self.block_rows), (0, 0)], 0.0))
         for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
+            convolution_options = {}
+            if getattr(self, 'fused_convolution', False):
+                from draft_convolution_fused import checked_convolution
+
+                def convolve(*args, **kwargs):
+                    return checked_convolution(*args, **kwargs, audit=audit_convolution, checks=self.convolution_checks,
+                        context=dict(position=self.position, layer=layer))
+                convolution_options['convolution_operation'] = convolve
             stage('attention', layer=layer)
             operation_audit = audit_operations(operations, self.mesh, self.progress) if audit and self.progress is not None and layer == 0 and self.proposal_calls else nullcontext()
             with operation_audit:
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
-                    retain, parameters=attention, context=context)
+                    retain, parameters=attention, context=context, **convolution_options)
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
-                retain, parameters=mlp, trace_safe=True)['output']
+                retain, parameters=mlp, trace_safe=True, **convolution_options)['output']
         stage('final-norm-and-selector-projection')
         normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
             compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))

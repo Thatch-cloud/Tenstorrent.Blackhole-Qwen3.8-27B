@@ -45,7 +45,8 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
-                             parameters, context, wide_dot_placement=False):
+                             parameters, context, wide_dot_placement=False, convolution_operation=None):
+    convolve = convolution_operation or grouped_causal_convolution
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
     if parameters.get('native_kernel') and wide_dot_placement:
@@ -77,7 +78,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     rounded = retain(operations.typecast(projected, operations.bfloat16))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
-    prepared = retain(grouped_causal_convolution(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
+    prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
         fp32_intermediates=True, retain_temporaries=retain))
     context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
     proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
@@ -130,7 +131,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     partial = project(merged, parameters['output_projection'], (8, 10), 32, 2)
     reduced = retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
-    finished = retain(grouped_causal_convolution(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
+    finished = retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
         fp32_intermediates=True, retain_temporaries=retain))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (finished, hidden)]
     summed = retain(operations.add(*wide, dtype=operations.float32))

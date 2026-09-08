@@ -107,6 +107,10 @@ def main():
     dflash_drafts = os.environ.get('QWEN_DFLASH_DRAFTS', '0')
     dflash_capture = os.environ.get('QWEN_DFLASH_CAPTURE', '0')
     dflash_commit_abba = os.environ.get('QWEN_DFLASH_COMMIT_ABBA', '0')
+    dflash_convolution_abba = os.environ.get('QWEN_DFLASH_CONVOLUTION_ABBA', '0')
+    if dflash_convolution_abba not in ('0', '1') or (dflash_convolution_abba == '1' and
+            (dflash_capture != '1' or dflash_drafts != '7' or dflash_commit_abba != '0')):
+        parser.error('Convolution ABBA requires the isolated captured T8 DFlash2 request')
     if dflash_commit_abba not in ('0', '1') or (dflash_commit_abba == '1' and
             (dflash_capture != '1' or dflash_drafts != '7')):
         parser.error('Commit-only GDN ABBA requires the captured T8 DFlash2 request')
@@ -784,6 +788,7 @@ def main():
 
                 if dflash_drafts != '0':
                     from full_dflash_request import measure_dflash_request, summarize_dflash_requests, summarize_dflash_commit_requests
+                    from full_dflash_request import summarize_dflash_convolution_requests
                     output_path = root / 'full-dflash-request.json'
                     report.update(scope='Complete five-layer DFlash2 coding request; exact target verification, not held-out quality certification',
                         context_lengths=[len(prompt)], request_checks=[])
@@ -792,17 +797,23 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('DFlash2 target sampler must use four physical-pair links')
-                        arms = ((False, True), (False, False), (False, False))
+                        arms = ((False, False, True), (False, False, False), (False, False, False))
                         if dflash_commit_abba == '1':
-                            arms = ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False))
-                        for commit_only, feature_audit in arms:
+                            arms = tuple((candidate, False, audit) for candidate, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        if dflash_convolution_abba == '1':
+                            arms = tuple((True, candidate, audit) for candidate, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        for commit_only, fused_convolution, feature_audit in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
-                                commit_only_gdn=commit_only, repetition=len(report['request_checks']))), flush=True)
+                                commit_only_gdn=commit_only, fused_convolution=fused_convolution,
+                                repetition=len(report['request_checks']))), flush=True)
                             result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
-                                proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only)
+                                proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only,
+                                fused_convolution=fused_convolution)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -810,6 +821,8 @@ def main():
                             report['request_checks'].append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                     summarize = summarize_dflash_commit_requests if dflash_commit_abba == '1' else summarize_dflash_requests
+                    if dflash_convolution_abba == '1':
+                        summarize = summarize_dflash_convolution_requests
                     report['request_summary'] = summarize(report['request_checks'])
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)

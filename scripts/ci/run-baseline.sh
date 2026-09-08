@@ -6,6 +6,11 @@ mtp_drafts=0
 dflash_drafts=0
 dflash_capture=0
 dflash_commit_abba=0
+dflash_convolution_abba=0
+if [ "$mode" = full-dflash-convolution-request ]; then
+    dflash_convolution_abba=1
+    mode=full-dflash-trace-request
+fi
 if [ "$mode" = full-dflash-commit-request ]; then
     dflash_commit_abba=1
     mode=full-dflash-trace-request
@@ -144,6 +149,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_DRAFTS=$dflash_drafts" \
     -e "QWEN_DFLASH_CAPTURE=$dflash_capture" \
     -e "QWEN_DFLASH_COMMIT_ABBA=$dflash_commit_abba" \
+    -e "QWEN_DFLASH_CONVOLUTION_ABBA=$dflash_convolution_abba" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \

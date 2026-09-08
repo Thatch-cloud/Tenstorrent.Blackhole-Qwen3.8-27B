@@ -48,9 +48,10 @@ class PreparedDFlashProposal:
             self.close()
             raise
 
-    def execute(self, bucket, owned, retain):
+    def execute(self, bucket, owned, retain, *, audit_convolution=False):
         return self.device.execute_proposal(bucket.identifiers, bucket.history, bucket.mask, bucket.rope,
-            context=bucket.context, owned=owned, retain=retain, stage=lambda name, **values: None, audit=False)
+            context=bucket.context, owned=owned, retain=retain, stage=lambda name, **values: None, audit=False,
+            **(dict(audit_convolution=True) if audit_convolution else {}))
 
     def update(self, bucket, seed):
         operations, device = self.operations, self.device
@@ -86,7 +87,7 @@ class PreparedDFlashProposal:
         if device.progress is not None:
             owned, retain = device.temporaries([*device.owned, *self.owned])
             try:
-                outputs = self.execute(bucket, owned, retain)
+                outputs = self.execute(bucket, owned, retain, audit_convolution=getattr(device, 'fused_convolution', False))
                 operations.synchronize_device(self.mesh)
                 expected = device.proposal_snapshot(outputs)
             finally:

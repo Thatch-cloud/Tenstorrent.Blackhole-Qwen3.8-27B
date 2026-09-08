@@ -10,7 +10,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from draft_selector import greedy_selector_reference, select_active_candidates
-from full_dflash_request import load_dflash_fixtures, summarize_dflash_requests, summarize_dflash_commit_requests
+from full_dflash_request import (load_dflash_fixtures, summarize_dflash_requests,
+    summarize_dflash_commit_requests, summarize_dflash_convolution_requests)
 
 
 class FullDFlashRequestTests(unittest.TestCase):
@@ -62,6 +63,44 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertEqual(result['candidate']['prefill_setup_decode_ms'], [80, 90])
         self.assertEqual(result['measured_order'], ['control', 'candidate', 'candidate', 'control'])
         self.assertFalse(result['target_reached'])
+
+    def convolution_requests(self):
+        records = self.commit_requests()
+        for index, record in enumerate(records):
+            record.update(commit_only_gdn=True, fused_convolution=index in (1, 3, 4))
+            record['gdn_verify_checks'] = [dict(position=2, rows=8, unchanged=True)] if record['instrumented_timing'] else []
+            record['dflash']['convolution_checks'] = [dict(position=2, layer=layer, chip=chip, rows=32, exact=True)
+                for layer in range(5) for convolution in range(4) for chip in range(2)] if index == 1 else []
+        return records
+
+    def test_convolution_abba_retains_commit_only_and_audits_all_learned_calls(self):
+        result = summarize_dflash_convolution_requests(self.convolution_requests())
+        self.assertEqual(result['committed_tokens_per_second'], 80)
+        self.assertEqual(result['candidate_over_control'], 2)
+        self.assertTrue(result['candidate']['fused_convolution'])
+        self.assertFalse(result['control']['fused_convolution'])
+        self.assertTrue(result['control']['commit_only_gdn'])
+
+    def test_convolution_abba_rejects_missing_wrong_or_instrumented_checks(self):
+        for mutation in ('missing', 'layer', 'chip', 'exact', 'rows', 'instrumented', 'verifier'):
+            records = self.convolution_requests()
+            checks = records[1]['dflash']['convolution_checks']
+            if mutation == 'missing':
+                checks.pop()
+            elif mutation in ('layer', 'chip', 'rows', 'exact'):
+                checks[0][mutation] = False if mutation == 'exact' else 7
+            elif mutation == 'instrumented':
+                records[3]['dflash']['convolution_checks'] = copy.deepcopy(checks)
+            else:
+                records[4]['commit_only_gdn'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                summarize_dflash_convolution_requests(records)
+
+    def test_commit_only_abba_rejects_a_second_optimization_in_candidate_arm(self):
+        records = self.commit_requests()
+        records[3]['fused_convolution'] = True
+        with self.assertRaises(ValueError):
+            summarize_dflash_commit_requests(records)
 
     def test_commit_only_abba_rejects_order_instrumentation_or_different_proposals(self):
         for index, key, value in ((3, 'commit_only_gdn', False), (4, 'instrumented_timing', True),
@@ -146,7 +185,7 @@ class FullDFlashRequestTests(unittest.TestCase):
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
         for suite in ('full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
-                'full-dflash-wide-trace-request', 'full-dflash-commit-request'):
+                'full-dflash-wide-trace-request', 'full-dflash-commit-request', 'full-dflash-convolution-request'):
             environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
                 QWEN_LOOKUP_CAP_ABBA='1')
             result = subprocess.run(['bash', str(Path(__file__).with_name('run-baseline.sh'))],

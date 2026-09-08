@@ -14,6 +14,14 @@ The target remains200, not achieved. Next: fuse the drafter's repeated grouped
 convolution while preserving BF16 rounding; no new fusion speed claim yet.
 [Matched result](dflash-commit-only-gdn-2026-09-09.md).
 
+**Next hardware candidate: fused DFlash2 convolution.** One dispatch replaces
+the repeated shift/expand/cast/arithmetic sequence while preserving all BF16
+rounding. Simulator passes36 exact output/replay comparisons,12 request-wrapper
+comparisons and stale/rounding negative controls;867 host tests pass. The first
+register-capacity bug is fixed and retained as failed evidence. Hardware ABBA
+keeps commit-only GDN in both arms and audits every learned convolution.
+[Experiment](dflash-fused-convolution-2026-09-09.md). No new TG claim yet.
+
 **Previous best: captured DFlash2 T8,66.76 committed TG.**
 Run34238134003 (`eadaa41`) passes three complete150-token coding requests through
 EOS. The two uninstrumented requests measure68.409353/65.197390 TG, aggregate
