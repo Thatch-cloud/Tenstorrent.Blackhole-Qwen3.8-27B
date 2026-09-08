@@ -28,7 +28,9 @@ class DFlashDevice:
         self.spare_history = None
         self.closed = False
         self.proposal_calls = self.published_rows = 0
-        self.progress = progress if progress is not None else lambda *args, **kwargs: None
+        if progress is not None and not callable(progress):
+            raise ValueError('An optional callable audit progress reporter is required')
+        self.progress = progress
         self.kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         try:
@@ -166,8 +168,14 @@ class DFlashDevice:
             raise ValueError('Committed DFlash2 history and bounded anchor/proposal IDs required')
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])
+        previous_stage = 'target-publication'
         def stage(name, **values):
-            self.progress('draft-step', step=name, position=self.position, **values)
+            nonlocal previous_stage
+            if self.progress is not None:
+                self.progress('draft-fence', after=previous_stage, next_step=name, position=self.position)
+                operations.synchronize_device(self.mesh)
+                self.progress('draft-step', step=name, position=self.position, **values)
+            previous_stage = name
         def upload(value, dtype=operations.bfloat16, row_major=False):
             return retain(operations.from_torch(value, device=self.mesh, dtype=dtype,
                 layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,

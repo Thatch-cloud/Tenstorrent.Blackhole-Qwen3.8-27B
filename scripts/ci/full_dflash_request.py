@@ -182,6 +182,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             proposal_calls=device.proposal_calls if device is not None else 0,
             committed_feature_rows=runtime.committed_feature_rows if runtime is not None else 0,
             feature_checks=feature_checks, audit_features=audit_features)
+        result['dflash']['synchronized_stage_diagnostics'] = audit_features
         result['instrumented_timing'] = audit_features
         if audit_features:
             result['committed_tokens_per_second'] = None

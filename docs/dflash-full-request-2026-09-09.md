@@ -17,6 +17,15 @@ and dumps Python stacks/exits after180 seconds without a committed block instead
 of consuming the80-minute outer timeout. A timed-out device process requires
 CI recovery before another hardware test.
 
+Follow-up [34227754156](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34227754156)
+repeats that first exact block with cached kernels (draft238.09ms,
+target verification/readback64.33ms, publication/audit17.48ms). It then reaches
+the final device synchronization in the second proposal and times out after180s;
+the watchdog captures the Python stack and the container exits normally through
+CI cleanup. Enqueued stage logs alone do not identify the blocked kernel.
+Next audit adds synchronization between draft stages; those fenced timings are
+excluded from TG, and the two measurement requests keep the unfenced path.
+
 ## What is connected
 
 | Part | Opt-in implementation |
