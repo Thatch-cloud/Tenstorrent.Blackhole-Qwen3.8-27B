@@ -17,7 +17,7 @@ class DraftAttentionBranchTests(unittest.TestCase):
             DRAM_MEMORY_CONFIG='dram', MathFidelity=SimpleNamespace(HiFi4='hifi4'))
         for name in ('from_torch', 'ShardTensorToMesh', 'ReplicateTensorToMesh', 'WormholeComputeKernelConfig',
                 'MatmulMultiCoreReuseMultiCast1DProgramConfig', 'matmul', 'rms_norm', 'typecast', 'slice', 'add',
-                'zeros_like', 'concat', 'reshape', 'transpose'):
+                'zeros_like', 'concat', 'reshape', 'transpose', 'pad'):
             setattr(operations, name, Mock(side_effect=lambda *args, **kwargs: object()))
         operations.experimental = SimpleNamespace(rotary_embedding_hf=Mock(return_value=object()))
         weights = {f'layers.0.self_attn.{name}_proj.weight': torch.ones(2, 2) for name in ('q', 'k', 'v', 'o')}
@@ -104,3 +104,35 @@ class DraftAttentionBranchTests(unittest.TestCase):
             env=environment, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn('Captured stack requires', result.stderr)
+
+    def test_cached_branch_projects_only_live_rows_and_clears_proposal_padding(self):
+        operations, weights, convolution, hidden, history, mask, rope = self.fixture()
+        mesh = object()
+        history.shape, mask.shape = (1, 1, 288, 5120), (1, 1, 32, 288)
+        for table in rope['k']:
+            table.shape = (1, 1, 288, 128)
+        cached = {name: SimpleNamespace(shape=(1, 4, 256, 128), dtype='bf16') for name in ('k', 'v')}
+        with patch('draft_attention_branch.grouped_causal_convolution', return_value=object()), \
+                patch('draft_attention_branch.gather_add_projection', return_value=object()), \
+                patch('draft_attention_branch.concatenate_query_heads', return_value=object()), \
+                patch('draft_attention_branch.composed_draft_attention', return_value=object()), \
+                patch('draft_kv_projection.project_key_value', return_value=dict(q=object(), k=object(), v=object())) as project:
+            parameters = prepare_attention_branch(operations, mesh, weights, convolution, lambda value: value,
+                native_head_layout=True)
+            execute_attention_branch(operations, mesh, object(), hidden, history, mask, rope, lambda value: value,
+                parameters=parameters, context=256, cached_history=cached)
+        project.assert_called_once()
+        self.assertIs(project.call_args.kwargs['parameters'], parameters)
+        self.assertEqual(operations.matmul.call_count, 3)
+        self.assertEqual(operations.pad.call_args.args[1], [(0, 0), (0, 0), (0, 24), (0, 0)])
+        self.assertTrue(all(call.kwargs['per_core_M'] == 1
+            for call in operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.call_args_list))
+
+    def test_cache_cannot_be_attached_to_legacy_or_partial_heads(self):
+        operations, weights, convolution, hidden, history, mask, rope = self.fixture()
+        mesh = object()
+        parameters = dict(operations=operations, mesh=mesh)
+        with self.assertRaisesRegex(ValueError, 'historical K/V'):
+            execute_attention_branch(operations, mesh, object(), hidden, history, mask, rope, lambda value: value,
+                parameters=parameters, context=31, cached_history={})
+        operations.matmul.assert_not_called()

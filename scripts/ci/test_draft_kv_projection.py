@@ -34,6 +34,7 @@ class DraftKVProjectionTests(unittest.TestCase):
             with patch('draft_kv_projection.split_projected_heads', return_value=heads) as split:
                 output = project_key_value(operations, inputs, query, rope, retain, parameters=parameters)
             self.assertIs(output['v'], heads['v'])
+            self.assertIs(output['q'], heads['q'])
             self.assertIs(split.call_args.args[1], query)
             self.assertIs(split.call_args.args[-1], retain)
             program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.call_args.kwargs

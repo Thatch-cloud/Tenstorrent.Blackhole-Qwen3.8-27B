@@ -17,7 +17,7 @@ class DraftKVHistoryTests(unittest.TestCase):
             pad=lambda value, padding, fill: torch.nn.functional.pad(value, tuple(item for pair in reversed(padding) for item in pair), value=fill),
             concat=lambda values, dim, **kwargs: torch.cat(values, dim=dim), zeros_like=torch.zeros_like,
             copy=Mock(side_effect=lambda source, destination: destination.copy_(source)),
-            synchronize_device=Mock(), deallocate=Mock())
+            synchronize_device=Mock(), deallocate=Mock(), get_device_tensors=lambda value: [value, value], to_torch=lambda value: value)
 
     def features(self, rows, seed):
         return torch.randn((1, 1, rows, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
@@ -122,6 +122,15 @@ class DraftKVHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Complete replicated'):
             with self.fixture(self.features(32, 4), 170):
                 pass
+
+    def test_audit_recomputes_the_full_committed_history_and_detects_corruption(self):
+        features = self.features(170, 31)
+        with self.fixture(features, 170) as (cache, operations):
+            cache.audit(features)
+            self.assertEqual(len(cache.checks), 8)
+            cache.active[1]['k'][..., 7, 0] = 300
+            with self.assertRaisesRegex(AssertionError, 'historical K/V differs'):
+                cache.audit(features)
 
 
 if __name__ == '__main__':

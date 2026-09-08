@@ -20,6 +20,7 @@ class DraftKVHistory:
         self.operations, self.mesh, self.parameters = operations, mesh, parameters
         self.position, self.history_rows = position, history_rows
         self.owned, self.active, self.spare = [], [], []
+        self.checks = []
         self.pending, self.closed = None, False
         try:
             self.query = self.upload(torch.zeros((1, 1, 32, 2048), dtype=torch.bfloat16))
@@ -119,6 +120,28 @@ class DraftKVHistory:
             raise ValueError('Only the current prepared draft cache may be discarded')
         publication.status = 'discarded'
         self.pending = None
+
+    def audit(self, features):
+        import torch
+
+        if self.closed or self.pending is not None:
+            raise ValueError('Only a committed open draft cache may be audited')
+        operations = self.operations
+        with self.temporaries([features]) as retain:
+            inputs, tables = self.project_inputs(features, self.history_rows, self.position - self.history_rows, retain)
+            for layer, (parameter, active) in enumerate(zip(self.parameters, self.active, strict=True)):
+                expected = project_key_value(operations, inputs, self.query, tables, retain, parameters=parameter)
+                for name in ('k', 'v'):
+                    actual_shards = operations.get_device_tensors(active[name])
+                    expected_shards = operations.get_device_tensors(expected[name])
+                    if len(actual_shards) != 2 or len(expected_shards) != 2:
+                        raise AssertionError('Both committed draft-cache shards required')
+                    for chip, (actual, reference) in enumerate(zip(actual_shards, expected_shards, strict=True)):
+                        left = operations.to_torch(actual)[..., :self.history_rows, :].contiguous()
+                        right = operations.to_torch(reference)[..., :self.history_rows, :].contiguous()
+                        if not torch.equal(left.view(torch.int16), right.view(torch.int16)):
+                            raise AssertionError(f'Committed historical K/V differs: layer={layer}, head={name}, chip={chip}')
+                        self.checks.append(dict(position=self.position, rows=self.history_rows, layer=layer, head=name, chip=chip, exact=True))
 
     def close(self):
         if self.closed:

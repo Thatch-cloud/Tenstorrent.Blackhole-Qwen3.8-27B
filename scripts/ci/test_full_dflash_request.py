@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decodi
 from draft_selector import greedy_selector_reference, select_active_candidates
 from dflash_prefill_window import prefill_window, validate_prefill_chunks
 from full_dflash_request import (audit_prefill_assembly, load_dflash_fixtures, summarize_dflash_requests,
-    summarize_dflash_commit_requests, summarize_dflash_convolution_requests)
+    summarize_dflash_commit_requests, summarize_dflash_convolution_requests, summarize_dflash_cache_requests)
 
 
 class FullDFlashRequestTests(unittest.TestCase):
@@ -152,6 +152,43 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertFalse(result['control']['fused_convolution'])
         self.assertTrue(result['control']['commit_only_gdn'])
 
+    def cache_requests(self):
+        records = self.convolution_requests()
+        for index, record in enumerate(records):
+            record.update(fused_convolution=True, cache_history=index in (1, 3, 4))
+            audit = record['instrumented_timing']
+            record['dflash']['convolution_checks'] = [dict(position=2, layer=layer, chip=chip, rows=32, exact=True)
+                for layer in range(5) for convolution in range(4) for chip in range(2)] if audit else []
+            record['dflash']['cache_checks'] = copy.deepcopy(record['dflash']['proposal_trace_checks']) if index == 1 else []
+            record['dflash']['history_checks'] = [dict(position=position, rows=position, layer=layer, head=head, chip=chip, exact=True)
+                for position in (2, 4) for layer in range(5) for head in ('k', 'v') for chip in range(2)] if index == 1 else []
+        return records
+
+    def test_cache_abba_retains_the_lead_and_audits_each_committed_frontier(self):
+        result = summarize_dflash_cache_requests(self.cache_requests())
+        self.assertTrue(result['candidate']['cache_history'])
+        self.assertFalse(result['control']['cache_history'])
+        self.assertTrue(result['control']['fused_convolution'])
+        self.assertEqual(result['candidate_over_control'], 2)
+
+    def test_cache_abba_rejects_missing_corrupt_or_timed_audits_and_mixed_arms(self):
+        for mutation in ('missing', 'frontier', 'proposal', 'timed', 'convolution', 'mixed'):
+            records = self.cache_requests()
+            if mutation == 'missing':
+                records[1]['dflash']['history_checks'].pop()
+            elif mutation == 'frontier':
+                records[1]['dflash']['history_checks'][-1]['position'] = 5
+            elif mutation == 'proposal':
+                records[1]['dflash']['cache_checks'] = []
+            elif mutation == 'timed':
+                records[3]['dflash']['history_checks'] = copy.deepcopy(records[1]['dflash']['history_checks'])
+            elif mutation == 'convolution':
+                records[2]['fused_convolution'] = False
+            else:
+                records[4]['cache_history'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                summarize_dflash_cache_requests(records)
+
     def test_convolution_abba_rejects_missing_wrong_or_instrumented_checks(self):
         for mutation in ('missing', 'layer', 'chip', 'exact', 'rows', 'instrumented', 'verifier'):
             records = self.convolution_requests()
@@ -255,7 +292,7 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertTrue(all(torch.equal(left, right) for left, right in zip(actual, expected)))
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
-        for suite in ('full-dflash-8k-request', 'full-dflash-4k-request', 'full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
+        for suite in ('full-dflash-kv-cache-request', 'full-dflash-8k-request', 'full-dflash-4k-request', 'full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
                 'full-dflash-wide-trace-request', 'full-dflash-commit-request', 'full-dflash-convolution-request'):
             environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
                 QWEN_LOOKUP_CAP_ABBA='1')
@@ -274,6 +311,17 @@ class FullDFlashRequestTests(unittest.TestCase):
                 '--request-pilot', '--norm-batch'], env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Context qualification requires', result.stderr)
+
+    def test_cache_experiment_cannot_change_context_width_or_another_arm(self):
+        for context, capture, drafts, convolution in (('8192', '1', '7', '0'), ('4096', '0', '7', '0'),
+                ('4096', '1', '31', '0'), ('4096', '1', '7', '1')):
+            environment = dict(os.environ, QWEN_DFLASH_CONTEXT=context, QWEN_DFLASH_CAPTURE=capture,
+                QWEN_DFLASH_DRAFTS=drafts, QWEN_DFLASH_CACHE_ABBA='1', QWEN_DFLASH_CONVOLUTION_ABBA=convolution,
+                QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
+                '--request-pilot', '--norm-batch'], env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Historical K/V cache ABBA requires', result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

@@ -10,13 +10,14 @@ tokens, GDN state, valid KV and inactive slots. A separate request audits every
 committed feature row, captured proposal and pre-decision GDN state.
 All 880 learned-convolution comparisons match the composed implementation.
 The matched ABBA control reaches 72.21 TG: **8.10% improvement**.
-[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
+[Best short-context run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
 
 This is a single-task experiment, not held-out coding quality or a serving result.
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**4K passes at 58.18 TG; 8K passes at 46.20 TG. Cached drafter K/V is next.**
+**4K passes at 58.18 TG; the 8K repeat passes at 53.48 TG.**
+Cached drafter K/V passes its simulator gate; hardware comparison is next.
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
@@ -61,7 +62,8 @@ These are offline complete requests, not endpoint streaming measurements.
 | ---: | ---: | ---: | --- |
 | 510.65 | 170 | **78.06** | Measured: two 150-token decode samples through EOS |
 | 3,355.04 | 4,096 | **58.18** | Measured: two 121-token decode samples through EOS |
-| 3,149.33 | 8,192 | **46.20** | Measured: two 121-token EOS samples; TG41.94 / 51.43 |
+| 3,149.33 | 8,192 | **46.20** | First run: publication stall included; TG41.94 / 51.43 |
+| 3,298.59 | 8,192 | **53.48** | Same-code repeat: two 121-token EOS samples; TG53.40 / 53.57 |
 | — | 16,384 | — | Planned |
 | — | 32,768 | — | Planned |
 | — | 64,504 | — | Planned; reserves generation space below 65,536 |
@@ -74,8 +76,9 @@ context. An opt-in 4K initializer now captures the valid tail and retains absolu
 positions. The corrected 4K run passes native token/state and feature audits;
 mean prefill is 1.221 s and prefill + fresh setup + decode is 7.05 s.
 [4K hardware result](docs/dflash-long-context-2026-09-09.md).
-The 8K run has a 424 ms publication stall in one measured request; it remains
-included in TG. Its mean complete request is 10.24 s, not a clean scaling result.
+The first 8K run has a 424 ms publication stall; it remains included in TG.
+The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
+46.20 TG and 10.24 s initially. This is repeatability evidence, not a code gain.
 [8K result and timing spread](docs/dflash-8k-context-2026-09-09.md).
 [Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
 

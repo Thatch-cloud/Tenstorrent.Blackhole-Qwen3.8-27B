@@ -27,4 +27,4 @@ def project_key_value(operations, inputs, query, cosine_sine, retain, *, paramet
     wide = [retain(operations.typecast(value, operations.float32)) for value in (normalized, *cosine_sine)]
     rotated = retain(operations.experimental.rotary_embedding_hf(*wide, is_decode_mode=False,
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-    return dict(k=retain(operations.typecast(rotated, operations.bfloat16)), v=heads['v'])
+    return dict(q=heads['q'], k=retain(operations.typecast(rotated, operations.bfloat16)), v=heads['v'])

@@ -1,8 +1,28 @@
 # DFlash2 at 8K context
 
-**Passed: PP3149.33 / CTX8192 / TG46.20, one stream, up to T8.**
-The timed requests vary substantially; this is not a clean context-scaling
-comparison or a serving measurement.
+**Repeat passed: PP3298.59 / CTX8192 / TG53.48, one stream, up to T8.**
+The first run remains recorded at46.20 TG, including its publication stall.
+Neither run is a serving measurement or a matched context-scaling comparison.
+
+## Same-code repeat
+
+[Hardware run34289671592](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34289671592)
+uses the same `868dcbc` code and prompt, without a new optimization.
+
+| Metric | Timed request 1 | Timed request 2 |
+| --- | ---: | ---: |
+| PP tok/s | 3,299.08 | 3,298.11 |
+| Committed TG tok/s | 53.40 | 53.57 |
+| Committed decode tokens through EOS | 121 | 121 |
+| Complete prefill + fresh setup + decode | 8.63 s | 8.78 s |
+
+Combined TG is53.484297; mean prefill2.483 s and complete request8.704 s.
+The separate native-reference and feature/proposal audits pass. These two
+repeat timings are more consistent, but do not identify the first run's stall.
+No original sample is discarded or silently replaced.
+Artifact SHA256: `272bae1fda0885196330ca6b49e9d8392015d91502eb8608b0181ddd97c88142`.
+
+## First run
 
 [Hardware run34286889429](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34286889429),
 code `868dcbc`, retains the captured DFlash2 + commit-only GDN + fused convolution

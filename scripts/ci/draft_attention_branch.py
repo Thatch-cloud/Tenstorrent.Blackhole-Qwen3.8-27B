@@ -45,7 +45,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
-                             parameters, context, wide_dot_placement=False, convolution_operation=None):
+                             parameters, context, wide_dot_placement=False, convolution_operation=None, cached_history=None):
     convolve = convolution_operation or grouped_causal_convolution
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
@@ -63,6 +63,10 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             tuple(table.shape) != (1, 1, 32 if name == 'q' else key_rows, 128)
             or table.dtype != operations.bfloat16 for table in rope[name]) for name in ('q', 'k')):
         raise ValueError('Caller-owned BF16 position tables required for query and keys')
+    if cached_history is not None and (not parameters.get('native_head_layout') or context not in (256, 512, 1024, 2048)
+            or set(cached_history) != {'k', 'v'} or any(tuple(value.shape) != (1, 4, context, 128)
+                or value.dtype != operations.bfloat16 for value in cached_history.values())):
+        raise ValueError('Explicit native fixed-bucket historical K/V heads required')
     kernel = parameters['kernel']
 
     def project(value, weight, grid, rows, columns):
@@ -80,14 +84,6 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         for offset in range(4)]
     prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
         fp32_intermediates=True, retain_temporaries=retain))
-    context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
-    proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
-    parts = [context_input, proposal_input]
-    if key_rows > context + block_rows:
-        zeros = retain(operations.zeros_like(history))
-        parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - block_rows, 5120))))
-    keys = retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
-    heads, flat = {}, {}
     def normalize_head(name, head):
         norm = retain(operations.rms_norm(head, epsilon=1e-6, weight=parameters['head_norms'][name],
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
@@ -95,21 +91,40 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         rotated = retain(operations.experimental.rotary_embedding_hf(*wide, is_decode_mode=False,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         return retain(operations.typecast(rotated, operations.bfloat16))
-    for name, count in (('q', 16), ('k', 4), ('v', 4)):
-        rows = 32 if name == 'q' else key_rows
-        projection = project(prepared if name == 'q' else keys, parameters['projections'][name], (8, 8), rows, 1)
-        rounded = retain(operations.typecast(projection, operations.bfloat16))
+    if cached_history is not None:
+        from draft_kv_projection import project_key_value
+
+        query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), 32, 1), operations.bfloat16))
+        valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
+        proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
+        tables = tuple(retain(operations.slice(table, (0, 0, context, 0), (1, 1, key_rows, 128))) for table in rope['k'])
+        live = project_key_value(operations, proposal, query, tables, retain, parameters=parameters)
+        heads = dict(q=normalize_head('q', live['q']), **{name: retain(operations.concat([cached_history[name], live[name]],
+            dim=2, memory_config=operations.DRAM_MEMORY_CONFIG)) for name in ('k', 'v')})
+    else:
+        context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
+        proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
+        parts = [context_input, proposal_input]
+        if key_rows > context + block_rows:
+            zeros = retain(operations.zeros_like(history))
+            parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - block_rows, 5120))))
+        keys = retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+        heads, flat = {}, {}
+        for name, count in (('q', 16), ('k', 4), ('v', 4)):
+            rows = 32 if name == 'q' else key_rows
+            projection = project(prepared if name == 'q' else keys, parameters['projections'][name], (8, 8), rows, 1)
+            rounded = retain(operations.typecast(projection, operations.bfloat16))
+            if parameters.get('native_head_layout'):
+                flat[name] = rounded
+                continue
+            reshaped = retain(operations.reshape(rounded, (1, rows, count, 128)))
+            heads[name] = retain(operations.transpose(reshaped, 1, 2))
+            if name != 'v':
+                heads[name] = normalize_head(name, heads[name])
         if parameters.get('native_head_layout'):
-            flat[name] = rounded
-            continue
-        reshaped = retain(operations.reshape(rounded, (1, rows, count, 128)))
-        heads[name] = retain(operations.transpose(reshaped, 1, 2))
-        if name != 'v':
-            heads[name] = normalize_head(name, heads[name])
-    if parameters.get('native_head_layout'):
-        heads = split_projected_heads(operations, flat['q'], flat['k'], flat['v'], retain)
-        for name in ('q', 'k'):
-            heads[name] = normalize_head(name, heads[name])
+            heads = split_projected_heads(operations, flat['q'], flat['k'], flat['v'], retain)
+            for name in ('q', 'k'):
+                heads[name] = normalize_head(name, heads[name])
     attention_owned = []
     try:
         if parameters.get('native_kernel'):

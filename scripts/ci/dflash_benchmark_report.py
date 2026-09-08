@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 
 from full_dflash_request import (summarize_dflash_requests, summarize_dflash_commit_requests,
-    summarize_dflash_convolution_requests)
+    summarize_dflash_convolution_requests, summarize_dflash_cache_requests)
 
 
 def report_rows(report):
@@ -19,6 +19,8 @@ def report_rows(report):
     elif len(requests) == 6:
         convolution = any(entry.get('fused_convolution') is True for entry in requests)
         summarize = summarize_dflash_convolution_requests if convolution else summarize_dflash_commit_requests
+        if any(entry.get('cache_history') is True for entry in requests):
+            summarize = summarize_dflash_cache_requests
         combined = summarize(requests)
         summaries = [(arm, combined[arm], report['request_summary'][arm]) for arm in ('control', 'candidate')]
     else:
@@ -36,6 +38,8 @@ def report_rows(report):
             path.append('commit-only GDN')
         if summary['fused_convolution']:
             path.append('fused convolution')
+        if summary.get('cache_history'):
+            path.append('cached draft K/V')
         output.append(dict(arm=arm, path=' + '.join(path), **summary['benchmark']))
     return output
 

@@ -19,7 +19,8 @@ from dflash_prefill_window import prefill_window
 
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
-                 block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0):
+                 block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
+                 cache_history=False):
         import torch
 
         window = prefill_window(position)
@@ -28,7 +29,8 @@ class DFlashDevice:
                 or len(layers) != 5 or type(feature_start) is not int or feature_start != window['start']
                 or len(features) != 5 or any(len(value.shape) != 4 or value.shape[2] != window['rows'] for value in features)
                 or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
-                or type(fused_convolution) is not bool):
+                or type(fused_convolution) is not bool or type(cache_history) is not bool
+                or (cache_history and (not proposal_capture or block_rows != 8))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
@@ -37,6 +39,8 @@ class DFlashDevice:
         self.history = self.pending = None
         self.spare_history = None
         self.proposal_capture = None
+        self.kv_history = None
+        self.cache_history = cache_history
         self.fused_convolution, self.convolution_checks = fused_convolution, []
         self.closed = False
         self.proposal_calls = self.published_rows = 0
@@ -64,6 +68,13 @@ class DFlashDevice:
             self.history = padded
             self.spare_history = operations.zeros_like(self.history)
             operations.synchronize_device(self.mesh)
+            if cache_history:
+                from draft_kv_history import DraftKVHistory
+
+                self.kv_history = DraftKVHistory(operations, self.mesh, [layer[0] for layer in self.layers], self.history,
+                    position=position, history_rows=self.history_rows)
+                if self.progress is not None:
+                    self.kv_history.audit(self.history)
             if proposal_capture:
                 from dflash_proposal_trace import PreparedDFlashProposal
 
@@ -143,6 +154,7 @@ class DFlashDevice:
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history])
         output = None
+        cache_publication = None
         try:
             projected = retain(self.project_features(features, prefix))
             valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
@@ -151,9 +163,14 @@ class DFlashDevice:
             output = retain(operations.slice(combined, (0, 0, combined.shape[2] - rows, 0), (1, 1, combined.shape[2], 5120)))
             padded = retain(operations.pad(output, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
             operations.copy(padded, self.spare_history)
+            if self.kv_history is not None:
+                cache_publication = self.kv_history.prepare(projected, prefix, position=position)
             operations.synchronize_device(self.mesh)
-            self.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, history=self.spare_history, status='prepared')
+            self.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, history=self.spare_history,
+                kv=cache_publication, status='prepared')
         except BaseException:
+            if cache_publication is not None:
+                self.kv_history.discard(cache_publication)
             release_owned(operations, owned)
             raise
         release_owned(operations, owned)
@@ -162,6 +179,8 @@ class DFlashDevice:
     def commit_publication(self, publication):
         if self.closed or publication is not self.pending or publication.status != 'prepared' or publication.position != self.position:
             raise ValueError('Only the current prepared feature publication may commit')
+        if self.kv_history is not None:
+            self.kv_history.commit(publication.kv)
         previous = self.history
         self.history, self.history_rows = publication.history, publication.rows
         self.spare_history = previous
@@ -169,18 +188,24 @@ class DFlashDevice:
         self.published_rows += publication.prefix
         publication.status = 'committed'
         self.pending = None
+        if self.kv_history is not None and self.progress is not None:
+            self.kv_history.audit(self.history)
 
     def discard_publication(self, publication):
         if publication.status == 'committed':
             return
         if publication is not self.pending or publication.status != 'prepared':
             raise ValueError('Only the current prepared feature publication may be discarded')
+        if self.kv_history is not None:
+            self.kv_history.discard(publication.kv)
         publication.status = 'discarded'
         self.pending = None
 
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
-                         audit_convolution=False):
+                         audit_convolution=False, cached_history=None):
         operations = self.operations
+        if cached_history is not None and (self.kv_history is None or len(cached_history) != len(self.layers)):
+            raise ValueError('Every prepared learned layer requires a committed K/V cache')
         if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
             raise ValueError('Convolution audit requires the explicit fused candidate')
         stage('borrowed-embedding')
@@ -207,7 +232,8 @@ class DFlashDevice:
             operation_audit = audit_operations(operations, self.mesh, self.progress) if audit and self.progress is not None and layer == 0 and self.proposal_calls else nullcontext()
             with operation_audit:
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
-                    retain, parameters=attention, context=context, **convolution_options)
+                    retain, parameters=attention, context=context, **convolution_options,
+                    **(dict(cached_history=cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
                 retain, parameters=mlp, trace_safe=True, **convolution_options)['output']
@@ -308,6 +334,8 @@ class DFlashDevice:
             self.proposal_capture.close()
         if self.pending is not None:
             self.discard_publication(self.pending)
+        if self.kv_history is not None:
+            self.kv_history.close()
         if self.history is not None:
             self.operations.deallocate(self.history)
             self.history = None

@@ -8,6 +8,7 @@
 | Same + fused convolution | **510.65** | **170** | **78.06** | **1** | Up to 8 | 150, 150 | **6.42 s** |
 | Lead at 4K, separate context pilot | **3,355.04** | **4,096** | **58.18** | **1** | Up to 8 | 121, 121 | **7.05 s** |
 | Lead at 8K, separate context pilot | **3,149.33** | **8,192** | **46.20** | **1** | Up to 8 | 121, 121 | **10.24 s** |
+| Lead at 8K, same-code repeat | **3,298.59** | **8,192** | **53.48** | **1** | Up to 8 | 121, 121 | **8.70 s** |
 
 CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
@@ -23,6 +24,9 @@ Artifact SHA256: `2816e7c8e2b93eef9e8848c06f3d451c296897e555154bf86c49127f8241ab
 The 8K row passes the same correctness gate, but TG samples41.94 /51.43 include
 a424 ms publication stall in the first request. Do not treat this as isolated
 context-scaling evidence. [8K result and artifact](dflash-8k-context-2026-09-09.md).
+The unchanged-code repeat34289671592 measures53.40 /53.57 TG, combined53.48.
+Both runs remain separate: the repeat is not an optimization gain and does not
+explain the original stall.
 
 | Metric | Definition |
 | --- | --- |
@@ -43,7 +47,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
 | 4,096 | 1 | 3,355.04 / 58.18 measured | Retain long-context control |
-| 8,192 | 1 | 3,149.33 / 46.20 measured | Timing spread needs investigation; retain all samples |
+| 8,192 | 1 | Repeat3,298.59 /53.48; first3,149.33 /46.20 | Retain both runs; original stall remains unexplained |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |
 | 64,504 | 1 | Not measured | Reserve space for the 513-token output budget and verification |

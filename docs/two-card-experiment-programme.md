@@ -16,6 +16,9 @@ a matched comparison against the different CTX170 prompt/output. The8K run
 121-token EOS responses. Samples41.94/51.43 include a424ms publication stall;
 the combined rate retains it. Host/runtime attribution is needed before making
 a context-scaling claim. [8K detail](dflash-8k-context-2026-09-09.md).
+The same-code repeat34289671592 passes PP3298.59 / CTX8192 / TG53.48;
+samples53.40/53.57, complete mean request8.70s. Keep both runs: the repeat
+does not isolate the original stall or establish a new optimization gain.
 16K/32K/64,504 remain unmeasured. The former 2,048-token prefill limit now has
 an opt-in tail-window initializer with absolute positions; full target KV stays
 unchanged. The first 4K hardware run34282865344 failed before timing: slot-prefill
@@ -23,6 +26,15 @@ delivers 2K chunks, not a full-sequence layer output. Chunk-aware capture now
 passes its simulator gate, 889 host tests and the complete hardware retry.
 [Initialization gate](dflash-long-context-2026-09-09.md). Multi-stream DFlash
 remains unmeasured. [Matrix and gates](pp-ctx-tg-benchmark-matrix.md).
+
+**Current optimization: cached historical draft K/V.** Incremental learned
+projection passes20 exact simulator comparisons. The opt-in4K ABBA integration
+now updates only committed rows, preserves atomic cache publication and audits
+against full-history recomputation. Integrated gate20260908T230732Z-297 passes
+eight attention-operand,36 replay,12 unchanged-state and four full-history
+comparisons, plus four detected stale controls. All11 source hashes match;
+846 CI and60 harness tests pass. The opt-in4K ABBA suite is ready, but there is
+no cache-enabled hardware rate yet. [Gates](dflash-kv-cache-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
