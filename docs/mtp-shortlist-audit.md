@@ -50,3 +50,23 @@ including a tie and a high global special-token ID, on both simulated chips.
 It checks eager execution, A/B/A captured replay, input preservation, buffer
 addresses and a stale-input control. This is not learned-weight acceptance or
 hardware latency evidence. `learned_stack=true` retains the five-layer gate.
+
+## Target hidden-state integration
+
+The old MTP branch intercepts `_lm_head` input. The current verifier requests
+sharded logits, so integration must not depend on that head method executing.
+`mtp_hidden_capture.py` instead wraps `_final_norm_decode` within an explicit
+instance-local scope and copies its result to caller-owned fixed storage.
+It performs no allocation or global environment switching inside the forward.
+
+`VerifierEngine(retain_mtp_hidden=True)` now allocates each bucket's hidden buffer
+before warming or capturing any verifier trace. Warm and captured forwards use
+the same fixed-buffer scope. `verified_mtp_hidden(ticket)` exposes borrowed rows
+only for the current verified ticket; retention defaults off.
+
+Before live MTP requests, establish the initial anchor hidden from prefill and
+publish only the last consumed target row after prefix selection. Prefix-zero
+abort must preserve the previous anchor. Bucket retention is host-tested but
+still needs device qualification and is not enabled in the candidate runtime.
+MTP KV catch-up and rollback still require independent exact tests; merely
+capturing every speculative row does not authorize using rejected rows.

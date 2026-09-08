@@ -2,6 +2,7 @@
 
 import os
 import time
+from contextlib import nullcontext
 
 from attention_batch import capture_operation
 from force_argmax import sample_rows
@@ -32,9 +33,12 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
-                 attention_mask_once=False, replay_group_rows=4, max_verify_rows=32):
+                 attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False):
         import ttnn
 
+        if type(retain_mtp_hidden) is not bool:
+            raise ValueError('Explicit boolean MTP hidden retention required')
+        self.retain_mtp_hidden = retain_mtp_hidden
         if type(norm_batch) is not bool:
             raise ValueError('Explicit boolean norm-batch selection required')
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
@@ -77,6 +81,16 @@ class VerifierEngine:
             for key, rows, position in captures:
                 bucket = dict(rows=rows, capture_position=position, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
                 self.buckets[key] = bucket
+                if retain_mtp_hidden:
+                    import torch
+                    from mtp_hidden_capture import MTPHiddenCapture
+
+                    hidden = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                        device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+                    bucket['mtp_hidden'] = hidden
+                    bucket['mtp_capture'] = MTPHiddenCapture(model, hidden, copy=ttnn.copy,
+                        storage_ids=lambda value: addresses(ttnn, value))
                 for helper in helpers:
                     bucket['checkpoints'].append(helper.allocate())
                 bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position)
@@ -86,7 +100,7 @@ class VerifierEngine:
                 warm = self.fixture(rows, bucket['checkpoints'], retain=False, position=bucket['capture_position'])
                 result = None
                 try:
-                    result = self.operation(warm)
+                    result = self.operation(warm, hidden_capture=bucket.get('mtp_capture'))
                     ttnn.synchronize_device(self.mesh)
                 finally:
                     if result is not None:
@@ -96,7 +110,7 @@ class VerifierEngine:
                 rows = bucket['rows']
                 self.restore_initial()
                 bucket['trace'], bucket['output'] = capture_operation(ttnn, self.mesh,
-                    lambda bucket=bucket: self.operation(bucket['fixture']))
+                    lambda bucket=bucket: self.operation(bucket['fixture'], hidden_capture=bucket.get('mtp_capture')))
                 if rows > 1:
                     layers = [[*state.entry, result['states'], *result['packed_conv_states'],
                                state.gdn.rec_state, *state.gdn.conv_states, *checkpoint]
@@ -140,13 +154,16 @@ class VerifierEngine:
         remaining = self.session.max_new_tokens - len(self.session.emitted)
         return self.replay_plan.select(ticket.position, len(ticket.tokens), remaining).key
 
-    def operation(self, fixture):
-        logits = fixture.run(sharded_logits=self.sampler is not None)
+    def operation(self, fixture, *, hidden_capture=None):
+        logits = None
         try:
+            with hidden_capture.capture() if hidden_capture is not None else nullcontext():
+                logits = fixture.run(sharded_logits=self.sampler is not None)
             ids = sample_rows(self.sampler, logits, fixture.rows, self.operations) if self.sampler is not None else None
             return logits, ids
         except BaseException:
-            self.operations.deallocate(logits)
+            if logits is not None:
+                self.operations.deallocate(logits)
             raise
 
     def restore_initial(self):
@@ -198,6 +215,13 @@ class VerifierEngine:
             self.session.fail_verification(self.session.request_id, ticket)
             raise
 
+    def verified_mtp_hidden(self, ticket):
+        self.session.check_ticket(self.session.request_id, ticket)
+        if (self.phase != 'verified' or self.pending is not ticket
+                or not getattr(self, 'retain_mtp_hidden', False)):
+            raise ValueError('MTP hidden requires its live verified ticket and opt-in retention')
+        return self.buckets[self.pending_key]['mtp_capture'].output()
+
     def publish(self, prefix):
         ticket = self.pending
         if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
@@ -235,6 +259,8 @@ class VerifierEngine:
             if bucket['trace'] is not None:
                 self.operations.release_trace(self.mesh, bucket['trace'])
         for bucket in self.buckets.values():
+            if bucket.get('mtp_hidden') is not None:
+                release_owned(self.operations, [bucket['mtp_hidden']])
             if bucket['output'] is not None:
                 release_owned(self.operations, [value for value in bucket['output'] if value is not None])
             if bucket['fixture'] is not None:

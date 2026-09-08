@@ -12,6 +12,39 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_mtp_hidden_is_available_only_for_live_verified_ticket(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        ticket, hidden = object(), object()
+        engine.session = SimpleNamespace(request_id='request', check_ticket=Mock())
+        engine.pending, engine.pending_key = ticket, 4
+        engine.buckets = {4: dict(mtp_capture=SimpleNamespace(output=lambda: hidden))}
+        engine.phase, engine.retain_mtp_hidden = 'verified', True
+        self.assertIs(engine.verified_mtp_hidden(ticket), hidden)
+        for phase, retained, selected in (('idle', True, ticket), ('failed', True, ticket),
+                                          ('verified', False, ticket), ('verified', True, object())):
+            engine.phase, engine.retain_mtp_hidden = phase, retained
+            with self.assertRaises(ValueError):
+                engine.verified_mtp_hidden(selected)
+
+    def test_capture_failure_releases_logits_and_never_samples(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fail_after_forward():
+            yield
+            raise RuntimeError('missing final normalization')
+
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.sampler = object()
+        engine.operations = SimpleNamespace(deallocate=Mock())
+        logits = object()
+        fixture = SimpleNamespace(run=Mock(return_value=logits), rows=4)
+        with patch('verifier_engine.sample_rows') as sample:
+            with self.assertRaises(RuntimeError):
+                engine.operation(fixture, hidden_capture=SimpleNamespace(capture=fail_after_forward))
+            sample.assert_not_called()
+        engine.operations.deallocate.assert_called_once_with(logits)
+
     def test_width_cap_excludes_unused_large_traces(self):
         self.assertEqual(capture_widths(170, 65536, 32, 512, 8), (1, 2, 4, 8))
         self.assertEqual(capture_widths(170, 65536, 32, 3, 8), (1, 2))
