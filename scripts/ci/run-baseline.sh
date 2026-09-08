@@ -2,7 +2,8 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
-[[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 && "$mode" = sampling-kernel ) ]]
+[[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 &&
+    ( "$mode" = sampling-kernel || ( "$mode" = full-norm-engine && "${QWEN_CODING_REQUEST:-0}" = 1 && "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 ) ) ) ]]
 descriptor=p300_mesh_graph_descriptor.textproto
 if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then descriptor=p150_x2_mesh_graph_descriptor.textproto; fi
 if [[ "${QWEN_CODING_REQUEST:-0}" != 0 && !( "${QWEN_CODING_REQUEST:-0}" = 1 && "$mode" = full-norm-engine ) ]]; then

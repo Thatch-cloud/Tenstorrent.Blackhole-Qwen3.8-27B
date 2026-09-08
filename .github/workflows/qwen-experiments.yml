@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       fabric_link_probe:
-        description: Isolated sampler 1/2/4-link comparison; sampling-kernel only
+        description: Sampler 1/2/4-link probe, or 1/4-link coding ABBA with full-norm-engine (no lookup_cap_abba)
         type: boolean
         default: false
       reset_authorized:

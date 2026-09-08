@@ -5,6 +5,26 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_sampling_links_keeps_request_and_routing_identical(self):
+        def measure(*, sampling_links):
+            return dict(self.record(sampling_links), sampling_links=sampling_links, norm_batch=True,
+                family_routing=False, attention_replay=False, attention_mask_once=False,
+                replay_group_rows=4, lookup_max_rows=8, sampler_num_links=4 if sampling_links else 1,
+                ended_with_eos=True, fabric_sources={'descriptor': 'audited'})
+        records, summary = measure_requests(measure, arm_key='sampling_links')
+        self.assertTrue(summary['exact'])
+        for key, value in (('norm_batch', False), ('family_routing', True), ('lookup_max_rows', 32),
+                ('sampler_num_links', 2), ('sampler_num_links', 4.0), ('ended_with_eos', False),
+                ('fabric_sources', {}), ('fabric_sources', {'descriptor': 'changed'})):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='sampling_links')
+        invalid = deepcopy(records)
+        invalid[1]['blocks'][0]['input_tokens'] = [9]
+        with self.assertRaises(ValueError):
+            summarize_requests(invalid, arm_key='sampling_links')
+
     def test_lookup_cap_allows_only_between_arm_routing_changes(self):
         def measure(*, lookup_cap):
             record = dict(self.record(lookup_cap), lookup_cap=lookup_cap, norm_batch=True,

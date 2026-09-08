@@ -4,7 +4,7 @@ import math
 
 
 def summarize_requests(requests, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links'):
         raise ValueError('Known matched request experiment required')
     if len(requests) != 4 or [entry[arm_key] for entry in requests] != [False, True, True, False]:
         raise ValueError('One complete control/candidate/candidate/control request block required')
@@ -18,6 +18,16 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
     for entry in requests:
         if type(entry[arm_key]) is not bool:
             raise ValueError('Explicit boolean arm selection required')
+        if arm_key == 'sampling_links':
+            if (entry.get('norm_batch') is not True or any(entry.get(key) is not False for key in
+                    ('family_routing', 'attention_replay', 'attention_mask_once'))
+                    or entry.get('replay_group_rows') != 4
+                    or type(entry.get('lookup_max_rows')) is not int or entry['lookup_max_rows'] != 8
+                    or type(entry.get('sampler_num_links')) is not int
+                    or entry['sampler_num_links'] != (4 if entry[arm_key] else 1)
+                    or not entry.get('fabric_sources') or entry['fabric_sources'] != reference.get('fabric_sources')
+                    or entry.get('ended_with_eos') is not True):
+                raise ValueError('Sampling comparison requires complete matched T8 coding requests with audited links')
         if arm_key == 'lookup_cap':
             if (entry.get('norm_batch') is not True or any(entry.get(key) is not False for key in
                     ('family_routing', 'attention_replay', 'attention_mask_once'))
@@ -74,7 +84,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
 
 
 def measure_requests(measure, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links'):
         raise ValueError('Known matched request experiment required')
     requests = [measure(**{arm_key: enabled}) for enabled in (False, True, True, False)]
     return requests, summarize_requests(requests, arm_key=arm_key)

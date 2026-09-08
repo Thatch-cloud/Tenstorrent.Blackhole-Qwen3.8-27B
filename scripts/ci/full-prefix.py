@@ -103,6 +103,15 @@ def main():
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
+    fabric_link_probe = os.environ.get('QWEN_FABRIC_LINK_PROBE', '0')
+    if fabric_link_probe not in ('0', '1') or (fabric_link_probe == '1' and
+            (coding_request != '1' or not options.norm_batch or not options.request_pilot
+             or options.attention_engine or options.attention_engine_wide
+             or os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0') != '0')):
+        parser.error('Fabric request comparison requires coding norm-engine without other ABBA options')
+    if fabric_link_probe == '1':
+        from sampling_link_policy import audit, sampler_links
+        fabric_sources = audit('/opt/tt-metal', os.environ)
     if coding_request not in ('0', '1') or (coding_request == '1' and not options.request_pilot):
         raise ValueError('Coding workload requires explicit request-pilot mode')
     if coding_request == '1' and (options.attention_engine or options.attention_engine_wide):
@@ -722,14 +731,25 @@ def main():
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
 
-                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False):
-                    result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
-                        live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
-                        norm_batch=norm_batch, attention_replay=attention_replay or options.attention_engine_wide,
-                        max_new_tokens=513 if coding_request == '1' else 129,
-                        lookup_max_rows=8 if lookup_cap else 32,
-                        family_routing=options.attention_engine, attention_mask_once=options.attention_engine_wide,
-                        replay_group_rows=8 if attention_wide else 4)
+                def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False, sampling_links=False):
+                    from contextlib import nullcontext
+                    links = 4 if sampling_links else 1
+                    scope = sampler_links(sampler.tt_sampling, links) if fabric_link_probe == '1' else nullcontext()
+                    with scope:
+                        if fabric_link_probe == '1':
+                            axis = sampler.tt_sampling._get_sampling_cluster_axis()
+                            actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
+                            if actual != links or topology != ttnn.Topology.Linear:
+                                raise AssertionError('Request sampling link configuration was clamped')
+                        result = measure_request(model, sampler, prompt, page_table, helpers, prefill=prefill, decode=decode,
+                            live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
+                            norm_batch=norm_batch, attention_replay=attention_replay or options.attention_engine_wide,
+                            max_new_tokens=513 if coding_request == '1' else 129,
+                            lookup_max_rows=8 if lookup_cap or fabric_link_probe == '1' else 32,
+                            family_routing=options.attention_engine, attention_mask_once=options.attention_engine_wide,
+                            replay_group_rows=8 if attention_wide else 4)
+                    if fabric_link_probe == '1':
+                        result.update(sampling_links=sampling_links, sampler_num_links=links, fabric_sources=fabric_sources)
                     if options.attention_engine_wide:
                         result['attention_wide'] = attention_wide
                     if lookup_cap_abba == '1':
@@ -749,7 +769,7 @@ def main():
                 if options.norm_batch:
                     from full_request_pair import measure_requests
                     unused_requests, comparison = measure_requests(request_measure,
-                        arm_key='lookup_cap' if lookup_cap_abba == '1' else 'attention_wide' if options.attention_engine_wide else 'attention_replay' if options.attention_engine else 'norm_batch')
+                        arm_key='sampling_links' if fabric_link_probe == '1' else 'lookup_cap' if lookup_cap_abba == '1' else 'attention_wide' if options.attention_engine_wide else 'attention_replay' if options.attention_engine else 'norm_batch')
                     comparison['length'] = len(prompt)
                     report.setdefault('request_comparisons', []).append(comparison)
                     output_path.write_text(json.dumps(report, indent=2))
