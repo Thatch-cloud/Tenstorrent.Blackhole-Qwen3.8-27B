@@ -1,8 +1,35 @@
 # Commit-only GDN verification
 
-**Status: simulator and host gates pass; hardware comparison ready.**
-The best complete single-stream result remains **66.76 committed tok/s**.
-The target is 200; this change has no measured performance result yet.
+**Status: hardware ABBA passes; new best 70.34 committed tok/s.**
+The matched control reaches 65.50: **7.38% improvement**. The target remains
+200, not achieved. This is one complete coding task, not held-out quality.
+
+## Hardware result
+
+[Run 34242926044](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044),
+revision `20dbd99`, passes both full-request audits and four timed requests.
+
+| CTX / streams / verify rows | Control | Commit-only candidate |
+| --- | --- | --- |
+| 170 / 1 / up to 8: committed TG | 65.501887 | **70.336300** |
+| Individual timed TG | 63.661800 / 67.451512 | 71.665727 / 69.055297 |
+| PP tok/s | 496.892908 | 530.317135 |
+| Mean draft ms/block | 32.326778 | 32.374450 |
+| Mean verifier/readback ms/block | 65.427248 | 58.078125 |
+| Mean publication ms/block | 3.364984 | 3.142621 |
+| Complete prefill + setup + decode | 8.148 / 8.588 s | 6.904 / 7.061 s |
+
+All six requests emit the same 150 committed tokens through EOS, with 22 blocks
+and 129/154 accepted proposals. Native tokens, GDN, valid KV and inactive slots
+are exact. Each arm's audit checks 1500 feature row/chip/tap comparisons and
+22 eager-versus-trace proposals. The candidate also passes all 22 native-GDN
+hash comparisons around verification, before the commit decision.
+
+The measured order is control/candidate/candidate/control. Audits are excluded;
+setup is fresh and unamortized. Target model loading is outside the reported
+complete-request time. PP/setup variation is not attributed to this decode
+optimization. Report SHA256:
+`dce5700d3a1735e3d36ff7babcf6186b9396b863e8db932acebfba42fc345582`.
 
 ## What changes
 
@@ -57,6 +84,9 @@ The report includes runtime source hashes, per-arm TG, setup-inclusive request
 time and the candidate/control ratio. No audit time or setup amortization is
 hidden in the decode rate. One task is not held-out coding-quality certification.
 
-The remaining 31.27 ms draft cost also matters: removing target-state copies
-alone is not evidence that 200 tok/s is achievable. Promote only a measured,
-correct improvement; otherwise retain the current control.
+The remaining 32.37 ms draft cost also matters. Next candidate: fuse the
+drafter's grouped causal convolution, currently repeated four times per learned
+layer with separate expansion, shift, casts and arithmetic. Preserve every BF16
+rounding boundary and gate against the existing composed implementation before
+hardware integration. No convolution speedup is claimed yet. The commit-only
+path is the new experimental lead; serving defaults remain unchanged.

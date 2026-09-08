@@ -2,7 +2,19 @@
 
 ## Current programme position - 2026-09-09
 
-**New best: captured DFlash2 T8,66.76 committed TG;200 remains unachieved.**
+**New best: captured DFlash2 T8 with commit-only GDN, 70.34 committed TG.**
+Hardware run34242926044 (`20dbd99`) passes matched ABBA: control65.501887,
+candidate70.336300 (+7.38%). Verification falls65.427248 ->58.078125ms/block;
+drafting is unchanged at32.37ms. All six150-token EOS requests preserve identical
+proposals, acceptance, native tokens, GDN, valid KV and inactive slots. Separate
+audits check all feature/proposal outputs and22 pre-decision GDN snapshots.
+Candidate PP530.32; complete prefill/setup/decode6.90/7.06s, no amortization.
+Simulator passes all9 prefixes and actual continuations;859 host tests pass.
+The target remains200, not achieved. Next: fuse the drafter's repeated grouped
+convolution while preserving BF16 rounding; no new fusion speed claim yet.
+[Matched result](dflash-commit-only-gdn-2026-09-09.md).
+
+**Previous best: captured DFlash2 T8,66.76 committed TG.**
 Run34238134003 (`eadaa41`) passes three complete150-token coding requests through
 EOS. The two uninstrumented requests measure68.409353/65.197390 TG, aggregate
 66.764763. All native token/GDN/valid KV/inactive checks pass; the audit also
@@ -14,12 +26,6 @@ Captured T32 run34239197088 passes but is slower:60.743458 TG,18 blocks/request,
 draft32.156012ms, verify98.436125ms,133/558 accepted proposals. T8 remains the
 lead candidate; target-verifier kernel cost is next, not another wider-draft
 assumption. [Captured results](dflash-captured-proposals-2026-09-09.md).
-
-**Active experiment: commit-only GDN verification.** Remove redundant state
-copies and speculative native-state writes from the verifier, then publish the
-selected prefix only after acceptance. Simulator checks every prefix and actual
-continuation; hardware will compare identical captured T8 requests in ABBA order.
-No new throughput claim yet. [Experiment](dflash-commit-only-gdn-2026-09-09.md).
 
 **Earlier eager integration: T8 37.64 / T32 41.03 TG; MTP58.33 TG.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the

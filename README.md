@@ -4,22 +4,23 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Best measured: 66.76 committed tok/s**, using captured five-layer DFlash2 drafting.
-Two complete coding responses reach EOS at68.41/65.20 TG, with exact native
+**Best measured: 70.34 committed tok/s**, using captured DFlash2 and commit-only GDN.
+Two complete coding responses reach EOS at 71.67 / 69.06 TG, with exact native
 tokens, GDN state, valid KV and inactive slots. A separate request audits every
-committed feature row and every captured proposal.
-[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
+committed feature row, captured proposal and pre-decision GDN state.
+The matched ABBA control reaches 65.50 TG: **7.38% improvement**.
+[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044).
 
 This is a single-task experiment, not held-out coding quality or a serving result.
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**Next: cheaper target verification, not simply wider drafting.** At T8,
-drafting now costs31.27 ms/block, down from110.58 ms in the eager experiment;
-verification still costs65.27 ms. The wider eager path reaches41.03 TG.
-Captured T32 completes exactly at60.74 TG, below captured T8; T8 stays the lead candidate.
+**Next: reduce verifier and draft kernel costs, not simply widen drafting.**
+Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
+Drafting still costs 32.37 ms/block; its repeated convolution operations are the
+next fusion candidate. Captured T32 reaches only 60.74 TG; T8 stays the lead.
 Native SDPA remains disabled after its failed numerical gate.
-[Captured-drafter results and limits](docs/dflash-captured-proposals-2026-09-09.md).
+[Commit-only results and limits](docs/dflash-commit-only-gdn-2026-09-09.md).
 
 ## Setup
 
@@ -108,6 +109,8 @@ TG includes drafting, verification/readback and publication; excludes prefill/se
 | 170 | 1 | Up to 32, trained-width extrapolation | 554.23 | **41.03** |
 | 170 | 1 | Up to 8, captured drafter | 517.11 | **66.76** |
 | 170 | 1 | Up to 32, captured drafter and trained-width extrapolation | 542.94 | **60.74** |
+| 170 | 1 | Up to 8, captured ABBA control | 496.89 | **65.50** |
+| 170 | 1 | Up to 8, captured + commit-only GDN | 530.32 | **70.34** |
 
 Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
 129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
@@ -133,6 +136,14 @@ Captured T32 completes at61.26/60.24 TG, with18 blocks/request. It costs98.44 ms
 per verification block versus65.27 ms at T8, without enough extra accepted tokens
 to compensate. It is not promoted over the trained-width T8 candidate.
 [Captured T32 run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34239197088).
+
+Commit-only GDN removes speculative state writes before acceptance. The matched
+ABBA test preserves all proposals and outputs: 150 tokens through EOS, 22 blocks,
+129/154 accepted drafts. Candidate prefill + fresh setup + decode takes
+**6.90 / 7.06 s**, versus control **8.15 / 8.59 s**; setup is not amortized.
+Two separate audit requests are excluded from TG. PP/setup variation is not
+attributed to the decode change. Serving defaults remain unchanged.
+[Matched hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044).
 
 ### Earlier lookup experiments
 
