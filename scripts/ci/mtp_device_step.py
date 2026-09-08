@@ -9,12 +9,15 @@ from verifier_inputs import host_inputs
 
 class MTPDeviceStep:
     def __init__(self, operations, model, mtp, embedding, page_table, sampler, *, shortlist=None,
-                 native_sampling_rows=False):
+                 native_sampling_rows=False, kv_only_repair=False):
         import torch
 
         if type(native_sampling_rows) is not bool or (native_sampling_rows and shortlist is not None):
             raise ValueError('Native-row sampling requires explicit full-vocabulary selection')
+        if type(kv_only_repair) is not bool or (kv_only_repair and not native_sampling_rows):
+            raise ValueError('KV-only repair requires explicit native-row MTP selection')
         self.native_sampling_rows = native_sampling_rows
+        self.kv_only_repair = kv_only_repair
         if (model.num_devices != 2 or tuple(embedding.shape) != (248320, 5120)
                 or embedding.device.type != 'cpu' or mtp.mesh is not model.mesh_device):
             raise ValueError('Pinned TP2 native MTP and full CPU embedding table required')
@@ -42,6 +45,11 @@ class MTPDeviceStep:
 
     def execute(self, select):
         operations = self.operations
+        if not select and self.kv_only_repair:
+            from mtp_cache_only import update_cache
+            update_cache(operations, self.mtp, self.inputs['embedding'], self.inputs['hidden'], self.inputs['positions'],
+                         self.inputs['cosine'], self.inputs['sine'], self.pages, self.owned)
+            return self.inputs['hidden'], None
         hidden = self.mtp.forward(self.inputs['embedding'], self.inputs['hidden'], self.inputs['positions'],
                                   self.inputs['cosine'], self.inputs['sine'], page_table=self.pages)
         self.owned.append(hidden)

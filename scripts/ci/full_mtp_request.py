@@ -95,11 +95,14 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
                         native_sampling_rows=False, short_context=False, attention_replay=False, attention_audit=False,
-                        reuse_accepted_cache=False):
+                        reuse_accepted_cache=False, kv_only_repair=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
+    if type(kv_only_repair) is not bool or (kv_only_repair and
+            (reuse_accepted_cache or not native_sampling_rows or attention_replay or attention_audit)):
+        raise ValueError('KV-only repair requires exact teacher forcing and native-row serial target')
     if type(reuse_accepted_cache) is not bool or (reuse_accepted_cache and
             (not native_sampling_rows or attention_replay or attention_audit)):
         raise ValueError('Draft-cache reuse experiment requires native sampling and unchanged serial target attention')
@@ -117,7 +120,8 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
     prefill_calls = 0
     metadata = dict(max_drafts=max_drafts, head='native-full-vocabulary-force-argmax', native_sampling_rows=native_sampling_rows,
                     mtp_weight_names=list(NAMES), kernel_math='reused native MTP, no new kernel math',
-                    reuse_accepted_cache=reuse_accepted_cache, approximate_draft_cache=reuse_accepted_cache)
+                    reuse_accepted_cache=reuse_accepted_cache, approximate_draft_cache=reuse_accepted_cache,
+                    kv_only_repair=kv_only_repair)
 
     def status(stage, **values):
         print(json.dumps(dict(mtp_stage=stage, **values)), flush=True)
@@ -146,6 +150,14 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         embedding, manifest = load_embedding(weights)
         metadata.update(manifest)
         mtp = Qwen36MTP(mesh, model.args, load_mtp_weights(weights), TT_CCL(mesh))
+        if kv_only_repair:
+            import inspect
+            import os
+            native_attention = hashlib.sha256(Path(inspect.getfile(type(mtp.attention))).read_bytes()).hexdigest()
+            if (native_attention != 'e0c685a43796f6f8a0ba42fd70a9533b502461b50fdda15e51c8753340f3dc3a'
+                    or os.environ.get('QWEN_ATTN_PREP') != '1'):
+                raise ValueError('KV-only repair requires the pinned native fused attention prefix')
+            metadata['native_attention_sha256'] = native_attention
         owned.extend(mtp.allocate_kv((1024, model.args.n_local_kv_heads, 64, model.args.head_dim), operations.bfloat16))
         mapper = operations.ReplicateTensorToMesh(mesh)
         draft_pages = operations.from_torch(pages, device=mesh, dtype=operations.int32,
@@ -157,7 +169,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
                 memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
         anchor, staged = owned[-2:]
         step = MTPDeviceStep(operations, model, mtp, embedding, draft_pages, sampler,
-            native_sampling_rows=native_sampling_rows)
+            native_sampling_rows=native_sampling_rows, kv_only_repair=kv_only_repair)
         status('prepare-native-mtp-traces')
         started = time.perf_counter()
         step.prepare()
@@ -191,6 +203,9 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
             progress=lambda block: status('committed-block', **{key: block[key] for key in (
                 'position', 'rows', 'accepted', 'committed', 'draft_ms', 'select_commit_ms', 'cycle_ms')}))
         metadata['cache_accounting'] = dict(runtime.cache_accounting) if runtime is not None else dict(reused_rows=0, teacher_forced_rows=0)
+        if step is not None:
+            from mtp_cache_only import cache_digest
+            metadata['valid_cache'] = cache_digest(operations, step.mtp, len(prompt) - 1 + result['committed_decode_tokens'])
         result['mtp'] = metadata
         result['native_committed_tokens_per_second'] = (
             1000 * result['committed_decode_tokens'] / result['native_decode_ms'] if result['native_decode_ms'] else None)

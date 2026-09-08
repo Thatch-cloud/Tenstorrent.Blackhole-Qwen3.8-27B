@@ -2,6 +2,15 @@
 
 ## Current programme position - 2026-09-08
 
+**Prepared next: exact KV-only repair ABBA.** The candidate runs the native
+MTP embedding/hidden norms, fusion projection, attention input norm, fused QKV
+preparation and both paged writes. It omits SDPA, output projection, residual,
+MLP and final norm whose output teacher-forced initialization/repair ignores.
+Proposal steps remain the full native MTP layer. No new kernel math: source and
+fused-prep flag are pinned. Both arms require identical proposals/acceptance and
+complete valid MTP K/V hashes on both chips, in addition to all target checks.
+746 host tests and 60 harness tests pass; hardware correctness/speed unmeasured.
+
 **Latest completed:34212022749 (`1e3738b`), reject approximate cache reuse.**
 All four complete requests pass exact target tokens/GDN/valid KV/inactive slots.
 Control54.942525TG versus candidate51.116004TG; ratio0.930354. Each emits150

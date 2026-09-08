@@ -3,6 +3,15 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
+## Exact KV-only MTP repair (2026-09-08, prepared)
+
+Omit unused attention output/MLP work after native MTP KV publication. Full
+teacher-forced history and full proposal execution remain unchanged. Pinned
+attention source/fused-prep guards and whole valid draft-cache hashes on both
+chips supplement the existing exact target and identical-acceptance checks.
+746 host tests plus60 harness tests pass. This reuses native kernels, not a new
+kernel or a simulator throughput claim. No hardware result yet.
+
 ## Accepted MTP cache reuse (2026-09-08, rejected)
 
 CI34212022749 on1e3738b passes all target correctness checks but loses decode

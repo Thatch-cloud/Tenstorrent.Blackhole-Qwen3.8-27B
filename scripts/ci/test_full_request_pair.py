@@ -5,6 +5,41 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_kv_only_repair_requires_identical_mtp_cache_and_proposals(self):
+        def measure(*, mtp_kv_only):
+            record = dict(self.record(True), mtp_kv_only=mtp_kv_only, native_sampling_rows=True,
+                norm_batch=True, family_routing=True, short_context=True, attention_replay=False,
+                attention_mask_once=False, replay_group_rows=4, lookup_max_rows=8,
+                sampler_num_links=4, ended_with_eos=True, fabric_sources={'descriptor': 'audited'},
+                selected_drafter='mtp', drafting_policy='neural-with-target-fallback', mtp_setup_ms=50,
+                mtp=dict(max_drafts=7, head='native-full-vocabulary-force-argmax', native_sampling_rows=True,
+                    mtp_weight_names=['mtp.fc.weight'], index_sha256='index', embedding_key='embedding',
+                    prompt_alignment={'initialized_mtp_rows': 1}, reuse_accepted_cache=False,
+                    approximate_draft_cache=False, kv_only_repair=mtp_kv_only,
+                    cache_accounting=dict(reused_rows=0, teacher_forced_rows=2)))
+            record['mtp']['valid_cache'] = dict(valid_rows=len(record['prompt_tokens']) + 1,
+                keys=['a' * 64, 'b' * 64], values=['c' * 64, 'd' * 64])
+            record['blocks'][0].update(source='mtp', match_length=0)
+            return record
+        records, summary = measure_requests(measure, arm_key='mtp_kv_only')
+        self.assertTrue(summary['exact'])
+        for key, value in (('kv_only_repair', False), ('approximate_draft_cache', True),
+                ('reuse_accepted_cache', True), ('cache_accounting', dict(reused_rows=1, teacher_forced_rows=1)),
+                ('valid_cache', {})):
+            invalid = deepcopy(records)
+            invalid[1]['mtp'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_kv_only')
+        for key, value in (('valid_rows', 0), ('keys', ['a' * 64, 'e' * 64]), ('values', ['c' * 64])):
+            invalid = deepcopy(records)
+            invalid[1]['mtp']['valid_cache'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_kv_only')
+        invalid = deepcopy(records)
+        invalid[1]['accepted'] += 1
+        with self.assertRaises(ValueError):
+            summarize_requests(invalid, arm_key='mtp_kv_only')
+
     def test_draft_cache_reuse_allows_changed_acceptance_not_changed_target(self):
         def measure(*, mtp_reuse_cache):
             record = dict(self.record(mtp_reuse_cache), mtp_reuse_cache=mtp_reuse_cache, native_sampling_rows=True,

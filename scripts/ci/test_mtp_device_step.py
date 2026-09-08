@@ -14,6 +14,7 @@ class MTPDeviceStepTests(unittest.TestCase):
         step.model = SimpleNamespace(lm_head_weight=object())
         step.inputs = {name: object() for name in ('embedding', 'hidden', 'positions', 'cosine', 'sine')}
         step.pages, step.sampler, step.shortlist = object(), object(), None
+        step.kv_only_repair = False
         for enabled in (False, True):
             step.native_sampling_rows, step.owned = enabled, []
             with patch('mtp_device_step.sample_rows', return_value=identifiers) as sample:
