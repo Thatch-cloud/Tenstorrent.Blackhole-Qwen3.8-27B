@@ -5,7 +5,7 @@
 | Priority | Verified position / next gate |
 | --- | --- |
 | Single-stream target | 200 committed TG not achieved; completed four-link coding request: 19.10 TG, CTX 170 |
-| Current hardware run | [34191983233](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34191983233): real native MTP K7/T8 coding request; results pending |
+| Current hardware run | [34193704110](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34193704110): native MTP K7/T8 coding retry with pre-trace warmup; results pending |
 | MTP integration | Prompt features and shifted KV initialization, traced drafting, accepted-row extraction and teacher-forced cache repair wired; 705 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
@@ -14,6 +14,9 @@
 No device resets, serving-default changes, or new isolated kernel matrix in the
 current run. Exact native tokens, active GDN state, valid KV and inactive slots
 remain mandatory. One coding request is not a held-out coding-quality suite.
+First MTP launch 34191983233 failed fresh-prefill seed equality before drafting;
+it produced no MTP throughput. The retry restores the required prefill/feature
+warmup before parking the native decode trace and keeps all equality guards.
 
 ### Earlier checkpoints (historical, not current run status)
 
