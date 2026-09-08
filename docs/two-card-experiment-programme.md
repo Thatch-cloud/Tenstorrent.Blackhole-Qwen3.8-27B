@@ -25,7 +25,8 @@ matches two gate/up calls across64 layers. The32-core128-call group combines
 The96-worker recurrence specification in gdn_vsplit.py maps to the48-call
 generic group. Fusion passed the corrected fused-SiLU native control at all six
 row widths in simulator005625Z with verified source/device operands; hardware
-measurement is next. Intermittent historical source-integrity failures remain
+34176158014 also passes correctness but eager fusion regresses. Captured replay
+is the next simulator prerequisite, not an assumed speedup. Historical source-integrity failures remain
 unresolved; a current pass does not erase those failed reports.
 
 ## Historical measured results - 2026-09-07
@@ -2202,3 +2203,19 @@ before its existing learned MLP gates. All six widths must match; T1/T8/T32 each
 receive three eager ABBA timing blocks, with every timed output validated on both
 chips outside the timer. Timings include dispatch/allocation but exclude uploads,
 validation and deallocation. No captured-fusion or full-model speedup is claimed.
+
+### Multi-row fusion hardware34176158014
+
+Run34176158014 onf1a4dc5 passed all twelve width/chip output checks and all four
+byte-exact packed-weight/source checks. Every timed output was also exact. Eager
+ABBA median block means (native/fused) were0.302722/0.763854ms atT1,
+0.239781/0.760774ms atT8 and0.247471/0.649273ms atT32. This is a regression,
+not an optimization winner; no full-model adoption is authorized by this result.
+
+FusedProjection.__call__ constructs mesh programs, per-core runtime arguments
+and descriptors on each eager invocation. That host work is included in these
+timings. Its contribution versus device execution has not been isolated, so do
+not conclude that fusion itself is intrinsically slower or claim that tracing
+will fix it. Next test changing-input captured fusion and native control in the
+simulator, preserving exactness/ownership, then compare matched hardware trace
+latencies before deciding whether full-target integration is worthwhile.
