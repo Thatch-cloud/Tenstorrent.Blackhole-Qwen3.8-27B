@@ -105,6 +105,8 @@ def main():
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
     if coding_request not in ('0', '1') or (coding_request == '1' and not options.request_pilot):
         raise ValueError('Coding workload requires explicit request-pilot mode')
+    if coding_request == '1' and (options.attention_engine or options.attention_engine_wide):
+        raise ValueError('Short coding workload is not qualified for long-context attention replay')
     if options.prefix_zero_reuse and (not options.batch or not options.coding_cost or not options.packed_checkpoints
             or any((options.request_pilot, options.replay_inputs, options.deferred_commit,
                 options.attribution, options.device_selection, options.target_features, options.target_feature_batch))):

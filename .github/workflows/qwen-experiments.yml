@@ -17,7 +17,7 @@ on:
         type: boolean
         default: false
       coding_request:
-        description: One non-repeated coding task; full-attention-engine-wide only
+        description: One short non-repeated coding task; full-norm-engine only
         type: boolean
         default: false
       reset_authorized:

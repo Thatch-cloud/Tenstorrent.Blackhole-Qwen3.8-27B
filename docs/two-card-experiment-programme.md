@@ -2,6 +2,15 @@
 
 ## Current programme position - 2026-09-08
 
+Coding run34181363845 failed before request verification: the short prompt was
+incorrectly routed into an attention replay family qualified only from capacity
+4096. No committed throughput result was produced. Do not relax that kernel
+guard or pad the prompt to hide the mismatch. The corrected short coding run uses
+`full-norm-engine`: native serial attention with paired norm batching, not the
+T4/T8 attention comparison. Invalid short-workload/replay combinations now fail
+before Docker build or model loading. The failed run spent about18 minutes in
+the disposable native build; this native-attention retry does not need that build.
+
 The next learned-draft integration gate is a single captured five-layer stack,
 including final normalization. Attention parameters are now prepared once outside
 the forward, matching the existing prepared MLP path. The simulator-only opt-in
