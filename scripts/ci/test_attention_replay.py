@@ -8,6 +8,26 @@ from attention_replay import ReplayAttentionReader
 
 
 class ReplayReaderTests(unittest.TestCase):
+    def test_short_reader_uses_128_start_and_preserves_fixed_masks(self):
+        operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock())
+        mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
+        with patch('attention_replay.prepare', return_value='program') as prepare:
+            reader = ReplayAttentionReader(operations, mesh, 8, 256, torch.arange(4).reshape(1, 4),
+                lambda value, dtype=None: value, short_context=True)
+        self.assertEqual(reader.start, 128)
+        self.assertEqual(reader.positions.tolist(), [128, 0, 0, 0, 0, 0, 0, 0])
+        prepare.assert_called_once()
+        self.assertIs(prepare.call_args.kwargs['short_context'], True)
+        self.assertEqual(prepare.call_args.kwargs['batches'], 2)
+        reader.validate(170)
+        reader.validate(248)
+        for start in (127, 249, 256):
+            with self.assertRaises(ValueError):
+                reader.validate(start)
+        with self.assertRaisesRegex(ValueError, 'four-row groups'):
+            ReplayAttentionReader(operations, mesh, 8, 256, torch.arange(4).reshape(1, 4),
+                lambda value, dtype=None: value, short_context=True, max_group_rows=8)
+
     def fixture(self, rows=16, *, max_group_rows=4):
         operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock())
         mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))

@@ -44,9 +44,12 @@ class ReplayPlan:
         return matches[0]
 
 
-def capture_plan(position, page_capacity, verifier_rows, remaining):
-    widths = capture_widths(position, page_capacity, verifier_rows, remaining)
+def capture_plan(position, page_capacity, verifier_rows, remaining, *, max_verify_rows=32, short_context=False):
+    widths = capture_widths(position, page_capacity, verifier_rows, remaining, max_verify_rows)
     stop = position + remaining
+    if type(short_context) is not bool or (short_context and
+            (max_verify_rows != 8 or position < 128 or stop > 768)):
+        raise ValueError('Short-context routing requires a T8 cap and complete budget in positions 128..767')
     captures = [Capture(rows, position, None) for rows in widths if rows < 8]
     for capacity in range((position // 256 + 1) * 256, ((stop - 1) // 256 + 1) * 256 + 1, 256):
         first = max(position, capacity - 256)
@@ -54,7 +57,7 @@ def capture_plan(position, page_capacity, verifier_rows, remaining):
         for rows in widths:
             if rows < 8 or first + rows > last:
                 continue
-            validate_ticket(first, rows, capacity)
+            validate_ticket(first, rows, capacity, short_context=short_context)
             captures.append(Capture(rows, first, capacity))
     if len({capture.key for capture in captures}) != len(captures):
         raise AssertionError('Capture keys must be unique')

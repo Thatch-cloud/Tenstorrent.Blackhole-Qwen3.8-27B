@@ -74,10 +74,18 @@ class ModelBatchTests(unittest.TestCase):
         tree = ast.parse(Path(__file__).with_name('full-prefix.py').read_text())
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Name) and node.func.id == 'ModelBatch']
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
+        short_warmups = 0
         for call in calls:
             options = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
-            self.assertEqual(options.get('norm_batch'), 'options.norm_batch')
+            if options.get('short_context') == 'True':
+                short_warmups += 1
+                self.assertEqual(options.get('norm_batch'), 'True')
+                self.assertEqual(options.get('attention_replay'), 'True')
+                self.assertEqual(options.get('attention_mask_once'), 'True')
+            else:
+                self.assertEqual(options.get('norm_batch'), 'options.norm_batch')
+        self.assertEqual(short_warmups, 1)
         timing = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                   and isinstance(node.func, ast.Name) and node.func.id == 'measure'
                   and any(keyword.arg == 'packed_checkpoints' for keyword in node.keywords)]

@@ -9,12 +9,18 @@ def source_hashes():
             for name in ('attention_mask_replay.py', 'attention_mask_replay.cpp')}
 
 
-def validate_ticket(start, rows, capacity):
+def validate_ticket(start, rows, capacity, *, short_context=False):
+    if type(short_context) is not bool:
+        raise ValueError('Explicit short-context experimental selection required')
     if any(type(value) is not int for value in (start, rows, capacity)):
         raise ValueError('Integer replay geometry required')
-    if not 1 <= rows <= 32 or capacity < 4096 or capacity > 16640 or capacity % 256:
+    minimum, maximum = (256, 768) if short_context else (4096, 16640)
+    if not 1 <= rows <= 32 or capacity < minimum or capacity > maximum or capacity % 256:
         raise ValueError('Bounded long-context native chunk family required')
-    if start < capacity - 256 or start + rows > capacity:
+    if short_context and rows != 8:
+        raise ValueError('Short-context qualification is limited to T8')
+    first = max(128, capacity - 256) if short_context else capacity - 256
+    if start < first or start + rows > capacity:
         raise ValueError('Ticket crosses the captured native chunk family')
 
 
@@ -24,14 +30,15 @@ def mask_position(start, rows, batch, head, offset=0):
     return start + offset + batch * rows + (head % (rows * 6)) // 6
 
 
-def prepare(mesh, positions, mask, *, rows, batches, offset, capacity):
+def prepare(mesh, positions, mask, *, rows, batches, offset, capacity, short_context=False):
     import ttnn
 
     if any(type(value) is not int for value in (rows, batches, offset, capacity)):
         raise ValueError('Integer mask geometry required')
     if not 1 <= rows <= 8 or not 1 <= batches <= 3 or offset < 0 or offset + rows * batches > 32:
         raise ValueError('At most three bounded contiguous query groups required')
-    validate_ticket(capacity - 256, offset + rows * batches, capacity)
+    first = max(128, capacity - 256) if short_context else capacity - 256
+    validate_ticket(first, offset + rows * batches, capacity, short_context=short_context)
     if tuple(positions.shape) != (8,) or positions.dtype != ttnn.int32 or positions.layout != ttnn.ROW_MAJOR_LAYOUT:
         raise ValueError('Eight-word position input required; first word is block start')
     if tuple(mask.shape) != (batches, 1, rows * 12, capacity) or mask.dtype != ttnn.bfloat16 or mask.layout != ttnn.TILE_LAYOUT:

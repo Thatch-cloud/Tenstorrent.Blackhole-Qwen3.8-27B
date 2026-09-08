@@ -23,6 +23,15 @@ in the candidate repetitions. The target is already loaded; this is not a cold
 process launch or sustained serving result. Setup is not amortized.
 Latest report SHA256: `cda6127029826c86cc59b9c2e3ea775d0850840a0ef580cce0afc113d5398b9d`.
 
+Next hardware comparison is short-context serial versus parallel attention with
+the qualified native-row sampler fixed in both arms. Simulator075510Z-308 passes
+24 native-output checks, 24 mask checks, 12 KV-preservation checks and 6 stale
+controls at capacities256/512/768, including actual CTX170. The default long-
+context path remains unchanged. A shared bounded routing plan retains native
+small-width boundary fallback without padding the prompt; full-request exactness
+and paired TG, not the simulator pass, determine whether this is adopted.
+All 722 host tests and 60 harness tests pass.
+
 ### First complete MTP request (historical baseline)
 
 No device resets or serving-default changes. One coding request is not a held-out

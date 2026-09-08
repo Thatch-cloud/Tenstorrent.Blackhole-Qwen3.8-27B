@@ -4,7 +4,7 @@ import math
 
 
 def summarize_requests(requests, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links', 'native_sampling_rows'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links', 'native_sampling_rows', 'mtp_short_attention'):
         raise ValueError('Known matched request experiment required')
     if len(requests) != 4 or [entry[arm_key] for entry in requests] != [False, True, True, False]:
         raise ValueError('One complete control/candidate/candidate/control request block required')
@@ -18,17 +18,19 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
     for entry in requests:
         if type(entry[arm_key]) is not bool:
             raise ValueError('Explicit boolean arm selection required')
-        if arm_key == 'native_sampling_rows':
+        if arm_key in ('native_sampling_rows', 'mtp_short_attention'):
             mtp = entry.get('mtp', {})
-            if (entry.get('norm_batch') is not True or any(entry.get(key) is not False for key in
-                    ('family_routing', 'attention_replay', 'attention_mask_once'))
+            short = arm_key == 'mtp_short_attention'
+            if (entry.get('norm_batch') is not True or entry.get('family_routing') is not short
+                    or any(entry.get(key) is not (short and entry[arm_key]) for key in ('attention_replay', 'attention_mask_once'))
+                    or (short and (entry.get('short_context') is not True or entry.get('native_sampling_rows') is not True))
                     or entry.get('replay_group_rows') != 4 or entry.get('lookup_max_rows') != 8
                     or entry.get('sampler_num_links') != 4 or not entry.get('fabric_sources')
                     or entry['fabric_sources'] != reference.get('fabric_sources')
                     or entry.get('ended_with_eos') is not True or entry.get('selected_drafter') != 'mtp'
                     or entry.get('drafting_policy') != 'neural-with-target-fallback'
                     or mtp.get('max_drafts') != 7 or mtp.get('head') != 'native-full-vocabulary-force-argmax'
-                    or mtp.get('native_sampling_rows') is not entry[arm_key]
+                    or mtp.get('native_sampling_rows') is not (True if short else entry[arm_key])
                     or any(mtp.get(key) != reference.get('mtp', {}).get(key) for key in
                         ('mtp_weight_names', 'index_sha256', 'embedding_key', 'prompt_alignment'))):
                 raise ValueError('Native-row comparison requires matched full-vocabulary K7 MTP, target and four-link sampler')
@@ -83,7 +85,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
         mtp_setup = entry.get('mtp_setup_ms', 0)
         if type(mtp_setup) not in (int, float) or not math.isfinite(mtp_setup) or mtp_setup < 0:
             raise ValueError('Finite measured MTP setup cost required')
-        if arm_key == 'native_sampling_rows' and mtp_setup <= 0:
+        if arm_key in ('native_sampling_rows', 'mtp_short_attention') and mtp_setup <= 0:
             raise ValueError('MTP preparation must be timed, not treated as free')
         if entry['setup_amortized'] is not False or entry['cross_request_trace_reuse'] is not False:
             raise ValueError('Each arm requires its own request trace lifetime')
@@ -106,7 +108,7 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
 
 
 def measure_requests(measure, *, arm_key='norm_batch'):
-    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links', 'native_sampling_rows'):
+    if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links', 'native_sampling_rows', 'mtp_short_attention'):
         raise ValueError('Known matched request experiment required')
     requests = [measure(**{arm_key: enabled}) for enabled in (False, True, True, False)]
     return requests, summarize_requests(requests, arm_key=arm_key)

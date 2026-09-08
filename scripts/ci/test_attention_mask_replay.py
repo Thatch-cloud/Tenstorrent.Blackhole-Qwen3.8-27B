@@ -8,6 +8,21 @@ from attention_mask_replay import mask_position, source_hashes, validate_ticket
 
 
 class MaskReplayTests(unittest.TestCase):
+    def test_short_context_requires_opt_in_and_fixed_native_chunk_signature(self):
+        for capacity in (256, 512, 768):
+            first = max(128, capacity - 256)
+            for start in range(first, capacity - 7):
+                validate_ticket(start, 8, capacity, short_context=True)
+                self.assertEqual({group['signature'] for group in chunk_groups(start, 8)}, {(256, capacity)})
+                with self.assertRaises(ValueError):
+                    validate_ticket(start, 8, capacity)
+        for start, rows, capacity in ((127, 8, 256), (249, 8, 256), (255, 8, 512),
+                                      (170, 4, 256), (170, 16, 256), (768, 8, 1024)):
+            with self.assertRaises(ValueError):
+                validate_ticket(start, rows, capacity, short_context=True)
+        with self.assertRaises(ValueError):
+            validate_ticket(170, 8, 256, short_context=1)
+
     def test_sources_resolve_from_installed_helper_not_harness_layout(self):
         hashes = source_hashes()
         self.assertEqual(set(hashes), {'attention_mask_replay.py', 'attention_mask_replay.cpp'})

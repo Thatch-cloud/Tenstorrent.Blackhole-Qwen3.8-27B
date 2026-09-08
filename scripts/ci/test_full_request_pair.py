@@ -5,6 +5,28 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_short_attention_keeps_mtp_sampling_and_family_routing_fixed(self):
+        def measure(*, mtp_short_attention):
+            record = dict(self.record(True), mtp_short_attention=mtp_short_attention, native_sampling_rows=True,
+                norm_batch=True, family_routing=True, short_context=True, attention_replay=mtp_short_attention,
+                attention_mask_once=mtp_short_attention, replay_group_rows=4, lookup_max_rows=8,
+                sampler_num_links=4, ended_with_eos=True, fabric_sources={'descriptor': 'audited'},
+                selected_drafter='mtp', drafting_policy='neural-with-target-fallback', mtp_setup_ms=50,
+                mtp=dict(max_drafts=7, head='native-full-vocabulary-force-argmax', native_sampling_rows=True,
+                    mtp_weight_names=['mtp.fc.weight'], index_sha256='index', embedding_key='embedding',
+                    prompt_alignment={'initialized_mtp_rows': 169}))
+            record['blocks'][0]['source'] = 'mtp'
+            return record
+        records, summary = measure_requests(measure, arm_key='mtp_short_attention')
+        self.assertTrue(summary['exact'])
+        for key, value in (('family_routing', False), ('short_context', False), ('native_sampling_rows', False),
+                ('attention_replay', False), ('attention_mask_once', False), ('lookup_max_rows', 32),
+                ('replay_group_rows', 8), ('sampler_num_links', 1)):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_short_attention')
+
     def test_native_sampling_mtp_comparison_includes_setup_and_preserves_routing(self):
         def measure(*, native_sampling_rows):
             record = dict(self.record(native_sampling_rows), native_sampling_rows=native_sampling_rows,

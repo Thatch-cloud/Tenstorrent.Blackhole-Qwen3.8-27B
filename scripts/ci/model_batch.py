@@ -49,13 +49,16 @@ class ModelBatch:
                  device_loop_gdn=False, compact_prologue=False, batch_conv=False, packed_checkpoints=False,
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
-                 replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False):
+                 replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         validate_checkpoint(self.rows, prefix)
+        if type(short_context) is not bool or (short_context and (not attention_replay or replay_group_rows != 4)):
+            raise ValueError('Short-context attention requires explicit four-row replay groups')
+        self.short_context = short_context
         if type(attention_tree) is not bool or (attention_tree and not attention_parallel):
             raise ValueError('Eight-row attention requires explicit parallel selection')
         self.attention_tree = bool(attention_tree and self.rows >= 8)
@@ -72,7 +75,7 @@ class ModelBatch:
         if self.attention_replay:
             from attention_mask_replay import validate_ticket
             self.replay_capacity = (start // 256 + 1) * 256
-            validate_ticket(start, self.rows, self.replay_capacity)
+            validate_ticket(start, self.rows, self.replay_capacity, short_context=short_context)
         if attention_parallel and not attention_dma:
             raise ValueError('Parallel attention requires DMA layout')
         self.attention_parallel = bool(attention_parallel and self.rows >= 8)
@@ -166,7 +169,7 @@ class ModelBatch:
                     memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
 
             self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
-                upload_replay, max_group_rows=self.replay_group_rows)
+                upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)
             self.grouped_readers.append(self.replay_reader)
             if self.replay_reader.start != start:
                 self.replay_reader.stage(start)

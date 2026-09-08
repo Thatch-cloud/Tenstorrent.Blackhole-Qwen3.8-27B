@@ -5,6 +5,25 @@ from attention_mask_replay import validate_ticket
 
 
 class RequestPlanTests(unittest.TestCase):
+    def test_short_coding_budget_has_three_families_and_native_boundary_fallback(self):
+        plan = capture_plan(170, 65536, 32, 512, max_verify_rows=8, short_context=True)
+        self.assertEqual([capture.key for capture in plan.captures],
+            [(1, None), (2, None), (4, None), (8, 256), (8, 512), (8, 768)])
+        self.assertEqual(plan.max_rows(254, 428), 4)
+        for position in range(170, 682):
+            remaining = 682 - position
+            maximum = plan.max_rows(position, remaining)
+            self.assertLessEqual(maximum, 8)
+            for rows in (1, 2, 4, 8):
+                if rows > maximum:
+                    continue
+                capture = plan.select(position, rows, remaining)
+                if capture.capacity is not None:
+                    validate_ticket(position, rows, capture.capacity, short_context=True)
+        for position, budget, limit in ((127, 32, 8), (170, 512, 32), (170, 599, 8)):
+            with self.assertRaises(ValueError):
+                capture_plan(position, 65536, 32, budget, max_verify_rows=limit, short_context=True)
+
     def test_cross_boundary_request_prepares_both_families_up_front(self):
         plan = capture_plan(4078, 65536, 32, 128)
         self.assertEqual([capture.key for capture in plan.captures],

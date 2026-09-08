@@ -34,12 +34,16 @@ def validate_replay_options(attention_replay, attention_mask_once, replay_group_
 class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                 native_sampling_rows=False):
+                 native_sampling_rows=False, short_context=False):
         import ttnn
 
         if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
             raise ValueError('Native-row sampling requires an explicit device sampler')
         self.native_sampling_rows = native_sampling_rows
+        if type(short_context) is not bool or (short_context and
+                (max_verify_rows != 8 or not norm_batch or not native_sampling_rows or replay_group_rows != 4)):
+            raise ValueError('Short-context verifier requires native-row sampling, batched norm and a T8 cap')
+        self.short_context = short_context
         if type(retain_mtp_hidden) is not bool:
             raise ValueError('Explicit boolean MTP hidden retention required')
         self.retain_mtp_hidden = retain_mtp_hidden
@@ -48,7 +52,7 @@ class VerifierEngine:
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
             raise ValueError('Explicit replay attention requires norm batching')
         validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
-        if attention_replay and max_verify_rows != 32:
+        if attention_replay and max_verify_rows != 32 and not short_context:
             raise ValueError('Width-cap experiment currently requires native attention')
         self.norm_batch = norm_batch
         self.attention_replay = attention_replay
@@ -71,7 +75,7 @@ class VerifierEngine:
         if attention_replay:
             from attention_request_plan import capture_plan
             self.replay_plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
-                session.max_new_tokens - len(session.emitted))
+                session.max_new_tokens - len(session.emitted), max_verify_rows=max_verify_rows, short_context=short_context)
         self.native_addresses = [[addresses(ttnn, value) for value in helper.live] for helper in helpers]
         self.widths = widths
         started = time.perf_counter()
@@ -150,7 +154,8 @@ class VerifierEngine:
             batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
             norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False),
             attention_mask_once=getattr(self, 'attention_mask_once', False),
-            replay_group_rows=getattr(self, 'replay_group_rows', 4))
+            replay_group_rows=getattr(self, 'replay_group_rows', 4),
+            short_context=getattr(self, 'short_context', False) and getattr(self, 'attention_replay', False))
 
     def proposal_rows(self):
         remaining = self.session.max_new_tokens - len(self.session.emitted)

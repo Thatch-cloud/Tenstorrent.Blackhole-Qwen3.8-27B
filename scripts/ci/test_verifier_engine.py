@@ -12,6 +12,16 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_short_context_reaches_only_replay_fixtures(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.model, engine.pages, engine.helpers = object(), object(), []
+        engine.position, engine.norm_batch, engine.short_context = 170, True, True
+        for enabled in (False, True):
+            engine.attention_replay = enabled
+            with patch('verifier_engine.ModelBatch') as factory:
+                engine.fixture(8, [], retain=True)
+            self.assertIs(factory.call_args.kwargs['short_context'], enabled)
+
     def test_native_sampling_selection_reaches_verifier_operation(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.sampler, engine.operations = object(), SimpleNamespace(deallocate=Mock())

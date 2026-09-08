@@ -23,7 +23,7 @@ class RequestPilotTests(unittest.TestCase):
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
-                    mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False):
+                    mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -31,13 +31,14 @@ class RequestPilotTests(unittest.TestCase):
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
                     attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
-                    native_sampling_rows=False):
+                    native_sampling_rows=False, short_context=False):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             engine.retain_mtp_hidden = retain_mtp_hidden
             engine.verified_mtp_hidden_for_publication = lambda ticket: [[token] for token in ticket.tokens]
             if attention_replay:
                 from attention_request_plan import capture_plan
-                plan = capture_plan(session.position, pages.shape[1] * 64, 32, 32)
+                plan = capture_plan(session.position, pages.shape[1] * 64, 32, 32,
+                    max_verify_rows=max_verify_rows, short_context=short_context)
                 engine.proposal_rows = lambda: plan.max_rows(session.position, session.max_new_tokens - len(session.emitted))
 
             def verify(ticket):
@@ -53,16 +54,30 @@ class RequestPilotTests(unittest.TestCase):
 
         with patch('full_request.VerifierEngine', side_effect=factory) as constructor:
             result = measure_request(SimpleNamespace(args=SimpleNamespace(vocab_size=100)), object() if native_sampling_rows else None,
-                [0, 1, 2] * (1365 if attention_replay else 12), SimpleNamespace(shape=(1, 1024)), [],
+                ([0, 1, 2] * 56 + [0, 1]) if short_context else [0, 1, 2] * (1365 if attention_replay else 12),
+                SimpleNamespace(shape=(1, 1024)), [],
                 prefill=prefill or (lambda prompt: seed), decode=decode,
                 live_digest=lambda: 'state', kv_digest=lambda position: position,
                 inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch,
-                attention_replay=attention_replay, family_routing=attention_replay,
+                attention_replay=attention_replay, family_routing=attention_replay or short_context,
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
                 lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
-                native_sampling_rows=native_sampling_rows)
+                native_sampling_rows=native_sampling_rows, short_context=short_context)
         return result, constructor
+
+    def test_short_attention_compares_matched_native_row_t8_requests(self):
+        records = []
+        for enabled in (False, True):
+            result, constructor = self.run_fixture(norm_batch=True, native_sampling_rows=True,
+                lookup_max_rows=8, short_context=True, attention_replay=enabled, attention_mask_once=enabled)
+            self.assertIs(constructor.call_args.kwargs['short_context'], True)
+            self.assertIs(result['short_context'], True)
+            self.assertIs(result['family_routing'], True)
+            self.assertEqual(result['length'], 170)
+            records.append(result)
+        for key in ('emitted', 'accepted', 'proposed', 'committed_decode_tokens'):
+            self.assertEqual(records[0][key], records[1][key])
 
     def test_native_sampling_rows_reaches_engine_without_changing_proposals(self):
         control, _ = self.run_fixture()

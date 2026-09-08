@@ -10,18 +10,23 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class ReplayAttentionReader:
-    def __init__(self, operations, mesh, rows, capacity, pages_host, upload, *, max_group_rows=4):
+    def __init__(self, operations, mesh, rows, capacity, pages_host, upload, *, max_group_rows=4,
+                 short_context=False):
         import torch
 
         if type(rows) is not int or rows not in (8, 16, 32):
             raise ValueError('Replay reader requires an explicit T8/T16/T32 bucket')
         if type(max_group_rows) is not int or max_group_rows not in (4, 8):
             raise ValueError('Replay group width must be explicitly four or eight')
+        if short_context and max_group_rows != 4:
+            raise ValueError('Short-context qualification requires four-row groups')
         if max_group_rows == 8 and os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':
             raise ValueError('Eight-row replay requires process-fixed compact native scratch')
         if type(capacity) is not int:
             raise ValueError('Integer capacity required')
-        validate_ticket(capacity - 256, rows, capacity)
+        first = max(128, capacity - 256) if short_context else capacity - 256
+        validate_ticket(first, rows, capacity, short_context=short_context)
+        self.short_context = short_context
         if pages_host.ndim != 2 or pages_host.shape[0] != 1 or pages_host.shape[1] < capacity // 64:
             raise ValueError('One complete native cache page table required')
         self.operations, self.mesh = operations, mesh
@@ -31,7 +36,7 @@ class ReplayAttentionReader:
         self.failed = False
         self.calls, self.refresh_calls = 0, 0
         self.mask_scope = None
-        self.start = capacity - 256
+        self.start = first
         grid = mesh.compute_with_storage_grid_size()
         try:
             words = torch.zeros(8, dtype=torch.int32)
@@ -48,7 +53,7 @@ class ReplayAttentionReader:
                     exp_approx_mode=False, q_chunk_size=0, k_chunk_size=256)
                 self.metadata.append((bundle, pages, mask, config))
                 self.programs.append(prepare(mesh, self.positions, mask, rows=count, batches=len(bundle),
-                    offset=bundle[0]['offset'], capacity=capacity))
+                    offset=bundle[0]['offset'], capacity=capacity, short_context=short_context))
         except BaseException:
             self.close()
             raise
@@ -58,7 +63,7 @@ class ReplayAttentionReader:
             raise RuntimeError('Replay reader is closed')
         if self.failed:
             raise RuntimeError('Replay reader is poisoned after a failed operation')
-        validate_ticket(start, self.rows, self.capacity)
+        validate_ticket(start, self.rows, self.capacity, short_context=self.short_context)
 
     def stage(self, start):
         import torch

@@ -94,11 +94,15 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
-                        native_sampling_rows=False):
+                        native_sampling_rows=False, short_context=False, attention_replay=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
+    if (type(short_context) is not bool or type(attention_replay) is not bool
+            or (attention_replay and not short_context)
+            or (short_context and (not native_sampling_rows or max_drafts != 7 or len(prompt) < 128))):
+        raise ValueError('Short attention comparison requires native-row K7 MTP and context at least 128')
     if (type(native_sampling_rows) is not bool or type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
             or not 0 < len(prompt) <= 256 or len(model.layers) != 64 or model.num_devices != 2
             or tuple(pages.shape) != (1, 1024) or not torch.equal(pages, torch.arange(1024).reshape(1, 1024))):
@@ -174,6 +178,8 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
             prefill=captured_prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=513, norm_batch=True,
             lookup_max_rows=max_drafts + 1, mtp_factory=factory, native_sampling_rows=native_sampling_rows,
+            short_context=short_context, family_routing=short_context,
+            attention_replay=attention_replay, attention_mask_once=attention_replay,
             progress=lambda block: status('committed-block', **{key: block[key] for key in (
                 'position', 'rows', 'accepted', 'committed', 'draft_ms', 'select_commit_ms', 'cycle_ms')}))
         result['mtp'] = metadata

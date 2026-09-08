@@ -232,3 +232,28 @@ The remaining verifier cost, not another sampling sweep, is the next bottleneck.
 
 Artifact `full-mtp-request.json` SHA256:
 `cda6127029826c86cc59b9c2e3ea775d0850840a0ef580cce0afc113d5398b9d`.
+
+### Next verifier comparison: short-context parallel attention
+
+Simulator `20260908T075510Z-308` passes T8 replay at capacities 256/512/768,
+including the actual position 170: 24 exact native-B1 output checks, 24 exact
+causal-mask checks, 12 unchanged-KV checks and 6 stale-query/position controls.
+The BF8 cache format matches the completed hardware request. Report SHA256:
+`ce0412905dced6ba5cd93cf5b5a318c3fbff764478da99041e9d5d40faaaceff`.
+
+An explicit short-context option is restricted to T8/four-row groups, with the
+first 256-token family starting at position 128 so native chunk size stays 256.
+The default long-context guard remains unchanged. Native T1/T2/T4 fallback handles
+family boundaries; no padding changes the actual coding prompt. The same bounded
+routing plan is applied to both arms, so neither acceptance nor proposal work may
+change between serial and parallel attention. It can differ from the earlier
+unrestricted T8 request, making the new paired control essential.
+
+The next `full-mtp-request` compares serial/parallel/parallel/serial attention,
+keeping native-row sampling, K7, target precision and four sampler links fixed.
+The candidate shares each refreshed causal mask across all 16 attention layers.
+All three short families warm before the native decode trace is parked. A same-
+source hardware component gate precedes model execution, then the complete
+requests must retain exact tokens, active GDN, valid KV and inactive slots.
+The 722-test host suite and 60 harness tests pass; no short-attention hardware
+or end-to-end speed claim yet.
