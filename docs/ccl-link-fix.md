@@ -20,6 +20,12 @@ serving image. Select `suite=learned-attention, fabric_link_probe=true`:
 - After that passes, use `simulator_only=false, cards_allocated=true` for the
   four-link hardware gate. No reset is requested.
 
+For this host-only selection fix, the standalone compiled C++ test verifies
+lazy evaluation without a full TTsim run; no device kernel math changes.
+The hardware probe now measures three ABBA blocks of 1/4/4/1 links at each
+1/8/32-row shape, checks exact outputs on both chips for every timed operation,
+and reports per-arm milliseconds. These are collective costs, not model TG.
+
 Host and standalone C++ tests are not hardware certification. Existing running
 jobs retain their original code. Other model collectives with explicit two-link
 settings remain unchanged; this is not a claim of runtime-wide four-link adoption
