@@ -2,16 +2,29 @@
 
 ## Current programme position - 2026-09-08
 
-**Chain retry prepared after34215001860 (`bf40963`) failed during warmup cleanup.**
+**Latest qualified:34216164140 (`3772f3b`), device chain exact, small TG gain.**
+ABBA57.244897TG host-stepped versus58.333256TG chained, ratio1.019012 (+1.90%).
+All four requests emit150 tokens, accept125/178 proposals in26 blocks and pass
+target token/GDN/valid KV/inactive checks plus both chips'319-row MTP K/V hashes.
+Drafting27.147793 ->25.151618ms/block; candidate verify65.036741, repair7.769537,
+cycle98.867127ms. The ownership fix passes full real-weight/four-link execution.
+Mean complete prefill/setup/decode worsens7.596229 ->9.270743s. Chain setup is
+3584.509647ms on first use and157.570025ms on second; neither is amortized away.
+Retain as a qualified decode candidate, not a serving-latency promotion.200TG
+remains unmet; next needs parallel proposals/wider verification, not another
+small host-overhead experiment. Report SHA256:
+`9d8d530a826b4a4fede6dd39b4cc23ef42f66c3228f53e96b0cf419446fc109e`.
+
+**Resolved chain failure:34215001860 (`bf40963`) failed during warmup cleanup.**
 The native `tt_all_gather` wrapper explicitly deallocates its input; the chain
 mistakenly retained that consumed embedding/view for later cleanup. This is not
 a link-discovery failure or a measured chain result. The consuming input is no
 longer owned twice. Simulator103111Z-304 now models that ownership contract and
 passes42 comparisons/14 stale controls, exit0 and clean close. SHA256:
 `c14a78568765edd29f9b30476a11fc5eb71e854f0af69250599d6b0f35ba5247`.
-752 host and60 harness tests pass. Retry the unchanged complete hardware ABBA.
+752 host and60 harness tests pass. The complete hardware retry passes above.
 
-**Latest qualified:34213743464 (`5c0e60c`), retain exact KV-only repair.**
+**Prior qualified:34213743464 (`5c0e60c`), retain exact KV-only repair.**
 ABBA55.067351TG control versus56.854631TG candidate, ratio1.032456 (+3.25%).
 All four requests emit150 tokens, accept125/178 proposals in26 blocks and pass
 target token/GDN/valid KV/inactive checks. Both chips' complete319-row valid MTP
@@ -22,7 +35,7 @@ The identical returned function also passes205 local interval/nonmutation cases;
 this checks one actual response, not held-out coding quality. Output SHA256:
 `3e7de1eedd8c91838c33c575f3edbd99643d1ce9c5b98ef57bbdd487662ecafc`.
 
-**Prepared next: native MTP device chain with KV-only repair in both arms.**
+**Device-chain experiment specification (completed):**
 Borrow the target BF16 embedding, gather the hidden shards, feed each native
 argmax token into the next MTP step and collect all proposals in one readback.
 Capture every requested count1--7 before prompt initialization; proposal math,
@@ -32,7 +45,7 @@ native keepdim-false argmax, full5120-wide embeddings, exit0 and clean close.
 It tests256 embedding rows without physical fabric, not full model throughput.
 An earlier simulation caught borrowed-seed view deallocation; ownership is fixed.
 Report SHA256:`a83dfb11d3baf3191d57b33fddc3de9464836a30042824e78a7b53026afcf736`.
-752 host tests and60 harness tests pass. Full hardware chain result is pending.
+752 host tests and60 harness tests pass. Full hardware chain result is recorded above.
 
 **KV-only repair specification (completed):** The candidate runs the native
 MTP embedding/hidden norms, fusion projection, attention input norm, fused QKV

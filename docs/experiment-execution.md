@@ -3,6 +3,16 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
+## Native MTP device chain (2026-09-08, qualified decode candidate)
+
+CI34216164140 on3772f3b passes:57.244897TG control versus58.333256TG candidate,
+ratio1.019012. Both repeats retain150 tokens,125/178 proposals,26 blocks and all
+target plus319-row MTP cache equality checks on both chips. Drafting drops
+27.147793 to25.151618ms/block; native execution still dominates. Setup-inclusive
+request means worsen7.596229 to9.270743s (first/second chain setup3584.510/157.570ms).
+This is not an overall latency improvement or200TG. No serving promotion.
+Report SHA256:`9d8d530a826b4a4fede6dd39b4cc23ef42f66c3228f53e96b0cf419446fc109e`.
+
 ## Device-chain ownership retry (2026-09-08)
 
 Run34215001860 onbf40963 fails during the first chain warmup cleanup, before
