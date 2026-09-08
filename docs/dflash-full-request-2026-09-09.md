@@ -1,10 +1,37 @@
 # Complete DFlash2 request integration
 
 **Target: 200 committed tok/s for one coding stream. Not achieved.**
-Latest measured hardware result remains **58.33 TG**, device-chained MTP,
+Best measured hardware result remains **58.33 TG**, device-chained MTP,
 [run 34216164140](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34216164140).
 This change connects a parallel learned drafter to complete generation instead
 of treating another isolated operator pass as a speed improvement.
+
+## Complete hardware result: 37.64 TG
+
+[34232609121](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34232609121),
+revision `5dc0878`, passes all three complete coding requests after the native
+head-layout fix. This is slower than MTP; serving defaults stay unchanged.
+
+| Metric | Result |
+| --- | --- |
+| Workload | `merge_intervals_v1`, CTX170, one stream, K7/T8 |
+| Completion | 150 committed decode tokens through EOS in every request |
+| Measured TG | 37.114056 / 38.184260; aggregate **37.641552** |
+| Target PP | 568.823676 tok/s |
+| Acceptance | 129/154 drafts (83.77%), 22 blocks/request, 6.818 committed/block |
+| Mean draft / verifier / publication | 110.576249 / 65.368631 / 3.343424 ms/block |
+| Complete prefill + setup + decode | 8239.563676 / 8170.156303 ms; no amortization |
+| Correctness | Exact native tokens, active GDN, valid target KV and inactive slots |
+| Feature audit | 220 checks covering 1500 row/chip/tap comparisons, all exact |
+
+The fenced first request is audit-only; its timing is excluded from TG. The two
+timed requests have no diagnostic fences. Rates include draft, verifier and
+publication, but exclude separately reported prefill and setup. The target is
+already loaded. This is not held-out coding quality or a matched MTP comparison.
+Artifact: `full-dflash-request.json`, SHA256:
+`692bc8250f4940c364e3c1c5166820585d17abb0bd25dddac63052f416deeb58`.
+
+## Historical stall diagnosis
 
 **First hardware attempt: [34225857819](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34225857819), cancelled after a stall.**
 At CTX170, its first T8 block accepts all seven drafts and commits eight tokens;
@@ -47,7 +74,7 @@ The old layout remains the default for unrelated component controls.
 Forty exact simulator checks pass across key-row sizes32/192/2080, changed
 allocations and changed-input trace replay on both chips. Report SHA256:
 `e9d3c137010a0fda003b87182da5f5f847ceb754d1c302e007050683d6cda0a8`.
-Full-request hardware validation of this replacement is still required.
+Full-request hardware validation of this replacement passes in34232609121 above.
 
 ## What is connected
 
@@ -92,7 +119,14 @@ prefill/setup/decode latency is also reported, with no setup amortization claim.
 - History simulation exercises CTX170 and the 2048-row sliding boundary, accepted
   prefixes 1/2/7/8, aborts and replay across the preallocated buffers: all 16
   checks pass. Report SHA256: `9ae52881272f70ca5da036af4dcaad209c2d5b9fe38d1816119e90dad31f2d01`.
-- All 839 host tests pass (779 CI helpers + 60 speculative harness tests).
+- Wide-history simulation adds accepted prefix32 at both context lengths:
+  all20 checks pass. Report SHA256:
+  `4393482ed91837292930ef8c24ef001221067cbc4b7675d47db911e5915694e2`.
+- T32 full-vocabulary candidate selection passes all eight shard/chunk checks
+  and returns exact global top16 IDs/scores for all31 proposal rows. This probe
+  excludes the LM-head projection. Report SHA256:
+  `3967db92ff9f1b844f71d6e7a20e367a21138dfe3904ddb8156605f2cae25707`.
+- All 842 host tests pass (782 CI helpers + 60 speculative harness tests).
   They cover transaction failures, stale tickets, ownership, complete
   fixture loading, exact selector equivalence and exclusion of audited timing.
 - These are integration/correctness checks, **not** full-model simulator speed,
@@ -100,8 +134,14 @@ prefill/setup/decode latency is also reported, with no setup amortization claim.
 
 ## After the first complete result
 
-Use the actual block breakdown to choose the next change: cache new history K/V
-once per layer, capture the fixed proposal computation, then address verifier
-cost and proposal width. Preserve the same full-request correctness boundary.
+The measured110.58ms draft and65.37ms verifier costs make T8 insufficient for
+200 TG even if drafting were free. The next opt-in suite,
+`full-dflash-wide-request`, tests31 proposals/T32: dense draft projections already
+operate on physical32-row tiles. This explicitly extrapolates beyond the trained
+eight-token block; acceptance and runtime must be measured, not assumed.
+It preserves the same full-request token/state/feature correctness boundary and
+reports `checkpoint_trained_block_rows=8` and `block_width_extrapolation=true`.
+Then cache new history K/V once per layer and capture proposal computation to
+reduce the measured drafting bottleneck. No serving defaults change.
 The failed native-attention numerical experiment remains a separate candidate,
 not a prerequisite for measuring the integrated composed drafter.

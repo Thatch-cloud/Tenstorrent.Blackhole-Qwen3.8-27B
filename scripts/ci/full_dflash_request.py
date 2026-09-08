@@ -44,6 +44,7 @@ def summarize_dflash_requests(requests):
     for entry in requests:
         if (any(entry.get(key) is not True for key in ('exact', 'state_exact', 'inactive_exact', 'ended_with_eos'))
                 or any(entry[key] != reference[key] for key in identity)
+                or entry['dflash'].get('block_rows') != reference['dflash'].get('block_rows')
                 or entry.get('selected_drafter') != 'dflash2' or entry.get('sampler_num_links') != 4
                 or not entry.get('fabric_sources') or entry['fabric_sources'] != reference.get('fabric_sources')):
             raise ValueError('Complete identical outputs, exact target state and the audited four-link pair required')
@@ -72,6 +73,7 @@ def summarize_dflash_requests(requests):
         per_request_tokens_per_second=[1000 * entry['committed_decode_tokens'] / entry['decode_ms'] for entry in measured],
         committed_tokens=tokens, measured_requests=2, feature_audit_requests=1,
         context=len(reference['prompt_tokens']), streams=1, target_reached=throughput >= 200,
+        block_rows=reference['dflash'].get('block_rows', 8),
         prefill_setup_decode_ms=[entry['prefill_setup_decode_ms'] for entry in measured],
         feature_setup_ms=[entry['feature_setup_ms'] for entry in measured],
         scope='Complete coding-request pilot; not a component rate, MTP comparison or held-out quality certification')
@@ -97,11 +99,12 @@ def load_dflash_fixtures(root):
 
 def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *, fixtures,
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
-                          audit_features=False, max_new_tokens=513):
+                          audit_features=False, max_new_tokens=513, block_rows=8):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
 
-    if type(audit_features) is not bool or len(prompt) > 2048:
+    if (type(audit_features) is not bool or len(prompt) > 2048
+            or type(block_rows) is not int or block_rows not in (8, 32)):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
     manifests, layers, projection, selector = fixtures
     capture = device = runtime = None
@@ -160,7 +163,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             raise ValueError('DFlash2 setup requires fresh candidate prefill features')
         status('prepare-five-layer-device-drafter')
         device = DFlashDevice(operations, model, TT_CCL(model.mesh_device), layers, projection, selector,
-            capture.outputs(), position=len(prompt), progress=status if audit_features else None)
+            capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows)
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
@@ -171,10 +174,11 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result = measure_request(model, sampler, prompt, pages, helpers,
             prefill=captured_prefill, decode=gold_decode, live_digest=live_digest, kv_digest=kv_digest,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=max_new_tokens,
-            norm_batch=True, lookup_max_rows=8, native_sampling_rows=True,
+            norm_batch=True, lookup_max_rows=block_rows, native_sampling_rows=True,
             feature_factory=factory, progress=lambda block: status('committed-block', **block))
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
-            block_rows=8, max_drafts=7, mask_token_id=248070,
+            block_rows=block_rows, max_drafts=block_rows - 1, mask_token_id=248070,
+            checkpoint_trained_block_rows=8, block_width_extrapolation=block_rows != 8,
             policy='Five learned BF16 layers, shared target head top16 and CPU FP64 learned greedy selector',
             attention='Composed precise control; unqualified native SDPA is not enabled',
             head_layout='Native QKV head split and concatenation; no generic sub-tile reshape',
@@ -190,7 +194,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['target_reached'] = bool(result['committed_tokens_per_second'] and result['committed_tokens_per_second'] >= 200)
         result['qualification'] = __doc__
         result['sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py')}
+            for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py',
+                         'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py', 'draft_selector.py')}
         return result
     finally:
         try:

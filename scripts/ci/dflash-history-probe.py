@@ -56,7 +56,7 @@ def main():
             warm = operation()
             ttnn.deallocate(warm)
             trace, trace_output = capture_operation(ttnn, mesh, operation)
-            for prefix in (1, 2, 7, 8):
+            for prefix in (1, 2, 7, 8, 32):
                 additions = (torch.arange(32).reshape(1, 1, 32, 1) + prefix * 5).expand(1, 1, 32, 5120).bfloat16()
                 source = upload(additions)
                 original = addresses(ttnn, device.history)
@@ -87,7 +87,7 @@ def main():
             trace_output = None
             device.close()
             device = None
-        report['passed'] = len(report['checks']) == 16
+        report['passed'] = len(report['checks']) == 20
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         raise

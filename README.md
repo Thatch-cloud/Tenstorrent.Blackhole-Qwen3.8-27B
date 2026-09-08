@@ -4,9 +4,9 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Latest measured: 58.33 committed tok/s** with device-chained MTP and exact KV-only repair;
+**Best measured: 58.33 committed tok/s** with device-chained MTP and exact KV-only repair;
 the matched native reference is **19.47 tok/s**.
-[Latest two-card run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34216164140)
+[Matched MTP run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34216164140)
 improves 57.24 to 58.33 TG (+1.90%), with identical drafts, target state and
 complete valid MTP caches on both cards. Extra setup makes the complete request
 slower, so this is a decode candidate, not a serving-latency improvement.
@@ -17,11 +17,11 @@ This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 trips saves only about 2 ms/block. The remaining draft/target execution costs,
 not more host-side tweaks, must fall substantially to approach 200 TG.
 
-The complete five-layer DFlash2 request path is now connected for testing.
-It uses the previously qualified composed attention, the target's embedding/head,
-and committed feature history. Native SDPA still fails its learned-input gate
-and is **not** enabled. The first hardware block accepts all seven drafts, but
-the next stalls; diagnosis is in progress. No DFlash2 request speed is claimed.
+The complete five-layer DFlash2 path now passes hardware correctness through EOS:
+**37.64 committed tok/s**, slower than MTP. It accepts 83.77% of draft tokens,
+but drafting costs 110.58 ms/block and verification another 65.37 ms.
+Next experiment: 32 verification rows instead of eight, followed by reducing
+drafter overhead. Native SDPA remains disabled after its failed numerical gate.
 [Integration and test boundaries](docs/dflash-full-request-2026-09-09.md).
 
 ## Setup
@@ -99,6 +99,25 @@ cache reuse lost 7% TG through lower acceptance; repaired parallel attention was
 (54.36 versus 54.90 TG); its mask correctness fix remains separate from speed.
 The earlier [sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
 established +7.7%; changes between separate runs are not attributed to an optimization.
+
+### DFlash2: complete coding response
+
+All five learned layers, shared target embedding/head and committed feature history.
+TG includes drafting, verification/readback and publication; excludes prefill/setup.
+
+| CTX | Streams (B) | Verify rows (T) | PP tok/s | Committed TG tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 170 | 1 | Up to 8 | 568.82 | **37.64** |
+
+Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
+129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
+a separate audited request checks every committed feature row on both chips.
+Prefill + unamortized setup + decode takes **8.24 / 8.17 s**, with the target loaded.
+This is one coding task, not held-out quality or a matched comparison against MTP.
+[Hardware run and artifacts](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34232609121).
+
+The opt-in 32-row test extrapolates beyond the checkpoint's trained eight-token
+block. Target verification remains mandatory; no wider-block speed is claimed yet.
 
 ### Earlier lookup experiments
 
@@ -205,7 +224,7 @@ was resolved by restoring the exact runtime image.
 | Workstream | Current position |
 | --- | --- |
 | MTP | Device chain + KV-only repair: 58.33 TG, +1.90% matched; setup-inclusive latency is worse; wider parallel proposals needed |
-| DFlash2 | Five-layer hardware correctness passes; full captured drafting and live request integration remain |
+| DFlash2 | Complete exact coding requests: 37.64 TG; wider proposals, captured drafting and per-layer history KV caching remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
 | Prefill/decode disaggregation | End-to-end placement, scheduling and responsiveness tests remain |

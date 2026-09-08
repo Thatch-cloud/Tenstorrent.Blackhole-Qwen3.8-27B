@@ -4,9 +4,10 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
 mtp_drafts=0
 dflash_drafts=0
-if [ "$mode" = full-dflash-request ]; then
+if [[ "$mode" = full-dflash-request || "$mode" = full-dflash-wide-request ]]; then
     [[ "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
     dflash_drafts=7
+    if [ "$mode" = full-dflash-wide-request ]; then dflash_drafts=31; fi
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
 fi

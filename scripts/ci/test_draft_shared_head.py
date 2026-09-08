@@ -21,8 +21,8 @@ class SharedHeadTests(unittest.TestCase):
         self.assertIn(124160, tokens[0].tolist())
         self.assertFalse(torch.equal(tokens[0], tokens[1]))
 
-    def fixture(self):
-        values = -torch.arange(248320, dtype=torch.float32).repeat(8, 1)
+    def fixture(self, rows=8):
+        values = -torch.arange(248320, dtype=torch.float32).repeat(rows, 1)
         boundaries = [0, 32767, 32768, 65535, 65536, 98303, 98304, 124159,
                       124160, 156927, 156928, 189695, 189696, 222463, 222464, 248319]
         values[:, boundaries] = torch.arange(1, 17, dtype=torch.float32)
@@ -39,6 +39,16 @@ class SharedHeadTests(unittest.TestCase):
         expected_scores, expected_tokens = values.topk(16, dim=-1)
         self.assertTrue(torch.equal(tokens, expected_tokens[None, 1:8]))
         self.assertTrue(torch.equal(scores, expected_scores[None, 1:8]))
+
+    def test_wide_head_keeps_all_31_proposal_rows(self):
+        values, chunks = self.fixture(32)
+        tokens, scores = merge_chunk_candidates(chunks, block_rows=32)
+        expected_scores, expected_tokens = values.topk(16, dim=-1)
+        self.assertEqual(tokens.shape, (1, 31, 16))
+        self.assertTrue(torch.equal(tokens, expected_tokens[None, 1:32]))
+        self.assertTrue(torch.equal(scores, expected_scores[None, 1:32]))
+        with self.assertRaises(ValueError):
+            merge_chunk_candidates(chunks)
 
     def test_missing_duplicate_and_padded_indices_rejected(self):
         _, chunks = self.fixture()

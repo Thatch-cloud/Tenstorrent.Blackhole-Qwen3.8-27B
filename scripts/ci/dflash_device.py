@@ -17,14 +17,16 @@ from projection_link_policy import projection_links
 
 
 class DFlashDevice:
-    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None):
+    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None, block_rows=8):
         import torch
 
         if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
-                or len(layers) != 5 or type(position) is not int or not 1 <= position <= 2048):
+                or len(layers) != 5 or type(position) is not int or not 1 <= position <= 2048
+                or type(block_rows) is not int or block_rows not in (8, 32)):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, position
+        self.block_rows, self.max_drafts = block_rows, block_rows - 1
         self.owned, self.layers = [], []
         self.history = self.pending = None
         self.spare_history = None
@@ -37,7 +39,8 @@ class DFlashDevice:
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         try:
             for attention, convolution, mlp in layers:
-                self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain, native_head_layout=True),
+                self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain,
+                    native_head_layout=True, block_rows=block_rows),
                     prepare_mlp_branch(operations, self.mesh, mlp, convolution, self.retain), mlp, convolution))
             shards = projection_shards(projection['fc.weight'])
             self.projection = self.upload(torch.cat(shards, dim=0), sharded=True)
@@ -166,7 +169,7 @@ class DFlashDevice:
     def propose(self, seed, count):
         import torch
 
-        if self.closed or self.pending is not None or type(seed) is not int or not 0 <= seed < 248320 or type(count) is not int or not 1 <= count <= 7:
+        if self.closed or self.pending is not None or type(seed) is not int or not 0 <= seed < 248320 or type(count) is not int or not 1 <= count <= self.max_drafts:
             raise ValueError('Committed DFlash2 history and bounded anchor/proposal IDs required')
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])
@@ -184,10 +187,10 @@ class DFlashDevice:
                 memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(self.mesh)))
         try:
             stage('upload-anchor-and-mask')
-            identifiers = upload(torch.tensor([[seed, *([248070] * 7)]], dtype=torch.int64), dtype=operations.uint32, row_major=True)
+            identifiers = upload(torch.tensor([[seed, *([248070] * self.max_drafts)]], dtype=torch.int64), dtype=operations.uint32, row_major=True)
             stage('borrowed-embedding')
             local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
-            local = retain(operations.reshape(local, (1, 1, 8, 2560)))
+            local = retain(operations.reshape(local, (1, 1, self.block_rows, 2560)))
             stage('embedding-all-gather')
             hidden = retain(operations.experimental.all_gather_async(local, persistent_output_buffer=None, dim=3,
                 multi_device_global_semaphore=self.collectives.get_and_cycle_ag_semaphore_handles(),
@@ -195,8 +198,9 @@ class DFlashDevice:
                 memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
                 chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
             stage('prepare-history-mask-and-rope')
-            hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 24), (0, 0)], 0.0))
-            host_mask = draft_attention_mask(self.history_rows)
+            if self.block_rows != 32:
+                hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - self.block_rows), (0, 0)], 0.0))
+            host_mask = draft_attention_mask(self.history_rows, block_rows=self.block_rows)
             key_rows = host_mask.shape[-1]
             valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
             history = retain(operations.pad(valid_history, [(0, 0), (0, 0), (0, key_rows - self.history_rows), (0, 0)], 0.0))
@@ -221,7 +225,7 @@ class DFlashDevice:
             projected = retain(operations.matmul(normalized, self.selector_projection, dtype=operations.float32,
                 program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
             projected = retain(operations.typecast(projected, operations.bfloat16))
-            block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, 8, 5120)))
+            block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, self.block_rows, 5120)))
             stage('shared-full-vocabulary-head')
             chunks = shared_head_candidates(operations, self.model, block, owned)
             stage('synchronize-head-and-selector')
@@ -235,13 +239,13 @@ class DFlashDevice:
                     raise AssertionError('Both learned head shards required')
                 for chip in range(2):
                     host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
-                        values=operations.to_torch(values[chip]).float().reshape(8, 16),
-                        indices=operations.to_torch(indices[chip]).long().reshape(8, 16)))
-            candidates, unary = merge_chunk_candidates(host_chunks)
+                        values=operations.to_torch(values[chip]).float().reshape(self.block_rows, 16),
+                        indices=operations.to_torch(indices[chip]).long().reshape(self.block_rows, 16)))
+            candidates, unary = merge_chunk_candidates(host_chunks, block_rows=self.block_rows)
             projected_parts = [operations.to_torch(value) for value in operations.get_device_tensors(projected)]
             if len(projected_parts) != 2 or not torch.equal(*projected_parts):
                 raise AssertionError('Replicated learned selector features differ')
-            selector_hidden = projected_parts[0][..., 1:8, :].reshape(1, 7, 256)
+            selector_hidden = projected_parts[0][..., 1:self.block_rows, :].reshape(1, self.max_drafts, 256)
             tokens, unused = select_active_candidates(selector_hidden, candidates, unary, self.predecessors, self.successors,
                 torch.tensor([seed], dtype=torch.int64))
             self.proposal_calls += 1

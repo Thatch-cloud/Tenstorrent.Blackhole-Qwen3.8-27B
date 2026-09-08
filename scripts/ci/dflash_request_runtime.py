@@ -13,6 +13,9 @@ class DFlashRequestRuntime:
                 or (validate_features is not None and not callable(validate_features))):
             raise ValueError('Prepared DFlash2 drafter at the exact prefilled frontier required')
         self.drafter, self.position = drafter, position
+        self.max_drafts = getattr(drafter, 'max_drafts', 7)
+        if type(self.max_drafts) is not int or self.max_drafts not in (7, 31):
+            raise ValueError('Explicit seven/31-proposal DFlash2 geometry required')
         self.validate_features = validate_features
         self.session = self.engine = None
         self.phase = 'unbound'
@@ -34,8 +37,8 @@ class DFlashRequestRuntime:
             raise ValueError('DFlash2 proposal requires the current committed request frontier')
         self.phase = 'drafting'
         try:
-            candidates = tuple(self.drafter.propose(self.session.seed, min(count, 7)))
-            if (len(candidates) != min(count, 7) or any(type(token) is not int or not 0 <= token < self.session.vocab_size
+            candidates = tuple(self.drafter.propose(self.session.seed, min(count, self.max_drafts)))
+            if (len(candidates) != min(count, self.max_drafts) or any(type(token) is not int or not 0 <= token < self.session.vocab_size
                     for token in candidates)):
                 raise ValueError('Complete global DFlash2 proposal IDs required')
             self.proposed = candidates

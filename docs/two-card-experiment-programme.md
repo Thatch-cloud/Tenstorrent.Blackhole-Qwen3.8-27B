@@ -2,22 +2,28 @@
 
 ## Current programme position - 2026-09-09
 
-**Full DFlash2 request integration replaces more isolated numerical experiments.**
+**Full DFlash2 generation passes: 37.64 committed TG; MTP remains best at 58.33.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the
 target's embedding/head and five post-layer feature taps. Only committed target
 input rows enter the drafter history; two preallocated history buffers survive
 verifier trace replay. The first complete coding request audits every published
 feature row against native decoding; two further requests measure committed TG,
 with setup reported separately. All three must match native tokens, GDN state,
-valid KV and inactive slots. This is implemented, not yet a measured DFlash2 gain.
-It uses the previously qualified composed precise attention, not the failing
-native candidate. First hardware attempt34225857819 accepts seven of seven
-drafts and passes the first published-feature audit, then stalls on the next
-block; cancelled with logs retained, not counted as a completed request.
-Follow-up adds bounded stall diagnostics after CI recovery.
-Those diagnostics identify a V-head tiled reshape; the native head-layout
-replacement passes40 exact simulator checks and awaits complete-request hardware
-validation. Attention math and target-verifier correctness checks are unchanged.
+valid KV and inactive slots. Run34232609121 (`5dc0878`) passes all three complete
+150-token requests through EOS. The two uninstrumented requests accept129/154
+drafts in22 blocks each and measure37.11/38.18 TG, aggregate37.641552 TG.
+Drafting costs110.58ms/block, verification65.37ms; mean6.82 committed tokens/block.
+PP568.82 tok/s; complete prefill/setup/decode8.24/8.17s. This is one coding task,
+not held-out quality, a serving result or a matched comparison against MTP.
+The earlier CTX178 stall was a V-head tiled reshape, fixed with native head split
+and concatenation after40 exact simulator checks. Attention math is unchanged;
+the failed native SDPA candidate remains disabled.
+
+**Next: explicit T32 extrapolation, then reduce drafter execution cost.**
+The checkpoint was trained for eight-token blocks. `full-dflash-wide-request`
+tests31 parallel proposals and up to32 target rows without changing defaults.
+The dense draft layers already use physical32-row tiles. Full target token/state
+and feature-publication checks remain mandatory; this is not yet a measured gain.
 [Integration details](dflash-full-request-2026-09-09.md).
 
 **Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**

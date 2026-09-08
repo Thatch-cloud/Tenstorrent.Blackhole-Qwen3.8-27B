@@ -105,7 +105,7 @@ def main():
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
     mtp_drafts = os.environ.get('QWEN_MTP_DRAFTS', '0')
     dflash_drafts = os.environ.get('QWEN_DFLASH_DRAFTS', '0')
-    if dflash_drafts not in ('0', '7') or (dflash_drafts != '0' and
+    if dflash_drafts not in ('0', '7', '31') or (dflash_drafts != '0' and
             (mtp_drafts != '0' or coding_request != '1' or not options.norm_batch or not options.request_pilot
              or options.attention_engine or options.attention_engine_wide or options.replay_inputs
              or os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0') != '0'
@@ -648,7 +648,7 @@ def main():
             from coding_request import make_prompt
             mtp_prompt = make_prompt(tokenizer)
             warm_lengths = (len(mtp_prompt),)
-            warm_widths = tuple(rows for rows in widths if rows <= 8)
+            warm_widths = tuple(rows for rows in widths if rows <= (int(dflash_drafts) + 1 if dflash_drafts != '0' else 8))
         if options.batch:
             from model_batch import ModelBatch
             save(replay_initial)
@@ -788,7 +788,7 @@ def main():
                             result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
-                                audit_features=feature_audit)
+                                audit_features=feature_audit, block_rows=int(dflash_drafts) + 1)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,

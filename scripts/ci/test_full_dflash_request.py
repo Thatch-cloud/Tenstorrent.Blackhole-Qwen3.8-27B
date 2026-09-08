@@ -84,3 +84,36 @@ class FullDFlashRequestTests(unittest.TestCase):
             env=environment, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('docker', result.stdout + result.stderr)
+
+    def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
+        generator = torch.Generator().manual_seed(29)
+        hidden = torch.randn((2, 31, 4), generator=generator).bfloat16()
+        candidates = torch.stack([torch.randperm(80, generator=generator)[:16] for row in range(62)]).reshape(2, 31, 16)
+        unary = torch.randn((2, 31, 16), generator=generator)
+        predecessors = torch.randn((80, 4), generator=generator).double()
+        successors = torch.randn((80, 4), generator=generator).double()
+        anchors = torch.tensor([78, 79])
+        selected, scores = select_active_candidates(hidden, candidates, unary, predecessors, successors, anchors)
+        previous = anchors
+        expected_tokens, expected_scores = [], []
+        for position in range(31):
+            edges = (predecessors[previous, None] * hidden.double()[:, position, None]
+                * successors[candidates[:, position]]).sum(-1)
+            row_scores = unary.double()[:, position] + edges
+            previous = candidates[:, position].gather(1, row_scores.argmax(-1, keepdim=True)).squeeze(1)
+            expected_tokens.append(previous)
+            expected_scores.append(row_scores)
+        self.assertTrue(torch.equal(selected, torch.stack(expected_tokens, dim=1)))
+        self.assertTrue(torch.equal(scores, torch.stack(expected_scores, dim=1)))
+
+    def test_selector_rejects_mismatched_or_unbounded_full_block(self):
+        hidden = torch.ones((1, 31, 4))
+        candidates = torch.zeros((1, 31, 1), dtype=torch.int64)
+        unary = torch.zeros((1, 31, 1))
+        codes = torch.ones((2, 4))
+        anchors = torch.tensor([1])
+        for projected, identifiers, scores in ((hidden, candidates[:, :30], unary[:, :30]),
+                (hidden, candidates, unary[:, :30]), (hidden[:, :7], candidates, unary),
+                (torch.ones((1, 32, 4)), candidates, unary)):
+            with self.assertRaises(ValueError):
+                select_active_candidates(projected, identifiers, scores, codes, codes, anchors)

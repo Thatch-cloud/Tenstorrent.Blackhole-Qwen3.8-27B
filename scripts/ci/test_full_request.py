@@ -74,25 +74,27 @@ class RequestPilotTests(unittest.TestCase):
     def test_feature_drafter_owns_neural_route_and_prefix_publication(self):
         from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
 
-        drafter = SimpleNamespace(position=36,
-            propose=lambda seed, count: tuple((seed + offset + 1) % 3 for offset in range(count)),
-            prepare_publication=lambda features, prefix, **kwargs: prefix,
-            discard_publication=Mock())
-        def commit(prefix):
-            drafter.position += prefix
-        drafter.commit_publication = commit
-        runtime = DFlashRequestRuntime(drafter, position=36)
-        factory = Mock(return_value=runtime)
-        result, constructor = self.run_fixture(feature_factory=factory, lookup_max_rows=8)
-        self.assertEqual(result['selected_drafter'], 'dflash2')
-        self.assertEqual(result['drafting_policy'], 'neural-with-target-fallback')
-        self.assertEqual(constructor.call_args.kwargs['retain_feature_taps'], TARGET_TAPS)
-        self.assertNotIn('retain_mtp_hidden', constructor.call_args.kwargs)
-        self.assertEqual(runtime.committed_feature_rows, 32)
-        self.assertEqual(drafter.position, 68)
-        self.assertGreater(result['feature_setup_ms'], 0)
-        self.assertEqual(result['mtp_setup_ms'], 0)
-        factory.assert_called_once()
+        for rows in (8, 32):
+            drafter = SimpleNamespace(position=36, max_drafts=rows - 1,
+                propose=lambda seed, count: tuple((seed + offset + 1) % 3 for offset in range(count)),
+                prepare_publication=lambda features, prefix, **kwargs: prefix,
+                discard_publication=Mock())
+            def commit(prefix):
+                drafter.position += prefix
+            drafter.commit_publication = commit
+            runtime = DFlashRequestRuntime(drafter, position=36)
+            factory = Mock(return_value=runtime)
+            result, constructor = self.run_fixture(feature_factory=factory, lookup_max_rows=rows)
+            self.assertEqual(result['selected_drafter'], 'dflash2')
+            self.assertEqual(result['drafting_policy'], 'neural-with-target-fallback')
+            self.assertEqual(constructor.call_args.kwargs['retain_feature_taps'], TARGET_TAPS)
+            self.assertNotIn('retain_mtp_hidden', constructor.call_args.kwargs)
+            self.assertEqual(runtime.committed_feature_rows, 32)
+            self.assertEqual(drafter.position, 68)
+            self.assertGreater(result['feature_setup_ms'], 0)
+            self.assertEqual(result['mtp_setup_ms'], 0)
+            self.assertEqual(max(block['rows'] for block in result['blocks']), rows)
+            factory.assert_called_once()
 
     def test_instrumented_attention_cannot_claim_decode_throughput(self):
         result, constructor = self.run_fixture(norm_batch=True, native_sampling_rows=True,

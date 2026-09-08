@@ -55,7 +55,10 @@ def greedy_selector_reference(projected_hidden, candidates, unary_logits, predec
 def select_active_candidates(projected_hidden, candidates, unary_logits, predecessor_codes, successor_codes, anchors):
     import torch
 
-    if (candidates.dtype != torch.int64 or anchors.dtype != torch.int64
+    if (projected_hidden.ndim != 3 or not 1 <= projected_hidden.shape[1] <= 31
+            or candidates.ndim != 3 or candidates.shape[:2] != projected_hidden.shape[:2]
+            or unary_logits.shape != candidates.shape or anchors.shape != (projected_hidden.shape[0],)
+            or candidates.dtype != torch.int64 or anchors.dtype != torch.int64
             or candidates.device.type != 'cpu' or anchors.device.type != 'cpu'
             or predecessor_codes.ndim != 2 or successor_codes.shape != predecessor_codes.shape
             or predecessor_codes.device.type != 'cpu' or successor_codes.device.type != 'cpu'):
@@ -65,6 +68,13 @@ def select_active_candidates(projected_hidden, candidates, unary_logits, predece
     identifiers, inverse = torch.unique(torch.cat((anchors.flatten(), candidates.flatten())), sorted=True, return_inverse=True)
     local_anchors = inverse[:anchors.numel()].reshape(anchors.shape)
     local_candidates = inverse[anchors.numel():].reshape(candidates.shape)
-    selected, scores = greedy_selector_reference(projected_hidden, local_candidates, unary_logits,
-        predecessor_codes[identifiers], successor_codes[identifiers], local_anchors)
-    return identifiers[selected], scores
+    selected_rows, score_rows = [], []
+    local_predecessors, local_successors = predecessor_codes[identifiers], successor_codes[identifiers]
+    for start in range(0, projected_hidden.shape[1], 8):
+        selected, scores = greedy_selector_reference(projected_hidden[:, start:start + 8],
+            local_candidates[:, start:start + 8], unary_logits[:, start:start + 8],
+            local_predecessors, local_successors, local_anchors)
+        selected_rows.append(selected)
+        score_rows.append(scores)
+        local_anchors = selected[:, -1]
+    return identifiers[torch.cat(selected_rows, dim=1)], torch.cat(score_rows, dim=1)

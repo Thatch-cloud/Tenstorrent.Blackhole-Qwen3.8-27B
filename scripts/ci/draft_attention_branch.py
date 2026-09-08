@@ -6,11 +6,13 @@ from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
 
 
-def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False):
+def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8):
     import torch
 
     if type(native_head_layout) is not bool:
         raise ValueError('Explicit boolean native head-layout selection required')
+    if type(block_rows) is not int or block_rows not in (8, 32):
+        raise ValueError('Explicit eight-row control or 32-row draft extrapolation required')
 
     native_kernel = None
     if precise_native:
@@ -33,7 +35,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     base = convolution['layers.0.attention_conv.base_kernel']
     return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
-        kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout,
+        kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout, block_rows=block_rows,
         norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
         convolution=upload(convolution['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()),
         bases=[upload(base[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
@@ -50,7 +52,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         raise ValueError('Native SDPA replaces the composed dot placement control')
     if type(context) is not int or context < 1 or context > 2048:
         raise ValueError('Explicit bounded committed feature context required')
-    key_rows = ((context + 8 + 31) // 32) * 32
+    block_rows = parameters.get('block_rows', 8)
+    key_rows = ((context + block_rows + 31) // 32) * 32
     if (tuple(hidden.shape) != (1, 1, 32, 5120) or tuple(history.shape) != (1, 1, key_rows, 5120)
             or hidden.dtype != operations.bfloat16 or history.dtype != operations.bfloat16
             or tuple(mask.shape) != (1, 1, 32, key_rows) or mask.dtype != operations.bfloat16):
@@ -77,11 +80,11 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     prepared = retain(grouped_causal_convolution(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
         fp32_intermediates=True, retain_temporaries=retain))
     context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
-    proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, 8, 5120)))
+    proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
     parts = [context_input, proposal_input]
-    if key_rows > context + 8:
+    if key_rows > context + block_rows:
         zeros = retain(operations.zeros_like(history))
-        parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - 8, 5120))))
+        parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - block_rows, 5120))))
     keys = retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
     heads, flat = {}, {}
     def normalize_head(name, head):
