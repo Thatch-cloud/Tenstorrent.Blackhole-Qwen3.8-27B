@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 
 from draft_attention_fixture import TENSORS as ATTENTION
-from draft_convolution_fixture import TENSORS as CONVOLUTION, fetch as fetch_subset, verified_bytes, MODEL, REVISION, HEADER_SHA256
+from draft_convolution_fixture import TENSORS as CONVOLUTION, fetch as fetch_subset, verified_bytes, verified_tensor, MODEL, REVISION, HEADER_SHA256
 from draft_mlp_fixture import TENSORS as MLP
 
 TENSOR_SHA256 = {
@@ -86,18 +86,13 @@ TENSOR_SHA256 = {
 
 
 def load_layer(output, layer):
-    import torch
-
     selected = specifications(layer)
     if str(layer) not in TENSOR_SHA256:
         raise ValueError('Layer tensor hashes have not been audited')
     manifest, data = verified_bytes(output, specifications=selected, hashes=TENSOR_SHA256[str(layer)])
     tensors = {}
     for name, (shape, filename) in selected.items():
-        value = torch.frombuffer(bytearray(data[name]), dtype=torch.bfloat16).reshape(shape)
-        if not torch.isfinite(value).all():
-            raise ValueError('Finite learned layer tensors required')
-        tensors[name] = value
+        tensors[name] = verified_tensor(data[name], shape, TENSOR_SHA256[str(layer)][name], name)
     return manifest, tensors
 
 

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from draft_convolution_fixture import fetch as fetch_subset, verified_bytes
+from draft_convolution_fixture import fetch as fetch_subset, verified_bytes, verified_tensor
 
 
 TENSORS = {
@@ -22,14 +22,10 @@ TENSOR_SHA256 = dict(zip(TENSORS, (
 
 
 def load_mlp(output):
-    import torch
-
     manifest, data = verified_bytes(output, specifications=TENSORS, hashes=TENSOR_SHA256)
     tensors = {}
     for name, (shape, filename) in TENSORS.items():
-        tensors[name] = torch.frombuffer(bytearray(data[name]), dtype=torch.bfloat16).reshape(shape)
-        if not torch.isfinite(tensors[name]).all():
-            raise ValueError('Finite learned MLP weights required')
+        tensors[name] = verified_tensor(data[name], shape, TENSOR_SHA256[name], name)
     return manifest, tensors
 
 

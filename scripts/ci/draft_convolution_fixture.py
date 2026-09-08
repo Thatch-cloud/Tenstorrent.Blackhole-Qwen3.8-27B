@@ -54,15 +54,25 @@ def verified_bytes(output, *, specifications=None, hashes=None):
     return manifest, tensors
 
 
-def load_convolution(output):
+def verified_tensor(data, shape, expected_hash, name):
     import torch
 
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+        raise ValueError(f'Input bytes changed before tensor conversion: {name}')
+    value = torch.frombuffer(bytearray(data), dtype=torch.bfloat16).reshape(shape)
+    if not torch.isfinite(value).all():
+        raise ValueError(f'Finite learned tensor required: {name}')
+    actual_hash = hashlib.sha256(memoryview(value.view(torch.uint8).numpy())).hexdigest()
+    if actual_hash != expected_hash:
+        raise ValueError(f'Loaded tensor integrity failure: {name}; expected {expected_hash}, read {actual_hash}')
+    return value
+
+
+def load_convolution(output):
     manifest, data = verified_bytes(output)
     tensors = {}
     for name, (shape, filename) in TENSORS.items():
-        tensors[name] = torch.frombuffer(bytearray(data[name]), dtype=torch.bfloat16).reshape(shape)
-        if not torch.isfinite(tensors[name]).all():
-            raise ValueError('Finite learned convolution weights required')
+        tensors[name] = verified_tensor(data[name], shape, TENSOR_SHA256[name], name)
     return manifest, tensors
 
 

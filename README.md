@@ -79,7 +79,11 @@ The T8 cap reduces proposals from 1812 to 572 per request, with the same 22 acce
 That recovers 20.4% versus T32, but remains slower than the paired native reference.
 TG excludes prefill/setup; T8 including setup is 13.67 tok/s.
 [Completed coding request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34183834884).
-The next matched request test compares one/four sampling links with T8 fixed.
+The subsequent matched T8 request test measured **18.87 tok/s with one sampling
+link versus 19.10 with four (+1.26%)**. All four requests completed with identical
+tokens and state; setup-inclusive four-link TG was 14.60 tok/s. This is one ABBA
+block, not a robust production speedup claim.
+[Four-link request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185881285).
 This is not adoption of a learned drafter or a serving change.
 
 Even perfect acceptance needs an eight-token draft/verify/commit cycle within **40 ms**.
@@ -111,6 +115,9 @@ link helper. Serving defaults are unchanged.
 The new five-layer captured-drafter simulator gate is **not passed**: its eager
 reference stage failed in layer three's gate/up MLP projection. It has not been
 promoted to hardware; this does not invalidate the earlier isolated branch tests.
+Local host-only diagnostics subsequently reproduced a one-bit discrepancy in a
+loaded tensor while a fresh file read matched its pinned hash. The local simulator
+is paused for integrity diagnosis; neither a kernel defect nor faulty RAM is yet established.
 
 | Experiment | Measured outcome | Meaning |
 | --- | --- | --- |

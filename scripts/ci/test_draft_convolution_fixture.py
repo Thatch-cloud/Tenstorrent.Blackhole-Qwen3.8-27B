@@ -5,10 +5,24 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from draft_convolution_fixture import load_convolution, ensure_fixture, MODEL, REVISION, HEADER_SHA256
+from draft_convolution_fixture import load_convolution, ensure_fixture, verified_tensor, MODEL, REVISION, HEADER_SHA256
 
 
 class ConvolutionFixtureTests(unittest.TestCase):
+    def test_tensor_conversion_is_independently_hash_checked(self):
+        import torch
+
+        data = b'\x80\x3f'
+        expected = hashlib.sha256(data).hexdigest()
+        self.assertEqual(verified_tensor(data, [1], expected, 'weight').item(), 1)
+        with patch('torch.frombuffer', return_value=torch.tensor([2.], dtype=torch.bfloat16)):
+            with self.assertRaisesRegex(ValueError, 'Loaded tensor integrity failure: weight'):
+                verified_tensor(data, [1], expected, 'weight')
+        with patch('torch.frombuffer') as convert:
+            with self.assertRaisesRegex(ValueError, 'Input bytes changed'):
+                verified_tensor(b'xx', [1], expected, 'weight')
+            convert.assert_not_called()
+
     def test_loader_checks_bytes_not_only_manifest(self):
         data = b'\x80\x3f'
         digest = hashlib.sha256(data).hexdigest()
