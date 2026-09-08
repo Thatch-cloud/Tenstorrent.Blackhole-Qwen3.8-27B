@@ -2123,3 +2123,18 @@ correctness process and both instrumented context processes use identical flags;
 the artifact checker rejects mismatched or partial configuration metadata.
 Three exact replays per arm/chip/context remain required. Profile sums remain
 attribution, not latency or committed throughput. Hardware execution is pending.
+
+### Hardware MLP trace result34170293087
+
+Run34170293087 on1fdceef passed the health gate, eager MLP gate, captured MLP
+gate, selector dot gate and five-layer gate. The captured MLP report contains
+four eager stage validations, twelve exact replay comparisons across both chips
+and two stale-input negative controls. Five post-warmup trace samples were
+1.912000,1.910169,1.911340,1.907680,1.914480ms (median1.911340ms).
+The separate eager process measured3.829159,3.634698,3.950039,3.897369,
+4.293291ms (median3.897369ms). These sequential process measurements are not
+an interleaved paired benchmark: they establish the isolated traced branch cost,
+not a full-drafter speedup. Uploads and validation are excluded. The connected
+five-layer gate also passed, but it does not yet capture the whole learned draft
+or provide committed coding-stream throughput. Matched best-verifier attribution
+run34170503918 is now in progress;200 committed tok/s remains unachieved.
