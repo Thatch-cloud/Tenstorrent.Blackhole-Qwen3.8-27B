@@ -2,6 +2,18 @@
 
 ## Current programme position - 2026-09-08
 
+Latest runtime checkpoint: captured fusion hardware run34178476409 failed before
+container creation/card access because pinned image `f1e9b1a64b4f` is missing.
+Read-only inventory34178884716 passed: both cards remain visible at PCIe x16/x4;
+the available TT serving candidate is `thatch-serving-tt:d9a3216` (`e6ba124656d0`),
+not the benchmark runtime. No resets, serving changes or model execution occurred.
+Device idleness remains unverified; other agents may be using the host.
+Historical inventory identifies the missing image as
+`zot.thatch.local:5000/tt-vllm:qwen38-k`; registry recovery must verify the full
+pinned image ID before any benchmark. Do not substitute the available image.
+The [README](../README.md) now separates serving, synthetic request and kernel
+results; absent PP measurements are explicit rather than inferred from TTFT.
+
 The200 committed coding tokens/s objective is not achieved. Serving defaults
 remain unchanged. The following is the current checkpoint; dated entries below
 are preserved historical evidence, including failures and superseded next steps.
