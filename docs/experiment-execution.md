@@ -5,6 +5,15 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current attention failure (2026-09-08)
 
+Follow-up34205529748 (`2a9c1d1`) stops at position258, attention index0, chip0.
+The first four rows differ (11,275 elements, max2.6953125); the last four are
+exact. Saved native output and ordinary folded replay both match in the local
+real-query simulator084618Z on both chips. Thus real input magnitudes alone do
+not reproduce the integration error. The attempted dynamic-chunk masked arm is
+unsupported and exited1; do not promote it. The next diagnostic additionally
+exports the live shared mask and compares its static prefix and refreshed tail
+against the exact host causal oracle. No arithmetic or precision change yet.
+
 Run 34202741880 (`f5a4403`) failed full-request token equality at emitted index
 138 after its short-attention component passed. The serial control completed
 150 tokens and exact final state; the parallel candidate is not a TG result.

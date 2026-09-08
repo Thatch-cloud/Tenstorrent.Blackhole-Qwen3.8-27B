@@ -2,6 +2,21 @@
 
 ## Current programme position - 2026-09-08
 
+Real-query audit **34205529748**, code `2a9c1d1`, localizes the first attention
+failure to position258, attention index0, chip0: 11,275/24,576 output elements
+differ, max absolute error2.6953125. Only the first four query rows differ;
+the final four match exactly. All earlier blocks passed the sixteen-layer audit.
+The serial request still passes 150 tokens/state checks (54.47 TG, one control).
+Saved query/KV SHA256:
+`c720f80b33fecd489b3fb3c52eec63a6246b5779bc3d7a838016677b57f7b372`.
+
+Local real-data simulator084618Z matches the saved native output exactly and
+the ordinary folded path also matches native on A/B/A, both chips. It does NOT
+reproduce the integrated failure. An exploratory dynamic-chunk masked arm was
+rejected by the native API (explicit mask requires nonzero chunk size); the run
+exited1, not a pass. Next capture the actual live mask with the same failing
+query/KV. Do not change arithmetic or claim a kernel fix from an isolated pass.
+
 Latest hardware attempt **34202741880**, code `f5a4403`, is rejected. The short
 attention component gate passed, but the first full-request parallel candidate
 changed emitted token 138. The serial arm passed all 150 tokens and state checks

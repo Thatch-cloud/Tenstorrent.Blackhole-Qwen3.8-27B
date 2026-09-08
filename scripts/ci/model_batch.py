@@ -179,7 +179,7 @@ class ModelBatch:
                 self.replay_reader.audit = AttentionReplayAudit(ttnn,
                     SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows),
                     pages=pages[:, :self.replay_capacity // 64],
-                    output_directory='/experiment/results/attention-mismatch')
+                    output_directory='/experiment/results/attention-mismatch', masks=self.replay_reader.metadata)
             if self.replay_reader.start != start:
                 self.replay_reader.stage(start)
         gdn_index = 0

@@ -63,6 +63,27 @@ class AttentionAuditTests(unittest.TestCase):
             self.assertEqual(len(caught.exception.evidence['fixture']['sha256']), 64)
             self.assertEqual(audit.operations.deallocate.call_count, 2)
 
+    def test_failure_preserves_mask_and_reports_static_prefix_corruption(self):
+        from attention_head_fold import causal_mask
+
+        with TemporaryDirectory() as directory:
+            mask = torch.cat([causal_mask(4, 258, 512), causal_mask(4, 262, 512)], dim=0)
+            mask[0, 0, 0, 0] = 7
+            metadata = [([dict(rows=4, offset=0), dict(rows=4, offset=4)], None, mask, None)]
+            audit, _, _ = self.fixture(pages=torch.arange(8).reshape(1, 8),
+                output_directory=directory, masks=metadata)
+            audit.records[0]['candidate'][0, 0, 0, 0] = 2
+            cache = torch.ones(8, 2, 64, 256, dtype=torch.bfloat16)
+            audit.records[0].update(keys=cache, values=cache)
+            with self.assertRaises(AttentionMismatch) as caught:
+                audit.check(258, [1] * 8)
+            checks = caught.exception.evidence['fixture']['mask_checks']
+            self.assertEqual(len(checks), 2)
+            self.assertTrue(all(entry['prefix_differing_elements'] == 1 for entry in checks))
+            self.assertTrue(all(entry['tail_differing_elements'] == 0 for entry in checks))
+            saved = torch.load(Path(directory) / 'real-query.pt', weights_only=True)
+            self.assertEqual(float(saved['mask'][0, 0, 0, 0]), 7)
+
     def test_capture_budget_and_cleanup_exclude_borrowed_cache(self):
         audit, query, _ = self.fixture()
         with self.assertRaises(ValueError):

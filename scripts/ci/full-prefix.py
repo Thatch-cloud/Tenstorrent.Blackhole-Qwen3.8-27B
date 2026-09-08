@@ -807,7 +807,7 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        for attention_replay in (False, True):
+                        for attention_replay in (True,):
                             print(json.dumps(dict(mtp_short_attention=attention_replay, repetition=len(report['request_checks']))), flush=True)
                             result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,

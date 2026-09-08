@@ -23,9 +23,10 @@ def tensor_summary(value):
 
 
 class AttentionReplayAudit:
-    def __init__(self, operations, oracle, *, pages=None, output_directory=None):
+    def __init__(self, operations, oracle, *, pages=None, output_directory=None, masks=None):
         self.operations, self.oracle = operations, oracle
         self.pages, self.output_directory = pages, output_directory
+        self.masks = masks
         self.records, self.owned = [], []
         self.closed = False
 
@@ -81,6 +82,23 @@ class AttentionReplayAudit:
             raise ValueError('Diagnostic export is bounded to the twelve short-context pages')
         tensors = dict(query=query, actual=actual, expected=expected, pages=self.pages.cpu().clone(),
                        position=position, scale=record['scale'], chip=chip)
+        mask_checks = []
+        if self.masks is not None:
+            from attention_head_fold import causal_mask
+            if len(self.masks) != 1:
+                raise ValueError('One bounded T8 mask bundle required for diagnostic export')
+            bundle, _, mask, _ = self.masks[0]
+            expected_mask = torch.cat([causal_mask(group['rows'], position + group['offset'], self.pages.numel() * 64)
+                                       for group in bundle], dim=0)
+            for mask_chip, part in enumerate(self.operations.get_device_tensors(mask)):
+                host_mask = self.operations.to_torch(part).clone()
+                mask_checks.append(dict(chip=mask_chip, exact=torch.equal(host_mask, expected_mask),
+                    differing_elements=int((host_mask != expected_mask).sum()),
+                    prefix_differing_elements=int((host_mask[..., :-256] != expected_mask[..., :-256]).sum()),
+                    tail_differing_elements=int((host_mask[..., -256:] != expected_mask[..., -256:]).sum()),
+                    actual=tensor_summary(host_mask), expected=tensor_summary(expected_mask)))
+                if mask_chip == chip:
+                    tensors['mask'] = host_mask
         for name in ('keys', 'values'):
             source = record[name]
             end = (page_count, *tuple(source.shape)[1:])
@@ -95,7 +113,8 @@ class AttentionReplayAudit:
         path = directory / 'real-query.pt'
         torch.save(tensors, path)
         return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                    keys=tensor_summary(tensors['keys']), values=tensor_summary(tensors['values']))
+                    keys=tensor_summary(tensors['keys']), values=tensor_summary(tensors['values']),
+                    mask_checks=mask_checks)
 
     def close(self):
         if not self.closed:
