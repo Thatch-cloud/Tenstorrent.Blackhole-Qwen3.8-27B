@@ -2,6 +2,39 @@
 
 ## Current programme position - 2026-09-08
 
+**Identified fault and simulator-qualified repair:** run34206948191 (`079e552`)
+finds 12,277/12,276 corrupt static-prefix mask values on the two chips, with
+zero refreshed-tail differences. The saved mask/query/KV fixture SHA is
+`6504ecb77022c9a843e6cd77a96e0b9269c01ce0dd9835ecf333f4ad50b69688`.
+Simulator090326Z reproduced the exact11275-element hardware output error when
+given that mask; a clean mask was exact. This identifies the causal-mask prefix,
+not SDPA math or T4 routing, as the immediate failure. The writer that corrupted
+the resident prefix is not yet identified; immutable-prefix residency was unsafe.
+
+The short-context reader now enqueues native in-place constant-zero fill before
+tail generation, inside every captured mask refresh. It neither multiplies
+corrupt/NaN data by zero nor depends on a separately resident zero tensor.
+Shared-mask forwards still initialize once, then use the mask for16 layers.
+No SDPA arithmetic, target precision, native B1 or default long-context path changes.
+Simulator090714Z reproduces the old failure and fixes the saved corrupt-mask
+A/B/A case exactly on both chips (18 comparisons, including the failing control).
+Report SHA256: `e9a4b87f3931ee5274ee413f2ba438c1a74f03332879e73a08f51a4201f1886d`.
+
+Next hardware gate first audits an entire repaired coding request against native
+attention in all16 layers, then runs uninstrumented serial/parallel/parallel/serial
+MTP requests. The audit is stored separately and cannot enter TG aggregation.
+The multi-family prerequisite now poisons the entire mask with NaNs before each
+replay, so a tail-only initialization cannot accidentally pass again.
+Simulator090902Z passes all24 output checks,24 mask checks and12 immutable-KV
+checks after12 full-mask poison injections, plus6 stale-query controls, at
+capacities256/512/768. Report SHA256:
+`382558f2631bbc2e127a3c86c3d40e2cb06fc7d6f2255f911fc2e72a1e56c708`.
+All733 host tests and60 speculative harness tests pass for the repair.
+Final real-data simulator091157Z re-injects the saved corrupt mask before every
+A/B/A replay, rather than just before warmup. Old behavior still reproduces the
+hardware failure and the captured fill repairs every output exactly on both chips.
+Report SHA256: `f7a4b8090589b563648b8018edc1e0a7959f72184b5159afe3ae9cdfffddf8e0`.
+
 Real-query audit **34205529748**, code `2a9c1d1`, localizes the first attention
 failure to position258, attention index0, chip0: 11,275/24,576 output elements
 differ, max absolute error2.6953125. Only the first four query rows differ;

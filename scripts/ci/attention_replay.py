@@ -91,6 +91,8 @@ class ReplayAttentionReader:
     def refresh(self):
         self.validate(self.start)
         for entry, program in zip(self.metadata, self.programs, strict=True):
+            if self.short_context:
+                self.operations.full_like(entry[2], 0.0, optional_tensor=entry[2])
             refresh_mask(self.positions, entry[2], program)
             self.refresh_calls += 1
 

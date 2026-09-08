@@ -5,6 +5,17 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current attention failure (2026-09-08)
 
+Run34206948191 (`079e552`) confirms corrupt mask prefix on both chips and an
+exact tail:12277/12276 differing prefix elements, zero tail differences. The
+saved mask/query/KV reproduces the hardware output error exactly in local
+simulator090326Z. Native in-place constant fill inside the short-context mask
+refresh repairs this real-data negative control in simulator090714Z; the old
+tail-only path still reproduces all11275 wrong output elements. All18 A/B/A
+arm/chip comparisons complete. This is a mask-initialization repair, not a
+numerical-tolerance relaxation, measured TG gain, or identification of the
+upstream writer. New full-model testing keeps the diagnostic outside the paired
+timing results and requires all token/state guards before any promotion.
+
 Follow-up34205529748 (`2a9c1d1`) stops at position258, attention index0, chip0.
 The first four rows differ (11,275 elements, max2.6953125); the last four are
 exact. Saved native output and ordinary folded replay both match in the local

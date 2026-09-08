@@ -8,6 +8,24 @@ from attention_replay import ReplayAttentionReader
 
 
 class ReplayReaderTests(unittest.TestCase):
+    def test_short_masks_are_fully_initialized_inside_each_replay(self):
+        events = []
+        operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock(),
+            full_like=Mock(side_effect=lambda *args, **kwargs: events.append('fill')))
+        mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
+        with patch('attention_replay.prepare', return_value='program'):
+            reader = ReplayAttentionReader(operations, mesh, 8, 512, torch.arange(8).reshape(1, 8),
+                lambda value, dtype=None: value, short_context=True)
+        with patch('attention_replay.refresh_mask', side_effect=lambda *args: events.append('tail')):
+            reader.refresh()
+            reader.refresh()
+        self.assertEqual(events, ['fill', 'tail', 'fill', 'tail'])
+        self.assertEqual(operations.full_like.call_count, 2)
+        for call in operations.full_like.call_args_list:
+            self.assertIs(call.args[0], reader.metadata[0][2])
+            self.assertIs(call.kwargs['optional_tensor'], reader.metadata[0][2])
+            self.assertEqual(call.args[1], 0.0)
+
     def test_short_reader_uses_128_start_and_preserves_fixed_masks(self):
         operations = SimpleNamespace(int32='int32', SDPAProgramConfig=Mock())
         mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))

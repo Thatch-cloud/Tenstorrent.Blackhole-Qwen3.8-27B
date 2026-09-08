@@ -24,7 +24,7 @@ def main():
 
     report = dict(passed=False, backend='hardware' if options.hardware else 'simulator',
         scope='Short-context T8 attention component, including CTX170; not full-model correctness or TG',
-        checks=[], mask_checks=[], source_checks=[], stale_controls=0,
+        checks=[], mask_checks=[], source_checks=[], stale_controls=0, mask_poison_controls=0,
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                  for name in ('attention_replay.py', 'attention_mask_replay.py', 'attention_mask_replay.cpp',
                               'attention_parallel.py', 'attention_fold_dma.py', 'attention_fold_dma.cpp')})
@@ -96,6 +96,12 @@ def main():
                     staged = ttnn.from_torch(ticket_query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                         mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
                     ttnn.copy_host_to_device_tensor(staged, query)
+                    for _, _, mask, _ in reader.metadata:
+                        poison = torch.full(tuple(mask.shape), float('nan'), dtype=torch.bfloat16)
+                        staged_mask = ttnn.from_torch(poison, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                        ttnn.copy_host_to_device_tensor(staged_mask, mask)
+                        report['mask_poison_controls'] += 1
                     ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                     for chip, (actual, reference) in enumerate(zip(host(output), expected, strict=True)):
                         if not torch.equal(actual, reference):
@@ -128,7 +134,8 @@ def main():
                     reader.close()
                 release_owned(ttnn, owned)
         report['passed'] = (len(report['checks']) == 24 and len(report['mask_checks']) == 24
-                            and len(report['source_checks']) == 12 and report['stale_controls'] == 6)
+                            and len(report['source_checks']) == 12 and report['stale_controls'] == 6
+                            and report['mask_poison_controls'] == 12)
         if not report['passed']:
             raise AssertionError('Incomplete short-context attention gate')
     except BaseException as error:

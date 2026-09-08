@@ -645,6 +645,7 @@ def main():
             if (component.get('passed') is not True or component.get('backend') != 'hardware'
                     or component.get('sources') != short_sources or len(component.get('checks', [])) != 24
                     or len(component.get('mask_checks', [])) != 24 or len(component.get('source_checks', [])) != 12
+                    or component.get('mask_poison_controls') != 12
                     or component.get('stale_controls') != 6):
                 raise AssertionError('Same-source hardware short-context attention gate required')
             report['short_attention_sources'] = short_sources
@@ -791,8 +792,8 @@ def main():
                     from full_mtp_request import measure_mtp_request
                     from full_request_pair import summarize_requests
                     output_path = root / 'full-mtp-request.json'
-                    report['scope'] = 'Diagnostic real-query native B1 versus folded attention; no candidate throughput claim'
-                    report['instrumented_timing'] = True
+                    report['scope'] = 'Repaired short-context mask: real-query audit, then matched serial/parallel MTP ABBA'
+                    report['instrumented_timing'] = False
                     report['attention_audit_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                         for name in ('attention_replay_audit.py', 'attention_replay.py', 'model_batch.py', 'verifier_engine.py')}
                     report['context_lengths'] = [len(prompt)]
@@ -807,24 +808,29 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        for attention_replay in (True,):
-                            print(json.dumps(dict(mtp_short_attention=attention_replay, repetition=len(report['request_checks']))), flush=True)
+                        for attention_replay, attention_audit in ((True, True), (False, False), (True, False), (True, False), (False, False)):
+                            print(json.dumps(dict(mtp_short_attention=attention_replay, attention_audit=attention_audit,
+                                repetition=len(report['request_checks']))), flush=True)
                             result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 max_drafts=int(mtp_drafts), native_sampling_rows=True,
-                                short_context=True, attention_replay=attention_replay, attention_audit=attention_replay)
+                                short_context=True, attention_replay=attention_replay, attention_audit=attention_audit)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
                                 fabric_sources=fabric_sources, mtp_short_attention=attention_replay)
-                            report['request_checks'].append(result)
+                            if attention_audit:
+                                report['attention_audit_request'] = result
+                                report['attention_audit_passed'] = True
+                            else:
+                                report['request_checks'].append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             if result['committed_decode_tokens'] == 0:
                                 raise AssertionError('MTP request must exercise decode')
-                    report['attention_audit_passed'] = True
+                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_short_attention')
                     report['passed'] = True
-                    print(json.dumps(dict(attention_audit_passed=True, throughput_claim=False)), flush=True)
+                    print(json.dumps(report['request_summary']), flush=True)
                     return
 
                 def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False, sampling_links=False):

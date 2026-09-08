@@ -5,6 +5,11 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_instrumented_diagnostics_cannot_enter_throughput_summary(self):
+        for key in ('attention_audit', 'instrumented_timing'):
+            with self.assertRaisesRegex(ValueError, 'not paired throughput'):
+                summarize_requests([{key: True}])
+
     def test_short_attention_keeps_mtp_sampling_and_family_routing_fixed(self):
         def measure(*, mtp_short_attention):
             record = dict(self.record(True), mtp_short_attention=mtp_short_attention, native_sampling_rows=True,

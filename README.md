@@ -11,10 +11,11 @@ passes all four complete requests with identical tokens and cache state.
 Removing unused sampling rows improves decode by **7.7%** in this ABBA block.
 This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 
-**Latest experiment rejected:** short-context parallel attention passed its component
-test but changed the full response at token 138 in [run 34202741880](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34202741880).
-It is not a speed result. Real-query comparison against native attention is next;
-the exact serial-attention MTP path remains the qualified baseline.
+**Current fix:** [hardware diagnostics](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34206948191)
+found a corrupt causal-mask prefix in short-context parallel attention. The saved
+failure reproduces exactly in TTSim; initializing the full mask inside the trace
+restores exact output. Full-model validation and paired timing are next.
+The serial-attention MTP path remains the qualified baseline.
 
 ## Setup
 

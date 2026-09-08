@@ -4,6 +4,8 @@ import math
 
 
 def summarize_requests(requests, *, arm_key='norm_batch'):
+    if any(entry.get('attention_audit') or entry.get('instrumented_timing') for entry in requests):
+        raise ValueError('Instrumented attention diagnostics are not paired throughput measurements')
     if arm_key not in ('norm_batch', 'attention_replay', 'attention_wide', 'lookup_cap', 'sampling_links', 'native_sampling_rows', 'mtp_short_attention'):
         raise ValueError('Known matched request experiment required')
     if len(requests) != 4 or [entry[arm_key] for entry in requests] != [False, True, True, False]:
