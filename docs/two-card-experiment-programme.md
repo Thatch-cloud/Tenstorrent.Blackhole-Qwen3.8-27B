@@ -2,16 +2,36 @@
 
 ## Current programme position - 2026-09-08
 
-**Prepared next: exact KV-only repair ABBA.** The candidate runs the native
+**Latest completed:34213743464 (`5c0e60c`), retain exact KV-only repair.**
+ABBA55.067351TG control versus56.854631TG candidate, ratio1.032456 (+3.25%).
+All four requests emit150 tokens, accept125/178 proposals in26 blocks and pass
+target token/GDN/valid KV/inactive checks. Both chips' complete319-row valid MTP
+K/V hashes also match across every arm. Repair/commit11.623757 ->7.874864ms/block;
+mean total prefill/setup/decode7.682483 ->7.250688s. Target200TG remains unmet.
+Report SHA256:`451b750fa24e6cdfea0b47dc4bd205673b0eee49dd57a20152265ac3386430d3`.
+
+**Prepared next: native MTP device chain with KV-only repair in both arms.**
+Borrow the target BF16 embedding, gather the hidden shards, feed each native
+argmax token into the next MTP step and collect all proposals in one readback.
+Capture every requested count1--7 before prompt initialization; proposal math,
+full vocabulary, acceptance and both target/draft-cache equality stay fixed.
+Simulator101731Z-299 passes42 width/chip/seed checks and14 stale controls, with
+native keepdim-false argmax, full5120-wide embeddings, exit0 and clean close.
+It tests256 embedding rows without physical fabric, not full model throughput.
+An earlier simulation caught borrowed-seed view deallocation; ownership is fixed.
+Report SHA256:`a83dfb11d3baf3191d57b33fddc3de9464836a30042824e78a7b53026afcf736`.
+752 host tests and60 harness tests pass. Full hardware chain result is pending.
+
+**KV-only repair specification (completed):** The candidate runs the native
 MTP embedding/hidden norms, fusion projection, attention input norm, fused QKV
 preparation and both paged writes. It omits SDPA, output projection, residual,
 MLP and final norm whose output teacher-forced initialization/repair ignores.
 Proposal steps remain the full native MTP layer. No new kernel math: source and
 fused-prep flag are pinned. Both arms require identical proposals/acceptance and
 complete valid MTP K/V hashes on both chips, in addition to all target checks.
-746 host tests and 60 harness tests pass; hardware correctness/speed unmeasured.
+Its pre-launch validation passed746 host tests and60 harness tests.
 
-**Latest completed:34212022749 (`1e3738b`), reject approximate cache reuse.**
+**Prior run:34212022749 (`1e3738b`), reject approximate cache reuse.**
 All four complete requests pass exact target tokens/GDN/valid KV/inactive slots.
 Control54.942525TG versus candidate51.116004TG; ratio0.930354. Each emits150
 committed tokens. Full repair accepts125/178 in26 blocks; reuse accepts120/209

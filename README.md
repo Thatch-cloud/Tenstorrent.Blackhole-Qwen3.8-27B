@@ -4,17 +4,18 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Latest measured: 54.94 committed tok/s** with MTP and full cache repair;
-the matched native reference is **19.36 tok/s**.
-[Latest two-card run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34212022749)
-passes full token/cache checks. Accepted draft-cache reuse is slower overall:
-**51.12 tok/s** because acceptance falls. It is **not adopted**.
+**Latest measured: 56.85 committed tok/s** with exact KV-only MTP repair;
+the matched native reference is **19.20 tok/s**.
+[Latest two-card run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34213743464)
+improves 55.07 to 56.85 TG (+3.25%), with identical drafts, target state and
+complete valid MTP caches on both cards. The gain is retained for experiments.
 The earlier native-row sampler comparison improved 49.79 to 53.60 TG (+7.7%).
 This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 
-**Next experiment: exact KV-only MTP repair.** Keep the correct draft history,
-but skip attention output and MLP work whose results repair never consumes.
-Device-chained drafting is also being investigated to remove CPU round trips.
+**Next experiment: device-chained drafting.** One captured proposal chain and
+one token readback instead of per-token CPU round trips. Both arms retain exact
+KV-only repair. The feedback primitive passes simulation; full requests must
+still prove identical acceptance, caches and improved TG on the real cards.
 
 ## Setup
 
@@ -71,20 +72,21 @@ TG includes drafting, verification/readback and commit; excludes prefill/setup.
 
 | CTX | Streams (B) | Path | Verify rows (T) | PP tok/s | Committed TG tok/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 170 | 1 | Native reference, all paired repetitions | 1 | 558.15 | 19.36 |
-| 170 | 1 | MTP K7, full teacher-forced repair | Up to 8 | 537.91 | **54.94** |
-| 170 | 1 | MTP K7, accepted draft-cache reuse | Up to 8 | 532.88 | 51.12 |
+| 170 | 1 | Native reference, all paired repetitions | 1 | 568.58 | 19.20 |
+| 170 | 1 | MTP K7, full decoder during repair | Up to 8 | 446.56 | 55.07 |
+| 170 | 1 | MTP K7, exact KV-only repair | Up to 8 | 567.29 | **56.85** |
 
 PP measures the target prefill helper; MTP feature capture is included, draft
-initialization is not. Full repair accepts 125/178 proposals in 26 blocks;
-reuse accepts 120/209 in 31 blocks. Each produces 150 committed decode tokens
+initialization is not. Both arms accept 125/178 proposals in 26 blocks.
+Each produces 150 committed decode tokens
 and reaches EOS; two repetitions per arm run in ABBA order. This is one coding task.
 Tokens, active GDN, valid KV and inactive slots match the native reference exactly.
-Mean prefill + unamortized setup + decode: **7.90 s full repair versus 7.87 s reuse**.
+Mean prefill + unamortized setup + decode: **7.68 s control versus 7.25 s KV-only**.
 These totals start with the target model already loaded, not a cold process launch.
 Trace/setup reuse across requests and longer-context measurements remain to do.
-Reuse cuts repair/commit from 11.71 to 2.31 ms/block, but extra verifier blocks
-make decode 7% slower. Earlier repaired parallel attention was also slower
+KV-only cuts repair/commit from 11.62 to 7.87 ms/block without changing draft KV.
+PP variation is not attributed to this decode change. Earlier approximate
+cache reuse lost 7% TG through lower acceptance; repaired parallel attention was also slower
 (54.36 versus 54.90 TG); its mask correctness fix remains separate from speed.
 The earlier [sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
 established +7.7%; changes between separate runs are not attributed to an optimization.
@@ -105,16 +107,16 @@ Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
 
 ## What currently limits 200 tok/s?
 
-MTP now produces useful drafts, but the serial control cycle averages **105.05 ms** for
+MTP now produces useful drafts, but the KV-only candidate cycle averages **101.43 ms** for
 **5.77 committed tokens**. Measured mean costs in the completed request:
 
 | Work per block | Time |
 | --- | ---: |
-| Target verification and readback | 64.89 ms |
-| Sequential MTP drafts | 27.47 ms |
-| Cache repair and commit | 11.69 ms |
+| Target verification and readback | 65.00 ms |
+| Sequential MTP drafts | 27.54 ms |
+| Cache repair and commit | 7.87 ms |
 
-At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 105 ms.
+At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 101 ms.
 Even perfect T8 acceptance and free drafting cannot overcome the current verifier.
 Next: reduce sequential drafting/repair and develop wider parallel proposals to
 amortize target verification. Short-context attention and earlier larger-grid MLP
@@ -193,7 +195,7 @@ was resolved by restoring the exact runtime image.
 
 | Workstream | Current position |
 | --- | --- |
-| MTP | Latest exact serial control: 54.90 TG; parallel attention 54.36, not adopted; setup reuse and broader tests remain |
+| MTP | Exact KV-only repair: 56.85 TG, +3.25%; device-chained drafting is next; setup reuse and broader tests remain |
 | DFlash2 | Five-layer hardware correctness passes; full captured drafting and live request integration remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |

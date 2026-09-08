@@ -6,6 +6,32 @@ from mtp_request_runtime import MTPRequestRuntime
 
 
 class MTPRequestRuntimeTests(unittest.TestCase):
+    def test_one_device_chain_call_owns_all_proposals_and_still_repairs_from_target(self):
+        runtime, session, engine, state, calls, anchor = self.fixture()
+        runtime.publish(0)
+        session.phase = 'drafting'
+        runtime.propose_chain = Mock(return_value=(21, 22, 23))
+        previous_calls = len(calls)
+        self.assertEqual(runtime('request', (20,), 7), (21, 22, 23))
+        runtime.propose_chain.assert_called_once_with(20, anchor, 10, 3)
+        self.assertEqual(len(calls), previous_calls)
+        self.assertEqual(runtime.drafted_inputs, (20, 21, 22))
+        session.phase, engine.phase = 'committing', 'verified'
+        runtime.publish(2)
+        self.assertEqual(state[11], (21, 101))
+        self.assertEqual(anchor, [102])
+
+    def test_incomplete_invalid_and_failed_chains_poison_the_draft_transaction(self):
+        for result in ((21,), (True, 22, 23), (21, 22, 100), RuntimeError('device chain failed')):
+            runtime, session, engine, state, calls, anchor = self.fixture()
+            runtime.publish(0)
+            session.phase = 'drafting'
+            runtime.propose_chain = Mock(side_effect=result) if isinstance(result, Exception) else Mock(return_value=result)
+            with self.assertRaises((ValueError, RuntimeError)):
+                runtime('request', (20,), 3)
+            self.assertEqual(runtime.phase, 'failed')
+            self.assertEqual(anchor, [100])
+
     def fixture(self, *, reuse_accepted_cache=False):
         anchor = [100]
         state = {}

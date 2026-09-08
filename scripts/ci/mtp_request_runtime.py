@@ -2,14 +2,17 @@
 
 
 class MTPRequestRuntime:
-    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row=None, max_drafts=31, reuse_accepted_cache=False):
+    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row=None, max_drafts=31, reuse_accepted_cache=False,
+                 propose_chain=None):
         if (type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
                 or not all(callable(callback) for callback in (step, copy_hidden))
-                or (verified_row is not None and not callable(verified_row))):
+                or (verified_row is not None and not callable(verified_row))
+                or (propose_chain is not None and not callable(propose_chain))):
             raise ValueError('Prepared MTP step, hidden copy/row access and bounded draft count required')
         self.step, self.copy_hidden, self.verified_row = step, copy_hidden, verified_row
         self.anchor = initial_hidden
         self.max_drafts = max_drafts
+        self.propose_chain = propose_chain
         if type(reuse_accepted_cache) is not bool:
             raise ValueError('Explicit draft-cache reuse selection required')
         self.reuse_accepted_cache = reuse_accepted_cache
@@ -38,11 +41,19 @@ class MTPRequestRuntime:
         try:
             hidden, token = self.anchor, self.session.seed
             proposed = []
-            for offset in range(min(count, self.max_drafts)):
-                hidden, token = self.step(token, hidden, self.position + offset, select=True)
-                if type(token) is not int or not 0 <= token < self.session.vocab_size:
-                    raise ValueError('MTP head returned an invalid global token ID')
-                proposed.append(token)
+            selected_count = min(count, self.max_drafts)
+            if self.propose_chain is not None:
+                proposed = list(self.propose_chain(token, hidden, self.position, selected_count))
+                if len(proposed) != selected_count:
+                    raise ValueError('MTP chain must account for every requested draft input')
+            else:
+                for offset in range(selected_count):
+                    hidden, token = self.step(token, hidden, self.position + offset, select=True)
+                    if type(token) is not int or not 0 <= token < self.session.vocab_size:
+                        raise ValueError('MTP head returned an invalid global token ID')
+                    proposed.append(token)
+            if any(type(token) is not int or not 0 <= token < self.session.vocab_size for token in proposed):
+                raise ValueError('MTP head returned an invalid global token ID')
             self.proposed = tuple(proposed)
             self.drafted_inputs = (self.session.seed, *self.proposed[:-1])
             self.phase = 'proposed'

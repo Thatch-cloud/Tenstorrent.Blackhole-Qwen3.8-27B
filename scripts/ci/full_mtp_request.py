@@ -95,11 +95,14 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
                         prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
                         native_sampling_rows=False, short_context=False, attention_replay=False, attention_audit=False,
-                        reuse_accepted_cache=False, kv_only_repair=False):
+                        reuse_accepted_cache=False, kv_only_repair=False, device_chain=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
+    if type(device_chain) is not bool or (device_chain and
+            (reuse_accepted_cache or not native_sampling_rows or attention_replay or attention_audit or max_drafts != 7)):
+        raise ValueError('Device chain requires exact K7 MTP with native-row serial target')
     if type(kv_only_repair) is not bool or (kv_only_repair and
             (reuse_accepted_cache or not native_sampling_rows or attention_replay or attention_audit)):
         raise ValueError('KV-only repair requires exact teacher forcing and native-row serial target')
@@ -116,12 +119,12 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         raise ValueError('Pinned short coding request, identity pages and explicit MTP draft width required')
     mesh = model.mesh_device
     owned, prompt_rows = [], []
-    step = runtime = None
+    step = runtime = chain = None
     prefill_calls = 0
     metadata = dict(max_drafts=max_drafts, head='native-full-vocabulary-force-argmax', native_sampling_rows=native_sampling_rows,
                     mtp_weight_names=list(NAMES), kernel_math='reused native MTP, no new kernel math',
                     reuse_accepted_cache=reuse_accepted_cache, approximate_draft_cache=reuse_accepted_cache,
-                    kv_only_repair=kv_only_repair)
+                    kv_only_repair=kv_only_repair, device_chain=device_chain)
 
     def status(stage, **values):
         print(json.dumps(dict(mtp_stage=stage, **values)), flush=True)
@@ -143,7 +146,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         return seed
 
     def factory():
-        nonlocal step, runtime
+        nonlocal step, runtime, chain
         if prefill_calls != 2 or len(prompt_rows) != 1:
             raise AssertionError('Real MTP preparation requires the fresh candidate prompt features')
         status('load-native-mtp')
@@ -174,6 +177,13 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         started = time.perf_counter()
         step.prepare()
         metadata['mtp_trace_setup_ms'] = 1000 * (time.perf_counter() - started)
+        if device_chain:
+            from mtp_device_chain import MTPDeviceChain
+            status('prepare-device-proposal-chain')
+            started = time.perf_counter()
+            chain = MTPDeviceChain(step, max_drafts=max_drafts)
+            chain.prepare()
+            metadata['chain_setup_ms'] = 1000 * (time.perf_counter() - started)
 
         def stage_row(row):
             source = operations.from_torch(row.contiguous(), dtype=operations.bfloat16,
@@ -189,7 +199,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         metadata['mtp_prompt_ms'] = 1000 * (time.perf_counter() - started)
         status('prepare-target-verifier', max_rows=max_drafts + 1)
         runtime = MTPRequestRuntime(AlignedMTPStep(step), anchor, copy_hidden=operations.copy, max_drafts=max_drafts,
-            reuse_accepted_cache=reuse_accepted_cache)
+            reuse_accepted_cache=reuse_accepted_cache, propose_chain=chain)
         return runtime
 
     try:
@@ -213,6 +223,8 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         result['qualification'] = 'One exact native coding request; not held-out coding quality or sustained service throughput'
         return result
     finally:
+        if chain is not None:
+            chain.close()
         if step is not None:
             step.close()
         release_owned(operations, owned)

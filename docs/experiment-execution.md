@@ -3,14 +3,29 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
-## Exact KV-only MTP repair (2026-09-08, prepared)
+## Exact KV-only MTP repair (2026-09-08, retained)
+
+CI34213743464 on5c0e60c passes:55.067351TG control versus56.854631TG candidate,
+ratio1.032456. All150 tokens,125/178 proposals,26 blocks and complete319-row MTP
+valid K/V hashes are identical, alongside all target-state checks. Repair/commit
+falls11.623757 to7.874864ms/block. This is a measured3.25% whole-request TG gain,
+not200TG or serving qualification. Report SHA256:
+`451b750fa24e6cdfea0b47dc4bd205673b0eee49dd57a20152265ac3386430d3`.
 
 Omit unused attention output/MLP work after native MTP KV publication. Full
 teacher-forced history and full proposal execution remain unchanged. Pinned
 attention source/fused-prep guards and whole valid draft-cache hashes on both
 chips supplement the existing exact target and identical-acceptance checks.
 746 host tests plus60 harness tests pass. This reuses native kernels, not a new
-kernel or a simulator throughput claim. No hardware result yet.
+kernel or a simulator throughput claim.
+
+Next ABBA retains this repair in both arms and replaces serial host-stepped MTP
+with device embedding/argmax feedback in one captured proposal chain. Simulator
+101731Z-299 passes all42 changing-input comparisons and14 stale controls with
+native keepdim-false output shape, exit0 and clean close. Its256-row embedding
+fixture does not test real fabric or full MTP weights; the complete hardware
+requests must establish identical proposals, draft/target caches and TG. Local
+validation:752 host tests and60 harness tests pass. No chain speed claimed.
 
 ## Accepted MTP cache reuse (2026-09-08, rejected)
 

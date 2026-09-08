@@ -40,6 +40,18 @@ class MatchedRequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_requests(invalid, arm_key='mtp_kv_only')
 
+        chained = deepcopy(records)
+        for record in chained:
+            enabled = record.pop('mtp_kv_only')
+            record['mtp_device_chain'] = enabled
+            record['mtp'].update(kv_only_repair=True, device_chain=enabled, chain_setup_ms=10 if enabled else 0)
+        self.assertTrue(summarize_requests(chained, arm_key='mtp_device_chain')['exact'])
+        for key, value in (('device_chain', False), ('chain_setup_ms', 0), ('kv_only_repair', False)):
+            invalid = deepcopy(chained)
+            invalid[1]['mtp'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='mtp_device_chain')
+
     def test_draft_cache_reuse_allows_changed_acceptance_not_changed_target(self):
         def measure(*, mtp_reuse_cache):
             record = dict(self.record(mtp_reuse_cache), mtp_reuse_cache=mtp_reuse_cache, native_sampling_rows=True,

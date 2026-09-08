@@ -760,12 +760,12 @@ def main():
                     from full_mtp_request import measure_mtp_request
                     from full_request_pair import summarize_requests
                     output_path = root / 'full-mtp-request.json'
-                    report['scope'] = 'MTP exact KV-only repair ABBA; unchanged draft history and lossless target'
+                    report['scope'] = 'MTP device-chained drafting ABBA; both arms retain exact KV-only repair'
                     report['instrumented_timing'] = False
                     report['context_lengths'] = [len(prompt)]
                     report['mtp_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                         for name in ('full_mtp_request.py', 'mtp_device_step.py', 'mtp_prefill.py',
-                                     'mtp_request_runtime.py', 'mtp_hidden_capture.py', 'mtp_hidden_rows.py', 'mtp_cache_only.py',
+                                     'mtp_request_runtime.py', 'mtp_hidden_capture.py', 'mtp_hidden_rows.py', 'mtp_cache_only.py', 'mtp_device_chain.py',
                                      'force_argmax.py', 'full_request_pair.py', 'attention_request_plan.py')}
                     report['mtp_module_sha256'] = hashlib.sha256(Path('/experiment-speculative/mtp_module.py').read_bytes()).hexdigest()
                     report['request_checks'] = []
@@ -774,23 +774,23 @@ def main():
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        for kv_only_repair in (False, True, True, False):
-                            print(json.dumps(dict(mtp_kv_only=kv_only_repair,
+                        for device_chain in (False, True, True, False):
+                            print(json.dumps(dict(mtp_device_chain=device_chain,
                                 repetition=len(report['request_checks']))), flush=True)
                             result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 max_drafts=int(mtp_drafts), native_sampling_rows=True,
-                                short_context=True, kv_only_repair=kv_only_repair)
+                                short_context=True, kv_only_repair=True, device_chain=device_chain)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
-                                fabric_sources=fabric_sources, mtp_kv_only=kv_only_repair)
+                                fabric_sources=fabric_sources, mtp_device_chain=device_chain)
                             report['request_checks'].append(result)
                             output_path.write_text(json.dumps(report, indent=2))
                             if result['committed_decode_tokens'] == 0:
                                 raise AssertionError('MTP request must exercise decode')
-                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_kv_only')
+                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='mtp_device_chain')
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)
                     return
