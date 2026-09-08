@@ -2231,3 +2231,12 @@ and missing-update negative controls for both arms. Both traces are released
 before captured buffers, and before allocating the next width. Hardware trace
 promotion remains rejected until this simulator gate passes. Eager hardware
 results and kernel arithmetic are unchanged by this new test path.
+
+Simulator012750Z on a3ed767 passed all six eager widths plus captured T1/T8/T32:
+36 exact changing-input arm/chip comparisons and12 stale-input negative controls,
+with four byte-exact source/device packing checks. Exit0 and clean close verified.
+The local compatibility header was restored. Hardware trace timing is now enabled
+in the learned-mlp suite, using the same traces and three ABBA blocks per width.
+Each blocking execution is checked outside the timer; capture, allocations,
+uploads and readback validation are excluded. Eager regression remains recorded;
+no captured performance improvement is established until hardware reports it.

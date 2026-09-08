@@ -8,11 +8,11 @@ import unittest
 class FusedBatchCLITests(unittest.TestCase):
     def test_timing_and_device_weight_guards_precede_fixture_loading(self):
         for flags, environment, message in (
-                (['--hardware', '--trace-replay', '--device-weight-check'],
+                (['--hardware', '--trace-replay'],
                     {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'},
-                    'Trace replay requires simulator and byte-exact weight checks'),
+                    'Trace replay requires byte-exact weight checks'),
                 (['--trace-replay'], {'TT_METAL_SIMULATOR': 'placeholder'},
-                    'Trace replay requires simulator and byte-exact weight checks'),
+                    'Trace replay requires byte-exact weight checks'),
                 (['--timing'], {'TT_METAL_SIMULATOR': 'placeholder'}, 'Latency measurements require allocated hardware'),
                 (['--hardware'], {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'},
                     'Hardware promotion requires byte-exact device weight checks')):

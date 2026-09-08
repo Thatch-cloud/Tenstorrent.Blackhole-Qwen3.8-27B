@@ -8,7 +8,7 @@ from fusion_trace import validate_replays
 
 
 class FusionTraceTests(unittest.TestCase):
-    def run_gate(self, stale=False):
+    def run_gate(self, stale=False, timing=False):
         hidden = torch.ones((1, 1, 1, 5120), dtype=torch.bfloat16)
         inputs = SimpleNamespace(data=hidden.clone())
         callbacks, events = {}, []
@@ -39,7 +39,7 @@ class FusionTraceTests(unittest.TestCase):
                 patch('gdn_multitoken_conv.addresses', side_effect=lambda operations, value: id(value)):
             try:
                 return validate_replays(operations, object(), inputs, hidden,
-                    [hidden * 2, hidden * 2], project, project, ())
+                    [hidden * 2, hidden * 2], project, project, (), timing=timing)
             finally:
                 releases = [index for index, event in enumerate(events) if event[0] == 'release']
                 self.assertEqual(len(releases), 2)
@@ -55,3 +55,12 @@ class FusionTraceTests(unittest.TestCase):
     def test_stale_trace_output_fails(self):
         with self.assertRaisesRegex(AssertionError, 'differs from native reference'):
             self.run_gate(stale=True)
+
+    def test_paired_trace_timing_preserves_exactness(self):
+        with patch('fusion_trace.time.perf_counter', side_effect=[value / 1000 for value in range(24)]):
+            result = self.run_gate(timing=True)
+        self.assertTrue(result['passed'])
+        self.assertEqual(len(result['timings']), 3)
+        for block in result['timings']:
+            self.assertAlmostEqual(block['control_ms'], 1)
+            self.assertAlmostEqual(block['fused_ms'], 1)

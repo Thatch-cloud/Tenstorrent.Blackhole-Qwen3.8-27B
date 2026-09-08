@@ -156,7 +156,7 @@ timeout() {
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 4)
         self.assertIn('device-readback.py', lines[0])
-        for argument in ('600', 'fused-batch-probe.py', '--hardware --timing --device-weight-check',
+        for argument in ('600', 'fused-batch-probe.py', '--hardware --timing --device-weight-check --trace-replay',
                 '--fixture /experiment-projection-fixture', 'fused-batch.json'):
             self.assertIn(argument, lines[1])
         for argument in ('1800', 'learned-mlp-probe.py', '--hardware',

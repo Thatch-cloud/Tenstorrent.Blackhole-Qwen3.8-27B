@@ -36,8 +36,8 @@ def main():
     parser.add_argument('--trace-replay', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
-    if options.trace_replay and (options.hardware or not options.device_weight_check):
-        parser.error('Trace replay requires simulator and byte-exact weight checks')
+    if options.trace_replay and not options.device_weight_check:
+        parser.error('Trace replay requires byte-exact weight checks')
     if options.timing and not options.hardware:
         parser.error('Latency measurements require allocated hardware')
     if options.hardware and not options.device_weight_check:
@@ -52,6 +52,8 @@ def main():
         timing_scope='Eager paired ABBA projection calls including dispatch and allocation; excludes uploads, validation and deallocation; not traced or full-model latency',
         precision='BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality')
     packer = Path(os.environ['TT_METAL_HOME']) / 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
+    if options.trace_replay:
+        report['timing_scope'] = 'Blocking captured projection ABBA; excludes capture, allocation, uploads and validation; not full-model or committed throughput'
     report['packer_header_sha256'] = hashlib.sha256(packer.read_bytes()).hexdigest()
     report['packer_zero_graft'] = os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1'
     mesh, owned = None, []
@@ -155,10 +157,10 @@ def main():
                 report['phase'] = 'trace_replay'
                 options.output.write_text(json.dumps(report, indent=2))
                 checked = validate_replays(ttnn, mesh, inputs, hidden, references, native_replay, fused_replay,
-                    (device_gate, device_up, device_packed))
+                    (device_gate, device_up, device_packed), timing=options.timing)
                 report.setdefault('trace_replays', []).append(checked)
                 report['trace_source_sha256'] = hashlib.sha256(Path(__file__).with_name('fusion_trace.py').read_bytes()).hexdigest()
-            if options.timing and rows in (1, 8, 32):
+            if options.timing and not options.trace_replay and rows in (1, 8, 32):
                 for block in range(3):
                     samples = dict(control=[], fused=[])
                     for arm in ('control', 'fused', 'fused', 'control'):
@@ -196,7 +198,7 @@ def main():
         options.output.write_text(json.dumps(report, indent=2))
     if len(report['checks']) != 12:
         raise AssertionError('All six widths and both chips required')
-    if len(report['timings']) != (9 if options.timing else 0):
+    if len(report['timings']) != (9 if options.timing and not options.trace_replay else 0):
         raise AssertionError('Three paired timing blocks at T1/T8/T32 required')
     if options.trace_replay and (len(report.get('trace_replays', [])) != 3
             or not all(result['passed'] for result in report['trace_replays'])):

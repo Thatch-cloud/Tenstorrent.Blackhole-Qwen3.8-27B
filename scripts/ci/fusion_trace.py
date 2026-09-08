@@ -2,9 +2,11 @@
 
 from attention_batch import capture_operation
 from gdn_multitoken_conv import addresses, release_owned
+import math
+import time
 
 
-def validate_replays(operations, mesh, inputs, hidden, references, native, fused, parameters):
+def validate_replays(operations, mesh, inputs, hidden, references, native, fused, parameters, *, timing=False):
     import torch
 
     rows = hidden.shape[-2]
@@ -15,7 +17,7 @@ def validate_replays(operations, mesh, inputs, hidden, references, native, fused
     protected = (inputs, *parameters)
     original_addresses = [addresses(operations, value) for value in protected]
     traces, outputs, owned = {}, {}, []
-    report = dict(rows=rows, passed=False, checks=[], negative_controls=[])
+    report = dict(rows=rows, passed=False, checks=[], negative_controls=[], timings=[])
 
     def host(value, chip):
         return operations.to_torch(operations.get_device_tensors(value)[chip]).clone()
@@ -59,9 +61,26 @@ def validate_replays(operations, mesh, inputs, hidden, references, native, fused
                         if not torch.equal(observed, expected[0][chip]) or torch.equal(observed, expected[1][chip]):
                             raise AssertionError('Missing-input-update negative control failed')
                         report['negative_controls'].append(dict(arm=name, chip=chip, stale_input_detected=True))
+        if timing:
+            for block in range(3):
+                samples = dict(control=[], fused=[])
+                for name in ('control', 'fused', 'fused', 'control'):
+                    operations.synchronize_device(mesh)
+                    started = time.perf_counter()
+                    operations.execute_trace(mesh, traces[name], cq_id=0, blocking=True)
+                    elapsed = (time.perf_counter() - started) * 1000
+                    if not math.isfinite(elapsed) or elapsed <= 0:
+                        raise AssertionError('Positive finite trace latency required')
+                    for chip in range(2):
+                        if not torch.equal(host(outputs[name], chip), expected[0][chip]):
+                            raise AssertionError('Timed trace output changed')
+                    samples[name].append(elapsed)
+                report['timings'].append(dict(block=block, samples_ms=samples,
+                    control_ms=sum(samples['control']) / 2, fused_ms=sum(samples['fused']) / 2, both_chips_exact=True))
     finally:
         for trace in traces.values():
             operations.release_trace(mesh, trace)
         release_owned(operations, owned)
-    report['passed'] = len(report['checks']) == 12 and len(report['negative_controls']) == 4
+    report['passed'] = (len(report['checks']) == 12 and len(report['negative_controls']) == 4
+        and len(report['timings']) == (3 if timing else 0))
     return report
