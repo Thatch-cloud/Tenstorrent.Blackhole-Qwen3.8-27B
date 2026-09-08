@@ -4,26 +4,21 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Best measured: 58.33 committed tok/s** with device-chained MTP and exact KV-only repair;
-the matched native reference is **19.47 tok/s**.
-[Matched MTP run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34216164140)
-improves 57.24 to 58.33 TG (+1.90%), with identical drafts, target state and
-complete valid MTP caches on both cards. Extra setup makes the complete request
-slower, so this is a decode candidate, not a serving-latency improvement.
-The earlier native-row sampler comparison improved 49.79 to 53.60 TG (+7.7%).
-This is not 200 TG, a held-out coding-quality score or a serving benchmark.
+**Best measured: 66.76 committed tok/s**, using captured five-layer DFlash2 drafting.
+Two complete coding responses reach EOS at68.41/65.20 TG, with exact native
+tokens, GDN state, valid KV and inactive slots. A separate request audits every
+committed feature row and every captured proposal.
+[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
 
-**Next priority: parallel proposals and wider verification.** Removing CPU round
-trips saves only about 2 ms/block. The remaining draft/target execution costs,
-not more host-side tweaks, must fall substantially to approach 200 TG.
+This is a single-task experiment, not held-out coding quality or a serving result.
+Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
+matched DFlash-versus-MTP comparisons.
 
-The complete five-layer DFlash2 path now passes hardware correctness through EOS:
-**37.64 committed tok/s**, slower than MTP. It accepts 83.77% of draft tokens,
-but drafting costs 110.58 ms/block and verification another 65.37 ms.
-The wider 32-row request reaches **41.03 tok/s**, also exact, but still spends
-111.00 ms drafting and 98.26 ms verifying each block. Capturing the complete
-drafter is next. Native SDPA remains disabled after its failed numerical gate.
-[Integration and test boundaries](docs/dflash-full-request-2026-09-09.md).
+**Next: captured 32-row drafting and cheaper target verification.** At T8,
+drafting now costs31.27 ms/block, down from110.58 ms in the eager experiment;
+verification still costs65.27 ms. The wider eager path reaches41.03 TG.
+Native SDPA remains disabled after its failed numerical gate.
+[Captured-drafter results and limits](docs/dflash-captured-proposals-2026-09-09.md).
 
 ## Setup
 
@@ -110,6 +105,7 @@ TG includes drafting, verification/readback and publication; excludes prefill/se
 | ---: | ---: | ---: | ---: | ---: |
 | 170 | 1 | Up to 8 | 568.82 | **37.64** |
 | 170 | 1 | Up to 32, trained-width extrapolation | 554.23 | **41.03** |
+| 170 | 1 | Up to 8, captured drafter | 517.11 | **66.76** |
 
 Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
 129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
@@ -124,6 +120,12 @@ Complete prefill/setup/decode takes9.82/9.22s. The first attempt exhausted DRAM;
 reserving KV pages for one stream fixes that without reducing its65,536-token
 capacity. This is not a matched T8 comparison or an eight-stream configuration.
 [Wider hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34236992387).
+
+Captured T8 preserves the same129/154 acceptance and22 blocks in this task.
+Its two complete requests take7.34/7.43s including fresh prefill and setup;
+their decode-only rates are68.41/65.20 TG. This also changes context padding and
+KV allocation, so it is not a matched capture-only attribution.
+[Captured hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
 
 ### Earlier lookup experiments
 
@@ -203,9 +205,10 @@ This uses the `p150_x2` descriptor and a sampler-only override of the hardcoded
 link helper. Serving defaults are unchanged.
 [Fabric sampling evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185352446).
 
-The five-layer captured-drafter gate is **not passed**. Local tensor-integrity
-failures led to a CI simulator retry; that retry was cancelled, not qualified.
-Earlier eager hardware checks do not establish a working captured drafter.
+The complete captured five-layer drafter now passes on hardware through EOS,
+including22 exact eager-versus-trace proposal audits. Earlier cancelled simulator
+attempts and local tensor-integrity failures are retained as failed evidence,
+not retroactively counted as passes.
 
 The native eager link-discovery bug is fixed in the disposable experiment build.
 The [two-card check](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34189506734)
@@ -230,7 +233,7 @@ was resolved by restoring the exact runtime image.
 | Workstream | Current position |
 | --- | --- |
 | MTP | Device chain + KV-only repair: 58.33 TG, +1.90% matched; setup-inclusive latency is worse; wider parallel proposals needed |
-| DFlash2 | Complete exact requests: T8 37.64 TG / T32 41.03 TG; captured drafting and per-layer history KV caching remain |
+| DFlash2 | Complete exact captured T8: 66.76 TG; captured T32 and per-layer history KV caching remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
 | Prefill/decode disaggregation | End-to-end placement, scheduling and responsiveness tests remain |

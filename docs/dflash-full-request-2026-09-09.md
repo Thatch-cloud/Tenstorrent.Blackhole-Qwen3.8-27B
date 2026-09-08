@@ -1,8 +1,10 @@
 # Complete DFlash2 request integration
 
 **Target: 200 committed tok/s for one coding stream. Not achieved.**
-Best measured hardware result remains **58.33 TG**, device-chained MTP,
-[run 34216164140](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34216164140).
+Best measured hardware result is now **66.76 TG**, captured T8 DFlash2,
+[run 34238134003](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
+This page retains the eager integration history; see
+[captured-proposal results](dflash-captured-proposals-2026-09-09.md) for the newer path.
 This change connects a parallel learned drafter to complete generation instead
 of treating another isolated operator pass as a speed improvement.
 

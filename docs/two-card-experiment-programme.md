@@ -2,7 +2,17 @@
 
 ## Current programme position - 2026-09-09
 
-**Full DFlash2 generation passes: T8 37.64 / T32 41.03 TG; MTP remains best at 58.33.**
+**New best: captured DFlash2 T8,66.76 committed TG;200 remains unachieved.**
+Run34238134003 (`eadaa41`) passes three complete150-token coding requests through
+EOS. The two uninstrumented requests measure68.409353/65.197390 TG, aggregate
+66.764763. All native token/GDN/valid KV/inactive checks pass; the audit also
+checks1500 row/chip/tap comparisons and22 exact eager/trace proposal comparisons.
+Mean draft31.265333ms, verify65.266694ms, publication3.384118ms; PP517.112935.
+Complete prefill/setup/decode7.34/7.43s, no setup amortization. This is one coding
+task, not held-out quality, serving adoption or a matched MTP comparison.
+Captured T32 is next. [Captured results](dflash-captured-proposals-2026-09-09.md).
+
+**Earlier eager integration: T8 37.64 / T32 41.03 TG; MTP58.33 TG.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the
 target's embedding/head and five post-layer feature taps. Only committed target
 input rows enter the drafter history; two preallocated history buffers survive
@@ -19,7 +29,7 @@ The earlier CTX178 stall was a V-head tiled reshape, fixed with native head spli
 and concatenation after40 exact simulator checks. Attention math is unchanged;
 the failed native SDPA candidate remains disabled.
 
-**T32 passes after fixing the single-stream harness allocation; capture drafting next.**
+**Eager T32 passes after fixing the single-stream harness allocation.**
 The checkpoint was trained for eight-token blocks. `full-dflash-wide-request`
 tests31 parallel proposals and up to32 target rows without changing defaults.
 The dense draft layers already use physical32-row tiles. Full target token/state
