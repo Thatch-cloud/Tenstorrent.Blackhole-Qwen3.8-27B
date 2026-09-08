@@ -2,6 +2,9 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
+[[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 && "$mode" = sampling-kernel ) ]]
+descriptor=p300_mesh_graph_descriptor.textproto
+if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then descriptor=p150_x2_mesh_graph_descriptor.textproto; fi
 if [[ "${QWEN_CODING_REQUEST:-0}" != 0 && !( "${QWEN_CODING_REQUEST:-0}" = 1 && "$mode" = full-norm-engine ) ]]; then
     echo 'Short coding workload requires full-norm-engine; long-context replay is not qualified' >&2
     exit 2
@@ -92,7 +95,8 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e HF_HOME=/models -e HF_HUB_CACHE=/models/hub -e TT_METAL_HOME=/opt/tt-metal \
     -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
     -e MESH_DEVICE=P300 -e VLLM_PLUGINS=tt,tt_model_registry -e VLLM_RPC_TIMEOUT=100000 \
-    -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
+    -e "TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/$descriptor" \
+    -e "QWEN_FABRIC_LINK_PROBE=${QWEN_FABRIC_LINK_PROBE:-0}" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \

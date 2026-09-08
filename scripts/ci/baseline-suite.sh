@@ -165,7 +165,11 @@ print(json.dumps(dict(snapshot=root.name, files={name: hashlib.sha256((root / na
     flags={name: value for name, value in os.environ.items() if name.startswith(('QWEN', 'TT_', 'MESH_DEVICE'))}), indent=2))
 PY
 if [ "${QWEN_RUN_MODE:-baseline}" = sampling-kernel ]; then
-    timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
+    if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then
+        timeout -k 15 900 python3 /experiment-scripts/ci/sampling-links.py
+    else
+        timeout 900 python3 /experiment-scripts/ci/sampling-kernel.py
+    fi
     exit 0
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-model-fusion ]; then

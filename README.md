@@ -10,7 +10,7 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 | --- | --- |
 | Accelerators | 2 × Blackhole P150A, 32 GiB each |
 | Placement | Tensor parallel across a `(1, 2)` mesh |
-| Card-to-card connection | QSFP-DD fabric; two fabric links |
+| Card-to-card connection | Two QSFP-DD cables; four physical Ethernet links |
 | Host connections | One PCIe x16 card; one PCIe x4 card behind a switch |
 | Compute grid | 110 exposed workers/card on current worker-dispatch path |
 | Extra column | Ethernet dispatch could expose 120; not validated on this pair |

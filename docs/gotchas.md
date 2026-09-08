@@ -83,11 +83,19 @@ tt-metal ships both of these, and they disagree:
 | `p150_x2_mesh_graph_descriptor.textproto` | `[1,2]` | **4** |
 | `p300_mesh_graph_descriptor.textproto` | `[1,2]` | **2** |
 
-One QSFP-DD cable gives **2 links per hop**. So the shipped `p150_x2` fails with
+The original one-cable setup gives **2 links per hop**. There, the shipped `p150_x2` fails with
 `TT_FATAL: Expected 4 eth links` on correctly-cabled hardware, and `p300` is the
 right file. **Choose from measured link count, not from card model.**
 
-And always pass `TT_MESH_GRAPH_DESC_PATH`. Without it:
+The current two-P150A setup has **two cables and four working links**. Use the
+four-channel `p150_x2` descriptor for four-link experiments. Changing the descriptor
+alone does not fix `get_num_links()`: its product-name table still treats two
+Blackhole devices as P300 and returns two. Sampling also has its own one-link
+default. See [upstream issue 55125](https://github.com/tenstorrent/tt-metal/issues/55125).
+The opt-in `fabric_link_probe` compares sampler link counts 1/2/4 with a scoped
+override; it does not modify serving defaults or all model collectives.
+
+Always pass `TT_MESH_GRAPH_DESC_PATH`. An earlier runtime also logged:
 
 ```
 warning | Op | Failed to discover available ethernet links; falling back to 1 link
