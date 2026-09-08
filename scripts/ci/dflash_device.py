@@ -37,7 +37,7 @@ class DFlashDevice:
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         try:
             for attention, convolution, mlp in layers:
-                self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain),
+                self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain, native_head_layout=True),
                     prepare_mlp_branch(operations, self.mesh, mlp, convolution, self.retain), mlp, convolution))
             shards = projection_shards(projection['fc.weight'])
             self.projection = self.upload(torch.cat(shards, dim=0), sharded=True)

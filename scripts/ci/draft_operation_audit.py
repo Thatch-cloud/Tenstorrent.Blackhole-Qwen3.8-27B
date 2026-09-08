@@ -14,7 +14,7 @@ def audit_operations(operations, mesh, progress):
     bindings = []
     groups = ((operations, ('add', 'multiply', 'matmul', 'transpose', 'reshape', 'slice', 'concat',
         'typecast', 'rms_norm', 'zeros_like', 'softmax', 'max', 'sum', 'exp', 'reciprocal', 'pad', 'generic_op')),
-        (operations.experimental, ('rotary_embedding_hf', 'all_gather_async')))
+        (operations.experimental, ('rotary_embedding_hf', 'all_gather_async', 'nlp_create_qkv_heads', 'nlp_concat_heads')))
     def wrap(name, original):
         def call(*args, **kwargs):
             frame = inspect.currentframe().f_back

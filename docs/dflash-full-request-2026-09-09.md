@@ -35,6 +35,20 @@ Simulator report SHA256: `e8426ef0742314e63436365789283fc3a5757b7a512ae8803e798c
 The next full-request audit fences individual attention operations at the failing
 block. It does not change attention math or the unfenced measurement requests.
 
+[34230830406](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34230830406)
+identifies the blocked operation: the V-head tiled reshape in layer-zero
+attention at CTX178, after its projection/typecast complete. The request path
+now opts into native `nlp_create_qkv_heads` and `nlp_concat_heads`, eliminating
+the generic sub-tile head reshape/transpose sequence. Query projections are
+zero-padded to the key row count for the split, then cropped back to32 rows.
+Normalization, RoPE, composed attention and rounding policies are unchanged.
+The old layout remains the default for unrelated component controls.
+
+Forty exact simulator checks pass across key-row sizes32/192/2080, changed
+allocations and changed-input trace replay on both chips. Report SHA256:
+`e9d3c137010a0fda003b87182da5f5f847ceb754d1c302e007050683d6cda0a8`.
+Full-request hardware validation of this replacement is still required.
+
 ## What is connected
 
 | Part | Opt-in implementation |
@@ -78,7 +92,7 @@ prefill/setup/decode latency is also reported, with no setup amortization claim.
 - History simulation exercises CTX170 and the 2048-row sliding boundary, accepted
   prefixes 1/2/7/8, aborts and replay across the preallocated buffers: all 16
   checks pass. Report SHA256: `9ae52881272f70ca5da036af4dcaad209c2d5b9fe38d1816119e90dad31f2d01`.
-- All 837 host tests pass (777 CI helpers + 60 speculative harness tests).
+- All 839 host tests pass (779 CI helpers + 60 speculative harness tests).
   They cover transaction failures, stale tickets, ownership, complete
   fixture loading, exact selector equivalence and exclusion of audited timing.
 - These are integration/correctness checks, **not** full-model simulator speed,

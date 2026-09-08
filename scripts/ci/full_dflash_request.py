@@ -177,6 +177,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             block_rows=8, max_drafts=7, mask_token_id=248070,
             policy='Five learned BF16 layers, shared target head top16 and CPU FP64 learned greedy selector',
             attention='Composed precise control; unqualified native SDPA is not enabled',
+            head_layout='Native QKV head split and concatenation; no generic sub-tile reshape',
             feature_history='Two preallocated 2048-row buffers; only committed prefixes are projected and published',
             execution='Eager request integration; setup, dispatch and compilation costs are not amortized',
             proposal_calls=device.proposal_calls if device is not None else 0,

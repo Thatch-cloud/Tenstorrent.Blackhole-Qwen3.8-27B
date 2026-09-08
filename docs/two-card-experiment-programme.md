@@ -15,6 +15,9 @@ native candidate. First hardware attempt34225857819 accepts seven of seven
 drafts and passes the first published-feature audit, then stalls on the next
 block; cancelled with logs retained, not counted as a completed request.
 Follow-up adds bounded stall diagnostics after CI recovery.
+Those diagnostics identify a V-head tiled reshape; the native head-layout
+replacement passes40 exact simulator checks and awaits complete-request hardware
+validation. Attention math and target-verifier correctness checks are unchanged.
 [Integration details](dflash-full-request-2026-09-09.md).
 
 **Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**

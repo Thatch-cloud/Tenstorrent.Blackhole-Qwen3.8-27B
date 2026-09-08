@@ -3,10 +3,14 @@
 from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
+from draft_head_layout import split_projected_heads, concatenate_query_heads
 
 
-def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False):
+def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False):
     import torch
+
+    if type(native_head_layout) is not bool:
+        raise ValueError('Explicit boolean native head-layout selection required')
 
     native_kernel = None
     if precise_native:
@@ -29,7 +33,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     base = convolution['layers.0.attention_conv.base_kernel']
     return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
-        kernel=kernel, native_kernel=native_kernel,
+        kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout,
         norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
         convolution=upload(convolution['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()),
         bases=[upload(base[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
@@ -79,20 +83,29 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         zeros = retain(operations.zeros_like(history))
         parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - 8, 5120))))
     keys = retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
-    heads = {}
+    heads, flat = {}, {}
+    def normalize_head(name, head):
+        norm = retain(operations.rms_norm(head, epsilon=1e-6, weight=parameters['head_norms'][name],
+            compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        wide = [retain(operations.typecast(value, operations.float32)) for value in (norm, *rope[name])]
+        rotated = retain(operations.experimental.rotary_embedding_hf(*wide, is_decode_mode=False,
+            compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        return retain(operations.typecast(rotated, operations.bfloat16))
     for name, count in (('q', 16), ('k', 4), ('v', 4)):
         rows = 32 if name == 'q' else key_rows
         projection = project(prepared if name == 'q' else keys, parameters['projections'][name], (8, 8), rows, 1)
         rounded = retain(operations.typecast(projection, operations.bfloat16))
+        if parameters.get('native_head_layout'):
+            flat[name] = rounded
+            continue
         reshaped = retain(operations.reshape(rounded, (1, rows, count, 128)))
         heads[name] = retain(operations.transpose(reshaped, 1, 2))
         if name != 'v':
-            norm = retain(operations.rms_norm(heads[name], epsilon=1e-6, weight=parameters['head_norms'][name],
-                compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-            wide = [retain(operations.typecast(value, operations.float32)) for value in (norm, *rope[name])]
-            rotated = retain(operations.experimental.rotary_embedding_hf(*wide, is_decode_mode=False,
-                compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-            heads[name] = retain(operations.typecast(rotated, operations.bfloat16))
+            heads[name] = normalize_head(name, heads[name])
+    if parameters.get('native_head_layout'):
+        heads = split_projected_heads(operations, flat['q'], flat['k'], flat['v'], retain)
+        for name in ('q', 'k'):
+            heads[name] = normalize_head(name, heads[name])
     attention_owned = []
     try:
         if parameters.get('native_kernel'):
@@ -106,8 +119,11 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         for value in attention_owned:
             retain(value)
     rounded = retain(operations.typecast(attention, operations.bfloat16))
-    transposed = retain(operations.transpose(rounded, 1, 2))
-    merged = retain(operations.reshape(transposed, (1, 1, 32, 2048)))
+    if parameters.get('native_head_layout'):
+        merged = concatenate_query_heads(operations, rounded, retain)
+    else:
+        transposed = retain(operations.transpose(rounded, 1, 2))
+        merged = retain(operations.reshape(transposed, (1, 1, 32, 2048)))
     partial = project(merged, parameters['output_projection'], (8, 10), 32, 2)
     reduced = retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
