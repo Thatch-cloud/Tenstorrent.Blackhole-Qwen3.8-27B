@@ -1,7 +1,10 @@
 """Explicit FP32 TP2 reduce-scatter/all-gather; no host tensor reduction."""
 
+from projection_link_policy import projection_links
+
 
 def reduce_projection(operations, mesh, collectives, value):
+    links = projection_links()
     if list(mesh.shape) != [1, 2] or tuple(value.shape) != (1, 1, 1, 5120) or value.dtype != operations.float32:
         raise ValueError('Single-row full-width FP32 TP2 projection required')
     reduced = output = None
@@ -9,13 +12,13 @@ def reduce_projection(operations, mesh, collectives, value):
         reduced = operations.experimental.reduce_scatter_minimal_async(value,
             persistent_output_buffers=None, dim=3,
             multi_device_global_semaphore=collectives.get_and_cycle_rs_semaphore_handles(),
-            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=1,
+            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=links,
             memory_config=operations.DRAM_MEMORY_CONFIG, intermediate_memory_config=operations.DRAM_MEMORY_CONFIG,
             topology=operations.Topology.Linear, chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
         output = operations.experimental.all_gather_async(reduced,
             persistent_output_buffer=None, dim=3,
             multi_device_global_semaphore=collectives.get_and_cycle_ag_semaphore_handles(),
-            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=1,
+            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=links,
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
         operations.synchronize_device(mesh)
@@ -30,6 +33,7 @@ def reduce_projection(operations, mesh, collectives, value):
 
 
 def gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None):
+    links = projection_links()
     shape = tuple(value.shape)
     if (list(mesh.shape) != [1, 2] or len(shape) != 4 or shape[:2] != (1, 1)
             or shape[2] not in (1, 8, 32) or shape[3] != 5120 or value.dtype != operations.float32):
@@ -46,7 +50,7 @@ def gather_add_projection(operations, mesh, collectives, value, *, retain_tempor
         gathered = operations.experimental.all_gather_async(value,
             persistent_output_buffer=None, dim=0,
             multi_device_global_semaphore=collectives.get_and_cycle_ag_semaphore_handles(),
-            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=1,
+            barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=links,
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
         retain(gathered)

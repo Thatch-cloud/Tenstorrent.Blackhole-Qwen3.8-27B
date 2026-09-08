@@ -3,9 +3,16 @@ set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
 [[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 &&
-    ( "$mode" = sampling-kernel || ( "$mode" = full-norm-engine && "${QWEN_CODING_REQUEST:-0}" = 1 && "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 ) ) ) ]]
+    ( "$mode" = sampling-kernel || "$mode" = learned-attention || ( "$mode" = full-norm-engine && "${QWEN_CODING_REQUEST:-0}" = 1 && "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 ) ) ) ]]
 descriptor=p300_mesh_graph_descriptor.textproto
 if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then descriptor=p150_x2_mesh_graph_descriptor.textproto; fi
+projection_links=1
+ccl_build=0
+if [[ "$mode" = learned-attention && "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]]; then ccl_build=1; fi
+if [[ "$mode" = learned-attention || "$mode" = learned-mlp || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
+    descriptor=p150_x2_mesh_graph_descriptor.textproto
+    projection_links=4
+fi
 if [[ "${QWEN_CODING_REQUEST:-0}" != 0 && !( "${QWEN_CODING_REQUEST:-0}" = 1 && "$mode" = full-norm-engine ) ]]; then
     echo 'Short coding workload requires full-norm-engine; long-context replay is not qualified' >&2
     exit 2
@@ -98,6 +105,8 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e MESH_DEVICE=P300 -e VLLM_PLUGINS=tt,tt_model_registry -e VLLM_RPC_TIMEOUT=100000 \
     -e "TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/$descriptor" \
     -e "QWEN_FABRIC_LINK_PROBE=${QWEN_FABRIC_LINK_PROBE:-0}" \
+    -e "QWEN_PROJECTION_LINKS=$projection_links" \
+    -e "QWEN_CCL_LAZY_BUILD=$ccl_build" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \
@@ -110,6 +119,9 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/baseline-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "$ccl_build" = 1 ]; then
+    docker cp optimisation/sim/sdpa-graft-registration.patch "$test_id:/tmp/ccl-graft-registration.patch"
+fi
 if [ "${QWEN_LEARNED_STACK:-0}" = 1 ]; then
     docker cp "$stack_fixture" "$test_id:/experiment-stack-fixture"
     docker cp "$selector_fixture" "$test_id:/experiment-selector-fixture"

@@ -19,6 +19,17 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
+    bash /experiment-scripts/ci/ccl-links-build.sh
+    export QWEN_PROJECTION_LINKS=1
+    timeout -k 15 3200 python3 -u /experiment-scripts/ci/ccl-link-probe.py \
+        --output /experiment/results/ccl-link-simulator.json 2>&1 | tee /experiment/results/ccl-link-simulator.log
+    if grep -q 'Failed to discover available ethernet links' /experiment/results/ccl-link-simulator.log; then
+        echo 'Explicit-link collective still invoked fallback discovery' >&2
+        exit 1
+    fi
+    exit 0
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = shortlist ]; then
     for width in 32768 65536; do
         timeout -k 15 3200 python3 -u /experiment-scripts/ci/draft-shortlist-probe.py \

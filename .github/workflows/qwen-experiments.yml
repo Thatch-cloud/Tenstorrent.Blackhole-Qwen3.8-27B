@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       fabric_link_probe:
-        description: Sampler 1/2/4-link probe, or 1/4-link coding ABBA with full-norm-engine (no lookup_cap_abba)
+        description: Sampler/link ABBA; learned-attention selects isolated native CCL fix build and collective gate (simulator_only supported)
         type: boolean
         default: false
       reset_authorized:
@@ -129,6 +129,7 @@ jobs:
         env:
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: ${{ inputs.learned_stack && 'stack' || 'shortlist' }}
+          QWEN_CCL_LAZY_BUILD: ${{ inputs.fabric_link_probe && '1' || '0' }}
         run: timeout -k 30 7000 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'

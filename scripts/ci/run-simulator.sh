@@ -42,7 +42,11 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     --mount "type=bind,src=$cache/dflash2-selector-$revision,dst=/fixture-selector,readonly" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
+    -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
+if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
+    docker cp optimisation/sim/sdpa-graft-registration.patch "$container:/tmp/ccl-graft-registration.patch"
+fi
 docker start -a "$container"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0

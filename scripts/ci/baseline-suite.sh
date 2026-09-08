@@ -16,6 +16,16 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
+    bash /experiment-scripts/ci/ccl-links-build.sh
+    OMP_NUM_THREADS=1 timeout -k 15 900 python3 -u /experiment-scripts/ci/ccl-link-probe.py \
+        --hardware --output /experiment/results/ccl-link-hardware.json 2>&1 | tee /experiment/results/ccl-link-hardware.log
+    if grep -q 'Failed to discover available ethernet links' /experiment/results/ccl-link-hardware.log; then
+        echo 'Explicit-link hardware collective still invoked fallback discovery' >&2
+        exit 1
+    fi
+    exit 0
+fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     OMP_NUM_THREADS=1 timeout -k 15 600 python3 /experiment-scripts/ci/fused-batch-probe.py \

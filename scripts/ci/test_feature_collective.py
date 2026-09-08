@@ -1,11 +1,22 @@
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from feature_collective import reduce_projection, gather_add_projection
 
 
 class FeatureCollectiveTests(unittest.TestCase):
+    def test_four_link_policy_reaches_both_collective_paths(self):
+        operations, mesh, collectives, value, reduced, gathered = self.fixture()
+        with patch('feature_collective.projection_links', return_value=4):
+            reduce_projection(operations, mesh, collectives, value)
+            self.assertEqual(operations.experimental.reduce_scatter_minimal_async.call_args.kwargs['num_links'], 4)
+            self.assertEqual(operations.experimental.all_gather_async.call_args.kwargs['num_links'], 4)
+            operations.slice = Mock(side_effect=[object(), object()])
+            operations.add = Mock(return_value=object())
+            gather_add_projection(operations, mesh, collectives, value)
+            self.assertEqual(operations.experimental.all_gather_async.call_args.kwargs['num_links'], 4)
+
     def test_trace_ownership_defers_sync_and_temporary_release(self):
         operations, mesh, collectives, value, reduced, gathered = self.fixture()
         left, right, output = object(), object(), object()
