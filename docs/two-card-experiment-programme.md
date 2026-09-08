@@ -2,6 +2,24 @@
 
 ## Current programme position - 2026-09-08
 
+Runtime recovery superseding the failure notes below: the operator supplied a
+jump-host route. Read-only registry inspection established that `f1e9b1a64b4f`
+is the OCI image-index digest, not the platform config digest. The original tag
+has not been shown to change; the earlier config comparison was incorrect.
+Pulling `tt-vllm@sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`
+through the existing authorized host login restored the exact image; Docker
+inspection returned that full ID. No credentials were copied, cards opened,
+workloads stopped or registry objects modified. A subsequent root fuser check
+found no device users, but that snapshot does not guarantee future exclusivity.
+
+Learned-attention capture prerequisite `20260908T021855Z-300` passed TTSim:
+four eager FP32-reference checks, six exact A/B/A replay checks and two stale-input
+negative controls across both chips. Q/K/V and mask all change at persistent
+addresses; caller inputs remain exact. Optional trace ownership removes the
+helper's internal synchronization/deallocation and retains buffers until release.
+This is the attention core, not a complete learned layer/drafter or a timing claim.
+Default eager behavior is unchanged. Full Linux host suite now passes634 tests.
+
 Latest runtime checkpoint: captured fusion hardware run34178476409 failed before
 container creation/card access because pinned image `f1e9b1a64b4f` is missing.
 Read-only inventory34178884716 passed: both cards remain visible at PCIe x16/x4;

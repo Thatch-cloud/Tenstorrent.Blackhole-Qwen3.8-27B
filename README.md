@@ -83,7 +83,7 @@ These are **block timings, not generated throughput**, excluding draft/commit ov
 | Learned MLP, T8 captured replay | 1.911 ms median | One isolated MLP branch, not a complete draft |
 | Gate/up fusion, T8 eager | Native 0.240 ms; fused 0.761 ms | Correct but slower; not adopted |
 | Fusion captured replay, simulator | Changing-input and stale-input controls pass on both chips | Correctness only; no hardware speed claim |
-| Fusion captured replay, hardware | Launch failed: pinned Docker image missing | No timing result; failed before card access |
+| Fusion captured replay, hardware | First launch failed before card access; exact runtime now restored | Hardware timing retry pending |
 
 Evidence: [MLP trace](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34170293087),
 [eager fusion](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34176158014),
@@ -99,8 +99,8 @@ Fusion uses geometry-matched DFlash weights, not a full target-model quality tes
 | Ethernet dispatch / extra column | Hardware grid and fabric gates remain before performance claims |
 | Coding quality | Held-out coding evaluation remains; numerical gates alone do not certify quality |
 
-Next: recover the exact pinned runtime without disturbing other workloads, measure
-captured fusion, then pursue full-model verifier savings and learned-drafter integration.
+Next: measure captured fusion on the restored exact runtime, then pursue full-model
+verifier savings and learned-drafter integration without disturbing other workloads.
 PP and committed TG need a matched context/concurrency sweep once that path is ready.
 
 ## Guides and evidence

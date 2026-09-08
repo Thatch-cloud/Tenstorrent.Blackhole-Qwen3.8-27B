@@ -70,10 +70,12 @@ def pairwise_dot(operations, left, right, retain):
     return retain(operations.reshape(reduced, (1, heads, rows, key_rows)))
 
 
-def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False, fused_dots=False, cache_dot_tiles=False, wide_dot_placement=False):
+def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspect=None, explicit_softmax=False, wide_operands=False, pairwise_sum=False, pairwise_dots=False, fused_row_sum=False, fused_dots=False, cache_dot_tiles=False, wide_dot_placement=False, trace_owned=None):
     from gdn_multitoken_conv import addresses, release_owned
 
     validate_attention(operations, query, key, value, mask)
+    if trace_owned is not None and (not isinstance(trace_owned, list) or inspect is not None):
+        raise ValueError('Trace ownership requires a caller-owned list and no host inspection')
     if fused_row_sum and (not explicit_softmax or pairwise_sum):
         raise ValueError('Fused row sum requires explicit softmax and replaces pairwise sum')
     if fused_dots and pairwise_dots:
@@ -141,11 +143,18 @@ def composed_draft_attention(operations, mesh, query, key, value, mask, *, inspe
         else:
             output = retain(operations.matmul(probabilities, values, dtype=operations.float32,
                 compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-        operations.synchronize_device(mesh)
+        if trace_owned is None:
+            operations.synchronize_device(mesh)
         if inspect is not None:
             inspect(query, keys, values, scores, masked, probabilities, output)
     except BaseException:
-        release_owned(operations, owned)
+        if trace_owned is None:
+            release_owned(operations, owned)
+        else:
+            trace_owned.extend(owned)
         raise
-    release_owned(operations, [tensor for tensor in owned if addresses(operations, tensor) != addresses(operations, output)])
+    if trace_owned is None:
+        release_owned(operations, [tensor for tensor in owned if addresses(operations, tensor) != addresses(operations, output)])
+    else:
+        trace_owned.extend(owned)
     return output

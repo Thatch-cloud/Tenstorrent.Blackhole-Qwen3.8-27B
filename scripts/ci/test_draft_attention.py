@@ -76,6 +76,32 @@ class DraftAttentionTests(unittest.TestCase):
         self.assertIs(arguments['is_causal'], False)
         self.assertIs(arguments['attn_mask'], mask)
 
+    def test_trace_retains_intermediates_without_sync_or_deallocation(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        owned = []
+        output = composed_draft_attention(operations, object(), query, key, value, mask, trace_owned=owned)
+        operations.synchronize_device.assert_not_called()
+        operations.deallocate.assert_not_called()
+        self.assertTrue(any(tensor is output for tensor in owned))
+        self.assertEqual(len(owned), 9)
+        for borrowed in (query, key, value, mask):
+            self.assertFalse(any(tensor is borrowed for tensor in owned))
+
+    def test_trace_failure_transfers_cleanup_to_caller(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        operations.multiply.side_effect = RuntimeError('capture failure')
+        owned = []
+        with self.assertRaisesRegex(RuntimeError, 'capture failure'):
+            composed_draft_attention(operations, object(), query, key, value, mask, trace_owned=owned)
+        self.assertEqual(len(owned), 4)
+        operations.deallocate.assert_not_called()
+
+    def test_trace_rejects_host_inspection_before_dispatch(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        with self.assertRaises(ValueError):
+            composed_draft_attention(operations, object(), query, key, value, mask, trace_owned=[], inspect=Mock())
+        operations.repeat_interleave.assert_not_called()
+
     def test_composed_path_keeps_inputs_and_output_owned_by_caller(self):
         operations, query, key, value, mask = self.operations_fixture()
         mesh = object()
