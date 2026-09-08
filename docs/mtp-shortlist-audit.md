@@ -137,3 +137,17 @@ The next launch validates checkpoint paths and headers before rebuilding or
 opening cards. Allocated hardware builds use eight compile jobs within the
 existing 24-CPU/96-GiB container limits; CPU simulator builds retain two jobs.
 Neither change is a model throughput improvement. MTP TG remains unmeasured.
+
+Run `34195514722` loads MTP, captures its proposal/catch-up traces, and initializes
+all 169 shifted prompt rows. It then fails while preparing verifier hidden-row
+extraction: unaligned native slice internally switches to row-major, where the
+preallocated tiled destination has incompatible padding (32 physical rows versus
+one required row). The caller now lets native slice finish its layout conversion,
+then copies into the fixed destination; single-row buckets copy directly.
+Temporary ownership stays within warmup/capture, not hot-path replay.
+
+Real-TTNN simulator gate `20260908T065049Z-415` passes T1/T2/T4/T8 A/B/A replay:
+90 exact row checks on both chips, 24 source-preservation checks, and 30 stale-row
+negative controls. No hardware throughput is inferred. The hardware request suite
+now runs this exact row test before loading the full model, then continues into
+the complete coding request. The 709-test host suite also passes.

@@ -22,18 +22,25 @@ class HiddenRowsTests(unittest.TestCase):
             return trace
         def end(mesh, trace, cq_id):
             active.clear()
-        def slice_row(value, start, stop, *, output_tensor, memory_config):
-            operation = lambda: output_tensor.data.copy_(value.data[:, :, start[2]:stop[2]])
+        temporary = []
+        def record(operation):
             operation()
             if active:
                 traces[active[0]].append(operation)
-            return output_tensor
+        def slice_row(value, start, stop, *, memory_config):
+            result = tensor(torch.zeros_like(destination.data), (30 + len(temporary), 30 + len(temporary)))
+            temporary.append(result)
+            record(lambda: result.data.copy_(value.data[:, :, start[2]:stop[2]]))
+            return result
+        def copy(source, target):
+            record(lambda: target.data.copy_(source.data))
+            return target
         def replay(mesh, trace, cq_id, blocking):
             for operation in traces[trace]:
                 operation()
         operations = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', DRAM_MEMORY_CONFIG='dram',
             from_torch=Mock(return_value=destination), ReplicateTensorToMesh=Mock(),
-            slice=slice_row, begin_trace_capture=begin, end_trace_capture=end, execute_trace=replay,
+            slice=slice_row, copy=copy, begin_trace_capture=begin, end_trace_capture=end, execute_trace=replay,
             synchronize_device=Mock(), release_trace=Mock(), deallocate=Mock())
         with patch('mtp_hidden_rows.addresses', side_effect=lambda operations, value: value.identity):
             reader = MTPHiddenRows(operations, object(), [source])
@@ -49,5 +56,17 @@ class HiddenRowsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reader(source, 0)
             reader.close()
-            operations.deallocate.assert_called_once_with(destination)
+            self.assertEqual(operations.deallocate.call_count, len(temporary) + 1)
+            self.assertIs(operations.deallocate.call_args.args[0], destination)
+            self.assertTrue(all(call.args[0] is not source for call in operations.deallocate.call_args_list))
             self.assertEqual(operations.release_trace.call_count, 4)
+
+    def test_single_row_copies_directly_without_slicing_or_releasing_source(self):
+        source = SimpleNamespace(shape=(1, 1, 1, 5120))
+        reader = MTPHiddenRows.__new__(MTPHiddenRows)
+        reader.destination = object()
+        reader.operations = SimpleNamespace(copy=Mock(), slice=Mock(), deallocate=Mock())
+        self.assertIs(reader.execute(source, 0), reader.destination)
+        reader.operations.copy.assert_called_once_with(source, reader.destination)
+        reader.operations.slice.assert_not_called()
+        reader.operations.deallocate.assert_not_called()

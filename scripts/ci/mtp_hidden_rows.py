@@ -34,11 +34,20 @@ class MTPHiddenRows:
             raise ValueError('Row destination must not alias source on either chip')
 
     def execute(self, source, row):
+        if source.shape[2] == 1:
+            self.operations.copy(source, self.destination)
+            return self.destination
         result = self.operations.slice(source, (0, 0, row, 0), (1, 1, row + 1, 5120),
-            output_tensor=self.destination, memory_config=self.operations.DRAM_MEMORY_CONFIG)
-        if tuple(addresses(self.operations, result)) != self.destination_ids:
-            raise ValueError('Native slice did not use its preallocated destination')
-        return result
+            memory_config=self.operations.DRAM_MEMORY_CONFIG)
+        source_ids, result_ids = addresses(self.operations, source), addresses(self.operations, result)
+        if source_ids != result_ids and any(left == right for left, right in zip(source_ids, result_ids, strict=True)):
+            raise ValueError('Slice must not partially alias its source across chips')
+        try:
+            self.operations.copy(result, self.destination)
+        finally:
+            if source_ids != result_ids:
+                self.operations.deallocate(result)
+        return self.destination
 
     def prepare(self):
         if self.ready or self.closed:
