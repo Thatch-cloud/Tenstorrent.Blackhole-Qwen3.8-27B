@@ -151,3 +151,49 @@ Real-TTNN simulator gate `20260908T065049Z-415` passes T1/T2/T4/T8 A/B/A replay:
 negative controls. No hardware throughput is inferred. The hardware request suite
 now runs this exact row test before loading the full model, then continues into
 the complete coding request. The 709-test host suite also passes.
+
+## Complete hardware MTP request - 2026-09-08
+
+[Run 34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661)
+on `c0810fd` passes the hidden-row gate and the full coding request. This supersedes
+the pending native-MTP device qualification above; the shortlisted head is still
+unqualified and unused. No future target answers or shortlist calibration are used.
+
+| Metric | Measured result |
+| --- | --- |
+| CTX / streams / draft K / verify T | 170 / 1 / 7 / 8 |
+| Output | 150 committed decode tokens; EOS reached |
+| Native / MTP committed TG | 19.7357 / 48.8346 tok/s |
+| Acceptance | 125 of 182 proposals; 26 blocks |
+| Equality | All emitted tokens, final active GDN, valid KV and inactive slots |
+| MTP setup / verifier setup | 3058.08 / 4345.42 ms |
+| MTP prefill / decode | 298.06 / 3071.59 ms |
+| Prefill + setup + decode | 10773.15 ms MTP; 7900.36 ms native |
+
+The request is slower including unamortized setup; target model loading is outside
+both totals. This one task is not a
+held-out coding-quality, context/concurrency or sustained-serving qualification.
+Target 200 TG remains unmet. Mean block costs are 66.29 ms verifier/readback,
+38.82 ms drafting and 12.04 ms repair/commit. Sampling currently pads each draft
+to 32 rows; test native logical rows without changing full-vocabulary greedy
+semantics, and then measure the complete request rather than extrapolating TG.
+
+Artifact: `full-mtp-request.json`, SHA256
+`86a92b560ced248ce91e20a1ec19ea2007ac7a73be64748b5c517b724bfc305c`.
+
+### Next experiment: native logical sampling rows
+
+The opt-in `full-mtp-request` suite now compares padded/native/native/padded
+requests with K7/T8 fixed. Only logical-row padding in the native full-vocabulary
+sampler changes, in both MTP and target verification. Target quantization, four
+fabric links, prompt, sampling semantics and cache repair remain unchanged.
+Exact proposal routes, acceptance, outputs and target-state checks are mandatory.
+MTP setup is included alongside verifier setup in the paired inclusive totals.
+The 716-test host suite and 60 harness tests pass; no candidate hardware TG yet.
+
+Simulator reduction gate `20260908T071725Z-311` exceeded its 600-second budget
+after exact T1 checks and partial T2 checks. It is not a pass. The retry removes
+redundant padded-control simulation and tests the changed native untilize/argmax
+against Torch at the real 248320-token vocabulary. It does not simulate fabric.
+The hardware gate retains both complete samplers, changing inputs, cross-shard
+ties, boundary IDs and input-preservation checks before the request comparison.

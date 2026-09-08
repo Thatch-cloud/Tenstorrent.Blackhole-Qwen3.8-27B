@@ -104,7 +104,7 @@ def main():
     options = parser.parse_args()
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
     mtp_drafts = os.environ.get('QWEN_MTP_DRAFTS', '0')
-    if mtp_drafts not in ('0', '1', '3', '7', '15', '31') or (mtp_drafts != '0' and
+    if mtp_drafts not in ('0', '7') or (mtp_drafts != '0' and
             (coding_request != '1' or not options.norm_batch or not options.request_pilot
              or options.attention_engine or options.attention_engine_wide
              or os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0') != '0'
@@ -758,29 +758,37 @@ def main():
 
                 if mtp_drafts != '0':
                     from full_mtp_request import measure_mtp_request
+                    from full_request_pair import summarize_requests
                     output_path = root / 'full-mtp-request.json'
-                    report['scope'] = 'Single real coding request with native MTP drafting and exact target verification'
+                    report['scope'] = 'Matched ABBA coding requests: padded/native-row full-vocabulary MTP and target sampling'
                     report['context_lengths'] = [len(prompt)]
                     report['mtp_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                         for name in ('full_mtp_request.py', 'mtp_device_step.py', 'mtp_prefill.py',
-                                     'mtp_request_runtime.py', 'mtp_hidden_capture.py', 'mtp_hidden_rows.py')}
+                                     'mtp_request_runtime.py', 'mtp_hidden_capture.py', 'mtp_hidden_rows.py',
+                                     'force_argmax.py', 'full_request_pair.py')}
                     report['mtp_module_sha256'] = hashlib.sha256(Path('/experiment-speculative/mtp_module.py').read_bytes()).hexdigest()
+                    report['request_checks'] = []
                     with sampler_links(sampler.tt_sampling, 4):
                         axis = sampler.tt_sampling._get_sampling_cluster_axis()
                         actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
                         if actual != 4 or topology != ttnn.Topology.Linear:
                             raise AssertionError('MTP request sampler must use four physical-pair links')
-                        result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
-                            weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
-                            kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids, max_drafts=int(mtp_drafts))
-                    result.update(kind=report['scope'], coding_task=report['coding_task'],
-                        output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
-                        ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4, fabric_sources=fabric_sources)
-                    report['request_checks'] = [result]
-                    if result['committed_decode_tokens'] == 0:
-                        raise AssertionError('MTP request must exercise decode')
+                        for native_sampling_rows in (False, True, True, False):
+                            print(json.dumps(dict(mtp_arm=native_sampling_rows, repetition=len(report['request_checks']))), flush=True)
+                            result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
+                                weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
+                                kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
+                                max_drafts=int(mtp_drafts), native_sampling_rows=native_sampling_rows)
+                            result.update(kind=report['scope'], coding_task=report['coding_task'],
+                                output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
+                                ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4, fabric_sources=fabric_sources)
+                            report['request_checks'].append(result)
+                            output_path.write_text(json.dumps(report, indent=2))
+                            if result['committed_decode_tokens'] == 0:
+                                raise AssertionError('MTP request must exercise decode')
+                    report['request_summary'] = summarize_requests(report['request_checks'], arm_key='native_sampling_rows')
                     report['passed'] = True
-                    print(json.dumps(result), flush=True)
+                    print(json.dumps(report['request_summary']), flush=True)
                     return
 
                 def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False, sampling_links=False):

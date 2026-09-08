@@ -65,3 +65,35 @@ class ForceArgmaxTests(unittest.TestCase):
 
         sampler, operations = self.fixture()
         self.assertEqual(sample_rows(sampler, SimpleNamespace(shape=Shape()), 2, operations), 'ids')
+
+    def test_native_rows_preserve_input_width_without_padding(self):
+        for rows in (1, 2, 4, 8, 16, 32):
+            sampler, operations = self.fixture()
+            sampler.tt_sampling.vocab_size = sampler.tt_sampling.padded_vocab_size = 248320
+            sampler._penalties_active = False
+            logits = SimpleNamespace(shape=(1, 1, rows, 124160))
+            self.assertEqual(sample_rows(sampler, logits, rows, operations, native_rows=True), 'ids')
+            sampler.sample.assert_called_once_with(logits, enable_trace=False)
+            operations.pad.assert_not_called()
+            operations.deallocate.assert_not_called()
+
+    def test_native_rows_reject_unqualified_sampler_contracts(self):
+        for invalid in ('selection', 'vocab', 'padding', 'penalties', 'logprobs', 'shard'):
+            sampler, operations = self.fixture()
+            sampler.tt_sampling.vocab_size = sampler.tt_sampling.padded_vocab_size = 248320
+            sampler._penalties_active = sampler._log_probs_active = False
+            logits = SimpleNamespace(shape=(1, 1, 1, 124160))
+            if invalid == 'vocab':
+                sampler.tt_sampling.vocab_size = 248319
+            elif invalid == 'padding':
+                sampler.tt_sampling.padded_vocab_size = 248352
+            elif invalid == 'penalties':
+                sampler._penalties_active = True
+            elif invalid == 'logprobs':
+                sampler._log_probs_active = True
+            elif invalid == 'shard':
+                logits.shape = (1, 1, 1, 248320)
+            with self.assertRaises(ValueError):
+                sample_rows(sampler, logits, 1, operations, native_rows=1 if invalid == 'selection' else True)
+            sampler.sample.assert_not_called()
+            operations.pad.assert_not_called()

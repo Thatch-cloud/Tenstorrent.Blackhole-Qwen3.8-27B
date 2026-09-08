@@ -5,6 +5,40 @@ from full_request_pair import measure_requests, summarize_requests
 
 
 class MatchedRequestTests(unittest.TestCase):
+    def test_native_sampling_mtp_comparison_includes_setup_and_preserves_routing(self):
+        def measure(*, native_sampling_rows):
+            record = dict(self.record(native_sampling_rows), native_sampling_rows=native_sampling_rows,
+                norm_batch=True, family_routing=False, attention_replay=False, attention_mask_once=False,
+                replay_group_rows=4, lookup_max_rows=8, sampler_num_links=4, ended_with_eos=True,
+                fabric_sources={'descriptor': 'audited'}, selected_drafter='mtp',
+                drafting_policy='neural-with-target-fallback', mtp_setup_ms=50,
+                mtp=dict(max_drafts=7, head='native-full-vocabulary-force-argmax',
+                    native_sampling_rows=native_sampling_rows, mtp_weight_names=['mtp.fc.weight'],
+                    index_sha256='index', embedding_key='embedding', prompt_alignment={'initialized_mtp_rows': 1}))
+            record['blocks'][0]['source'] = 'mtp'
+            return record
+        records, summary = measure_requests(measure, arm_key='native_sampling_rows')
+        self.assertEqual(summary['arms']['candidate']['mtp_setup_ms'], 100)
+        self.assertEqual(summary['arms']['candidate']['prefill_setup_decode_ms'], 360)
+        self.assertAlmostEqual(summary['arms']['candidate']['post_seed_including_setup_tokens_per_second'], 4000 / 300)
+        for key, value in (('sampler_num_links', 1), ('lookup_max_rows', 32), ('selected_drafter', 'lookup'),
+                ('accepted', 0), ('drafting_policy', 'lookup-first'), ('mtp_setup_ms', 0),
+                ('mtp_setup_ms', float('nan')), ('ended_with_eos', False)):
+            invalid = deepcopy(records)
+            invalid[1][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='native_sampling_rows')
+        for key, value in (('max_drafts', 15), ('native_sampling_rows', False), ('index_sha256', 'different'),
+                           ('head', 'shortlisted'), ('prompt_alignment', {'initialized_mtp_rows': 0})):
+            invalid = deepcopy(records)
+            invalid[1]['mtp'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                summarize_requests(invalid, arm_key='native_sampling_rows')
+        invalid = deepcopy(records)
+        invalid[2]['blocks'][0]['input_tokens'] = [0, 9]
+        with self.assertRaisesRegex(ValueError, 'changed proposal routing'):
+            summarize_requests(invalid, arm_key='native_sampling_rows')
+
     def test_sampling_links_keeps_request_and_routing_identical(self):
         def measure(*, sampling_links):
             return dict(self.record(sampling_links), sampling_links=sampling_links, norm_batch=True,

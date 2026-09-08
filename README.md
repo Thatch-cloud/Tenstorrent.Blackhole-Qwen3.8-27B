@@ -4,12 +4,11 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Current test:** [real coding MTP retry](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661)
-on both cards: seven draft tokens, eight-row target verification, full-vocabulary
-device argmax, and cache repair after rejection. TG includes all four steps.
-Hardware executes MTP loading, trace setup and prompt initialization. The retry
-fixes hidden-row extraction; its changing-input TTNN simulator checks pass. No MTP TG yet.
-Completed four-link lookup: **19.10 tok/s**.
+**Latest completed result: 48.83 committed tok/s**, versus a matched native
+**19.74 tok/s**. [Two-card MTP run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661)
+finishes one coding response with all 150 decode tokens and final cache state exact.
+This is a 2.47x decode improvement, not 200 TG or a held-out coding-quality score.
+Setup is not amortized yet: the request including preparation remains slower than native.
 
 ## Setup
 
@@ -58,6 +57,26 @@ single-stream acceleration; these medians are not aggregate throughput.
 
 ## Speculative request experiments
 
+### Native MTP: complete coding response
+
+Seven draft tokens, up to eight target verification rows, full-vocabulary device
+argmax and cache repair after rejection. One stream, not eight batched users.
+TG includes drafting, verification/readback and commit; excludes prefill/setup.
+
+| CTX | Streams (B) | Path | Verify rows (T) | PP tok/s | Committed TG tok/s |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 170 | 1 | Matched native | 1 | 566.82 | 19.74 |
+| 170 | 1 | Native MTP K7 | 8 | 570.35 | **48.83** |
+
+PP measures the target prefill helper; MTP feature capture is included, draft
+initialization is not. MTP accepts 125/182 proposals over 26 blocks and reaches EOS.
+Tokens, active GDN, valid KV and inactive slots match the native reference exactly.
+Prefill + unamortized setup + decode: **10.77 s MTP versus 7.90 s native**.
+These totals start with the target model already loaded, not a cold process launch.
+Trace/setup reuse across requests and longer-context measurements remain to do.
+
+### Earlier lookup experiments
+
 Synthetic lookup proposals, **not a learned drafter or a coding benchmark**.
 TG counts committed tokens during decode, excluding prefill and setup.
 
@@ -72,7 +91,22 @@ Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
 
 ## What currently limits 200 tok/s?
 
-The September 8 completed coding request still exposes weak lookup proposals.
+MTP now produces useful drafts, but the full cycle averages **118.10 ms** for
+**5.77 committed tokens**. Measured mean costs in the completed request:
+
+| Work per block | Time |
+| --- | ---: |
+| Target verification and readback | 66.29 ms |
+| Seven sequential MTP drafts | 38.82 ms |
+| Cache repair and commit | 12.04 ms |
+| Input staging | 0.54 ms |
+
+At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 118 ms.
+Even perfect T8 acceptance and free drafting cannot overcome the current verifier.
+Next: remove unnecessary sampler rows and qualify parallel attention at the actual
+short context. Both need exact checks and a complete-request hardware comparison.
+
+The earlier September 8 coding requests expose weak lookup proposals.
 All four requests reach EOS after 150 committed decode tokens and match native
 tokens, active state and inactive slots. This is one task, not held-out coding-quality certification.
 
@@ -145,7 +179,7 @@ was resolved by restoring the exact runtime image.
 
 | Workstream | Current position |
 | --- | --- |
-| MTP | Complete coding-request path wired; real two-card qualification pending |
+| MTP | Complete exact coding request: 48.83 TG; setup reuse and held-out/context tests remain |
 | DFlash2 | Five-layer hardware correctness passes; full captured drafting and live request integration remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
@@ -153,8 +187,8 @@ was resolved by restoring the exact runtime image.
 | Ethernet dispatch / extra column | Hardware grid and fabric gates remain before performance claims |
 | Coding quality | Held-out coding evaluation remains; numerical gates alone do not certify quality |
 
-Next: measure real draft acceptance and complete-cycle cost, then optimize the
-dominant cost. The modest isolated fusion gain does not close the verifier gap.
+Next: reduce the measured verifier and drafting costs; acceptance is now measured.
+The modest isolated fusion gain does not close the verifier gap.
 PP and committed TG need a matched context/concurrency sweep after qualification.
 
 ## Guides and evidence

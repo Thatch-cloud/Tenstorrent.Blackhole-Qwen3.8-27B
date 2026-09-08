@@ -3,7 +3,9 @@
 from gdn_multitoken_conv import addresses
 
 
-def sample_rows(sampler, logits, rows, operations):
+def sample_rows(sampler, logits, rows, operations, *, native_rows=False):
+    if type(native_rows) is not bool:
+        raise ValueError('Explicit boolean native-row sampling required')
     if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Supported verifier width required')
     shape = tuple(logits.shape)
@@ -13,10 +15,14 @@ def sample_rows(sampler, logits, rows, operations):
         raise ValueError('Pinned 32-row force-argmax sampler required')
     if sampler.seed_manager.has_active_request_seed():
         raise ValueError('Seeded sampling is outside the greedy verifier contract')
+    if native_rows and (shape[-1] != 124160 or sampler.tt_sampling.vocab_size != 248320
+            or sampler.tt_sampling.padded_vocab_size != 248320
+            or sampler._penalties_active or getattr(sampler, '_log_probs_active', False)):
+        raise ValueError('Native-row experiment requires unpadded Qwen TP2 vocabulary without penalties or logprobs')
     padded = logits
     owns_padding = False
     try:
-        if rows < 32:
+        if rows < 32 and not native_rows:
             padded = operations.pad(logits, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], value=0.0)
             original_addresses, padded_addresses = addresses(operations, logits), addresses(operations, padded)
             if original_addresses != padded_addresses:

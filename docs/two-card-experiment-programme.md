@@ -4,16 +4,31 @@
 
 | Priority | Verified position / next gate |
 | --- | --- |
-| Single-stream target | 200 committed TG not achieved; completed four-link coding request: 19.10 TG, CTX 170 |
-| Current hardware run | [34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661): native MTP K7/T8 coding retry with corrected hidden-row extraction; results pending |
-| MTP integration | Hardware executes MTP load, trace setup and 169-row prompt initialization; row-layout fix passes real-TTNN simulation; 709 host tests pass |
+| Single-stream target | 200 committed TG not achieved; complete native-MTP coding request: 48.83 TG, CTX 170, versus matched native 19.74 |
+| Latest hardware result | [34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661) passes: K7/T8, 150 committed tokens to EOS, exact tokens/GDN/valid KV/inactive slots |
+| MTP integration | Full-vocabulary device drafting, 169-row prompt initialization and rejection repair execute; 125/182 proposals accepted in 26 blocks; 709 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
 | DFlash2 | Complete captured stack remains unqualified; cancelled simulator runs are not passes |
 
-No device resets, serving-default changes, or new isolated kernel matrix in the
-current run. Exact native tokens, active GDN state, valid KV and inactive slots
-remain mandatory. One coding request is not a held-out coding-quality suite.
+No device resets or serving-default changes. One coding request is not a held-out
+coding-quality suite. Decode is 3.072 s; prefill + setup + decode is 10.773 s versus
+7.900 s native. The 2.47x decode gain does not yet improve this cold request's total
+latency. The target model is already loaded for both totals; these are not cold
+process-launch measurements. Setup/trace reuse across requests remains unimplemented.
+
+Mean block budget: verification/readback 66.285 ms, seven drafts 38.816 ms,
+cache repair/commit 12.040 ms, staging 0.536 ms; total 118.099 ms for 5.769 committed
+tokens. The 200 TG budget at this acceptance is 28.846 ms. Prioritize the actual
+verifier and draft costs, not more link/fusion microbenchmarks. Next experiment:
+exact native-row force argmax instead of sampling 32 rows; qualify the primitive
+on changing simulator inputs, then compare complete hardware MTP requests.
+Short-context parallel attention requires its own numerical/replay qualification;
+do not relax the long-context guard or pad the coding input to hide the mismatch.
+Report SHA256: `86a92b560ced248ce91e20a1ec19ea2007ac7a73be64748b5c517b724bfc305c`.
+
+### MTP bring-up failures (resolved by run 34196777661)
+
 First MTP launch 34191983233 failed fresh-prefill seed equality before drafting;
 it produced no MTP throughput. The retry restores the required prefill/feature
 warmup before parking the native decode trace and keeps all equality guards.
@@ -24,7 +39,8 @@ the host; the next CI run repeats that preflight before its native build.
 Run 34195514722 passes checkpoint loading and executes MTP prompt initialization,
 then fails on an unaligned slice's tiled output padding. The corrected composition
 passes 90 real-TTNN simulator row checks, 24 input-preservation checks and 30 stale
-controls. The next hardware run checks those rows, then runs the coding request.
+controls. Run 34196777661 repeats the row checks on hardware and completes the
+coding request. These failures are resolved, not outstanding qualification gates.
 
 ### Earlier checkpoints (historical, not current run status)
 

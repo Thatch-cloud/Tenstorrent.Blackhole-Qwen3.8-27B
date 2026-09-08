@@ -23,14 +23,15 @@ class RequestPilotTests(unittest.TestCase):
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
-                    mtp_factory=None, prefill=None, progress=None):
+                    mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
             return logits
 
         def factory(model, session, pages, helpers, sampler, norm_batch, attention_replay=False,
-                    attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False):
+                    attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
+                    native_sampling_rows=False):
             engine = SimpleNamespace(setup_ms=12.0, phase='idle', close=Mock(), buckets={1: {}, 2: {}, 4: {}})
             engine.retain_mtp_hidden = retain_mtp_hidden
             engine.verified_mtp_hidden_for_publication = lambda ticket: [[token] for token in ticket.tokens]
@@ -51,7 +52,7 @@ class RequestPilotTests(unittest.TestCase):
             return engine
 
         with patch('full_request.VerifierEngine', side_effect=factory) as constructor:
-            result = measure_request(SimpleNamespace(args=SimpleNamespace(vocab_size=100)), None,
+            result = measure_request(SimpleNamespace(args=SimpleNamespace(vocab_size=100)), object() if native_sampling_rows else None,
                 [0, 1, 2] * (1365 if attention_replay else 12), SimpleNamespace(shape=(1, 1024)), [],
                 prefill=prefill or (lambda prompt: seed), decode=decode,
                 live_digest=lambda: 'state', kv_digest=lambda position: position,
@@ -59,8 +60,17 @@ class RequestPilotTests(unittest.TestCase):
                 attention_replay=attention_replay, family_routing=attention_replay,
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
-                lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress)
+                lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
+                native_sampling_rows=native_sampling_rows)
         return result, constructor
+
+    def test_native_sampling_rows_reaches_engine_without_changing_proposals(self):
+        control, _ = self.run_fixture()
+        candidate, constructor = self.run_fixture(native_sampling_rows=True)
+        self.assertIs(constructor.call_args.kwargs['native_sampling_rows'], True)
+        self.assertIs(candidate['native_sampling_rows'], True)
+        for key in ('emitted', 'proposed', 'accepted', 'committed_decode_tokens'):
+            self.assertEqual(candidate[key], control[key])
 
     def test_mtp_factory_runs_after_second_prefill_and_is_charged(self):
         from mtp_request_runtime import MTPRequestRuntime

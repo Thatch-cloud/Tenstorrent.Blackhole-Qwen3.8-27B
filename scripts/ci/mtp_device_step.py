@@ -8,9 +8,13 @@ from verifier_inputs import host_inputs
 
 
 class MTPDeviceStep:
-    def __init__(self, operations, model, mtp, embedding, page_table, sampler, *, shortlist=None):
+    def __init__(self, operations, model, mtp, embedding, page_table, sampler, *, shortlist=None,
+                 native_sampling_rows=False):
         import torch
 
+        if type(native_sampling_rows) is not bool or (native_sampling_rows and shortlist is not None):
+            raise ValueError('Native-row sampling requires explicit full-vocabulary selection')
+        self.native_sampling_rows = native_sampling_rows
         if (model.num_devices != 2 or tuple(embedding.shape) != (248320, 5120)
                 or embedding.device.type != 'cpu' or mtp.mesh is not model.mesh_device):
             raise ValueError('Pinned TP2 native MTP and full CPU embedding table required')
@@ -48,7 +52,7 @@ class MTPDeviceStep:
         else:
             logits = operations.linear(hidden, self.model.lm_head_weight)
             self.owned.append(logits)
-            tokens = sample_rows(self.sampler, logits, 1, operations)
+            tokens = sample_rows(self.sampler, logits, 1, operations, native_rows=self.native_sampling_rows)
             self.owned.append(tokens)
         return hidden, tokens
 

@@ -316,6 +316,8 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
     if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
         OMP_NUM_THREADS=1 timeout -k 15 300 python3 -u /experiment-scripts/ci/mtp-hidden-row-probe.py \
             --hardware --output /experiment/results/mtp-hidden-rows.json
+        OMP_NUM_THREADS=1 timeout -k 15 300 python3 -u /experiment-scripts/ci/sampling-native-rows-probe.py \
+            --hardware --output /experiment/results/sampling-native-rows.json
     fi
     timeout -k 30 4800 python3 /experiment-scripts/ci/full-prefix.py --max-rows 32 --batch --coding-cost --serial-sdpa --compact-gdn --reuse-gdn-input --skip-row-clones --hoist-row-layout --device-loop-gdn --compact-prologue --batch-conv --packed-checkpoints --ordered-cache --device-selection --request-pilot --norm-batch
     exit 0

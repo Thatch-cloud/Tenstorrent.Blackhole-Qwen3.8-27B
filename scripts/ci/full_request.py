@@ -22,7 +22,9 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
-                    mtp_runtime=None, mtp_factory=None, progress=None):
+                    mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False):
+    if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
+        raise ValueError('Native-row experiment requires explicit device sampling')
     if progress is not None and not callable(progress):
         raise ValueError('Request progress must be callable')
     if mtp_factory is not None and (not callable(mtp_factory) or mtp_runtime is not None):
@@ -92,6 +94,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             engine = factory(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
                 attention_replay=attention_replay, attention_mask_once=attention_mask_once,
                 replay_group_rows=replay_group_rows,
+                **(dict(native_sampling_rows=True) if native_sampling_rows else {}),
                 **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
             if mtp_runtime is not None:
@@ -134,7 +137,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
-            lookup_max_rows=lookup_max_rows,
+            lookup_max_rows=lookup_max_rows, native_sampling_rows=native_sampling_rows,
             selected_drafter=selected_drafter,
             drafting_policy='lookup-first' if lookup_enabled else 'neural-with-target-fallback',
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),

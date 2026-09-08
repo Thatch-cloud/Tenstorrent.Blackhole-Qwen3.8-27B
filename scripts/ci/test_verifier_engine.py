@@ -12,6 +12,17 @@ from verifier_engine import VerifierEngine, capture_widths
 
 
 class EngineLifecycleTests(unittest.TestCase):
+    def test_native_sampling_selection_reaches_verifier_operation(self):
+        engine = VerifierEngine.__new__(VerifierEngine)
+        engine.sampler, engine.operations = object(), SimpleNamespace(deallocate=Mock())
+        logits, identifiers = object(), object()
+        fixture = SimpleNamespace(run=Mock(return_value=logits), rows=8)
+        for enabled in (False, True):
+            engine.native_sampling_rows = enabled
+            with patch('verifier_engine.sample_rows', return_value=identifiers) as sample:
+                self.assertEqual(engine.operation(fixture), (logits, identifiers))
+                sample.assert_called_once_with(engine.sampler, logits, 8, engine.operations, native_rows=enabled)
+
     def test_mtp_hidden_is_available_only_for_live_verified_ticket(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         ticket, hidden = object(), object()

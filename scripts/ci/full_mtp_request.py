@@ -93,12 +93,13 @@ def prefill_with_hidden(operations, model, prompt, prefill):
 
 
 def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, weights,
-                        prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7):
+                        prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids, max_drafts=7,
+                        native_sampling_rows=False):
     import torch
     from models.tt_transformers.tt.ccl import TT_CCL
     from mtp_module import NAMES, Qwen36MTP, load_mtp_weights
 
-    if (type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
+    if (type(native_sampling_rows) is not bool or type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
             or not 0 < len(prompt) <= 256 or len(model.layers) != 64 or model.num_devices != 2
             or tuple(pages.shape) != (1, 1024) or not torch.equal(pages, torch.arange(1024).reshape(1, 1024))):
         raise ValueError('Pinned short coding request, identity pages and explicit MTP draft width required')
@@ -106,7 +107,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
     owned, prompt_rows = [], []
     step = None
     prefill_calls = 0
-    metadata = dict(max_drafts=max_drafts, head='native-full-vocabulary-force-argmax',
+    metadata = dict(max_drafts=max_drafts, head='native-full-vocabulary-force-argmax', native_sampling_rows=native_sampling_rows,
                     mtp_weight_names=list(NAMES), kernel_math='reused native MTP, no new kernel math')
 
     def status(stage, **values):
@@ -146,7 +147,8 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
                 device=mesh, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
                 memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
         anchor, staged = owned[-2:]
-        step = MTPDeviceStep(operations, model, mtp, embedding, draft_pages, sampler)
+        step = MTPDeviceStep(operations, model, mtp, embedding, draft_pages, sampler,
+            native_sampling_rows=native_sampling_rows)
         status('prepare-native-mtp-traces')
         started = time.perf_counter()
         step.prepare()
@@ -171,7 +173,7 @@ def measure_mtp_request(operations, model, sampler, prompt, pages, helpers, *, w
         result = measure_request(model, sampler, prompt, pages, helpers,
             prefill=captured_prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=513, norm_batch=True,
-            lookup_max_rows=max_drafts + 1, mtp_factory=factory,
+            lookup_max_rows=max_drafts + 1, mtp_factory=factory, native_sampling_rows=native_sampling_rows,
             progress=lambda block: status('committed-block', **{key: block[key] for key in (
                 'position', 'rows', 'accepted', 'committed', 'draft_ms', 'select_commit_ms', 'cycle_ms')}))
         result['mtp'] = metadata
