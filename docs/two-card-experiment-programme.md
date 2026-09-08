@@ -7,11 +7,16 @@ CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness
 audits and keeping ABBA arms separate. An offline artifact reporter recomputes
 the rates and preserves run/hash provenance; it does not rerun hardware.
-Next is 4K, then 8K/16K/32K/64,504. The former 2,048-token prefill limit now has
+The 4K row now passes: PP3355.04 / CTX4096 / TG58.18, B1. Run34285614832
+(`afaedc7`) produces two121-token EOS responses at57.28/59.10TG, with separate
+native token/GDN/valid-KV/inactive and learned-feature/proposal audits. Drafting
+costs54.57ms/block, verification61.87ms; complete mean request7.05s. This is not
+a matched comparison against the different CTX170 prompt/output. Next is 8K,
+then16K/32K/64,504. The former 2,048-token prefill limit now has
 an opt-in tail-window initializer with absolute positions; full target KV stays
 unchanged. The first 4K hardware run34282865344 failed before timing: slot-prefill
 delivers 2K chunks, not a full-sequence layer output. Chunk-aware capture now
-passes its simulator gate and 889 host tests; hardware retry is next. No 4K rate exists.
+passes its simulator gate, 889 host tests and the complete hardware retry.
 [Initialization gate](dflash-long-context-2026-09-09.md). Multi-stream DFlash
 remains unmeasured. [Matrix and gates](pp-ctx-tg-benchmark-matrix.md).
 

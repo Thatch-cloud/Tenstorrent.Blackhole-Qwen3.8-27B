@@ -12,6 +12,10 @@ if [ "$mode" = full-dflash-4k-request ]; then
     dflash_context=4096
     mode=full-dflash-trace-request
 fi
+if [ "$mode" = full-dflash-8k-request ]; then
+    dflash_context=8192
+    mode=full-dflash-trace-request
+fi
 if [ "$mode" = full-dflash-convolution-request ]; then
     dflash_convolution_abba=1
     mode=full-dflash-trace-request

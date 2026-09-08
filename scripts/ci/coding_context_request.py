@@ -9,12 +9,14 @@ from coding_request import TASK
 
 
 CONTEXT_FILES = ('target_features.py', 'feature_projection.py', 'dflash_request_runtime.py', 'verifier_engine.py')
+EXTENDED_CONTEXT_FILES = (*CONTEXT_FILES, 'model_batch.py', 'full_request.py')
 
 
 def make_context_prompt(tokenizer, *, context_tokens=4096):
-    if type(context_tokens) is not int or context_tokens != 4096:
-        raise ValueError('Only the explicit 4K context qualification pilot is enabled')
-    sources = {name: Path(__file__).with_name(name).read_bytes() for name in CONTEXT_FILES}
+    if type(context_tokens) is not int or context_tokens not in (4096, 8192):
+        raise ValueError('Only the explicit 4K and 8K context qualification pilots are enabled')
+    filenames = CONTEXT_FILES if context_tokens == 4096 else EXTENDED_CONTEXT_FILES
+    sources = {name: Path(__file__).with_name(name).read_bytes() for name in filenames}
     context = '\n\n'.join(f'File: {name}\n{payload.decode("utf-8")}' for name, payload in sources.items())
 
     def encode(characters):
@@ -44,7 +46,7 @@ def make_context_prompt(tokenizer, *, context_tokens=4096):
         else:
             high = characters - 1
     if best is None or not context_tokens - 32 <= len(best[1]) <= context_tokens:
-        raise ValueError('Could not construct a bounded near-4K prompt without changing the task or template')
+        raise ValueError('Could not construct a bounded context prompt without changing the task or template')
     characters, tokens = best
     return tokens, dict(task='merge_intervals_repo_context_v1', requested_context=context_tokens,
         actual_context=len(tokens), excerpt_characters=characters,

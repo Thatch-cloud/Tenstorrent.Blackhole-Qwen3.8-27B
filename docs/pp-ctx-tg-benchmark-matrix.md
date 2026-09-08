@@ -6,12 +6,18 @@
 | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |
 | Captured DFlash2 + commit-only GDN | 517.89 | 170 | 72.21 | 1 | Up to 8 | 150, 150 | 7.52 s |
 | Same + fused convolution | **510.65** | **170** | **78.06** | **1** | Up to 8 | 150, 150 | **6.42 s** |
+| Lead at 4K, separate context pilot | **3,355.04** | **4,096** | **58.18** | **1** | Up to 8 | 121, 121 | **7.05 s** |
 
-Matched ABBA, separate correctness audits, both responses reach EOS. Candidate
+CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
 requests on an already-loaded model, not a streaming server measurement.
 [Hardware run 34246322267](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
 Artifact SHA256: `b9947cffc7e596f51215da3ec0e585bafbaddd9e76366168e251510b6415b197`.
+
+The 4K row passes one correctness audit and two timed requests, TG57.28 / 59.10.
+It is not a matched comparison with the shorter prompt or its different output.
+[4K run34285614832](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34285614832).
+Artifact SHA256: `2816e7c8e2b93eef9e8848c06f3d451c296897e555154bf86c49127f8241ab87`.
 
 | Metric | Definition |
 | --- | --- |
@@ -31,8 +37,8 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | Not measured | Retry after native chunk-capture fix; local gates pass |
-| 8,192 | 1 | Not measured | Run after 4K correctness passes |
+| 4,096 | 1 | 3,355.04 / 58.18 measured | Retain long-context control |
+| 8,192 | 1 | Not measured | Next qualification; 4K correctness passed |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |
 | 64,504 | 1 | Not measured | Reserve space for the 513-token output budget and verification |
@@ -49,7 +55,7 @@ the short pilot's 150 decode tokens. This matrix is not held-out coding quality.
 
 | Finding | Required change / evidence |
 | --- | --- |
-| Former constructor/request/bucket guards limited prefill to 2,048 | Absolute target position and bounded draft history are now separate in the opt-in 4K path; hardware qualification pending. |
+| Former constructor/request/bucket guards limited prefill to 2,048 | Absolute target position and bounded draft history are now separate; corrected 4K hardware qualification passed. |
 | Initial feature projection previously received the full prompt | It now receives only the final 2,048 valid feature rows, with an explicit absolute start; padding is excluded. |
 | Proposal input builder already supports absolute positions with a rolling window | Test initial 4K position and continuation, not only a short prompt that later crosses 2K. |
 | Target KV is independent of the draft window | Preserve the full target context; compare tokens, GDN, valid KV and inactive slots against native decoding. |

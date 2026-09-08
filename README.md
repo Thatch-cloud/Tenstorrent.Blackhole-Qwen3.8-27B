@@ -16,12 +16,13 @@ This is a single-task experiment, not held-out coding quality or a serving resul
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**Next: qualify the lead at 4K context, then continue verifier kernel work.**
+**4K now passes at 58.18 TG; next is 8K and cached drafter K/V.**
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
 60.74 TG; T8 stays the lead. Longer-context DFlash initialization must be qualified
-before attributing this short-context rate to coding-sized inputs.
+before attributing this short-context rate to larger coding inputs. The 4K run
+measures drafting at 54.57 ms/block and verification at 61.87 ms/block.
 Native SDPA remains disabled after its failed numerical gate.
 [Fused-convolution results and limits](docs/dflash-fused-convolution-2026-09-09.md).
 
@@ -59,8 +60,8 @@ These are offline complete requests, not endpoint streaming measurements.
 | PP tok/s | CTX tokens | Committed TG tok/s | Status |
 | ---: | ---: | ---: | --- |
 | 510.65 | 170 | **78.06** | Measured: two 150-token decode samples through EOS |
-| — | 4,096 | — | First run hit a capture-boundary error; fix passes local gates, hardware retry next |
-| — | 8,192 | — | Planned |
+| 3,355.04 | 4,096 | **58.18** | Measured: two 121-token decode samples through EOS |
+| — | 8,192 | — | Next hardware qualification |
 | — | 16,384 | — | Planned |
 | — | 32,768 | — | Planned |
 | — | 64,504 | — | Planned; reserves generation space below 65,536 |
@@ -70,7 +71,9 @@ At CTX 170, mean prefill is **0.333 s**; prefill + fresh setup + decode is
 target feature capture and first-token selection, but not drafter initialization.
 The drafter's rolling 2,048-token history is separate from the target's full KV
 context. An opt-in 4K initializer now captures the valid tail and retains absolute
-positions; its hardware qualification is pending, so no longer-context TG is claimed.
+positions. The corrected 4K run passes native token/state and feature audits;
+mean prefill is 1.221 s and prefill + fresh setup + decode is 7.05 s.
+[4K hardware result](docs/dflash-long-context-2026-09-09.md).
 [Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
 
 ## Serving baseline

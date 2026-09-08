@@ -27,7 +27,7 @@ class CodingContextRequestTests(unittest.TestCase):
         self.assertEqual(len(metadata['prompt_sha256']), 64)
 
     def test_other_contexts_and_invalid_token_shapes_fail_closed(self):
-        for context in (True, 170, 2048, 8192):
+        for context in (True, 170, 2048, 16384):
             with self.assertRaises(ValueError):
                 make_context_prompt(Mock(), context_tokens=context)
         for encoded in ([], [True], [[1]], 'tokens', [-1]):
@@ -41,6 +41,20 @@ class CodingContextRequestTests(unittest.TestCase):
         tokenizer.apply_chat_template.return_value = [1, 2, 3]
         with self.assertRaisesRegex(ValueError, 'cannot fill'):
             make_context_prompt(tokenizer)
+
+    def test_8k_extends_the_recorded_corpus_without_changing_the_task(self):
+        tokenizer = Mock()
+        def encode(messages, **kwargs):
+            self.assertTrue(messages[1]['content'].endswith(TASK))
+            self.assertIs(kwargs['enable_thinking'], False)
+            return [ord(character) for character in messages[1]['content']]
+        tokenizer.apply_chat_template.side_effect = encode
+        tokens, metadata = make_context_prompt(tokenizer, context_tokens=8192)
+        self.assertEqual(len(tokens), 8192)
+        self.assertEqual(metadata['requested_context'], 8192)
+        self.assertEqual(metadata['actual_context'], 8192)
+        self.assertEqual(tuple(metadata['sources']), ('target_features.py', 'feature_projection.py',
+            'dflash_request_runtime.py', 'verifier_engine.py', 'model_batch.py', 'full_request.py'))
 
 
 if __name__ == '__main__':

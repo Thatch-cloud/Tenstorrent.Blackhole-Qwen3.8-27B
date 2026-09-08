@@ -255,7 +255,7 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertTrue(all(torch.equal(left, right) for left, right in zip(actual, expected)))
 
     def test_invalid_dflash_suite_options_stop_before_fixture_or_device_access(self):
-        for suite in ('full-dflash-4k-request', 'full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
+        for suite in ('full-dflash-8k-request', 'full-dflash-4k-request', 'full-dflash-request', 'full-dflash-wide-request', 'full-dflash-trace-request',
                 'full-dflash-wide-trace-request', 'full-dflash-commit-request', 'full-dflash-convolution-request'):
             environment = dict(os.environ, QWEN_RUN_MODE=suite, QWEN_CARDS_ALLOCATED='1',
                 QWEN_LOOKUP_CAP_ABBA='1')
@@ -265,14 +265,15 @@ class FullDFlashRequestTests(unittest.TestCase):
             self.assertNotIn('docker', result.stdout + result.stderr)
 
     def test_long_context_request_cannot_enable_an_unqualified_runtime_combination(self):
-        for context, capture, abba in (('8192', '1', '0'), ('4096', '0', '0'), ('4096', '1', '1')):
+        for context, capture, abba in (('16384', '1', '0'), ('4096', '0', '0'), ('4096', '1', '1'),
+                ('8192', '0', '0'), ('8192', '1', '1')):
             environment = dict(os.environ, QWEN_DFLASH_CONTEXT=context, QWEN_DFLASH_CAPTURE=capture,
                 QWEN_DFLASH_DRAFTS='7', QWEN_DFLASH_COMMIT_ABBA=abba,
                 QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
             result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
                 '--request-pilot', '--norm-batch'], env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('4K qualification requires', result.stderr)
+            self.assertIn('Context qualification requires', result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

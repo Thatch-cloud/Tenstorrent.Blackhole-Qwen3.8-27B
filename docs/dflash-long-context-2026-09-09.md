@@ -1,7 +1,34 @@
 # DFlash2 long-prefill initialization
 
-**Status: first 4K hardware run failed during feature capture; the chunk-aware fix passes local gates and is ready for hardware retry.**
-Best measured performance remains PP510.65 / CTX170 / TG78.06, B1.
+**Status: corrected 4K hardware run passes: PP3355.04 / CTX4096 / TG58.18, B1.**
+Best short-context performance remains PP510.65 / CTX170 / TG78.06, B1.
+
+## Measured 4K result
+
+[Run34285614832](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34285614832),
+code `afaedc73a65519b554ec5d599a58d078a2c72510`, passes one full correctness audit
+and two uninstrumented requests. Artifact SHA256:
+`2816e7c8e2b93eef9e8848c06f3d451c296897e555154bf86c49127f8241ab87`.
+
+| Metric | 4K result |
+| --- | --- |
+| Actual CTX / streams / verification | 4,096 / B1 / up to T8 |
+| PP | 3,355.04 tok/s; mean prefill 1.221 s |
+| Committed TG | 58.179489 tok/s; samples 57.28 / 59.10 |
+| Output | 121 committed decode tokens per request, both through EOS |
+| Complete prefill + fresh setup + decode | 7.07 / 7.03 s; mean 7.05 s, excluding model load |
+| Mean block cost | Draft 54.57 ms; verify/readback 61.87 ms; publication 3.87 ms |
+| Acceptance | 105 of 119 proposals, 17 blocks/request |
+| Correctness | Native tokens, GDN, valid target KV and inactive slots exact |
+| Separate audit | 1,210 feature row/chip/tap comparisons; 17 eager/trace proposals; 17 unchanged pre-decision GDN checks; 680 learned convolutions |
+| Prefill tail | Both native chunks recorded; 20 exact snapshots and 20 exact assembled-window checks |
+| Sampling | Explicit four-link force-argmax path |
+
+This is not a matched speed comparison against CTX170: the prompt and output
+length differ. The longer prompt uses the same rolling 2K draft window without
+shortening the target KV context. No serving or held-out coding-quality claim.
+The recorded input matches the failed attempt, so the chunk-capture retry did
+not change the workload.
 
 ## What changes
 
@@ -70,8 +97,10 @@ native token/state equality and PP/CTX/TG require the complete hardware request.
 
 ## Hardware gate
 
-`full-dflash-4k-request` uses one recorded repository-prefix coding prompt,
-between4,064 and4,096 actual template-inclusive tokens. It records source hashes,
+`full-dflash-4k-request` and the next `full-dflash-8k-request` use recorded
+repository-prefix coding prompts within 32 tokens below their requested 4,096
+or 8,192 template-inclusive tokens. The 8K corpus appends two real source files
+after the original four; the 4K input construction is unchanged. Each records source hashes,
 excerpt hash, prompt-token hash and actual CTX; no answer-derived padding.
 The unchanged coding task is at the end of the prompt. This is a latency pilot,
 not a held-out repository-editing quality benchmark.

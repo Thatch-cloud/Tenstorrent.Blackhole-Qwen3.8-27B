@@ -109,9 +109,9 @@ def main():
     dflash_commit_abba = os.environ.get('QWEN_DFLASH_COMMIT_ABBA', '0')
     dflash_convolution_abba = os.environ.get('QWEN_DFLASH_CONVOLUTION_ABBA', '0')
     dflash_context = os.environ.get('QWEN_DFLASH_CONTEXT', '0')
-    if dflash_context not in ('0', '4096') or (dflash_context != '0' and
+    if dflash_context not in ('0', '4096', '8192') or (dflash_context != '0' and
             (dflash_capture != '1' or dflash_drafts != '7' or dflash_commit_abba != '0' or dflash_convolution_abba != '0')):
-        parser.error('4K qualification requires the isolated captured T8 lead, without an ABBA experiment')
+        parser.error('Context qualification requires the isolated captured T8 lead, without an ABBA experiment')
     if dflash_convolution_abba not in ('0', '1') or (dflash_convolution_abba == '1' and
             (dflash_capture != '1' or dflash_drafts != '7' or dflash_commit_abba != '0')):
         parser.error('Convolution ABBA requires the isolated captured T8 DFlash2 request')
