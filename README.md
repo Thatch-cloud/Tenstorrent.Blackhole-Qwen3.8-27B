@@ -65,21 +65,22 @@ Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
 
 ## What currently limits 200 tok/s?
 
-The September 8 non-repeated coding request exposes a regression from weak lookup
-proposals. Both paths produce identical tokens, but the 129-token output limit
-truncates the function; this is not a completed coding-quality result.
+The September 8 completed coding request still exposes weak lookup proposals.
+All four requests reach EOS after 150 committed decode tokens and match native
+tokens, active state and inactive slots. This is one task, not held-out coding-quality certification.
 
 | CTX | Streams | Path | PP tok/s | Committed TG tok/s |
 | ---: | ---: | --- | ---: | ---: |
-| 170 | 1 | Native reference, paired candidate repetitions | Not isolated | 19.67 |
-| 170 | 1 | Lookup, norm batching off | Not isolated | 15.02 |
-| 170 | 1 | Lookup, norm batching on | Not isolated | 16.11 |
+| 170 | 1 | Native reference, paired candidate repetitions | Not isolated | 18.96 |
+| 170 | 1 | Lookup capped at T32, norm batching on | Not isolated | 15.16 |
+| 170 | 1 | Lookup capped at T8, norm batching on | Not isolated | 18.26 |
 
-Only 20 of 1234 proposed tokens are accepted: 128 committed tokens need 108 verifier
-calls. TG excludes prefill/setup; the norm-batched rate including setup is 9.38.
-[Coding request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34182900581).
-The next matched test caps lookup verification at eight rows and allows the
-function to finish. This is not adoption of a learned drafter or a serving change.
+The T8 cap reduces proposals from 1812 to 572 per request, with the same 22 accepted.
+That recovers 20.4% versus T32, but remains slower than the paired native reference.
+TG excludes prefill/setup; T8 including setup is 13.67 tok/s.
+[Completed coding request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34183834884).
+The next matched request test compares one/four sampling links with T8 fixed.
+This is not adoption of a learned drafter or a serving change.
 
 Even perfect acceptance needs an eight-token draft/verify/commit cycle within **40 ms**.
 Our best static target verification alone still takes longer:

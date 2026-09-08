@@ -25,7 +25,7 @@ class ConvolutionFixtureTests(unittest.TestCase):
                 self.assertEqual(ensure_fixture(root), manifest)
                 reader.assert_not_called()
             (root / 'test.bf16').write_bytes(b'xx')
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, f'test at .*test.bf16; expected {digest}, read {hashlib.sha256(b"xx").hexdigest()}'):
                 load_convolution(root)
 
     def test_loader_rejects_other_revision(self):

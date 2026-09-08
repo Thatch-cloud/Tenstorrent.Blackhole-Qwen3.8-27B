@@ -46,8 +46,10 @@ def verified_bytes(output, *, specifications=None, hashes=None):
                 or (output / filename).stat().st_size != length):
             raise ValueError('Audited convolution metadata required')
         data = (output / filename).read_bytes()
-        if hashlib.sha256(data).hexdigest() != hashes[name]:
-            raise ValueError('Audited convolution content required')
+        actual_hash = hashlib.sha256(data).hexdigest()
+        if actual_hash != hashes[name]:
+            raise ValueError(f'Audited convolution content required: {name} at {output / filename}; '
+                f'expected {hashes[name]}, read {actual_hash}')
         tensors[name] = data
     return manifest, tensors
 
