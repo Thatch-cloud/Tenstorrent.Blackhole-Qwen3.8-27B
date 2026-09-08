@@ -17,7 +17,7 @@ Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
 **4K passes at 58.18 TG; the 8K repeat passes at 53.48 TG.**
-Cached drafter K/V passes its simulator gate; hardware comparison is next.
+Cached drafter K/V passes its simulator gate; [hardware comparison is running](docs/dflash-kv-cache-2026-09-09.md).
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only

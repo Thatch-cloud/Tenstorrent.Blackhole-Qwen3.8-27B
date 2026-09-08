@@ -1,8 +1,13 @@
 # Historical K/V cache for DFlash2
 
-**Status: integrated simulator gate passed; opt-in 4K hardware ABBA ready.**
+**Status: integrated simulator gate passed; opt-in 4K hardware ABBA running.**
 No cached-drafter hardware speed or correctness result exists yet. Serving
 defaults and the measured lead are unchanged.
+
+[Hardware run34291073085](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34291073085)
+tests code `20915fe` on the dedicated two-card runner. Its gate is two separate
+audits followed by four uninstrumented requests, in uncached/cached/cached/
+uncached order. A running job is not a result.
 
 ## Why this experiment
 
@@ -35,7 +40,7 @@ draft-side optimization; these bounds are calculations, not benchmark results.
 | Learned numerical simulator | Passed `20260908T222847Z-416-draft-kv-projection-probe`: 20 bit-exact comparisons and four detected stale-history controls, pinned layer1 weights, both chips |
 | Actual cached/uncached attention operands and cache publication/replay | Passed `20260908T230732Z-297-draft-kv-history-probe`; real learned layer1, native head layout and fused convolution |
 | Full eager proposal comparison against uncached lead | Implemented as a separate hardware audit for every proposal; hardware evidence pending |
-| Matched complete-request hardware ABBA | Pending |
+| Matched complete-request hardware ABBA | Running34291073085; no result yet |
 
 The numerical probe compares full versus separate history/live projection at
 CTX170 and4093, then seven-row eviction/append at4100. It also requires changed

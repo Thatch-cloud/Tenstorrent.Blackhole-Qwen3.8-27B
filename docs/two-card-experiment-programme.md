@@ -33,8 +33,9 @@ now updates only committed rows, preserves atomic cache publication and audits
 against full-history recomputation. Integrated gate20260908T230732Z-297 passes
 eight attention-operand,36 replay,12 unchanged-state and four full-history
 comparisons, plus four detected stale controls. All11 source hashes match;
-846 CI and60 harness tests pass. The opt-in4K ABBA suite is ready, but there is
-no cache-enabled hardware rate yet. [Gates](dflash-kv-cache-2026-09-09.md).
+846 CI and60 harness tests pass. The opt-in4K ABBA run34291073085 (`20915fe`)
+is now running; there is no cache-enabled hardware rate yet.
+[Gates](dflash-kv-cache-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
