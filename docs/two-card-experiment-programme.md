@@ -1,6 +1,33 @@
 # Qwen3.8-27B: two-card experiment programme
 
-## Current measured result - 2026-09-07
+## Current programme position - 2026-09-08
+
+The200 committed coding tokens/s objective is not achieved. Serving defaults
+remain unchanged. The following is the current checkpoint; dated entries below
+are preserved historical evidence, including failures and superseded next steps.
+
+| Track | Validated result | Remaining gate |
+| --- | --- | --- |
+| Target verifier | Best T8 static block62--64ms; exact logits/state/KV/rollback | Reduce below40ms including eventual draft/commit overhead |
+| Matched attribution | CI34170503918 passed; matmul32ms, generic18ms summed costs | Optimize dominant kernels; profile sums are not critical-path latency |
+| Learned drafter | Five-layer hardware correctness; MLP trace1.911ms median | Full captured draft, live feature history, shared head/selection, request acceptance |
+| Actual request TPS | Last synthetic lookup20--24 committed tok/s | Real coding workload with learned proposals and held-out quality |
+| Ethernet/spare column | Simulator descriptor work only | Firmware/fabric/real-card grid gates before expanded-grid kernels |
+| KV reporting | Cache/state correctness gates pass | Classify the original zero-valued metric observation |
+| Disaggregation | Experiment design and state prerequisites | Integrated placement/scheduling and responsiveness measurements |
+
+The host suite passes624 tests. CI34174232113 read-only native source audit
+passed against the pinned hardware image. Native MLP uses44 configured workers
+for gate/up and33 for down. Actual occupied cores are39 for272 output tiles
+at7 tiles/core, and32 for160 tiles at5/core. The39-core128-call profile group
+matches two gate/up calls across64 layers. The32-core128-call group combines
+64 MLP down calls and64 attention/GDN output calls; do not label it all MLP down.
+The96-worker recurrence specification in gdn_vsplit.py maps to the48-call
+generic group. Fusion remains simulator-gated: the corrected fused-SiLU native
+control has not yet passed the full multi-row gate with verified source/device
+operands. Intermittent historical source-integrity failures remain unresolved.
+
+## Historical measured results - 2026-09-07
 
 Hardware34109548525 passes full projection and learned normalization; every
 projection output matches TTsim. A shared-fabric gather-plus-FP32-add simulator
