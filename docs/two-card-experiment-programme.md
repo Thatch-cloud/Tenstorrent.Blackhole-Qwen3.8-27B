@@ -2219,3 +2219,15 @@ not conclude that fusion itself is intrinsically slower or claim that tracing
 will fix it. Next test changing-input captured fusion and native control in the
 simulator, preserving exactness/ownership, then compare matched hardware trace
 latencies before deciding whether full-target integration is worthwhile.
+
+### Captured fusion prerequisite
+
+The simulator-only --trace-replay gate retains all six eager width checks and
+adds T1/T8/T32 native/control versus fused traces. Each width owns one input
+allocation, two prebuilt host input payloads and both captured output sets.
+References come from native eager execution for both inputs. Replay follows
+A/B/A with exact outputs and immutable inputs on both chips, stable addresses,
+and missing-update negative controls for both arms. Both traces are released
+before captured buffers, and before allocating the next width. Hardware trace
+promotion remains rejected until this simulator gate passes. Eager hardware
+results and kernel arithmetic are unchanged by this new test path.

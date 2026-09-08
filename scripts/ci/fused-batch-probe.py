@@ -33,8 +33,11 @@ def main():
     parser.add_argument('--device-weight-check', action='store_true')
     parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--timing', action='store_true')
+    parser.add_argument('--trace-replay', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.trace_replay and (options.hardware or not options.device_weight_check):
+        parser.error('Trace replay requires simulator and byte-exact weight checks')
     if options.timing and not options.hardware:
         parser.error('Latency measurements require allocated hardware')
     if options.hardware and not options.device_weight_check:
@@ -54,7 +57,8 @@ def main():
     mesh, owned = None, []
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        mesh_options = dict(trace_region_size=268435456) if options.trace_replay else {}
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, **mesh_options)
         mesh.enable_program_cache()
 
         def upload(value, dtype, sharded=False):
@@ -120,7 +124,8 @@ def main():
         report['control_epilogue'] = 'Native gate linear fused SILU before BF16 pack; separate BF16 up; BF16 multiply'
         for rows in (1, 2, 4, 8, 16, 32):
             generator = torch.Generator().manual_seed(3891 + rows)
-            inputs = upload(torch.randn((1, 1, rows, 5120), generator=generator).bfloat16(), ttnn.bfloat16)
+            hidden = torch.randn((1, 1, rows, 5120), generator=generator).bfloat16()
+            inputs = upload(hidden, ttnn.bfloat16)
             report.update(phase='native_projection', active_rows=rows)
             options.output.write_text(json.dumps(report, indent=2))
             expected = native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, owned)
@@ -139,6 +144,20 @@ def main():
                     raise AssertionError(f'Fused multi-row output differs: rows={rows}, chip={chip}, mismatches={int((observed != reference).sum())}')
                 report['checks'].append(dict(rows=rows, chip=chip, exact=True))
                 references.append(reference.clone())
+            if options.trace_replay and rows in (1, 8, 32):
+                from fusion_trace import validate_replays
+                def native_replay(temporary):
+                    return native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, temporary)
+                def fused_replay(temporary):
+                    output = operation(inputs)
+                    temporary.append(output)
+                    return output
+                report['phase'] = 'trace_replay'
+                options.output.write_text(json.dumps(report, indent=2))
+                checked = validate_replays(ttnn, mesh, inputs, hidden, references, native_replay, fused_replay,
+                    (device_gate, device_up, device_packed))
+                report.setdefault('trace_replays', []).append(checked)
+                report['trace_source_sha256'] = hashlib.sha256(Path(__file__).with_name('fusion_trace.py').read_bytes()).hexdigest()
             if options.timing and rows in (1, 8, 32):
                 for block in range(3):
                     samples = dict(control=[], fused=[])
@@ -179,6 +198,9 @@ def main():
         raise AssertionError('All six widths and both chips required')
     if len(report['timings']) != (9 if options.timing else 0):
         raise AssertionError('Three paired timing blocks at T1/T8/T32 required')
+    if options.trace_replay and (len(report.get('trace_replays', [])) != 3
+            or not all(result['passed'] for result in report['trace_replays'])):
+        raise AssertionError('All three changing-input trace gates required')
     report['passed'] = True
     options.output.write_text(json.dumps(report, indent=2))
 
