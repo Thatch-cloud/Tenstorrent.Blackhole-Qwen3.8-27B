@@ -2,13 +2,25 @@
 
 ## Current programme position - 2026-09-08
 
-**Latest completed:34213743464 (`5c0e60c`), retain exact KV-only repair.**
+**Chain retry prepared after34215001860 (`bf40963`) failed during warmup cleanup.**
+The native `tt_all_gather` wrapper explicitly deallocates its input; the chain
+mistakenly retained that consumed embedding/view for later cleanup. This is not
+a link-discovery failure or a measured chain result. The consuming input is no
+longer owned twice. Simulator103111Z-304 now models that ownership contract and
+passes42 comparisons/14 stale controls, exit0 and clean close. SHA256:
+`c14a78568765edd29f9b30476a11fc5eb71e854f0af69250599d6b0f35ba5247`.
+752 host and60 harness tests pass. Retry the unchanged complete hardware ABBA.
+
+**Latest qualified:34213743464 (`5c0e60c`), retain exact KV-only repair.**
 ABBA55.067351TG control versus56.854631TG candidate, ratio1.032456 (+3.25%).
 All four requests emit150 tokens, accept125/178 proposals in26 blocks and pass
 target token/GDN/valid KV/inactive checks. Both chips' complete319-row valid MTP
 K/V hashes also match across every arm. Repair/commit11.623757 ->7.874864ms/block;
 mean total prefill/setup/decode7.682483 ->7.250688s. Target200TG remains unmet.
 Report SHA256:`451b750fa24e6cdfea0b47dc4bd205673b0eee49dd57a20152265ac3386430d3`.
+The identical returned function also passes205 local interval/nonmutation cases;
+this checks one actual response, not held-out coding quality. Output SHA256:
+`3e7de1eedd8c91838c33c575f3edbd99643d1ce9c5b98ef57bbdd487662ecafc`.
 
 **Prepared next: native MTP device chain with KV-only repair in both arms.**
 Borrow the target BF16 embedding, gather the hidden shards, feed each native

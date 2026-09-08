@@ -7,6 +7,7 @@ from verifier_inputs import host_inputs
 
 
 def feedback_embedding(operations, embed, gather, identifiers, owned):
+    """The native gather callback consumes its DRAM input allocation."""
     if (tuple(identifiers.shape) not in ((1, 1, 1), (1, 1, 1, 1)) or identifiers.dtype != operations.uint32
             or identifiers.layout != operations.ROW_MAJOR_LAYOUT):
         raise ValueError('One native global UINT32 token required for device embedding feedback')
@@ -17,9 +18,12 @@ def feedback_embedding(operations, embed, gather, identifiers, owned):
             raise ValueError('Embedding index view must not partially alias its borrowed token')
         owned.append(indices)
     embedded = embed(indices, memory_config=operations.DRAM_MEMORY_CONFIG)
-    owned.append(embedded)
     local = operations.reshape(embedded, (1, 1, 1, embedded.shape[-1]))
-    owned.append(local)
+    embedded_ids, local_ids = addresses(operations, embedded), addresses(operations, local)
+    if embedded_ids != local_ids:
+        if any(first == second for first, second in zip(embedded_ids, local_ids, strict=True)):
+            raise ValueError('Embedding reshape must not partially alias its consuming gather input')
+        owned.append(embedded)
     gathered = gather(local)
     owned.append(gathered)
     if gathered.shape[-1] != 5120:

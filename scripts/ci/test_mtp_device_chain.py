@@ -18,12 +18,13 @@ class MTPDeviceChainTests(unittest.TestCase):
         operations = SimpleNamespace(uint32='uint32', ROW_MAJOR_LAYOUT='row', DRAM_MEMORY_CONFIG='dram',
             reshape=Mock(side_effect=[indices, local, result]))
         embed, gather, owned = Mock(return_value=embedded), Mock(return_value=gathered), []
-        with patch('mtp_device_chain.addresses', return_value=(100, 200)):
+        with patch('mtp_device_chain.addresses', side_effect=[(100, 200), (100, 200), (300, 400), (300, 400)]):
             self.assertIs(feedback_embedding(operations, embed, gather, identifiers, owned), result)
         self.assertFalse(any(value is indices or value is identifiers for value in owned))
         embed.assert_called_once_with(indices, memory_config='dram')
         gather.assert_called_once_with(local)
-        self.assertEqual(len(owned), 4)
+        self.assertFalse(any(value is embedded or value is local for value in owned))
+        self.assertEqual(len(owned), 2)
 
     def test_partial_alias_is_rejected_before_embedding(self):
         identifiers = SimpleNamespace(shape=(1, 1, 1, 1), dtype='uint32', layout='row')

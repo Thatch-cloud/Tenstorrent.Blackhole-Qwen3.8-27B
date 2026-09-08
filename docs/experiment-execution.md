@@ -3,6 +3,18 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
+## Device-chain ownership retry (2026-09-08)
+
+Run34215001860 onbf40963 fails during the first chain warmup cleanup, before
+candidate timing. Native `tt_all_gather` consumes its input; retaining both its
+embedding input/view and output caused a second cleanup of freed storage. The
+fix retains only unconsumed allocations. Simulator103111Z-304 reproduces the
+native consuming contract and passes42 comparisons/14 stale controls with exit0
+and clean close. Report SHA256:
+`c14a78568765edd29f9b30476a11fc5eb71e854f0af69250599d6b0f35ba5247`.
+752 host tests and60 harness tests pass. Full real-weight/fabric ABBA remains
+required; no link or serving settings changed, and no device reset was needed.
+
 ## Exact KV-only MTP repair (2026-09-08, retained)
 
 CI34213743464 on5c0e60c passes:55.067351TG control versus56.854631TG candidate,

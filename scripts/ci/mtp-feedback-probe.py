@@ -42,10 +42,15 @@ def main():
         def embed(identifiers, *, memory_config):
             return ttnn.embedding(identifiers, table, layout=ttnn.TILE_LAYOUT, memory_config=memory_config)
 
+        def gather_consuming_input(value):
+            gathered = ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(value)
+            return gathered
+
         def operation(count, owned):
             identifiers, selected, embedded_rows = source, [], []
             for _ in range(count):
-                embedded = feedback_embedding(ttnn, embed, lambda value: value, identifiers, owned)
+                embedded = feedback_embedding(ttnn, embed, gather_consuming_input, identifiers, owned)
                 embedded_rows.append(embedded)
                 logits = ttnn.slice(embedded, (0, 0, 0, 0), (1, 1, 1, 256), memory_config=ttnn.DRAM_MEMORY_CONFIG)
                 owned.append(logits)
