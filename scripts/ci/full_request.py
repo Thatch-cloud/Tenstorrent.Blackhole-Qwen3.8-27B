@@ -22,12 +22,17 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
-                    mtp_runtime=None):
-    if mtp_runtime is not None:
+                    mtp_runtime=None, mtp_factory=None, progress=None):
+    if progress is not None and not callable(progress):
+        raise ValueError('Request progress must be callable')
+    if mtp_factory is not None and (not callable(mtp_factory) or mtp_runtime is not None):
+        raise ValueError('Choose a prepared MTP runtime or one post-prefill factory')
+    if mtp_runtime is not None or mtp_factory is not None:
         if (neural or selected_drafter is not None or engine_factory is not None
-                or not all(callable(getattr(mtp_runtime, name, None)) for name in ('bind', 'publish', '__call__'))):
+                or (mtp_runtime is not None and not all(
+                    callable(getattr(mtp_runtime, name, None)) for name in ('bind', 'publish', '__call__')))):
             raise ValueError('MTP request bridge owns neural routing and requires the hidden-retaining verifier')
-        neural, selected_drafter, lookup_enabled = {'mtp': mtp_runtime}, 'mtp', False
+        neural, selected_drafter, lookup_enabled = {'mtp': mtp_runtime or mtp_factory}, 'mtp', False
     neural = dict(neural or {})
     if (type(lookup_enabled) is not bool or (not lookup_enabled and not neural)
             or any(not isinstance(name, str) or not name or name in ('lookup', 'target')
@@ -61,6 +66,14 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     prefill_ms = (time.perf_counter() - started) * 1000
     if seed != gold[0]:
         raise AssertionError('Fresh request prefill changed the native seed')
+    mtp_setup_ms = 0.0
+    if mtp_factory is not None:
+        started = time.perf_counter()
+        mtp_runtime = mtp_factory()
+        mtp_setup_ms = (time.perf_counter() - started) * 1000
+        if not all(callable(getattr(mtp_runtime, name, None)) for name in ('bind', 'publish', '__call__')):
+            raise ValueError('MTP factory must return a prepared request runtime')
+        neural = {'mtp': mtp_runtime}
     inactive_before = inactive_digest()
     session = GreedySession('lookup-pilot', prompt, seed, vocab_size=model.args.vocab_size,
         max_new_tokens=max_new_tokens, eos_ids=eos_ids, verifier_rows=32, neural=neural, lookup_enabled=lookup_enabled)
@@ -104,6 +117,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     committed=len(decision.emitted), draft_ms=(drafted - block_started) * 1000,
                     select_commit_ms=(finished - verified) * 1000,
                     cycle_ms=(finished - block_started) * 1000, **components))
+                if progress is not None:
+                    progress(blocks[-1])
             decode_ms = (time.perf_counter() - started) * 1000
             engine.close()
             engine = None
@@ -128,10 +143,11 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
             committed_decode_tokens=session.committed_decode_tokens, proposed=session.committed_block_proposals,
             accepted=session.accepted_proposals, prefill_ms=prefill_ms, engine_setup_ms=setup_ms,
-            decode_ms=decode_ms, native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,
+            decode_ms=decode_ms, mtp_setup_ms=mtp_setup_ms,
+            native_prefill_ms=native_prefill_ms, native_decode_ms=native_decode_ms,
             committed_tokens_per_second=1000 * session.committed_decode_tokens / decode_ms if decode_ms else None,
-            post_seed_including_setup_ms=setup_ms + decode_ms,
-            prefill_setup_decode_ms=prefill_ms + setup_ms + decode_ms,
+            post_seed_including_setup_ms=mtp_setup_ms + setup_ms + decode_ms,
+            prefill_setup_decode_ms=prefill_ms + mtp_setup_ms + setup_ms + decode_ms,
             setup_amortized=False, cross_request_trace_reuse=False)
     finally:
         if engine is not None:

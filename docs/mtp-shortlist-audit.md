@@ -87,10 +87,11 @@ capturing every speculative row does not authorize using rejected rows.
 
 Host tests cover all selected prefixes, abort/reproposal, catch-up failure and
 complete coordinator execution. The native device step is **not hardware qualified**.
-Remaining before a valid real-weight run: initialize MTP's prompt KV from aligned
-target prefill hidden states, wire fixed-buffer accepted-row extraction, and
-include MTP preparation/prefill costs in the setup/PP report. Initializing MTP KV
-to zeros while marking a full prompt valid is not an acceptable substitute.
+`full-mtp-request` now connects these pieces for one real coding request (K7/T8):
+full prompt features, aligned independent MTP KV, fixed-buffer accepted rows,
+native full-vocabulary force argmax and exact native target/state comparison.
+Preparation and MTP prompt initialization are separately reported and included
+in setup-inclusive totals. Hardware qualification and measured TG are pending.
 
 ### Alignment and fixed-row preparation
 
@@ -105,6 +106,12 @@ rows in [vLLM's base proposer](https://github.com/vllm-project/vllm/blob/main/vl
 each retained bucket, writing into one fixed destination. MTP catch-up uses these
 through `engine.mtp_row`; the hot path does not create new row-extraction buffers
 or dispatch uncaptured Python slice operations. These additions are host-tested,
-not device-certified. The real-weight launch still needs to capture and normalize
-the complete valid target prefill hidden rows and call this initializer before
-binding the MTP request runtime.
+not device-certified. The launcher captures the last decoder layer during fresh
+eager prefill, applies the native distributed final norm, checks both replicas,
+and initializes MTP before binding the request runtime. No future target outputs
+are supplied to the drafter. The 705-test host suite passes.
+
+The hardware suite rebuilds the audited lazy-link fix, then proceeds directly to
+the coding request rather than exiting after another collective microbenchmark.
+It uses the physical `p150_x2` descriptor and four-link sampler, not a global
+four-link override. No serving defaults or device reset are part of this run.

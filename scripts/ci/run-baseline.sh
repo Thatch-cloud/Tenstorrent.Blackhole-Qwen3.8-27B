@@ -2,6 +2,13 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
+mtp_drafts=0
+if [ "$mode" = full-mtp-request ]; then
+    [[ "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
+    mtp_drafts=7
+    mode=full-norm-engine
+    export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
+fi
 [[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 &&
     ( "$mode" = sampling-kernel || "$mode" = learned-attention || ( "$mode" = full-norm-engine && "${QWEN_CODING_REQUEST:-0}" = 1 && "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 ) ) ) ]]
 descriptor=p300_mesh_graph_descriptor.textproto
@@ -9,6 +16,7 @@ if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then descriptor=p150_x2_mesh_graph_de
 projection_links=1
 ccl_build=0
 if [[ "$mode" = learned-attention && "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]]; then ccl_build=1; fi
+if [ "$mtp_drafts" != 0 ]; then ccl_build=1; fi
 if [[ "$mode" = learned-attention || "$mode" = learned-mlp || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
     descriptor=p150_x2_mesh_graph_descriptor.textproto
     projection_links=4
@@ -107,6 +115,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_FABRIC_LINK_PROBE=${QWEN_FABRIC_LINK_PROBE:-0}" \
     -e "QWEN_PROJECTION_LINKS=$projection_links" \
     -e "QWEN_CCL_LAZY_BUILD=$ccl_build" \
+    -e "QWEN_MTP_DRAFTS=$mtp_drafts" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
     -e "QWEN_RUN_MODE=$mode" -e "QWEN_INTERLEAVE_RATIO=$ratio" \

@@ -22,7 +22,8 @@ class RequestPilotTests(unittest.TestCase):
 
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
                     attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
-                    neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None):
+                    neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
+                    mtp_factory=None, prefill=None, progress=None):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -52,14 +53,46 @@ class RequestPilotTests(unittest.TestCase):
         with patch('full_request.VerifierEngine', side_effect=factory) as constructor:
             result = measure_request(SimpleNamespace(args=SimpleNamespace(vocab_size=100)), None,
                 [0, 1, 2] * (1365 if attention_replay else 12), SimpleNamespace(shape=(1, 1024)), [],
-                prefill=lambda prompt: seed, decode=decode,
+                prefill=prefill or (lambda prompt: seed), decode=decode,
                 live_digest=lambda: 'state', kv_digest=lambda position: position,
                 inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch,
                 attention_replay=attention_replay, family_routing=attention_replay,
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
                 lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter,
-                lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime)
+                lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress)
         return result, constructor
+
+    def test_mtp_factory_runs_after_second_prefill_and_is_charged(self):
+        from mtp_request_runtime import MTPRequestRuntime
+
+        prefill = Mock(return_value=0)
+        progress = Mock()
+        def factory():
+            self.assertEqual(prefill.call_count, 2)
+            return MTPRequestRuntime(lambda token, hidden, position, select: ([token], (token + 1) % 3 if select else None),
+                [0], copy_hidden=lambda source, destination: destination.__setitem__(0, source[0]),
+                verified_row=lambda rows, index: rows[index], max_drafts=3)
+        factory = Mock(side_effect=factory)
+        result, constructor = self.run_fixture(mtp_factory=factory, prefill=prefill, progress=progress,
+            norm_batch=True, lookup_max_rows=4)
+        factory.assert_called_once_with()
+        self.assertEqual(prefill.call_count, 2)
+        self.assertEqual(progress.call_count, len(result['blocks']))
+        self.assertGreater(result['mtp_setup_ms'], 0)
+        self.assertEqual(result['post_seed_including_setup_ms'],
+            result['mtp_setup_ms'] + result['engine_setup_ms'] + result['decode_ms'])
+        self.assertEqual(result['committed_decode_tokens'], 32)
+        self.assertTrue(constructor.call_args.kwargs['retain_mtp_hidden'])
+
+    def test_invalid_mtp_factory_rejected_before_prefill(self):
+        for options in (dict(mtp_factory=1), dict(mtp_factory=Mock(), mtp_runtime=Mock()),
+                dict(mtp_factory=Mock(), selected_drafter='mtp'), dict(mtp_factory=Mock(), engine_factory=Mock()),
+                dict(mtp_factory=Mock(), neural={'other': Mock()})):
+            prefill = Mock()
+            with self.assertRaises(ValueError):
+                measure_request(None, None, None, None, None, prefill=prefill, decode=None,
+                    live_digest=None, kv_digest=None, inactive_digest=None, **options)
+            prefill.assert_not_called()
 
     def test_mtp_bridge_runs_proposals_catchup_and_complete_exact_request(self):
         from mtp_request_runtime import MTPRequestRuntime

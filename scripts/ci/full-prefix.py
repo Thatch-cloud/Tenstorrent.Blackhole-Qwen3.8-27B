@@ -103,6 +103,13 @@ def main():
     parser.add_argument('--target-feature-prefix', action='store_true')
     options = parser.parse_args()
     coding_request = os.environ.get('QWEN_CODING_REQUEST', '0')
+    mtp_drafts = os.environ.get('QWEN_MTP_DRAFTS', '0')
+    if mtp_drafts not in ('0', '1', '3', '7', '15', '31') or (mtp_drafts != '0' and
+            (coding_request != '1' or not options.norm_batch or not options.request_pilot
+             or options.attention_engine or options.attention_engine_wide
+             or os.environ.get('QWEN_LOOKUP_CAP_ABBA', '0') != '0'
+             or os.environ.get('QWEN_FABRIC_LINK_PROBE', '0') != '1')):
+        parser.error('MTP requires the explicit short coding norm-engine, audited pair and no ABBA options')
     fabric_link_probe = os.environ.get('QWEN_FABRIC_LINK_PROBE', '0')
     if fabric_link_probe not in ('0', '1') or (fabric_link_probe == '1' and
             (coding_request != '1' or not options.norm_batch or not options.request_pilot
@@ -530,7 +537,8 @@ def main():
         def prefill(prompt, *, return_logits=False):
             generator.prev_page_table = None
             logits, _ = generator.prefill_forward(torch.tensor([prompt], dtype=torch.int32), page_table,
-                kv_cache, [len(prompt)], empty_slots=[0], enable_trace=not (options.target_features or options.target_feature_batch))
+                kv_cache, [len(prompt)], empty_slots=[0],
+                enable_trace=not (options.target_features or options.target_feature_batch or mtp_drafts != '0'))
             if addresses() != original_addresses:
                 raise AssertionError("Prefill replaced persistent decode state")
             return logits.clone() if return_logits else argmax(logits)
@@ -622,7 +630,7 @@ def main():
         save(scratch)
         restore()
         kv_digest(128)
-        if options.batch:
+        if options.batch and mtp_drafts == '0':
             from model_batch import ModelBatch
             save(replay_initial)
             restore(replay_initial)
@@ -639,7 +647,8 @@ def main():
                     output = fixture.run()
                     ttnn.deallocate(output)
                     fixture.close()
-        generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
+        if mtp_drafts == '0':
+            generator.warmup_model_prefill(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch))
         generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=not (options.target_features or options.target_feature_batch), max_batch_size=1,
                                       num_blocks=1024, can_sample_on_device=False, skip_trace_precompile=True)
         if options.target_feature_batch:
@@ -730,6 +739,33 @@ def main():
                     report['scope'] = 'Single non-repeated coding request with lookup drafting; exact native token/state comparison, not held-out coding-quality certification'
                 report['request_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                              for name in ('full_request.py', 'verifier_engine.py', 'full_request_pair.py')}
+
+                if mtp_drafts != '0':
+                    from full_mtp_request import measure_mtp_request
+                    output_path = root / 'full-mtp-request.json'
+                    report['scope'] = 'Single real coding request with native MTP drafting and exact target verification'
+                    report['context_lengths'] = [len(prompt)]
+                    report['mtp_sources'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                        for name in ('full_mtp_request.py', 'mtp_device_step.py', 'mtp_prefill.py',
+                                     'mtp_request_runtime.py', 'mtp_hidden_capture.py', 'mtp_hidden_rows.py')}
+                    report['mtp_module_sha256'] = hashlib.sha256(Path('/experiment-speculative/mtp_module.py').read_bytes()).hexdigest()
+                    with sampler_links(sampler.tt_sampling, 4):
+                        axis = sampler.tt_sampling._get_sampling_cluster_axis()
+                        actual, topology = sampler.tt_sampling._get_force_argmax_all_gather_config(axis)
+                        if actual != 4 or topology != ttnn.Topology.Linear:
+                            raise AssertionError('MTP request sampler must use four physical-pair links')
+                        result = measure_mtp_request(ttnn, model, sampler, prompt, page_table, helpers,
+                            weights=weights, prefill=prefill, decode=decode, live_digest=live_digest,
+                            kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids, max_drafts=int(mtp_drafts))
+                    result.update(kind=report['scope'], coding_task=report['coding_task'],
+                        output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
+                        ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4, fabric_sources=fabric_sources)
+                    report['request_checks'] = [result]
+                    if result['committed_decode_tokens'] == 0:
+                        raise AssertionError('MTP request must exercise decode')
+                    report['passed'] = True
+                    print(json.dumps(result), flush=True)
+                    return
 
                 def request_measure(*, norm_batch=options.norm_batch, attention_replay=False, attention_wide=False, lookup_cap=False, sampling_links=False):
                     from contextlib import nullcontext
