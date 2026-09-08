@@ -8,6 +8,20 @@ from draft_attention import draft_attention_mask, draft_sdpa, composed_draft_att
 
 
 class DraftAttentionTests(unittest.TestCase):
+    def test_native_key_chunks_are_explicit_and_aligned(self):
+        operations, query, key, value, mask = self.operations_fixture()
+        key.shape = value.shape = (1, 4, 64, 128)
+        mask.shape = (1, 1, 32, 64)
+        draft_sdpa(operations, query, key, value, mask, key_chunk_size=64)
+        self.assertEqual(operations.SDPAProgramConfig.call_args.kwargs['k_chunk_size'], 64)
+        for invalid in (True, 16, 128, '64'):
+            with self.assertRaisesRegex(ValueError, 'chunk'):
+                draft_sdpa(operations, query, key, value, mask, key_chunk_size=invalid)
+        key.shape = value.shape = (1, 4, 96, 128)
+        mask.shape = (1, 1, 32, 96)
+        with self.assertRaisesRegex(ValueError, 'chunk'):
+            draft_sdpa(operations, query, key, value, mask, key_chunk_size=64)
+
     def test_wide_dot_placement_requires_cached_fused_dots(self):
         operations, query, key, value, mask = self.operations_fixture()
         for fused, cache in ((False, False), (True, False)):

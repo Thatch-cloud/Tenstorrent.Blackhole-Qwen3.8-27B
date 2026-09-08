@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from attention_batch import capture_operation
-from draft_attention import composed_draft_attention, draft_attention_mask
+from draft_attention import composed_draft_attention, draft_attention_mask, draft_sdpa
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 
@@ -14,14 +14,22 @@ from gdn_multitoken_conv import addresses, release_owned
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--precise-native', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
-    if os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
+    if not options.precise_native and os.environ.get('QWEN_SIM_SHARED_BDF') != '1':
         parser.error('Connected simulator required; hardware promotion is not enabled')
+    from native_draft_sdpa import run_precise_probe
+
+    run(options, run_precise_probe(__file__) if options.precise_native else None)
+
+
+def run(options, kernel_audit):
     import torch
     import ttnn
 
-    report = dict(passed=False, scope=__doc__, eager_checks=[], replay_checks=[], negative_controls=[])
+    report = dict(passed=False, scope=__doc__, eager_checks=[], replay_checks=[], negative_controls=[],
+        native_kernel=kernel_audit)
     mesh, trace = None, None
     persistent, transient = [], []
 
@@ -34,7 +42,7 @@ def main():
         return ttnn.to_torch(ttnn.get_device_tensors(tensor)[chip])
 
     try:
-        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED if options.precise_native else ttnn.FabricConfig.FABRIC_1D)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=268435456)
         mesh.enable_program_cache()
         mapper = ttnn.ReplicateTensorToMesh(mesh)
@@ -60,6 +68,10 @@ def main():
             ttnn.synchronize_device(mesh)
 
         def execute():
+            if options.precise_native:
+                output = draft_sdpa(ttnn, *persistent)
+                transient.append(output)
+                return output
             return composed_draft_attention(ttnn, mesh, *persistent, explicit_softmax=True,
                 fused_row_sum=True, fused_dots=True, cache_dot_tiles=True, trace_owned=transient)
 
@@ -75,7 +87,7 @@ def main():
             results = []
             for chip in range(2):
                 actual = host(output, chip).clone()
-                torch.testing.assert_close(actual[..., :8, :], expected[..., :8, :], rtol=.01, atol=.01)
+                torch.testing.assert_close(actual[..., :8, :].float(), expected[..., :8, :], rtol=.01, atol=.01)
                 results.append(actual)
                 report['eager_checks'].append(dict(pattern=pattern, chip=chip, reference_close=True))
             references.append(results)

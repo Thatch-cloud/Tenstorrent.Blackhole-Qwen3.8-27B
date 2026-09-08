@@ -70,6 +70,31 @@ class DraftAttentionBranchTests(unittest.TestCase):
                     lambda value: value, parameters=parameters, context=context)
         operations.matmul.assert_not_called()
 
+    def test_native_branch_replaces_composition_and_retains_output(self):
+        operations, weights, convolution, hidden, history, mask, rope = self.fixture()
+        mesh, collective, native_output = object(), object(), object()
+        transient = []
+        def retain(value):
+            transient.append(value)
+            return value
+        with patch('draft_attention_branch.grouped_causal_convolution', return_value=object()), \
+                patch('draft_attention_branch.gather_add_projection', return_value=object()), \
+                patch('draft_attention_branch.composed_draft_attention') as composed, \
+                patch('draft_attention_branch.draft_sdpa', return_value=native_output) as native, \
+                patch('native_draft_sdpa.audit_active_kernel', return_value={'audited': True}) as audit, \
+                patch.dict(os.environ, TT_METAL_HOME='/audited'):
+            parameters = prepare_attention_branch(operations, mesh, weights, convolution, lambda value: value,
+                precise_native=True)
+            audit.assert_called_once_with('/audited')
+            execute_attention_branch(operations, mesh, collective, hidden, history, mask, rope,
+                retain, parameters=parameters, context=31)
+            native.assert_called_once()
+            composed.assert_not_called()
+            self.assertTrue(any(value is native_output for value in transient))
+            with self.assertRaisesRegex(ValueError, 'placement'):
+                execute_attention_branch(operations, mesh, collective, hidden, history, mask, rope,
+                    retain, parameters=parameters, context=31, wide_dot_placement=True)
+
     def test_captured_stack_cannot_be_promoted_directly_to_hardware(self):
         environment = {name: value for name, value in os.environ.items()
             if name not in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH', 'TT_METAL_SLOW_DISPATCH_MODE')}

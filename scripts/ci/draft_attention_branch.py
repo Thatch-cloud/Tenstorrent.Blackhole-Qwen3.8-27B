@@ -1,12 +1,19 @@
 """Prepared learned attention branch for device-resident draft-stack execution."""
 
-from draft_attention import composed_draft_attention
+from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 
 
-def prepare_attention_branch(operations, mesh, weights, convolution, retain):
+def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False):
     import torch
+
+    native_kernel = None
+    if precise_native:
+        import os
+        from native_draft_sdpa import audit_active_kernel
+
+        native_kernel = audit_active_kernel(os.environ['TT_METAL_HOME'])
 
     def upload(value, *, sharded=False, row_major=False):
         return retain(operations.from_torch(value, device=mesh, dtype=operations.bfloat16,
@@ -22,7 +29,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain):
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     base = convolution['layers.0.attention_conv.base_kernel']
     return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
-        kernel=kernel,
+        kernel=kernel, native_kernel=native_kernel,
         norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
         convolution=upload(convolution['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()),
         bases=[upload(base[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
@@ -35,6 +42,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                              parameters, context, wide_dot_placement=False):
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
+    if parameters.get('native_kernel') and wide_dot_placement:
+        raise ValueError('Native SDPA replaces the composed dot placement control')
     if type(context) is not int or context < 1 or context > 2048:
         raise ValueError('Explicit bounded committed feature context required')
     key_rows = ((context + 8 + 31) // 32) * 32
@@ -86,9 +95,13 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             heads[name] = retain(operations.typecast(rotated, operations.bfloat16))
     attention_owned = []
     try:
-        attention = composed_draft_attention(operations, mesh, heads['q'], heads['k'], heads['v'], mask,
-            explicit_softmax=True, fused_row_sum=True, fused_dots=True, cache_dot_tiles=True,
-            wide_dot_placement=wide_dot_placement, trace_owned=attention_owned)
+        if parameters.get('native_kernel'):
+            attention = draft_sdpa(operations, heads['q'], heads['k'], heads['v'], mask)
+            attention_owned.append(attention)
+        else:
+            attention = composed_draft_attention(operations, mesh, heads['q'], heads['k'], heads['v'], mask,
+                explicit_softmax=True, fused_row_sum=True, fused_dots=True, cache_dot_tiles=True,
+                wide_dot_placement=wide_dot_placement, trace_owned=attention_owned)
     finally:
         for value in attention_owned:
             retain(value)

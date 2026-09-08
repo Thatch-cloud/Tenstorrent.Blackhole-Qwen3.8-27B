@@ -28,12 +28,14 @@ def validate_attention(operations, query, key, value, mask):
         raise ValueError('BF16 draft attention operands required')
 
 
-def draft_sdpa(operations, query, key, value, mask, *, streaming=False):
+def draft_sdpa(operations, query, key, value, mask, *, streaming=False, key_chunk_size=32):
     validate_attention(operations, query, key, value, mask)
+    if type(key_chunk_size) is not int or key_chunk_size not in (32, 64) or key.shape[2] % key_chunk_size:
+        raise ValueError('Aligned 32/64-key native draft chunk required')
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=not streaming, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8), q_chunk_size=32,
-        k_chunk_size=32, exp_approx_mode=False)
+        k_chunk_size=key_chunk_size, exp_approx_mode=False)
     return operations.transformer.scaled_dot_product_attention(query, key, value,
         attn_mask=mask, is_causal=False, scale=128 ** -0.5, program_config=program,
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)

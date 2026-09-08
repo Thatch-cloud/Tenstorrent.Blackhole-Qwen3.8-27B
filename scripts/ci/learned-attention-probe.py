@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from draft_attention import draft_attention_mask, composed_draft_attention
+from draft_attention import draft_attention_mask, composed_draft_attention, draft_sdpa
 from draft_attention_fixture import load_attention
 from draft_convolution import grouped_causal_convolution, convolution_reference
 from draft_convolution_fixture import load_convolution
@@ -44,13 +44,20 @@ def main():
     parser.add_argument('--stack-layers', type=int, choices=(2, 3, 4, 5), default=2)
     parser.add_argument('--selector-fixture', type=Path)
     parser.add_argument('--captured-stack', action='store_true')
+    parser.add_argument('--precise-native', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.precise_native and (options.hardware or not options.fp32_rope
+            or options.inspect_attention or options.explicit_softmax or options.wide_attention
+            or options.pairwise_softmax or options.pairwise_dots or options.fused_row_sum
+            or options.fused_dots or options.cache_dot_tiles or options.wide_dot_placement):
+        parser.error('Native draft attention requires the isolated precise simulator path')
+    composed_capture = options.explicit_softmax and options.fused_row_sum and options.fused_dots and options.cache_dot_tiles
     if options.captured_stack and (options.hardware or not options.stack_fixtures
             or options.stack_layers != 5 or not options.selector_fixture or not options.convolution_fixture
             or not options.mlp_fixture or options.context != 31 or not options.fp32_rope
-            or not options.explicit_softmax or not options.fused_row_sum or not options.fused_dots
-            or not options.cache_dot_tiles or options.inspect_attention or options.wide_attention
+            or not (options.precise_native or composed_capture)
+            or options.inspect_attention or options.wide_attention
             or options.pairwise_softmax or options.pairwise_dots or options.wide_dot_placement):
         parser.error('Captured stack requires the complete precise short-context simulator stack')
     if options.selector_fixture and (not options.mlp_fixture or not options.convolution_fixture):
@@ -79,6 +86,12 @@ def main():
             or options.pairwise_dots == options.fused_dots
             or (options.fused_dots and not options.fused_row_sum)):
         parser.error('Hardware requires the inspection-free simulator-validated precise path')
+    from native_draft_sdpa import run_precise_probe
+
+    run(options, run_precise_probe(__file__) if options.precise_native else None)
+
+
+def run(options, kernel_audit):
     import torch
     import ttnn
     from models.tt_transformers.tt.ccl import TT_CCL
@@ -103,7 +116,7 @@ def main():
         stack_checkpoints=[entry[0] for entry in stack_entries], stack_layers=1 + len(stack_entries), layers_completed=0,
         selector_checkpoint=selector_manifest, selector_projection_only=bool(options.selector_fixture),
         projection_fidelity_span=32 if options.convolution_fixture else 16,
-        wide_dot_placement=options.wide_dot_placement,
+        wide_dot_placement=options.wide_dot_placement, native_kernel=kernel_audit,
         backend='hardware' if options.hardware else 'simulator',
         fp32_rope=options.fp32_rope,
         explicit_softmax=options.explicit_softmax,
@@ -231,11 +244,14 @@ def main():
                         probability_row_sum_error=float((actual_probabilities.sum(-1) - 1).abs().max()),
                         pv_max_error=float((actual_result - expected_result).abs().max())))
 
-            attention = retain(composed_draft_attention(ttnn, mesh, rotated['q'], rotated['k'], heads['v'], upload(mask),
-                inspect=inspect_attention if options.inspect_attention else None, explicit_softmax=options.explicit_softmax,
-                wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots,
-                fused_row_sum=options.fused_row_sum, fused_dots=options.fused_dots, cache_dot_tiles=options.cache_dot_tiles,
-                wide_dot_placement=options.wide_dot_placement))
+            if options.precise_native:
+                attention = retain(draft_sdpa(ttnn, rotated['q'], rotated['k'], heads['v'], upload(mask)))
+            else:
+                attention = retain(composed_draft_attention(ttnn, mesh, rotated['q'], rotated['k'], heads['v'], upload(mask),
+                    inspect=inspect_attention if options.inspect_attention else None, explicit_softmax=options.explicit_softmax,
+                    wide_operands=options.wide_attention, pairwise_sum=options.pairwise_softmax, pairwise_dots=options.pairwise_dots,
+                    fused_row_sum=options.fused_row_sum, fused_dots=options.fused_dots, cache_dot_tiles=options.cache_dot_tiles,
+                    wide_dot_placement=options.wide_dot_placement))
             rounded_attention = retain(ttnn.typecast(attention, ttnn.bfloat16))
             transposed = retain(ttnn.transpose(rounded_attention, 1, 2))
             merged = retain(ttnn.reshape(transposed, (1, 1, 32, 2048)))
@@ -329,7 +345,17 @@ def main():
                     host(rotated['k'], chip).float().repeat_interleave(4, dim=1), host(heads['v'], chip).float().repeat_interleave(4, dim=1),
                     attn_mask=mask.float(), is_causal=False)
                 actual_attention = host(attention, chip)
-                torch.testing.assert_close(actual_attention[..., :8, :], expected_attention[..., :8, :], rtol=.01, atol=.01)
+                try:
+                    torch.testing.assert_close(actual_attention[..., :8, :].float(), expected_attention[..., :8, :], rtol=.01, atol=.01)
+                except AssertionError:
+                    failure = options.output.with_suffix(f'.layer{active_layer}.rank{chip}-attention-failure.pt')
+                    torch.save(dict(query=host(rotated['q'], chip), key=host(rotated['k'], chip),
+                        value=host(heads['v'], chip), mask=mask, actual=actual_attention,
+                        expected=expected_attention, native_kernel=kernel_audit), failure)
+                    report['attention_failure'] = dict(path=str(failure), sha256=hashlib.sha256(failure.read_bytes()).hexdigest(),
+                        layer=active_layer, chip=chip)
+                    checkpoint('attention_numerical_failure')
+                    raise
                 actual_merged = host(merged, chip)
                 expected_merged = actual_attention.bfloat16().transpose(1, 2).reshape(1, 1, 32, 2048)
                 if not torch.equal(actual_merged, expected_merged):
@@ -413,7 +439,8 @@ def main():
             references.append([host(changed_normalized, chip).clone() for chip in range(2)])
             if any(torch.equal(references[0][chip], references[1][chip]) for chip in range(2)):
                 raise AssertionError('Changed stack inputs must change final hidden output')
-            prepared = [(prepare_attention_branch(ttnn, mesh, attention_weights, convolution_weights, retain),
+            prepared = [(prepare_attention_branch(ttnn, mesh, attention_weights, convolution_weights, retain,
+                precise_native=options.precise_native),
                 prepare_mlp_branch(ttnn, mesh, feedforward_weights, convolution_weights, retain))
                 for attention_weights, convolution_weights, feedforward_weights in entries]
             patterns = []

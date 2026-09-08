@@ -2,6 +2,19 @@
 
 ## Current programme position - 2026-09-08
 
+**Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**
+The native kernel hardcodes an approximate main exponential despite
+`exp_approx_mode=False`. A geometry-scoped precision correction passes synthetic
+CTX0/31/2048 and changed-input trace replay without relaxing tolerances.
+Learned layer-zero attention still fails: 65/16384 values exceed the existing
+bound; FP32 intermediate buffers reduce this to41 but do not pass. A single
+64-key chunk also fails44 values on captured rank-zero operands. No hardware
+job was dispatched for these known failures; latest committed TG stays58.33.
+Captured, hash-pinned operands now reproduce the failure without reloading
+weights or repeating projections/fabric setup. Next: diagnose that operand case,
+then qualify the connected native branch before full DFlash2 request integration.
+[Evidence and scope](native-draft-sdpa-2026-09-08.md). Serving defaults unchanged.
+
 **Latest qualified:34216164140 (`3772f3b`), device chain exact, small TG gain.**
 ABBA57.244897TG host-stepped versus58.333256TG chained, ratio1.019012 (+1.90%).
 All four requests emit150 tokens, accept125/178 proposals in26 blocks and pass

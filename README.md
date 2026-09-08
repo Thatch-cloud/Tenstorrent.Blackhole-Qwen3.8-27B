@@ -17,6 +17,10 @@ This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 trips saves only about 2 ms/block. The remaining draft/target execution costs,
 not more host-side tweaks, must fall substantially to approach 200 TG.
 
+DFlash2 native-attention work is underway. Small-input and trace checks pass,
+but learned inputs still fail the numerical gate; no hardware promotion or new
+TG claim. [Current kernel findings](docs/native-draft-sdpa-2026-09-08.md).
+
 ## Setup
 
 | Component | Experiment setup |

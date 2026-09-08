@@ -19,20 +19,29 @@ def main():
     parser.add_argument('--uniform-query', action='store_true')
     parser.add_argument('--streaming', action='store_true')
     parser.add_argument('--composed', action='store_true')
+    parser.add_argument('--precise-native', action='store_true')
     options = parser.parse_args()
     if options.composed and options.streaming:
         parser.error('Composed and native streaming are separate controls')
+    if options.precise_native and (options.composed or options.streaming):
+        parser.error('Precise native SDPA uses its isolated FP32 accumulation path')
     if options.hardware and not options.composed:
         parser.error('Only the simulator-validated composed path is enabled for hardware')
     if options.timing and not (options.hardware and options.composed):
         parser.error('Timing requires hardware and the composed path')
     require_projection_environment(os.environ, options.hardware)
+    from native_draft_sdpa import run_precise_probe
+
+    run(options, run_precise_probe(__file__) if options.precise_native else None)
+
+
+def run(options, kernel_audit):
     import torch
     import ttnn
 
     report = dict(passed=False, scope=__doc__, checks=[], uniform_query=options.uniform_query,
         streaming=options.streaming, tolerance=dict(rtol=.01, atol=.01),
-        composed=options.composed,
+        composed=options.composed, native_kernel=kernel_audit,
         backend='hardware' if options.hardware else 'simulator', timings=[],
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ('draft-attention-probe.py', 'draft_attention.py')})
