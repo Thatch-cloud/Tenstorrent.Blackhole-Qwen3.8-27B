@@ -14,7 +14,6 @@ from draft_mlp_fixture import load_mlp
 from draft_projection_full_fixture import load_projection
 from draft_remaining_layers_fixture import load_layer
 from draft_selector_fixture import load_selector
-from full_request import measure_request
 from gdn_multitoken_conv import addresses
 from target_features import LayerOutputCapture
 
@@ -61,7 +60,7 @@ def summarize_dflash_requests(requests):
                 or entry['dflash']['committed_feature_rows'] != count
                 or entry['dflash']['proposal_calls'] <= 0):
             raise ValueError('Measured decode and complete committed feature accounting required')
-        for key in ('decode_ms', 'prefill_ms', 'engine_setup_ms', 'feature_setup_ms'):
+        for key in ('decode_ms', 'prefill_ms', 'engine_setup_ms', 'feature_setup_ms', 'prefill_setup_decode_ms'):
             value = entry[key]
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 raise ValueError('Positive finite request and setup measurements required')
@@ -100,10 +99,26 @@ def summarize_dflash_requests(requests):
     tokens = sum(entry['committed_decode_tokens'] for entry in measured)
     decode_ms = sum(entry['decode_ms'] for entry in measured)
     throughput = 1000 * tokens / decode_ms
+    context = len(reference['prompt_tokens'])
+    prefill_ms = sum(entry['prefill_ms'] for entry in measured)
+    benchmark = dict(pp_tokens_per_second=1000 * context * len(measured) / prefill_ms,
+        ctx_tokens=context, tg_tokens_per_second=throughput, streams=1,
+        mode='Offline single-stream complete coding request',
+        verify_rows=reference['dflash'].get('block_rows', 8),
+        measured_requests=len(measured),
+        committed_decode_tokens_per_request=[entry['committed_decode_tokens'] for entry in measured],
+        per_request_pp_tokens_per_second=[1000 * context / entry['prefill_ms'] for entry in measured],
+        per_request_tg_tokens_per_second=[1000 * entry['committed_decode_tokens'] / entry['decode_ms'] for entry in measured],
+        mean_prefill_ms=prefill_ms / len(measured),
+        mean_prefill_setup_decode_ms=sum(entry['prefill_setup_decode_ms'] for entry in measured) / len(measured),
+        pp_scope='Target prefill helper including feature capture and first-token selection; excludes draft setup',
+        ctx_scope='Actual prompt tokens including chat template, before generation; not maximum cache capacity',
+        tg_scope='Committed decode after the prefill seed, including draft, verify/readback and publication; excludes prefill/setup',
+        aggregation='Sum of tokens divided by sum of measured time; audit requests excluded')
     return dict(committed_tokens_per_second=throughput,
         per_request_tokens_per_second=[1000 * entry['committed_decode_tokens'] / entry['decode_ms'] for entry in measured],
         committed_tokens=tokens, measured_requests=2, feature_audit_requests=1,
-        context=len(reference['prompt_tokens']), streams=1, target_reached=throughput >= 200,
+        context=context, streams=1, target_reached=throughput >= 200, benchmark=benchmark,
         block_rows=reference['dflash'].get('block_rows', 8),
         proposal_capture=reference['dflash'].get('proposal_capture', False),
         commit_only_gdn=commit_only,
@@ -178,6 +193,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                           audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False,
                           commit_only_gdn=False, fused_convolution=False):
     import torch
+    from full_request import measure_request
     from models.tt_transformers.tt.ccl import TT_CCL
 
     if (type(audit_features) is not bool or type(proposal_capture) is not bool or type(commit_only_gdn) is not bool

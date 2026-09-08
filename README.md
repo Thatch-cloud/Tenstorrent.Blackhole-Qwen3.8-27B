@@ -4,7 +4,7 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Best measured: 78.06 committed tok/s**, using captured DFlash2, commit-only GDN
+**Best measured: 78.06 committed tok/s at CTX 170, one stream**, using captured DFlash2, commit-only GDN
 and fused draft convolution. Two complete responses reach EOS at 77.96 / 78.17 TG, with exact native
 tokens, GDN state, valid KV and inactive slots. A separate request audits every
 committed feature row, captured proposal and pre-decision GDN state.
@@ -16,12 +16,12 @@ This is a single-task experiment, not held-out coding quality or a serving resul
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**Next: reduce verifier and draft kernel costs, not simply widen drafting.**
+**Next: qualify the lead at 4K context, then continue verifier kernel work.**
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
-60.74 TG; T8 stays the lead. Next: reduce verifier normalization/data-movement
-costs without changing arithmetic or sampling.
+60.74 TG; T8 stays the lead. Longer-context DFlash initialization must be qualified
+before attributing this short-context rate to coding-sized inputs.
 Native SDPA remains disabled after its failed numerical gate.
 [Fused-convolution results and limits](docs/dflash-fused-convolution-2026-09-09.md).
 
@@ -50,6 +50,27 @@ The model is not uniformly limited to 36 cores: different kernels use different 
 - **TG:** generation tokens/s **per stream**; each table states the timing boundary.
 - **Streams (B):** concurrent requests. **Verify rows (T):** speculative positions, not users.
 - **TTFT:** time to first token. Includes more than prefill; we do not convert it into PP.
+
+## Current lead: PP / CTX / TG
+
+Captured DFlash2 T8 + commit-only GDN + fused convolution; **one stream**.
+These are offline complete requests, not endpoint streaming measurements.
+
+| PP tok/s | CTX tokens | Committed TG tok/s | Status |
+| ---: | ---: | ---: | --- |
+| 510.65 | 170 | **78.06** | Measured: two 150-token decode samples through EOS |
+| — | 4,096 | — | Next: long-prefill correctness gate |
+| — | 8,192 | — | Planned |
+| — | 16,384 | — | Planned |
+| — | 32,768 | — | Planned |
+| — | 64,504 | — | Planned; reserves generation space below 65,536 |
+
+At CTX 170, mean prefill is **0.333 s**; prefill + fresh setup + decode is
+**6.42 s**, excluding model loading. TG excludes prefill/setup; PP includes
+target feature capture and first-token selection, but not drafter initialization.
+The drafter's rolling 2,048-token history is separate from the target's full KV
+context. Its current prefill initializer rejects inputs above 2,048 tokens.
+[Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
 
 ## Serving baseline
 

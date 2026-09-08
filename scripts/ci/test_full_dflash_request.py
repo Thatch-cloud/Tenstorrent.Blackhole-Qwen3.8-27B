@@ -35,6 +35,29 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertEqual(result['prefill_setup_decode_ms'], [100, 120])
         self.assertFalse(result['target_reached'])
 
+    def test_pp_ctx_tg_use_actual_prompt_and_time_weighted_uninstrumented_samples(self):
+        records = self.requests()
+        records[0]['prefill_ms'] = 100000
+        records[1]['prefill_ms'] = 20
+        records[2]['prefill_ms'] = 60
+        metrics = summarize_dflash_requests(records)['benchmark']
+        self.assertEqual(metrics['pp_tokens_per_second'], 50)
+        self.assertEqual(metrics['per_request_pp_tokens_per_second'], [100, 100 / 3])
+        self.assertEqual(metrics['ctx_tokens'], 2)
+        self.assertEqual(metrics['tg_tokens_per_second'], 40)
+        self.assertEqual(metrics['streams'], 1)
+        self.assertEqual(metrics['committed_decode_tokens_per_request'], [2, 2])
+        self.assertEqual(metrics['mean_prefill_ms'], 40)
+        self.assertEqual(metrics['mean_prefill_setup_decode_ms'], 110)
+
+    def test_nonfinite_or_zero_benchmark_timings_are_rejected(self):
+        for key in ('prefill_ms', 'decode_ms', 'prefill_setup_decode_ms'):
+            for value in (0, -1, True, float('nan'), float('inf')):
+                records = self.requests()
+                records[1][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    summarize_dflash_requests(records)
+
     def commit_requests(self):
         control = self.requests()
         for record in control:

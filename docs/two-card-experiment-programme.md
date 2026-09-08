@@ -2,6 +2,16 @@
 
 ## Current programme position - 2026-09-09
 
+**Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
+CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
+Request summaries now expose these metrics together, excluding correctness
+audits and keeping ABBA arms separate. An offline artifact reporter recomputes
+the rates and preserves run/hash provenance; it does not rerun hardware.
+Next is 4K, then 8K/16K/32K/64,504. The drafter currently rejects prefill above
+2,048 tokens: qualify tail-window initialization with absolute positions and
+unchanged full target KV before dispatching those tests. Multi-stream DFlash
+remains unmeasured. [Matrix and gates](pp-ctx-tg-benchmark-matrix.md).
+
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
 candidate78.061082 (+8.10%). Drafting falls31.054947 ->24.811769ms/block;
@@ -9,8 +19,9 @@ verification stays58.17ms. All six150-token EOS requests preserve identical
 proposals, acceptance, native tokens, GDN, valid KV and inactive slots. The
 candidate additionally passes880 exact learned-convolution comparisons.
 Candidate PP510.65; complete prefill/setup/decode6.56/6.29s, no amortization.
-Simulator and867 host tests pass. The target remains200, not achieved. Next:
-reduce target-verifier normalization/data movement without arithmetic changes.
+Simulator and867 host tests passed for that candidate. The target remains200,
+not achieved. Verifier normalization/data movement remains the kernel priority
+after the long-context initialization gate.
 [Matched result](dflash-fused-convolution-2026-09-09.md).
 
 **Previous best: captured DFlash2 T8 with commit-only GDN, 70.34 committed TG.**
