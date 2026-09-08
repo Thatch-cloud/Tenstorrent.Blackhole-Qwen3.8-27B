@@ -2138,3 +2138,22 @@ not a full-drafter speedup. Uploads and validation are excluded. The connected
 five-layer gate also passed, but it does not yet capture the whole learned draft
 or provide committed coding-stream throughput. Matched best-verifier attribution
 run34170503918 is now in progress;200 committed tok/s remains unachieved.
+
+### Matched best-verifier result34170503918
+
+Run34170503918 on4dff922 passed with identical complete best-configuration flags
+in correctness and both context profiles:24 batch checks,16 rollback checks,
+four negative controls and three exact replays of each arm on both chips.
+Candidate operation count is2040 per replay. Chip0 median summed kernel costs
+at4095/16383 are matmul32.061658/32.009741ms, generic18.241194/18.260368ms,
+SDPA2.546763/4.211429ms and all-gather1.992017/2.005627ms. These instrumented
+sums are not critical-path time and must not be converted into committed TPS.
+
+The retained C++ CSV separates the largest candidate groups at4095:39-core
+matmuls11.808597ms across128 operations;32-core matmuls10.805054ms across128;
+48-core generic7.198087ms across336;96-core generic6.252838ms across48;
+43-core matmuls5.733327ms across48. Core count alone does not identify a kernel
+or model projection. Next prioritization is source/dispatch mapping of the two
+dominant matmul groups and the48/96-core custom groups, rather than assuming
+unused cores imply attention is the main limit. The analyzer now retains these
+operation/core-count groups and rejects changing group coverage across replays.
