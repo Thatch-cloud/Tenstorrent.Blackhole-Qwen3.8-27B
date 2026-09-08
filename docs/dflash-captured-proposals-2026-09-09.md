@@ -33,8 +33,23 @@ a matched capture-only or MTP comparison. It is one coding task, not held-out
 quality or an adopted serving configuration.
 Report SHA256: `eb7b8d3e3694c7d32da683f182ba10913c777e9d4e3e540df424184338a742cb`.
 
-Captured T32 is the next full-request test; eager T32 measured41.03 TG. Target
-verification is now the larger measured cost, not host-side proposal dispatch.
+## Captured T32: correct but slower
+
+[34239197088](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34239197088)
+uses the same`eadaa41` code with31 proposals/T32. All three complete150-token
+requests pass through EOS. The audit includes18 exact eager/trace proposal
+comparisons and1500 feature row/chip/tap comparisons; target tokens/GDN/KV/inactive
+checks remain exact. Two uninstrumented requests measure61.258955/60.236565 TG,
+aggregate **60.743458**, with18 blocks/request and133/558 accepted proposals.
+Mean draft32.156012ms, verifier98.436125ms, publication3.715050ms; PP542.940972.
+Complete prefill/setup/decode9133.816222/10359.288562ms.
+Report SHA256: `d3132d537c48675b303ac9f5660480bf23462e05e099f7f032b7692ac0821c1b`.
+
+This is a separate-run width comparison, not interleaved ABBA. Fixed-context
+padding changes one acceptance path relative to eager T32, as anticipated.
+T32 does not beat captured T8 and is not promoted. The next priority is reducing
+target-verifier kernel cost while retaining the complete-request exactness gate;
+more speculative rows alone do not solve the200-TG target.
 
 ## Implementation boundaries
 

@@ -14,9 +14,10 @@ This is a single-task experiment, not held-out coding quality or a serving resul
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
 matched DFlash-versus-MTP comparisons.
 
-**Next: captured 32-row drafting and cheaper target verification.** At T8,
+**Next: cheaper target verification, not simply wider drafting.** At T8,
 drafting now costs31.27 ms/block, down from110.58 ms in the eager experiment;
 verification still costs65.27 ms. The wider eager path reaches41.03 TG.
+Captured T32 completes exactly at60.74 TG, below captured T8; T8 stays the lead candidate.
 Native SDPA remains disabled after its failed numerical gate.
 [Captured-drafter results and limits](docs/dflash-captured-proposals-2026-09-09.md).
 
@@ -106,6 +107,7 @@ TG includes drafting, verification/readback and publication; excludes prefill/se
 | 170 | 1 | Up to 8 | 568.82 | **37.64** |
 | 170 | 1 | Up to 32, trained-width extrapolation | 554.23 | **41.03** |
 | 170 | 1 | Up to 8, captured drafter | 517.11 | **66.76** |
+| 170 | 1 | Up to 32, captured drafter and trained-width extrapolation | 542.94 | **60.74** |
 
 Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
 129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
@@ -126,6 +128,11 @@ Its two complete requests take7.34/7.43s including fresh prefill and setup;
 their decode-only rates are68.41/65.20 TG. This also changes context padding and
 KV allocation, so it is not a matched capture-only attribution.
 [Captured hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
+
+Captured T32 completes at61.26/60.24 TG, with18 blocks/request. It costs98.44 ms
+per verification block versus65.27 ms at T8, without enough extra accepted tokens
+to compensate. It is not promoted over the trained-width T8 candidate.
+[Captured T32 run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34239197088).
 
 ### Earlier lookup experiments
 
@@ -233,7 +240,7 @@ was resolved by restoring the exact runtime image.
 | Workstream | Current position |
 | --- | --- |
 | MTP | Device chain + KV-only repair: 58.33 TG, +1.90% matched; setup-inclusive latency is worse; wider parallel proposals needed |
-| DFlash2 | Complete exact captured T8: 66.76 TG; captured T32 and per-layer history KV caching remain |
+| DFlash2 | Complete exact captured T8: 66.76 TG; captured T32 is slower at60.74 TG; target-verifier optimization is next |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
 | Prefill/decode disaggregation | End-to-end placement, scheduling and responsiveness tests remain |

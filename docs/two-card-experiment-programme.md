@@ -10,7 +10,10 @@ checks1500 row/chip/tap comparisons and22 exact eager/trace proposal comparisons
 Mean draft31.265333ms, verify65.266694ms, publication3.384118ms; PP517.112935.
 Complete prefill/setup/decode7.34/7.43s, no setup amortization. This is one coding
 task, not held-out quality, serving adoption or a matched MTP comparison.
-Captured T32 is next. [Captured results](dflash-captured-proposals-2026-09-09.md).
+Captured T32 run34239197088 passes but is slower:60.743458 TG,18 blocks/request,
+draft32.156012ms, verify98.436125ms,133/558 accepted proposals. T8 remains the
+lead candidate; target-verifier kernel cost is next, not another wider-draft
+assumption. [Captured results](dflash-captured-proposals-2026-09-09.md).
 
 **Earlier eager integration: T8 37.64 / T32 41.03 TG; MTP58.33 TG.**
 The opt-in `full-dflash-request` suite connects all five learned layers to the
