@@ -2,9 +2,10 @@
 
 
 class MTPRequestRuntime:
-    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row, max_drafts=31):
+    def __init__(self, step, initial_hidden, *, copy_hidden, verified_row=None, max_drafts=31):
         if (type(max_drafts) is not int or max_drafts not in (1, 3, 7, 15, 31)
-                or not all(callable(callback) for callback in (step, copy_hidden, verified_row))):
+                or not all(callable(callback) for callback in (step, copy_hidden))
+                or (verified_row is not None and not callable(verified_row))):
             raise ValueError('Prepared MTP step, hidden copy/row access and bounded draft count required')
         self.step, self.copy_hidden, self.verified_row = step, copy_hidden, verified_row
         self.anchor = initial_hidden
@@ -17,6 +18,8 @@ class MTPRequestRuntime:
         if self.phase != 'unbound' or not engine.retain_mtp_hidden or session.phase != 'idle':
             raise ValueError('Fresh runtime and prepared hidden-retaining verifier required')
         self.session, self.engine = session, engine
+        if self.verified_row is None:
+            self.verified_row = engine.mtp_row
         self.position = session.position
         self.phase = 'idle'
 

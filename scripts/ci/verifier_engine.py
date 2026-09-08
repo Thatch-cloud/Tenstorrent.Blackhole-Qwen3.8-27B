@@ -61,6 +61,7 @@ class VerifierEngine:
         self.position = session.position
         self.phase, self.pending = 'preparing', None
         self.initial, self.buckets = [], {}
+        self.mtp_row_reader = None
         self.pending_key = None
         self.replay_plan = None
         if attention_replay:
@@ -94,6 +95,9 @@ class VerifierEngine:
                 for helper in helpers:
                     bucket['checkpoints'].append(helper.allocate())
                 bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position)
+            if retain_mtp_hidden:
+                from mtp_hidden_rows import MTPHiddenRows
+                self.mtp_row_reader = MTPHiddenRows(ttnn, self.mesh, [bucket['mtp_hidden'] for bucket in self.buckets.values()])
             for bucket in self.buckets.values():
                 rows = bucket['rows']
                 self.restore_initial()
@@ -106,6 +110,8 @@ class VerifierEngine:
                     if result is not None:
                         release_owned(ttnn, [value for value in result if value is not None])
                     warm.close()
+            if self.mtp_row_reader is not None:
+                self.mtp_row_reader.prepare()
             for bucket in self.buckets.values():
                 rows = bucket['rows']
                 self.restore_initial()
@@ -228,6 +234,12 @@ class VerifierEngine:
             raise ValueError('MTP publication hidden requires the current committing request')
         return self.buckets[self.pending_key]['mtp_capture'].output()
 
+    def mtp_row(self, source, row):
+        if (self.phase != 'verified' or self.session.phase != 'committing'
+                or self.mtp_row_reader is None or source is not self.buckets[self.pending_key]['mtp_hidden']):
+            raise ValueError('Hidden row extraction is restricted to current target publication')
+        return self.mtp_row_reader(source, row)
+
     def publish(self, prefix):
         ticket = self.pending
         if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
@@ -259,6 +271,8 @@ class VerifierEngine:
         if self.phase not in ('idle', 'preparing', 'failed'):
             raise ValueError('Finish or abort the pending verifier block before closing')
         self.operations.synchronize_device(self.mesh)
+        if getattr(self, 'mtp_row_reader', None) is not None:
+            self.mtp_row_reader.close()
         for bucket in self.buckets.values():
             for trace in bucket['commits'].values():
                 self.operations.release_trace(self.mesh, trace)

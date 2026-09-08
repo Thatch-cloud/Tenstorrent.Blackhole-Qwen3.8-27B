@@ -91,3 +91,20 @@ Remaining before a valid real-weight run: initialize MTP's prompt KV from aligne
 target prefill hidden states, wire fixed-buffer accepted-row extraction, and
 include MTP preparation/prefill costs in the setup/PP report. Initializing MTP KV
 to zeros while marking a full prompt valid is not an acceptable substitute.
+
+### Alignment and fixed-row preparation
+
+`initialize_prompt` now pairs token `prompt[position + 1]` with target hidden
+row `position`, fills exactly `prompt_length - 1` draft KV rows, and retains the
+last valid target hidden as the seed anchor. Padding is excluded. The paired
+`AlignedMTPStep` maps target token positions to draft cache/RoPE positions by
+subtracting one. This follows the input-token shift with unchanged hidden/position
+rows in [vLLM's base proposer](https://github.com/vllm-project/vllm/blob/main/vllm/v1/spec_decode/llm_base_proposer.py).
+
+`VerifierEngine` also prepares native slice traces for every valid hidden row in
+each retained bucket, writing into one fixed destination. MTP catch-up uses these
+through `engine.mtp_row`; the hot path does not create new row-extraction buffers
+or dispatch uncaptured Python slice operations. These additions are host-tested,
+not device-certified. The real-weight launch still needs to capture and normalize
+the complete valid target prefill hidden rows and call this initializer before
+binding the MTP request runtime.

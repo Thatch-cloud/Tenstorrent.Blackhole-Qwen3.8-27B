@@ -30,3 +30,20 @@ Host and standalone C++ tests are not hardware certification. Existing running
 jobs retain their original code. Other model collectives with explicit two-link
 settings remain unchanged; this is not a claim of runtime-wide four-link adoption
 or repaired automatic topology discovery.
+
+## Hardware result: 34189506734
+
+The isolated rebuild and 36 timed ABBA collectives passed on both cards, with
+exact outputs and no fallback-discovery warning. Rebuilt `_ttnncpp.so` SHA256:
+`ae3d9a5f84a51249a319c7bf91083e741226fc2f76c9b748850d71f4dbd62d37`.
+
+| Rows | 1-link median ms | 4-link median ms | Interpretation |
+| --- | ---: | ---: | --- |
+| 1 | 1.1592 | 0.1343 | Startup/timing transition contaminates comparison; not a credible 8.6x gain |
+| 8 | 0.1271 | 0.1391 | No measured improvement from four links |
+| 32 | 0.1229 | 0.1255 | Essentially similar small-payload latency |
+
+Raw T1 samples began near 2 ms in both arms and later settled near 0.13 ms.
+This certifies the explicit-link correctness path, not a throughput improvement.
+Do not turn the first-row median ratio into a decode speed claim. Continue
+learned drafting and full-request measurement rather than more link microbenchmarks.
