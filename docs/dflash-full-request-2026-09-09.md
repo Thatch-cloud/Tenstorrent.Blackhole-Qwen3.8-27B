@@ -26,6 +26,15 @@ CI cleanup. Enqueued stage logs alone do not identify the blocked kernel.
 Next audit adds synchronization between draft stages; those fenced timings are
 excluded from TG, and the two measurement requests keep the unfenced path.
 
+[34229264462](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34229264462)
+narrows the stall to completion of layer-zero attention at CTX178. Input upload,
+embedding, its four-link gather, and history/mask/RoPE preparation all complete.
+A targeted simulator replay of key-input concatenation at170/178/170 passes all
+six chip checks; that isolated assembly does not reproduce the hardware stall.
+Simulator report SHA256: `e8426ef0742314e63436365789283fc3a5757b7a512ae8803e798caaf0a72cd5`.
+The next full-request audit fences individual attention operations at the failing
+block. It does not change attention math or the unfenced measurement requests.
+
 ## What is connected
 
 | Part | Opt-in implementation |
@@ -69,7 +78,7 @@ prefill/setup/decode latency is also reported, with no setup amortization claim.
 - History simulation exercises CTX170 and the 2048-row sliding boundary, accepted
   prefixes 1/2/7/8, aborts and replay across the preallocated buffers: all 16
   checks pass. Report SHA256: `9ae52881272f70ca5da036af4dcaad209c2d5b9fe38d1816119e90dad31f2d01`.
-- All 835 host tests pass (775 CI helpers + 60 speculative harness tests).
+- All 837 host tests pass (777 CI helpers + 60 speculative harness tests).
   They cover transaction failures, stale tickets, ownership, complete
   fixture loading, exact selector equivalence and exclusion of audited timing.
 - These are integration/correctness checks, **not** full-model simulator speed,

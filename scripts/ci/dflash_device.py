@@ -1,11 +1,13 @@
 """Opt-in complete five-layer DFlash2 proposer with committed projected feature history."""
 
 from types import SimpleNamespace
+from contextlib import nullcontext
 
 from draft_attention import draft_attention_mask
 from draft_attention_branch import prepare_attention_branch, execute_attention_branch
 from draft_head_preparation import rope_tables
 from draft_mlp_branch import prepare_mlp_branch, execute_mlp_branch
+from draft_operation_audit import audit_operations
 from draft_selector import select_active_candidates
 from draft_shared_head import shared_head_candidates, merge_chunk_candidates
 from feature_collective import gather_add_projection
@@ -203,8 +205,10 @@ class DFlashDevice:
                 for name, start, rows in (('q', self.position, 32), ('k', self.position - self.history_rows, key_rows))}
             for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
                 stage('attention', layer=layer)
-                hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
-                    retain, parameters=attention, context=self.history_rows)
+                audit = audit_operations(operations, self.mesh, self.progress) if self.progress is not None and layer == 0 and self.proposal_calls else nullcontext()
+                with audit:
+                    hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
+                        retain, parameters=attention, context=self.history_rows)
                 stage('mlp', layer=layer)
                 hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
                     retain, parameters=mlp, trace_safe=True)['output']
