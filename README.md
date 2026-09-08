@@ -4,12 +4,13 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Best measured: 70.34 committed tok/s**, using captured DFlash2 and commit-only GDN.
-Two complete coding responses reach EOS at 71.67 / 69.06 TG, with exact native
+**Best measured: 78.06 committed tok/s**, using captured DFlash2, commit-only GDN
+and fused draft convolution. Two complete responses reach EOS at 77.96 / 78.17 TG, with exact native
 tokens, GDN state, valid KV and inactive slots. A separate request audits every
 committed feature row, captured proposal and pre-decision GDN state.
-The matched ABBA control reaches 65.50 TG: **7.38% improvement**.
-[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044).
+All 880 learned-convolution comparisons match the composed implementation.
+The matched ABBA control reaches 72.21 TG: **8.10% improvement**.
+[Latest measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
 
 This is a single-task experiment, not held-out coding quality or a serving result.
 Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
@@ -17,10 +18,12 @@ matched DFlash-versus-MTP comparisons.
 
 **Next: reduce verifier and draft kernel costs, not simply widen drafting.**
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
-Drafting still costs 32.37 ms/block; its repeated convolution operations are the
-next fusion candidate. Captured T32 reaches only 60.74 TG; T8 stays the lead.
+Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
+costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
+60.74 TG; T8 stays the lead. Next: reduce verifier normalization/data-movement
+costs without changing arithmetic or sampling.
 Native SDPA remains disabled after its failed numerical gate.
-[Commit-only results and limits](docs/dflash-commit-only-gdn-2026-09-09.md).
+[Fused-convolution results and limits](docs/dflash-fused-convolution-2026-09-09.md).
 
 ## Setup
 
@@ -111,6 +114,8 @@ TG includes drafting, verification/readback and publication; excludes prefill/se
 | 170 | 1 | Up to 32, captured drafter and trained-width extrapolation | 542.94 | **60.74** |
 | 170 | 1 | Up to 8, captured ABBA control | 496.89 | **65.50** |
 | 170 | 1 | Up to 8, captured + commit-only GDN | 530.32 | **70.34** |
+| 170 | 1 | Up to 8, convolution ABBA control | 517.89 | **72.21** |
+| 170 | 1 | Up to 8, captured + commit-only GDN + fused convolution | 510.65 | **78.06** |
 
 Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
 129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
@@ -144,6 +149,14 @@ ABBA test preserves all proposals and outputs: 150 tokens through EOS, 22 blocks
 Two separate audit requests are excluded from TG. PP/setup variation is not
 attributed to the decode change. Serving defaults remain unchanged.
 [Matched hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044).
+
+Fused convolution improves the matched control by 8.10%, with the same 150
+tokens through EOS, 22 blocks and 129/154 accepted drafts. Complete prefill +
+fresh setup + decode takes **6.56 / 6.29 s**, versus control **7.03 / 8.01 s**.
+Its audit checks all 20 learned convolutions per proposal on both chips, in
+addition to the existing token, feature and cache checks. Audits are excluded
+from TG; no setup amortization or held-out coding-quality claim.
+[Fused-convolution hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
 
 ### Earlier lookup experiments
 

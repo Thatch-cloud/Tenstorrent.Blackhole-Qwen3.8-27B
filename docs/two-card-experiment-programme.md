@@ -2,7 +2,18 @@
 
 ## Current programme position - 2026-09-09
 
-**New best: captured DFlash2 T8 with commit-only GDN, 70.34 committed TG.**
+**New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
+Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
+candidate78.061082 (+8.10%). Drafting falls31.054947 ->24.811769ms/block;
+verification stays58.17ms. All six150-token EOS requests preserve identical
+proposals, acceptance, native tokens, GDN, valid KV and inactive slots. The
+candidate additionally passes880 exact learned-convolution comparisons.
+Candidate PP510.65; complete prefill/setup/decode6.56/6.29s, no amortization.
+Simulator and867 host tests pass. The target remains200, not achieved. Next:
+reduce target-verifier normalization/data movement without arithmetic changes.
+[Matched result](dflash-fused-convolution-2026-09-09.md).
+
+**Previous best: captured DFlash2 T8 with commit-only GDN, 70.34 committed TG.**
 Hardware run34242926044 (`20dbd99`) passes matched ABBA: control65.501887,
 candidate70.336300 (+7.38%). Verification falls65.427248 ->58.078125ms/block;
 drafting is unchanged at32.37ms. All six150-token EOS requests preserve identical
@@ -14,13 +25,13 @@ The target remains200, not achieved. Next: fuse the drafter's repeated grouped
 convolution while preserving BF16 rounding; no new fusion speed claim yet.
 [Matched result](dflash-commit-only-gdn-2026-09-09.md).
 
-**Next hardware candidate: fused DFlash2 convolution.** One dispatch replaces
+**Qualified fused DFlash2 convolution.** One dispatch replaces
 the repeated shift/expand/cast/arithmetic sequence while preserving all BF16
 rounding. Simulator passes36 exact output/replay comparisons,12 request-wrapper
 comparisons and stale/rounding negative controls;867 host tests pass. The first
 register-capacity bug is fixed and retained as failed evidence. Hardware ABBA
 keeps commit-only GDN in both arms and audits every learned convolution.
-[Experiment](dflash-fused-convolution-2026-09-09.md). No new TG claim yet.
+[Experiment](dflash-fused-convolution-2026-09-09.md). Serving defaults stay unchanged.
 
 **Previous best: captured DFlash2 T8,66.76 committed TG.**
 Run34238134003 (`eadaa41`) passes three complete150-token coding requests through

@@ -1,8 +1,37 @@
 # Fused DFlash2 convolution
 
-**Status: simulator and host gates pass; hardware comparison ready.**
-The current measured lead remains 70.34 committed tok/s. This kernel has no
-hardware speed result yet; 200 remains unachieved.
+**Status: hardware ABBA passes; new best 78.06 committed tok/s.**
+The matched control reaches 72.21: **8.10% improvement**. The target remains
+200, not achieved. This is one complete coding task, not held-out quality.
+
+## Hardware result
+
+[Run 34246322267](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267),
+revision `1948a21`, passes both complete audits and all four timed requests.
+
+| CTX / streams / verify rows | Control | Fused candidate |
+| --- | --- | --- |
+| 170 / 1 / up to 8: committed TG | 72.213017 | **78.061082** |
+| Individual timed TG | 70.774090 / 73.711668 | 77.955701 / 78.166749 |
+| PP tok/s | 517.894822 | 510.646465 |
+| Mean draft ms/block | 31.054947 | 24.811769 |
+| Mean verifier/readback ms/block | 58.114565 | 58.174193 |
+| Mean publication ms/block | 3.340334 | 3.284827 |
+| Complete prefill + setup + decode | 7.026 / 8.010 s | 6.559 / 6.286 s |
+
+All six requests emit the same 150 committed tokens through EOS: 22 blocks and
+129/154 accepted drafts. Native tokens, GDN, valid KV and inactive slots match.
+Each arm's audit checks 1500 feature comparisons, 22 eager/trace proposals and
+22 unchanged-before-decision GDN hashes. The fused audit additionally passes
+all **880 convolution comparisons** across five layers, four convolutions,
+22 proposals and both chips. No tolerance was relaxed.
+
+The measured order is control/candidate/candidate/control. Audits are excluded
+from TG, setup is unamortized and target model loading is outside the reported
+complete-request time. The speedup is against this run's control, not the
+previous run's 70.34 TG. PP/setup variation is not attributed to decode fusion.
+Report SHA256:
+`b9947cffc7e596f51215da3ec0e585bafbaddd9e76366168e251510b6415b197`.
 
 ## Change
 
