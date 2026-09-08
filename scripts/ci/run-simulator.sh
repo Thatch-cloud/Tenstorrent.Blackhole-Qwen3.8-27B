@@ -2,6 +2,7 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
+case "${QWEN_SIM_CASE:-stack}" in stack|shortlist) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
@@ -40,6 +41,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     --mount "type=bind,src=$cache/dflash2-stack-$revision,dst=/fixture-stack,readonly" \
     --mount "type=bind,src=$cache/dflash2-selector-$revision,dst=/fixture-selector,readonly" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
+    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
 docker start -a "$container"

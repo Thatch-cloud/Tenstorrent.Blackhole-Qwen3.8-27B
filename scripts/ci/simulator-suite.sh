@@ -19,6 +19,14 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_SIM_CASE:-stack}" = shortlist ]; then
+    for width in 32768 65536; do
+        timeout -k 15 3200 python3 -u /experiment-scripts/ci/draft-shortlist-probe.py \
+            --width "$width" --output "/experiment/results/draft-shortlist-$width.json"
+    done
+    exit 0
+fi
+test "${QWEN_SIM_CASE:-stack}" = stack
 timeout -k 15 6600 python3 -u /experiment-scripts/ci/learned-attention-probe.py \
     --fixture /fixture-attention --convolution-fixture /fixture-convolution --mlp-fixture /fixture-mlp \
     --stack-fixtures /fixture-stack --stack-layers 5 --selector-fixture /fixture-selector \

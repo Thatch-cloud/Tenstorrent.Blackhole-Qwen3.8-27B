@@ -22,6 +22,17 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertIn('--captured-stack', source)
         self.assertNotIn('--hardware', source)
 
+    def test_shortlist_gate_uses_same_exclusive_cpu_container(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        self.assertIn('group: qwen-two-p150a-exclusive', workflow)
+        self.assertIn("QWEN_SIM_CASE: ${{ inputs.learned_stack && 'stack' || 'shortlist' }}", workflow)
+        self.assertIn('bash scripts/ci/run-simulator.sh', workflow)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('for width in 32768 65536', suite)
+        self.assertIn('draft-shortlist-probe.py', suite)
+        self.assertIn('test "${QWEN_SIM_CASE:-stack}" = stack', suite)
+
     @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'Linux CI shell required')
     def test_missing_opt_ins_fail_before_docker(self):
         script = Path(__file__).with_name('run-simulator.sh')

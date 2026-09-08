@@ -31,3 +31,22 @@ do not start a second MTP implementation or confuse it with lookup drafting.
 and global-ID mapping. Rows are stored in ascending token-ID order for deterministic
 ties. It is not yet a device draft head, integrated MTP runtime, or speed result.
 Reducing draft vocabulary can reduce acceptance; measure the complete trade-off.
+
+`draft_shortlist_device.py` now provides experimental device preparation and
+single-row selection: replicated BF16 32K/64K head, row-major argmax, then a
+UINT32 global-ID gather. There is no full-vocabulary collective or host logits
+read in this path. Replication trades additional head memory for no draft-head
+collective; its cost must be measured rather than assumed beneficial.
+
+Host tests check operation ordering, ownership, ID mapping, and rejection of
+unsupported shapes. Device correctness, tie handling, A/B/A trace replay, and
+latency remain unqualified. Run those simulator gates before integrating this
+path with the existing MTP runtime or promoting it to hardware.
+
+The existing CI workflow selects the shortlist simulator with
+`suite=learned-attention`, `simulator_only=true`, `learned_stack=false`.
+It runs both shortlist widths with synthetic, analytically known winners,
+including a tie and a high global special-token ID, on both simulated chips.
+It checks eager execution, A/B/A captured replay, input preservation, buffer
+addresses and a stale-input control. This is not learned-weight acceptance or
+hardware latency evidence. `learned_stack=true` retains the five-layer gate.
