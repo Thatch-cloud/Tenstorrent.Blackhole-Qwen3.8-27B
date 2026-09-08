@@ -8,7 +8,11 @@ from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
-                 packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False):
+                 packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False,
+                 norm_source_root=None):
+        if norm_source_root is not None and not norm_batch:
+            raise ValueError('Norm source override requires batched normalization')
+        self.norm_source_root = norm_source_root
         if type(defer_conv_publication) is not bool or (defer_conv_publication and not (batch_conv and dma_windows and packed_checkpoints)):
             raise ValueError('Deferred publication requires packed batched DMA checkpoints and explicit bool')
         self.defer_conv_publication = defer_conv_publication
@@ -52,6 +56,7 @@ class DeviceLoopState:
             result = operation(layer.mesh, projected, self.entry[0], (self.entry if deferred else self.state)[1:],
                 list(layer.tw['conv_taps']), layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels,
                 **(dict(norm_batch=True) if self.norm_batch else {}),
+                **(dict(norm_source_root=self.norm_source_root) if self.norm_source_root is not None else {}),
                 **(dict(dma_windows=True) if self.dma_windows else {}),
                 **(dict(packed_checkpoints=True) if self.packed_checkpoints else {}),
                 **(dict(prefix_zero_reuse=True) if self.prefix_zero_reuse else {}),

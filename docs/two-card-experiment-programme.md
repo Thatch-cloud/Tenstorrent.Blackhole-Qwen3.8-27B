@@ -39,6 +39,15 @@ inactive slots and two-step continuation. An earlier invocation used the wrong
 source root and failed before simulator execution; the active run uses the original
 hash-pinned GDN audit from34009341359. No latency claim or hardware promotion yet.
 
+T2 simulator023342Z-492 completed cleanly: all3 selected prefixes and all3
+two-token continuations pass, with1 stale-state negative control and immutable
+entry/inactive-slot checks. The next active gate023840Z-315 usesT8/seed1 and the
+96-worker recurrence plus batched norm. The simulator model adapter now forwards
+the same norm selection and audited source root as its component control; this
+avoids comparing an optimized component with a differently configured adapter.
+The11 targeted adapter tests pass. Full-model wiring and hardware remain gated
+on this wider simulator result; existing production defaults are unchanged.
+
 Runtime recovery superseding the failure notes below: the operator supplied a
 jump-host route. Read-only registry inspection established that `f1e9b1a64b4f`
 is the OCI image-index digest, not the platform config digest. The original tag

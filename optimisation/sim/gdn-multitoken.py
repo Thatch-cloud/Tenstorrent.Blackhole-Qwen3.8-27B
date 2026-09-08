@@ -226,7 +226,9 @@ def main():
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
                     adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows,
-                                              args.packed_checkpoints, defer_conv_publication=args.defer_conv_publication)
+                                              args.packed_checkpoints, norm_batch=args.norm_batch_layer,
+                                              defer_conv_publication=args.defer_conv_publication,
+                                              norm_source_root=args.source_root if args.norm_batch_layer else None)
                     checkpoint = active.allocate()
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):

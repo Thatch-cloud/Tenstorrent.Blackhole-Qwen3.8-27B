@@ -6,6 +6,17 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_norm_source_override_is_forwarded_without_changing_publication(self):
+        adapter, active = self.fixture()
+        adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.norm_batch = True
+        adapter.norm_source_root = '/audited/source'
+        with patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[], norm_batch=True)) as run, \
+                patch('gdn_device_loop_state.restore_prefix'):
+            adapter.decode(SimpleNamespace(shape=(1, 8, 5120)), [], 0)
+        self.assertEqual(run.call_args.kwargs['norm_source_root'], '/audited/source')
+        active.restore.assert_called_once_with(adapter.state)
+
     def test_deferred_publication_skips_initial_copy_but_preserves_both_restores(self):
         for rows in (1, 2, 4, 8, 16, 32):
             for prefix in (0, rows):
