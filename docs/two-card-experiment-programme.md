@@ -11,7 +11,11 @@ feature row against native decoding; two further requests measure committed TG,
 with setup reported separately. All three must match native tokens, GDN state,
 valid KV and inactive slots. This is implemented, not yet a measured DFlash2 gain.
 It uses the previously qualified composed precise attention, not the failing
-native candidate. [Integration details](dflash-full-request-2026-09-09.md).
+native candidate. First hardware attempt34225857819 accepts seven of seven
+drafts and passes the first published-feature audit, then stalls on the next
+block; cancelled with logs retained, not counted as a completed request.
+Follow-up adds bounded stall diagnostics after CI recovery.
+[Integration details](dflash-full-request-2026-09-09.md).
 
 **Parallel-drafter work: native DFlash2 SDPA is implemented but not qualified.**
 The native kernel hardcodes an approximate main exponential despite

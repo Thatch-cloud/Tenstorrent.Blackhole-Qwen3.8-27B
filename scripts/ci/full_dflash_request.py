@@ -1,6 +1,7 @@
 """Complete DFlash2 request pilot; exact target checks, not held-out coding quality."""
 
 import hashlib
+import faulthandler
 import json
 import math
 from pathlib import Path
@@ -109,6 +110,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
     feature_checks = []
 
     def status(stage, **values):
+        if stage == 'committed-block':
+            faulthandler.dump_traceback_later(180, exit=True)
         print(json.dumps(dict(dflash_stage=stage, **values)), flush=True)
 
     def new_capture():
@@ -157,10 +160,11 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             raise ValueError('DFlash2 setup requires fresh candidate prefill features')
         status('prepare-five-layer-device-drafter')
         device = DFlashDevice(operations, model, TT_CCL(model.mesh_device), layers, projection, selector,
-            capture.outputs(), position=len(prompt))
+            capture.outputs(), position=len(prompt), progress=status if audit_features else None)
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
+        faulthandler.dump_traceback_later(180, exit=True)
         return runtime
 
     try:
@@ -187,7 +191,10 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py')}
         return result
     finally:
-        if device is not None:
-            device.close()
-        if capture is not None:
-            capture.close()
+        try:
+            if device is not None:
+                device.close()
+            if capture is not None:
+                capture.close()
+        finally:
+            faulthandler.cancel_dump_traceback_later()

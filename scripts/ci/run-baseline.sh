@@ -119,6 +119,8 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --mount "type=bind,src=$cache/hub/models--Qwen--Qwen3.8-27B,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
     --mount "type=volume,src=$volume,dst=/experiment-cache" \
     --label thatch.qwen.baseline=true --workdir /opt/vllm-tt-plugin \
+    --label "thatch.qwen.workflow-run=${GITHUB_RUN_ID:-untracked}" \
+    --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
     -e HF_HOME=/models -e HF_HUB_CACHE=/models/hub -e TT_METAL_HOME=/opt/tt-metal \
     -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \

@@ -15,7 +15,7 @@ from projection_link_policy import projection_links
 
 
 class DFlashDevice:
-    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position):
+    def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None):
         import torch
 
         if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
@@ -28,6 +28,7 @@ class DFlashDevice:
         self.spare_history = None
         self.closed = False
         self.proposal_calls = self.published_rows = 0
+        self.progress = progress if progress is not None else lambda *args, **kwargs: None
         self.kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         try:
@@ -165,19 +166,25 @@ class DFlashDevice:
             raise ValueError('Committed DFlash2 history and bounded anchor/proposal IDs required')
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])
+        def stage(name, **values):
+            self.progress('draft-step', step=name, position=self.position, **values)
         def upload(value, dtype=operations.bfloat16, row_major=False):
             return retain(operations.from_torch(value, device=self.mesh, dtype=dtype,
                 layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
                 memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(self.mesh)))
         try:
+            stage('upload-anchor-and-mask')
             identifiers = upload(torch.tensor([[seed, *([248070] * 7)]], dtype=torch.int64), dtype=operations.uint32, row_major=True)
+            stage('borrowed-embedding')
             local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
             local = retain(operations.reshape(local, (1, 1, 8, 2560)))
+            stage('embedding-all-gather')
             hidden = retain(operations.experimental.all_gather_async(local, persistent_output_buffer=None, dim=3,
                 multi_device_global_semaphore=self.collectives.get_and_cycle_ag_semaphore_handles(),
                 barrier_semaphore=self.collectives.get_and_cycle_barrier_semaphore_handle(), num_links=projection_links(),
                 memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
                 chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
+            stage('prepare-history-mask-and-rope')
             hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 24), (0, 0)], 0.0))
             host_mask = draft_attention_mask(self.history_rows)
             key_rows = host_mask.shape[-1]
@@ -186,11 +193,14 @@ class DFlashDevice:
             mask = upload(host_mask)
             rope = {name: tuple(upload(value) for value in rope_tables(start, rows))
                 for name, start, rows in (('q', self.position, 32), ('k', self.position - self.history_rows, key_rows))}
-            for attention, mlp, weights, convolution in self.layers:
+            for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
+                stage('attention', layer=layer)
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
                     retain, parameters=attention, context=self.history_rows)
+                stage('mlp', layer=layer)
                 hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
                     retain, parameters=mlp, trace_safe=True)['output']
+            stage('final-norm-and-selector-projection')
             normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
                 compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
             program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 1),
@@ -200,8 +210,11 @@ class DFlashDevice:
                 program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
             projected = retain(operations.typecast(projected, operations.bfloat16))
             block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, 8, 5120)))
+            stage('shared-full-vocabulary-head')
             chunks = shared_head_candidates(operations, self.model, block, owned)
+            stage('synchronize-head-and-selector')
             operations.synchronize_device(self.mesh)
+            stage('read-candidates-and-select')
             host_chunks = []
             for chunk in chunks:
                 values = operations.get_device_tensors(chunk['values'])
@@ -222,6 +235,7 @@ class DFlashDevice:
             self.proposal_calls += 1
             return tuple(int(token) for token in tokens[0, :count])
         finally:
+            stage('synchronize-and-release-draft-temporaries')
             operations.synchronize_device(self.mesh)
             release_owned(operations, owned)
 

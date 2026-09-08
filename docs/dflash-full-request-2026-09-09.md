@@ -6,6 +6,17 @@ Latest measured hardware result remains **58.33 TG**, device-chained MTP,
 This change connects a parallel learned drafter to complete generation instead
 of treating another isolated operator pass as a speed improvement.
 
+**First hardware attempt: [34225857819](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34225857819), cancelled after a stall.**
+At CTX170, its first T8 block accepts all seven drafts and commits eight tokens;
+all published target-feature checks pass. First-block draft time is5429.31ms,
+including compilation, and publication/audit is835.20ms. The next block stalls
+without compiler activity. This is **not** a complete request or a new TG result.
+Live log SHA256: `9272ee4f4f2ed6b305fe509ef48dbca4f7d0eca715a269cad6ce025ae854da17`.
+The follow-up retains the full request, adds stage diagnostics during its audit,
+and dumps Python stacks/exits after180 seconds without a committed block instead
+of consuming the80-minute outer timeout. A timed-out device process requires
+CI recovery before another hardware test.
+
 ## What is connected
 
 | Part | Opt-in implementation |

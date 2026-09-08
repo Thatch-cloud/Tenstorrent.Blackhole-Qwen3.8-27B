@@ -20,7 +20,8 @@ not more host-side tweaks, must fall substantially to approach 200 TG.
 The complete five-layer DFlash2 request path is now connected for testing.
 It uses the previously qualified composed attention, the target's embedding/head,
 and committed feature history. Native SDPA still fails its learned-input gate
-and is **not** enabled. No DFlash2 request speed is claimed yet.
+and is **not** enabled. The first hardware block accepts all seven drafts, but
+the next stalls; diagnosis is in progress. No DFlash2 request speed is claimed.
 [Integration and test boundaries](docs/dflash-full-request-2026-09-09.md).
 
 ## Setup
