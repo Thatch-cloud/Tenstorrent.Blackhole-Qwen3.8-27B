@@ -2,6 +2,33 @@
 
 ## Current programme position - 2026-09-08
 
+**Latest completed:34208889762 (`2f5ab9c`) passes correctness, not a speedup.**
+The repaired instrumented request passes all150 tokens, final active GDN/valid
+KV/inactive slots and all16 attention layers on both chips. It reports no TG.
+The separate four-request ABBA is exact, with identical proposals and routes:
+
+| CTX / B / verification | PP tok/s | Committed TG | Mean prefill + setup + decode |
+| --- | ---: | ---: | ---: |
+| 170 / 1 / native T1 reference, all four | 532.68 | 19.48 | Target already loaded |
+| 170 / 1 / serial-attention MTP, up to T8 | 546.41 | 54.90 | 7.71 s |
+| 170 / 1 / repaired parallel-attention MTP | 540.80 | 54.36 | 9.12 s |
+
+Decode ratio0.99014 (candidate about1% slower); **do not adopt short-context
+parallel attention for performance**. The old 53.60/49.79 paired sampler gain
+remains valid; this run's54.90 control is a current measurement, not evidence
+of another isolated optimization. Both MTP arms accept125/178 proposals over
+26 blocks/request. Mean serial costs:27.465ms drafts,64.889ms verify/readback,
+11.686ms repair/commit,105.050ms cycle. Candidate verification saves1.111ms but
+whole-cycle costs increase; extra capture families also increase preparation.
+Report SHA256: `a65212b5337d03bf1f96d4be7a22b9d894a15424f1f5be4e8062125945f4cd1f`.
+
+Next structural gate: reduce serial proposal/repair work and integrate wider
+parallel drafting, retaining the full-vocabulary lossless target verifier. Do
+not spend another matrix on short-context attention or rejected MLP grid sweeps.
+200 TG remains unmet; this one coding prompt does not certify general coding
+quality, serving throughput, or longer-context performance. No serving defaults
+or device reset policy changed.
+
 **Identified fault and simulator-qualified repair:** run34206948191 (`079e552`)
 finds 12,277/12,276 corrupt static-prefix mask values on the two chips, with
 zero refreshed-tail differences. The saved mask/query/KV fixture SHA is

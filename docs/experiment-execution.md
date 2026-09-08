@@ -5,6 +5,14 @@ aggregate throughput. No adoption or serving restart is authorized by a test pas
 
 ## Current attention failure (2026-09-08)
 
+**Resolved and measured by34208889762 (`2f5ab9c`).** The full150-token
+instrumented request passes native attention/token/state comparisons. Separate
+ABBA results are54.898269TG serial and54.357168TG repaired parallel, ratio0.990144.
+The repair is functionally valid, but the short-context parallel performance
+candidate is rejected. Setup-inclusive means are7.709s serial and9.120s parallel;
+no speculative serving default is enabled. This closes the mask investigation
+for the tested request, not the200TG objective or the unknown upstream writer.
+
 Run34206948191 (`079e552`) confirms corrupt mask prefix on both chips and an
 exact tail:12277/12276 differing prefix elements, zero tail differences. The
 saved mask/query/KV reproduces the hardware output error exactly in local
