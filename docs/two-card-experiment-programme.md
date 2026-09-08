@@ -29,6 +29,16 @@ prefix including zero, native state publication, rollback and continuation. Do n
 remove copies merely by assuming aliasing is harmless. The48-worker profile group
 remains a combined attribution, not a measured saving for this proposed change.
 
+The deferred-publication candidate is now implemented behind explicit constructor
+and helper options; no production environment flag or serving default enables it.
+For packed batched T>1, convolution reads the immutable entry snapshot and leaves
+publication to the existing selected/final restores. T1 keeps the old copy path.
+Routing/engagement tests and the636-test Linux host suite pass. Simulator
+`20260908T023342Z-492` is the active T2/seed0 gate for all prefixes, immutable entry,
+inactive slots and two-step continuation. An earlier invocation used the wrong
+source root and failed before simulator execution; the active run uses the original
+hash-pinned GDN audit from34009341359. No latency claim or hardware promotion yet.
+
 Runtime recovery superseding the failure notes below: the operator supplied a
 jump-host route. Read-only registry inspection established that `f1e9b1a64b4f`
 is the OCI image-index digest, not the platform config digest. The original tag

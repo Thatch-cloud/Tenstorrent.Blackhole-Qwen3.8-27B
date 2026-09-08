@@ -6,6 +6,34 @@ from gdn_device_loop_state import DeviceLoopState
 
 
 class DeviceLoopStateTests(unittest.TestCase):
+    def test_deferred_publication_skips_initial_copy_but_preserves_both_restores(self):
+        for rows in (1, 2, 4, 8, 16, 32):
+            for prefix in (0, rows):
+                adapter, active = self.fixture()
+                adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.defer_conv_publication = True
+                with patch('gdn_device_loop_state.copy_compact') as copy, \
+                        patch('gdn_device_loop_state.run_batched_projected', return_value=
+                            dict(owned=[], deferred_conv_publication=rows > 1)) as run, \
+                        patch('gdn_device_loop_state.restore_prefix') as restore:
+                    adapter.decode(SimpleNamespace(shape=(1, rows, 5120)), [], prefix)
+                self.assertEqual(copy.call_count, int(rows == 1))
+                history = adapter.entry if rows > 1 else adapter.state
+                self.assertEqual(run.call_args.args[3], history[1:])
+                self.assertEqual(run.call_args.kwargs.get('defer_conv_publication', False), rows > 1)
+                self.assertEqual([call.args[-1] for call in restore.call_args_list], [prefix, rows])
+                active.restore.assert_called_once_with(adapter.state)
+
+    def test_deferred_publication_must_engage_before_live_state_is_written(self):
+        adapter, active = self.fixture()
+        adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.defer_conv_publication = True
+        with patch('gdn_device_loop_state.copy_compact'), patch('gdn_device_loop_state.release_owned'), \
+                patch('gdn_device_loop_state.run_batched_projected', return_value=dict(owned=[])), \
+                patch('gdn_device_loop_state.restore_prefix') as restore:
+            with self.assertRaisesRegex(AssertionError, 'did not engage'):
+                adapter.decode(SimpleNamespace(shape=(1, 8, 5120)), [], 0)
+        restore.assert_not_called()
+        active.restore.assert_not_called()
+
     def test_prefix_reuse_is_forwarded_and_must_engage(self):
         adapter, active = self.fixture()
         adapter.batch_conv = adapter.dma_windows = adapter.packed_checkpoints = adapter.prefix_zero_reuse = True

@@ -45,7 +45,10 @@ def main():
     parser.add_argument('--refresh-value-split-inputs', action='store_true')
     parser.add_argument('--batch-norm-value-split', action='store_true')
     parser.add_argument('--norm-batch-layer', action='store_true')
+    parser.add_argument('--defer-conv-publication', action='store_true')
     args = parser.parse_args()
+    if args.defer_conv_publication and not (args.packed_checkpoints and args.model_adapter and args.continuation):
+        parser.error('--defer-conv-publication requires packed checkpoints, model adapter and continuation')
     if args.norm_batch_layer and not (args.conv and args.norm_gate and args.packed_checkpoints):
         parser.error('--norm-batch-layer requires packed convolution and norm/gate')
     if args.batch_norm_value_split and (not args.prepared_value_split or args.prefetch_value_split):
@@ -169,6 +172,7 @@ def main():
                                        taps, dt_bias, neg_exp_A, norm_w, kernels,
                                        **(dict(norm_batch=True, norm_source_root=args.source_root) if args.norm_batch_layer else {}),
                                        **(dict(packed_checkpoints=True) if args.packed_checkpoints else {}),
+                                       **(dict(defer_conv_publication=True) if args.defer_conv_publication else {}),
                                        **(dict(dma_windows=True) if args.dma_windows else {}))
                 if args.norm_batch_layer:
                     if result.get('norm_batch', False) != (args.rows >= 8):
@@ -197,8 +201,12 @@ def main():
                 if not all(torch.equal(value, projected) for value in host(candidate_projected)):
                     raise AssertionError('Candidate modified immutable projected input')
                 for tap, value in enumerate(candidate_conv):
-                    if not all(torch.equal(actual, control) for actual, control in zip(host(value), expected[-1][2][tap], strict=True)):
+                    expected_conv = [conv_host[tap]] * 2 if args.defer_conv_publication else expected[-1][2][tap]
+                    if not all(torch.equal(actual, control) for actual, control in zip(host(value), expected_conv, strict=True)):
                         raise AssertionError('Final working convolution state mismatch')
+                report['deferred_conv_publication'] = args.defer_conv_publication
+                if result.get('deferred_conv_publication', False) != args.defer_conv_publication:
+                    raise AssertionError('Deferred convolution publication gate did not engage')
                 if args.model_adapter:
                     from gdn_device_loop_state import DeviceLoopState
                     from gdn_snapshot import ActiveSnapshot
@@ -218,7 +226,7 @@ def main():
                         tw=dict(conv_taps=taps, dt_bias=dt_bias, neg_exp_A=neg_exp_A, norm_w=norm_w))
                     active = ActiveSnapshot(layer, ttnn, direct=True)
                     adapter = DeviceLoopState(active, ttnn, kernels, args.compact_prologue, args.batch_conv, args.dma_windows,
-                                              args.packed_checkpoints)
+                                              args.packed_checkpoints, defer_conv_publication=args.defer_conv_publication)
                     checkpoint = active.allocate()
                     expected_values = [host(result['output']), host(result['states'])]
                     for accepted in range(args.rows + 1):
@@ -226,6 +234,11 @@ def main():
                         for source, destination in zip(full_entry, live, strict=True):
                             ttnn.copy(source, destination)
                         actual = adapter.decode(dummy, checkpoint, accepted)
+                        if args.defer_conv_publication:
+                            for index, value in enumerate(adapter.entry):
+                                entry_reference = initial_host if index == 0 else conv_host[index - 1]
+                                if not all(torch.equal(actual_entry, entry_reference) for actual_entry in host(value)):
+                                    raise AssertionError('Deferred adapter modified immutable entry state')
                         for value, reference in zip((actual['output'], actual['states']), expected_values, strict=True):
                             if not all(torch.equal(left, right) for left, right in zip(host(value), reference, strict=True)):
                                 raise AssertionError('Model adapter output/recurrent prefix mismatch')
