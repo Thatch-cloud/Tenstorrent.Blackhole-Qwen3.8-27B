@@ -18,6 +18,9 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    OMP_NUM_THREADS=1 timeout -k 15 600 python3 /experiment-scripts/ci/fused-batch-probe.py \
+        --hardware --timing --device-weight-check --fixture /experiment-projection-fixture \
+        --output /experiment/results/fused-batch.json
     OMP_NUM_THREADS=1 timeout -k 30 1800 python3 /experiment-scripts/ci/learned-mlp-probe.py \
         --hardware --fixture /experiment-projection-fixture --output /experiment/results/learned-mlp.json
     OMP_NUM_THREADS=1 timeout -k 30 1800 python3 /experiment-scripts/ci/learned-mlp-probe.py \

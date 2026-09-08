@@ -154,16 +154,20 @@ timeout() {
         result = self.run_suite(mode='learned-mlp')
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), 4)
         self.assertIn('device-readback.py', lines[0])
-        for argument in ('1800', 'learned-mlp-probe.py', '--hardware',
-                '--fixture /experiment-projection-fixture', 'learned-mlp.json'):
+        for argument in ('600', 'fused-batch-probe.py', '--hardware --timing --device-weight-check',
+                '--fixture /experiment-projection-fixture', 'fused-batch.json'):
             self.assertIn(argument, lines[1])
         for argument in ('1800', 'learned-mlp-probe.py', '--hardware',
-                '--convolution-fixture /experiment-convolution-fixture', 'learned-mlp-integrated.json'):
+                '--fixture /experiment-projection-fixture', 'learned-mlp.json'):
             self.assertIn(argument, lines[2])
+        for argument in ('1800', 'learned-mlp-probe.py', '--hardware',
+                '--convolution-fixture /experiment-convolution-fixture', 'learned-mlp-integrated.json'):
+            self.assertIn(argument, lines[3])
 
     def test_mlp_failed_health_stops_probe(self):
         result = self.run_suite(True, 'learned-mlp')
         self.assertEqual(result.returncode, 17)
         self.assertNotIn('learned-mlp-probe.py', result.stdout)
+        self.assertNotIn('fused-batch-probe.py', result.stdout)

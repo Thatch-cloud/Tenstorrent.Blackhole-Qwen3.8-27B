@@ -23,9 +23,10 @@ at7 tiles/core, and32 for160 tiles at5/core. The39-core128-call profile group
 matches two gate/up calls across64 layers. The32-core128-call group combines
 64 MLP down calls and64 attention/GDN output calls; do not label it all MLP down.
 The96-worker recurrence specification in gdn_vsplit.py maps to the48-call
-generic group. Fusion remains simulator-gated: the corrected fused-SiLU native
-control has not yet passed the full multi-row gate with verified source/device
-operands. Intermittent historical source-integrity failures remain unresolved.
+generic group. Fusion passed the corrected fused-SiLU native control at all six
+row widths in simulator005625Z with verified source/device operands; hardware
+measurement is next. Intermittent historical source-integrity failures remain
+unresolved; a current pass does not erase those failed reports.
 
 ## Historical measured results - 2026-09-07
 
@@ -2184,3 +2185,20 @@ or model projection. Next prioritization is source/dispatch mapping of the two
 dominant matmul groups and the48/96-core custom groups, rather than assuming
 unused cores imply attention is the main limit. The analyzer now retains these
 operation/core-count groups and rejects changing group coverage across replays.
+
+### Multi-row fusion simulator005625Z
+
+After a standalone retained-buffer/streamed SHA check passed on all three pinned
+MLP source files, simulator005625Z passed bytewise packed/separate BF4 comparisons
+for gate/up on both chips:43520 pages each, zero mismatched words, source_exact
+true. Fused output then matched the corrected native fused-SiLU control exactly
+atT1/T2/T4/T8/T16/T32 on both chips. Exit0 and clean close were verified. The
+temporary upstream packer-zero-flags compatibility header was restored afterward;
+hardware runtime and serving remain untouched. These are DFlash-weight geometry
+operands, not full target-model quality or a resolution of historical RAM failures.
+
+The learned-mlp hardware suite now runs the byte-checked fusion gate after health,
+before its existing learned MLP gates. All six widths must match; T1/T8/T32 each
+receive three eager ABBA timing blocks, with every timed output validated on both
+chips outside the timer. Timings include dispatch/allocation but exclude uploads,
+validation and deallocation. No captured-fusion or full-model speedup is claimed.

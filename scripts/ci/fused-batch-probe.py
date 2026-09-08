@@ -1,10 +1,12 @@
-"""Simulator-only multi-row fusion check using pinned draft MLP weights as geometry-matched operands."""
+"""Multi-row fusion check using pinned draft MLP weights as geometry-matched operands, not target quality."""
 
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import time
 
 from draft_mlp_fixture import load_mlp
 from feature_projection import require_projection_environment
@@ -29,14 +31,22 @@ def main():
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device-weight-check', action='store_true')
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--timing', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
+    require_projection_environment(os.environ, options.hardware)
+    if options.timing and not options.hardware:
+        parser.error('Latency measurements require allocated hardware')
+    if options.hardware and not options.device_weight_check:
+        parser.error('Hardware promotion requires byte-exact device weight checks')
     import torch
     import ttnn
 
     manifest, weights = load_mlp(options.fixture)
     gate, up, packed = pair_pack(weights['layers.0.mlp.gate_proj.weight'], weights['layers.0.mlp.up_proj.weight'])
     report = dict(passed=False, scope=__doc__, fixture=manifest, checks=[],
+        backend='hardware' if options.hardware else 'simulator', timings=[],
+        timing_scope='Eager paired ABBA projection calls including dispatch and allocation; excludes uploads, validation and deallocation; not traced or full-model latency',
         precision='BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality')
     packer = Path(os.environ['TT_METAL_HOME']) / 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
     report['packer_header_sha256'] = hashlib.sha256(packer.read_bytes()).hexdigest()
@@ -121,12 +131,40 @@ def main():
             actual = operation(inputs)
             owned.append(actual)
             report.setdefault('kernels', []).append(operation.manifest)
+            references = []
             for chip in range(2):
                 observed = ttnn.to_torch(ttnn.get_device_tensors(actual)[chip])
                 reference = ttnn.to_torch(ttnn.get_device_tensors(expected)[chip])
                 if not torch.equal(observed, reference):
                     raise AssertionError(f'Fused multi-row output differs: rows={rows}, chip={chip}, mismatches={int((observed != reference).sum())}')
                 report['checks'].append(dict(rows=rows, chip=chip, exact=True))
+                references.append(reference.clone())
+            if options.timing and rows in (1, 8, 32):
+                for block in range(3):
+                    samples = dict(control=[], fused=[])
+                    for arm in ('control', 'fused', 'fused', 'control'):
+                        temporary = []
+                        try:
+                            ttnn.synchronize_device(mesh)
+                            started = time.perf_counter()
+                            if arm == 'control':
+                                value = native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, temporary)
+                            else:
+                                value = operation(inputs)
+                                temporary.append(value)
+                            ttnn.synchronize_device(mesh)
+                            elapsed = (time.perf_counter() - started) * 1000
+                            if not math.isfinite(elapsed) or elapsed <= 0:
+                                raise AssertionError('Positive finite hardware timing required')
+                            for chip in range(2):
+                                if not torch.equal(ttnn.to_torch(ttnn.get_device_tensors(value)[chip]), references[chip]):
+                                    raise AssertionError('Timed fusion/control output changed')
+                            samples[arm].append(elapsed)
+                        finally:
+                            release_owned(ttnn, temporary)
+                    report['timings'].append(dict(rows=rows, block=block, samples_ms=samples,
+                        control_ms=sum(samples['control']) / 2, fused_ms=sum(samples['fused']) / 2,
+                        both_chips_exact=True))
             options.output.write_text(json.dumps(report, indent=2))
             print(json.dumps(dict(rows=rows, both_chips_exact=True)), flush=True)
     except BaseException as error:
@@ -139,6 +177,8 @@ def main():
         options.output.write_text(json.dumps(report, indent=2))
     if len(report['checks']) != 12:
         raise AssertionError('All six widths and both chips required')
+    if len(report['timings']) != (9 if options.timing else 0):
+        raise AssertionError('Three paired timing blocks at T1/T8/T32 required')
     report['passed'] = True
     options.output.write_text(json.dumps(report, indent=2))
 
