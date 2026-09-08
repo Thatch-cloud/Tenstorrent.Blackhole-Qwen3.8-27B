@@ -21,7 +21,13 @@ def terminal_ids(weights, vocab_size):
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
-                    lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True):
+                    lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
+                    mtp_runtime=None):
+    if mtp_runtime is not None:
+        if (neural or selected_drafter is not None or engine_factory is not None
+                or not all(callable(getattr(mtp_runtime, name, None)) for name in ('bind', 'publish', '__call__'))):
+            raise ValueError('MTP request bridge owns neural routing and requires the hidden-retaining verifier')
+        neural, selected_drafter, lookup_enabled = {'mtp': mtp_runtime}, 'mtp', False
     neural = dict(neural or {})
     if (type(lookup_enabled) is not bool or (not lookup_enabled and not neural)
             or any(not isinstance(name, str) or not name or name in ('lookup', 'target')
@@ -73,7 +79,11 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             engine = factory(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
                 attention_replay=attention_replay, attention_mask_once=attention_mask_once,
                 replay_group_rows=replay_group_rows,
+                **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
                 **(dict(max_verify_rows=lookup_max_rows) if lookup_max_rows != 32 else {}))
+            if mtp_runtime is not None:
+                mtp_runtime.bind(session, engine)
+            publish = engine.publish if mtp_runtime is None else mtp_runtime.publish
             capture_count = len(engine.buckets)
             setup_ms = engine.setup_ms
             started = time.perf_counter()
@@ -87,7 +97,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 drafted = time.perf_counter()
                 predictions, components = engine.verify(ticket)
                 verified = time.perf_counter()
-                decision = session.commit(session.request_id, ticket, predictions, engine.publish)
+                decision = session.commit(session.request_id, ticket, predictions, publish)
                 finished = time.perf_counter()
                 blocks.append(dict(rows=len(ticket.tokens), source=ticket.source, accepted=decision.accepted,
                     match_length=ticket.match_length, position=ticket.position, input_tokens=list(ticket.tokens),
@@ -126,6 +136,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     finally:
         if engine is not None:
             if engine.phase == 'verified' and session.phase == 'pending':
-                session.abort(session.request_id, session.pending, engine.publish)
+                session.abort(session.request_id, session.pending,
+                              engine.publish if mtp_runtime is None else mtp_runtime.publish)
             engine.close()
         session.close(session.request_id)

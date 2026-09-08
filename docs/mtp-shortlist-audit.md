@@ -70,3 +70,24 @@ abort must preserve the previous anchor. Bucket retention is host-tested but
 still needs device qualification and is not enabled in the candidate runtime.
 MTP KV catch-up and rollback still require independent exact tests; merely
 capturing every speculative row does not authorize using rejected rows.
+
+## Request bridge implementation
+
+- Reused `Qwen36MTP` from branch commit `1fcbd0cdf8341ddbb7ab9dc93da917f42f2709c0`
+  (source blob `e00758ecbd0b06a24a225a29538e3000b90023ed`), rather than a second model implementation.
+- `MTPDeviceStep` stages persistent embedding/hidden/position/RoPE inputs and
+  prepares separate proposal and head-free catch-up traces. It supports the
+  native full-vocabulary force-argmax control or the experimental shortlisted head.
+- `MTPRequestRuntime` supplies proposals to the real request coordinator, then
+  refreshes consumed MTP KV rows using **verified target hidden states**, not the
+  recursively drafted hidden states. The next logical position excludes rejected rows.
+- `measure_request(mtp_runtime=...)` enables hidden retention and neural-only
+  routing. Its total decode clock includes proposals, verification, catch-up and
+  commit. K1/K3/K7/K15/K31 are supported; short K is not assumed sufficient for 200 TG.
+
+Host tests cover all selected prefixes, abort/reproposal, catch-up failure and
+complete coordinator execution. The native device step is **not hardware qualified**.
+Remaining before a valid real-weight run: initialize MTP's prompt KV from aligned
+target prefill hidden states, wire fixed-buffer accepted-row extraction, and
+include MTP preparation/prefill costs in the setup/PP report. Initializing MTP KV
+to zeros while marking a full prompt valid is not an acceptable substitute.

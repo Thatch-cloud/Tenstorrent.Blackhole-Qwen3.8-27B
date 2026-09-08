@@ -222,6 +222,12 @@ class VerifierEngine:
             raise ValueError('MTP hidden requires its live verified ticket and opt-in retention')
         return self.buckets[self.pending_key]['mtp_capture'].output()
 
+    def verified_mtp_hidden_for_publication(self, ticket):
+        if (self.phase != 'verified' or self.pending is not ticket or self.session.pending is not ticket
+                or self.session.phase != 'committing' or not self.retain_mtp_hidden):
+            raise ValueError('MTP publication hidden requires the current committing request')
+        return self.buckets[self.pending_key]['mtp_capture'].output()
+
     def publish(self, prefix):
         ticket = self.pending
         if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
