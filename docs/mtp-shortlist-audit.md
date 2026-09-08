@@ -197,3 +197,11 @@ redundant padded-control simulation and tests the changed native untilize/argmax
 against Torch at the real 248320-token vocabulary. It does not simulate fabric.
 The hardware gate retains both complete samplers, changing inputs, cross-shard
 ties, boundary IDs and input-preservation checks before the request comparison.
+
+Retry `20260908T072747Z-398` completes with exit 0 and clean mesh closure: 48 exact
+native-row output checks, 48 source-preservation checks, and 8 stale controls.
+The real vocabulary and all T1/T2/T4/T8 widths are covered on both simulated chips.
+Report SHA256: `c109f779e3454be96144be2536ddc9f61ed82b8d83cc8f52e382b2aaf8473b8e`.
+Sampler helper SHA256: `86f86a286a860529b95232e0251227fb9dca4df261d783932570750a4d50f744`.
+[Hardware comparison 34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
+is running on `fb17bbb`; no native-row TG claim until its complete requests pass.

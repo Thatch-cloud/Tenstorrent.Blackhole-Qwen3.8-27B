@@ -6,6 +6,7 @@
 | --- | --- |
 | Single-stream target | 200 committed TG not achieved; complete native-MTP coding request: 48.83 TG, CTX 170, versus matched native 19.74 |
 | Latest hardware result | [34196777661](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34196777661) passes: K7/T8, 150 committed tokens to EOS, exact tokens/GDN/valid KV/inactive slots |
+| Running experiment | [34200129693](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693): padded/native-row MTP sampling ABBA; full sampler hardware gate before complete requests |
 | MTP integration | Full-vocabulary device drafting, 169-row prompt initialization and rejection repair execute; 125/182 proposals accepted in 26 blocks; 709 host tests pass |
 | Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
 | Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
@@ -26,6 +27,13 @@ on changing simulator inputs, then compare complete hardware MTP requests.
 Short-context parallel attention requires its own numerical/replay qualification;
 do not relax the long-context guard or pad the coding input to hide the mismatch.
 Report SHA256: `86a92b560ced248ce91e20a1ec19ea2007ac7a73be64748b5c517b724bfc305c`.
+
+Native-row simulator reduction gate `20260908T072747Z-398` passes: T1/T2/T4/T8,
+48 exact token checks across both chips, 48 input checks and 8 stale controls.
+The scope is post-gather native untilize/argmax, not simulated fabric or speed.
+Hardware run 34200129693 on `fb17bbb` checks both complete four-link samplers,
+then runs padded/native/native/padded coding requests. All 716 host tests and
+60 harness tests pass. No candidate hardware throughput result is available yet.
 
 ### MTP bring-up failures (resolved by run 34196777661)
 

@@ -10,6 +10,10 @@ finishes one coding response with all 150 decode tokens and final cache state ex
 This is a 2.47x decode improvement, not 200 TG or a held-out coding-quality score.
 Setup is not amortized yet: the request including preparation remains slower than native.
 
+**Running now:** [native-row sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693).
+It removes 32-row sampling padding from MTP and verification, with paired complete
+requests and exact checks. Simulator reduction checks pass; hardware results are pending.
+
 ## Setup
 
 | Component | Experiment setup |
