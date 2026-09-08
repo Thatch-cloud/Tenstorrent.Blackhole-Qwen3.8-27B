@@ -4,19 +4,17 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Latest measured: 54.90 committed tok/s** with MTP and serial attention;
-the matched native reference is **19.48 tok/s**.
-[Latest two-card run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34208889762)
-passes full token/cache checks. Repaired parallel attention is exact but slightly
-slower: **54.36 tok/s**, so it is **not adopted for short contexts**.
+**Latest measured: 54.94 committed tok/s** with MTP and full cache repair;
+the matched native reference is **19.36 tok/s**.
+[Latest two-card run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34212022749)
+passes full token/cache checks. Accepted draft-cache reuse is slower overall:
+**51.12 tok/s** because acceptance falls. It is **not adopted**.
 The earlier native-row sampler comparison improved 49.79 to 53.60 TG (+7.7%).
 This is not 200 TG, a held-out coding-quality score or a serving benchmark.
 
-**Next experiment: reuse accepted MTP draft cache.** Avoid recomputing accepted
-draft inputs, keep the next draft anchored on verified target features, and
-measure whether reduced repair time outweighs any acceptance loss. This changes
-draft history only; target tokens and cache must still match native execution.
-No performance gain is claimed before the complete paired hardware requests.
+**Next experiment: exact KV-only MTP repair.** Keep the correct draft history,
+but skip attention output and MLP work whose results repair never consumes.
+Device-chained drafting is also being investigated to remove CPU round trips.
 
 ## Setup
 
@@ -73,21 +71,21 @@ TG includes drafting, verification/readback and commit; excludes prefill/setup.
 
 | CTX | Streams (B) | Path | Verify rows (T) | PP tok/s | Committed TG tok/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 170 | 1 | Native reference, all paired repetitions | 1 | 532.68 | 19.48 |
-| 170 | 1 | MTP K7, native-row sampling, serial attention | Up to 8 | 546.41 | **54.90** |
-| 170 | 1 | MTP K7, repaired parallel attention | Up to 8 | 540.80 | 54.36 |
+| 170 | 1 | Native reference, all paired repetitions | 1 | 558.15 | 19.36 |
+| 170 | 1 | MTP K7, full teacher-forced repair | Up to 8 | 537.91 | **54.94** |
+| 170 | 1 | MTP K7, accepted draft-cache reuse | Up to 8 | 532.88 | 51.12 |
 
 PP measures the target prefill helper; MTP feature capture is included, draft
-initialization is not. Both MTP arms accept 125/178 proposals over 26 blocks per
-request and reach EOS. Each produces 150 committed decode tokens; two repetitions
-per arm run in serial/parallel/parallel/serial order. This is one coding task.
+initialization is not. Full repair accepts 125/178 proposals in 26 blocks;
+reuse accepts 120/209 in 31 blocks. Each produces 150 committed decode tokens
+and reaches EOS; two repetitions per arm run in ABBA order. This is one coding task.
 Tokens, active GDN, valid KV and inactive slots match the native reference exactly.
-Mean prefill + unamortized setup + decode: **7.71 s serial versus 9.12 s parallel**.
+Mean prefill + unamortized setup + decode: **7.90 s full repair versus 7.87 s reuse**.
 These totals start with the target model already loaded, not a cold process launch.
 Trace/setup reuse across requests and longer-context measurements remain to do.
-An additional instrumented request validates every attention layer against native
-B1 before timing; it is excluded from TG. A corrupt mask prefix caused the earlier
-failure and is now initialized inside the trace. Correctness repair is not a speedup.
+Reuse cuts repair/commit from 11.71 to 2.31 ms/block, but extra verifier blocks
+make decode 7% slower. Earlier repaired parallel attention was also slower
+(54.36 versus 54.90 TG); its mask correctness fix remains separate from speed.
 The earlier [sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
 established +7.7%; changes between separate runs are not attributed to an optimization.
 

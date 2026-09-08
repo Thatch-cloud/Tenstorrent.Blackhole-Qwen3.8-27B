@@ -3,7 +3,16 @@
 Updated 2026-09-06. Target: 200 committed tokens/s for one coding stream, not
 aggregate throughput. No adoption or serving restart is authorized by a test pass.
 
-## Accepted MTP cache reuse (2026-09-08, prepared)
+## Accepted MTP cache reuse (2026-09-08, rejected)
+
+CI34212022749 on1e3738b passes all target correctness checks but loses decode
+throughput:54.942525TG full repair versus51.116004TG reuse, ratio0.930354.
+Both repetitions emit150 tokens. Control125/178 accepted/proposed,26 blocks;
+candidate120/209,31 blocks. Reuse saves143 of150 teacher-forced input rows and
+cuts repair/commit11.705157 to2.305442ms/block, but worsened acceptance costs
+five extra verifier executions. It is not adopted. Setup-inclusive means are
+7.896076s/7.873359s; this is not a sustained serving gain. Report SHA256:
+`065ec74bdfd46f2f87b0f6a21c1a80fafa35e08e8eb9681b111b516d481c14be`.
 
 New ABBA compares full teacher-forced repair with retained accepted draft KV.
 The candidate explicitly approximates drafter history; target sampling, tokens,
@@ -11,7 +20,8 @@ GDN, valid KV and inactive-slot guards are unchanged. Both arms use native-row
 K7 MTP, serial attention and four-link sampling. Changed acceptance is allowed
 between arms, not between repeats of the same arm. Reused plus teacher-forced
 input rows must account for every committed decode token. Local validation:
-740 host tests and 60 harness tests pass. Hardware speedup remains unmeasured.
+740 host tests and 60 harness tests pass. Next retain exact teacher-forced KV
+while skipping the unused attention-output/MLP half of repair.
 
 ## Current attention failure (2026-09-08)
 

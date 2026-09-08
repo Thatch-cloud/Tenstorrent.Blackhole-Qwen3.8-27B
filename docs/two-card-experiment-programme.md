@@ -2,7 +2,19 @@
 
 ## Current programme position - 2026-09-08
 
-**Prepared next: accepted MTP cache reuse, full-request ABBA.** Control keeps
+**Latest completed:34212022749 (`1e3738b`), reject approximate cache reuse.**
+All four complete requests pass exact target tokens/GDN/valid KV/inactive slots.
+Control54.942525TG versus candidate51.116004TG; ratio0.930354. Each emits150
+committed tokens. Full repair accepts125/178 in26 blocks; reuse accepts120/209
+in31 blocks, identically on both repetitions. Candidate reuses143 input rows
+and teacher-forces7, versus0/150 control. Repair/commit drops11.705157 to2.305442
+ms/block, but the five additional verifier blocks erase that saving. Mean total
+prefill/setup/decode is7.896076s versus7.873359s; no setup amortization claimed.
+Report SHA256:`065ec74bdfd46f2f87b0f6a21c1a80fafa35e08e8eb9681b111b516d481c14be`.
+Next: exact KV-only MTP repair, skipping unused attention output and MLP; then
+device-chained drafting to remove per-token CPU round trips. Target remains200TG.
+
+**Cache-reuse experiment specification (completed):** Control keeps
 teacher-forcing every committed draft input. Candidate reuses already-written
 accepted draft KV, computes only a missing tail input, and anchors the next
 proposal on the last verified target hidden row. This is explicitly approximate
@@ -13,7 +25,7 @@ count reused and teacher-forced rows against every committed decode token.
 740 host tests and 60 harness tests pass, including rejection, EOS, fallback,
 tail failure and publication guards. No new kernel math or simulator speed claim.
 
-**Latest completed:34208889762 (`2f5ab9c`) passes correctness, not a speedup.**
+**Prior run:34208889762 (`2f5ab9c`) passes correctness, not a speedup.**
 The repaired instrumented request passes all150 tokens, final active GDN/valid
 KV/inactive slots and all16 attention layers on both chips. It reports no TG.
 The separate four-request ABBA is exact, with identical proposals and routes:
