@@ -2,6 +2,33 @@
 
 ## Current programme position - 2026-09-08
 
+Captured fusion hardware run34179917205 on35654ca passed on the restored exact
+runtime. Transfer health, standalone learned MLP and integrated MLP also passed.
+The fusion report contains12 eager checks,4 byte/source weight checks,36 exact
+changing-input replay checks,12 stale-input negative controls and9 ABBA blocks.
+All timed outputs match on both chips. Median block means:
+
+| Rows | Native trace ms | Fused trace ms | Isolated reduction |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.208136 | 0.203761 | 2.10% |
+| 8 | 0.210611 | 0.201286 | 4.43% |
+| 32 | 0.210916 | 0.201526 | 4.45% |
+
+Timing is blocking captured execution, excluding uploads, allocation, capture and
+validation. This reverses the eager regression but is a small isolated gain on
+geometry-matched draft weights, not target-model throughput or quality evidence.
+No serving/full-model default adopts it. Raw report SHA256:
+`10589e25ab06196af1591706d0054492285c89d30ceb25e28f027ac8d74a3ae8`.
+
+Next target-state candidate: `DeviceLoopState.decode` copies entry to working
+state before the batched path, which also publishes final convolution state;
+the caller subsequently reconstructs the final working state with `restore_prefix`.
+An opt-in immutable-history/deferred-publication path could avoid both preliminary
+copies for packed batched checkpoints. It must preserve T1 fallback, every accepted
+prefix including zero, native state publication, rollback and continuation. Do not
+remove copies merely by assuming aliasing is harmless. The48-worker profile group
+remains a combined attribution, not a measured saving for this proposed change.
+
 Runtime recovery superseding the failure notes below: the operator supplied a
 jump-host route. Read-only registry inspection established that `f1e9b1a64b4f`
 is the OCI image-index digest, not the platform config digest. The original tag

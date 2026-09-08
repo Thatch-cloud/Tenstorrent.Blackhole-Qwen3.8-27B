@@ -83,12 +83,15 @@ These are **block timings, not generated throughput**, excluding draft/commit ov
 | Learned MLP, T8 captured replay | 1.911 ms median | One isolated MLP branch, not a complete draft |
 | Gate/up fusion, T8 eager | Native 0.240 ms; fused 0.761 ms | Correct but slower; not adopted |
 | Fusion captured replay, simulator | Changing-input and stale-input controls pass on both chips | Correctness only; no hardware speed claim |
-| Fusion captured replay, hardware | First launch failed before card access; exact runtime now restored | Hardware timing retry pending |
+| Fusion captured replay, T8 hardware | Native 0.211 ms; fused 0.201 ms | About 4.4% lower isolated latency; not adopted in full model |
 
 Evidence: [MLP trace](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34170293087),
 [eager fusion](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34176158014),
-[trace launch](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34178476409).
+[captured fusion](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34179917205).
 Fusion uses geometry-matched DFlash weights, not a full target-model quality test.
+Captured measurements use three ABBA blocks with exact outputs on both chips;
+they exclude uploads, allocation, capture and validation. The earlier launch failure
+was resolved by restoring the exact runtime image.
 
 | Workstream | Current position |
 | --- | --- |
@@ -99,8 +102,8 @@ Fusion uses geometry-matched DFlash weights, not a full target-model quality tes
 | Ethernet dispatch / extra column | Hardware grid and fabric gates remain before performance claims |
 | Coding quality | Held-out coding evaluation remains; numerical gates alone do not certify quality |
 
-Next: measure captured fusion on the restored exact runtime, then pursue full-model
-verifier savings and learned-drafter integration without disturbing other workloads.
+Next: test redundant GDN state-copy removal and complete captured learned-drafter
+integration. The modest isolated fusion gain does not close the verifier latency gap.
 PP and committed TG need a matched context/concurrency sweep once that path is ready.
 
 ## Guides and evidence
