@@ -15,7 +15,10 @@ class Proposal:
 class HybridDraft:
     """Adapters receive a bounded suffix, not full context or target feature tensors."""
 
-    def __init__(self, request_id, prompt, *, vocab_size, neural=None, **lookup_options):
+    def __init__(self, request_id, prompt, *, vocab_size, neural=None, lookup_enabled=True, **lookup_options):
+        if type(lookup_enabled) is not bool:
+            raise ValueError('Explicit lookup routing selection required')
+        self.lookup_enabled = lookup_enabled
         if type(vocab_size) is not int or vocab_size < 1:
             raise ValueError("vocab_size must be positive")
         self.vocab_size = vocab_size
@@ -37,7 +40,7 @@ class HybridDraft:
             raise ValueError('Proposal count exceeds the configured verifier capacity')
         if greedy is not True or verifier_ready is not True:
             return Proposal("target", ())
-        tokens, match_length = self.lookup.propose_with_match(request_id, count)
+        tokens, match_length = self.lookup.propose_with_match(request_id, count) if self.lookup_enabled else ((), 0)
         if tokens:
             return Proposal("lookup", tuple(tokens), match_length)
         adapter = self.neural.get(selected)

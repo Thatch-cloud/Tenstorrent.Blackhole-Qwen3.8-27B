@@ -21,7 +21,14 @@ def terminal_ids(weights, vocab_size):
 def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, live_digest,
                     kv_digest, inactive_digest, eos_ids=(), max_new_tokens=129, norm_batch=False,
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
-                    lookup_max_rows=32, engine_factory=None):
+                    lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True):
+    neural = dict(neural or {})
+    if (type(lookup_enabled) is not bool or (not lookup_enabled and not neural)
+            or any(not isinstance(name, str) or not name or name in ('lookup', 'target')
+            or not callable(adapter) for name, adapter in neural.items())
+            or (selected_drafter is not None and (not isinstance(selected_drafter, str) or selected_drafter not in neural))
+            or (neural and selected_drafter is None)):
+        raise ValueError('Explicit registered neural adapter selection required')
     if type(lookup_max_rows) is not int or lookup_max_rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Explicit supported lookup width cap required')
     if lookup_max_rows != 32 and (family_routing or attention_replay):
@@ -50,7 +57,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         raise AssertionError('Fresh request prefill changed the native seed')
     inactive_before = inactive_digest()
     session = GreedySession('lookup-pilot', prompt, seed, vocab_size=model.args.vocab_size,
-        max_new_tokens=max_new_tokens, eos_ids=eos_ids, verifier_rows=32)
+        max_new_tokens=max_new_tokens, eos_ids=eos_ids, verifier_rows=32, neural=neural, lookup_enabled=lookup_enabled)
     engine = None
     blocks = []
     setup_ms = decode_ms = 0.0
@@ -76,7 +83,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 maximum = min(maximum, lookup_max_rows)
                 if attention_replay and maximum != engine.proposal_rows():
                     raise AssertionError('Engine and matched request disagree on safe proposal width')
-                ticket = session.propose(session.request_id, max_rows=maximum)
+                ticket = session.propose(session.request_id, max_rows=maximum, selected=selected_drafter)
                 drafted = time.perf_counter()
                 predictions, components = engine.verify(ticket)
                 verified = time.perf_counter()
@@ -103,6 +110,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
             lookup_max_rows=lookup_max_rows,
+            selected_drafter=selected_drafter,
+            drafting_policy='lookup-first' if lookup_enabled else 'neural-with-target-fallback',
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
             vocab_size=model.args.vocab_size,
             prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),

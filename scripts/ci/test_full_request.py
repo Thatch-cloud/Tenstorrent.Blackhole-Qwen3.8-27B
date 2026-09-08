@@ -21,7 +21,8 @@ class RequestPilotTests(unittest.TestCase):
                     terminal_ids('/frozen-weights', 100)
 
     def run_fixture(self, *, seed=0, eos_ids=(), wrong=False, norm_batch=False,
-                    attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32):
+                    attention_replay=False, attention_mask_once=False, replay_group_rows=4, lookup_max_rows=32,
+                    neural=None, selected_drafter=None, lookup_enabled=True):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -54,7 +55,7 @@ class RequestPilotTests(unittest.TestCase):
                 inactive_digest=lambda: 'inactive', eos_ids=eos_ids, max_new_tokens=33, norm_batch=norm_batch,
                 attention_replay=attention_replay, family_routing=attention_replay,
                 attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
-                lookup_max_rows=lookup_max_rows)
+                lookup_max_rows=lookup_max_rows, neural=neural, selected_drafter=selected_drafter, lookup_enabled=lookup_enabled)
         return result, constructor
 
     def test_lookup_cap_bounds_proposals_and_capture_configuration(self):
@@ -64,6 +65,29 @@ class RequestPilotTests(unittest.TestCase):
             self.assertEqual(result['lookup_max_rows'], width)
             self.assertEqual(constructor.call_args.kwargs['max_verify_rows'], width)
             self.assertTrue(all(block['rows'] <= width for block in result['blocks']))
+
+    def test_neural_adapter_runs_inside_verified_request_loop(self):
+        def propose(request_id, history, count):
+            self.assertEqual(request_id, 'lookup-pilot')
+            return [(history[-1] + offset + 1) % 3 for offset in range(count)]
+        adapter = Mock(side_effect=propose)
+        result, constructor = self.run_fixture(neural={'fixture': adapter}, selected_drafter='fixture',
+            norm_batch=True, lookup_max_rows=8, lookup_enabled=False)
+        adapter.assert_called()
+        self.assertEqual(result['committed_decode_tokens'], 32)
+        self.assertTrue(result['exact'] and result['state_exact'] and result['inactive_exact'])
+        self.assertTrue(any(block['source'] == 'fixture' for block in result['blocks']))
+        self.assertEqual(result['selected_drafter'], 'fixture')
+        self.assertEqual(result['drafting_policy'], 'neural-with-target-fallback')
+
+    def test_invalid_neural_registration_fails_before_prefill(self):
+        for options in (dict(selected_drafter='missing'), dict(neural={'fixture': Mock()}), dict(lookup_enabled=False),
+                dict(neural={'fixture': None}, selected_drafter='fixture')):
+            prefill = Mock()
+            with self.assertRaises(ValueError):
+                measure_request(None, None, None, None, None, prefill=prefill, decode=None,
+                    live_digest=None, kv_digest=None, inactive_digest=None, **options)
+            prefill.assert_not_called()
 
     def test_lookup_cap_rejects_invalid_or_replay_options_before_prefill(self):
         for configuration in (dict(lookup_max_rows=True), dict(lookup_max_rows=3),

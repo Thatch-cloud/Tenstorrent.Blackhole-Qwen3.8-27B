@@ -50,6 +50,8 @@ def summarize_requests(requests, *, arm_key='norm_batch'):
             raise ValueError('Every request must pass native correctness')
         if any(entry[key] != reference[key] for key in identity):
             raise ValueError('Matched requests must use identical prompt, generation and proposal accounting')
+        if any(entry.get(key) != reference.get(key) for key in ('selected_drafter', 'drafting_policy')):
+            raise ValueError('Matched kernel comparisons must preserve the drafter and routing policy')
         if arm_key == 'lookup_cap':
             arm_reference = next(record for record in requests if record[arm_key] is entry[arm_key])
             expected_blocks = [tuple(block[key] for key in routing) for block in arm_reference['blocks']]

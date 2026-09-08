@@ -34,5 +34,6 @@ publication, eager gate/up fusion regressions and unqualified precision changes.
 
 The underlying combination measured 19.10 committed tok/s at CTX170/B1 in
 [run 34185881285](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185881285).
-That predates the packaging change: the wrapper still needs its own hardware
-regression run. It is not a 200 tok/s result or a held-out coding-quality evaluation.
+The packaged runtime then passed [hardware regression 34186950201](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34186950201):
+19.09 committed tok/s versus 18.92 for the one-link control, with complete outputs
+and exact native token/state checks. It is not a 200 tok/s result or a held-out coding-quality evaluation.

@@ -15,6 +15,8 @@ curl --fail --location --max-time 180 https://raw.githubusercontent.com/tenstorr
 printf '%s\n' "79287bd7cc1fc0fab28ca7b82567c39311f0dcc6ec2704ab7c4386dfc71abfd4  $assets/libttsim_bh_x2.so" \
     "27b7ec074f81fe4b4a1be89a5c39fd6c7eaf2c2d68da8f49bd8faf02a7d3df15  $assets/cluster_descriptor.yaml" | sha256sum -c -
 sha256sum "$assets/"* > experiment-results/simulator-assets.sha256
+chmod 0755 "$assets"
+chmod 0644 "$assets/libttsim_bh_x2.so" "$assets/cluster_descriptor.yaml"
 container=''
 cleanup() {
     status=$?
