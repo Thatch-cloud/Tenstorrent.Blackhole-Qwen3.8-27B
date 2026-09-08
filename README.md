@@ -4,6 +4,11 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
+**Current test:** [real coding MTP request](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34191983233)
+on both cards: seven draft tokens, eight-row target verification, full-vocabulary
+device argmax, and cache repair after rejection. TG includes all four steps.
+Hardware results are pending; the last completed four-link coding test is **19.10 tok/s**.
+
 ## Setup
 
 | Component | Experiment setup |
@@ -112,12 +117,14 @@ This uses the `p150_x2` descriptor and a sampler-only override of the hardcoded
 link helper. Serving defaults are unchanged.
 [Fabric sampling evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185352446).
 
-The new five-layer captured-drafter simulator gate is **not passed**: its eager
-reference stage failed in layer three's gate/up MLP projection. It has not been
-promoted to hardware; this does not invalidate the earlier isolated branch tests.
-Local host-only diagnostics subsequently reproduced a one-bit discrepancy in a
-loaded tensor while a fresh file read matched its pinned hash. The local simulator
-is paused for integrity diagnosis; neither a kernel defect nor faulty RAM is yet established.
+The five-layer captured-drafter gate is **not passed**. Local tensor-integrity
+failures led to a CI simulator retry; that retry was cancelled, not qualified.
+Earlier eager hardware checks do not establish a working captured drafter.
+
+The native eager link-discovery bug is fixed in the disposable experiment build.
+The [two-card check](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34189506734)
+passes without the fallback warning. T8/T32 collectives show no useful speed gain;
+this is a correctness fix, not progress to 200 TG by itself.
 
 | Experiment | Measured outcome | Meaning |
 | --- | --- | --- |
@@ -136,6 +143,7 @@ was resolved by restoring the exact runtime image.
 
 | Workstream | Current position |
 | --- | --- |
+| MTP | Complete coding-request path wired; real two-card qualification pending |
 | DFlash2 | Five-layer hardware correctness passes; full captured drafting and live request integration remain |
 | EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
 | KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
@@ -143,9 +151,9 @@ was resolved by restoring the exact runtime image.
 | Ethernet dispatch / extra column | Hardware grid and fabric gates remain before performance claims |
 | Coding quality | Held-out coding evaluation remains; numerical gates alone do not certify quality |
 
-Next: test redundant GDN state-copy removal and complete captured learned-drafter
-integration. The modest isolated fusion gain does not close the verifier latency gap.
-PP and committed TG need a matched context/concurrency sweep once that path is ready.
+Next: measure real draft acceptance and complete-cycle cost, then optimize the
+dominant cost. The modest isolated fusion gain does not close the verifier gap.
+PP and committed TG need a matched context/concurrency sweep after qualification.
 
 ## Guides and evidence
 

@@ -2,6 +2,21 @@
 
 ## Current programme position - 2026-09-08
 
+| Priority | Verified position / next gate |
+| --- | --- |
+| Single-stream target | 200 committed TG not achieved; completed four-link coding request: 19.10 TG, CTX 170 |
+| Current hardware run | [34191983233](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34191983233): real native MTP K7/T8 coding request; results pending |
+| MTP integration | Prompt features and shifted KV initialization, traced drafting, accepted-row extraction and teacher-forced cache repair wired; 705 host tests pass |
+| Measurement boundary | Decode includes proposal, verify/readback, cache repair and commit; prefill and all setup reported separately and in inclusive totals |
+| Fabric fix | Hardware run 34189506734 passes without fallback discovery; no meaningful T8/T32 collective speed gain |
+| DFlash2 | Complete captured stack remains unqualified; cancelled simulator runs are not passes |
+
+No device resets, serving-default changes, or new isolated kernel matrix in the
+current run. Exact native tokens, active GDN state, valid KV and inactive slots
+remain mandatory. One coding request is not a held-out coding-quality suite.
+
+### Earlier checkpoints (historical, not current run status)
+
 Coding retry 34182900581 passed exact native tokens, final state and inactive-slot
 checks. CTX 170, one stream, 128 committed tokens: norm-off 15.0196 TG; norm-on 16.1075
 TG; native reference in the candidate repetitions 19.6694 TG. Lookup is a regression,
