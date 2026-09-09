@@ -56,7 +56,7 @@ The earlier60.33-TG result remains eager-update, not the matched control here.
 Next prioritize attribution of the actual commit-only target verifier; the old
 static-profile sums are not a current critical-path measurement.
 
-**Current-request verifier profiler prepared.** The opt-in4K suite observes the
+**Current-request verifier profiler passed.** The opt-in4K suite observes the
 actual cached T8 commit-only verifier calls, retains all native-reference audits
 and emits no PP/TG result. Runtime replay counts must match every marked request
 call on both chips; report per-chip envelopes, operation/core sums and host call
@@ -65,8 +65,13 @@ pass. Hardware run34296336943 on `8460b69` passed its complete request audit but
 hit the96 GiB host limit during profiler finalization (`oom_kill=1`); no device
 CSV survived. The collection fix requires incremental profiler dumps, keeping
 all17 actual verifier calls and every correctness audit. Hardware retry34298049648
-on `da69ef8` is pending;
-no new performance result.
+on `da69ef8` passes: device envelopes61.539/61.542 ms, with16 steady replays/chip.
+Chip0 summed matmul time32.050 ms, GDN recurrence6.290 ms and native SDPA5.827 ms
+are attribution, not throughput or additive cross-chip critical-path costs.
+No OOM occurs;92.871 GiB peak still leaves tight headroom. Next test16-row
+activation tiles with unchanged compressed weights, including conversion and
+trace costs; below16 is unsupported on the pinned compressed-weight mcast path.
+This is simulator-first work, not a claimed speedup or another grid sweep.
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**

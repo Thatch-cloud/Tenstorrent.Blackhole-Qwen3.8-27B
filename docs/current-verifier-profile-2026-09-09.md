@@ -77,8 +77,50 @@ limit or reduce correctness coverage.
 The tests also reject missing incremental-dump configuration before opening
 hardware or observing a request. This is a source-grounded collection fix, not
 yet a successful hardware profile.
-The incremental-dump retry is
+The incremental-dump retry
 [run34298049648](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34298049648)
-on `da69ef8`; its final device attribution is pending.
+on `da69ef8` passes, including final device attribution.
 Mid-run dumping weakens cross-device clock alignment; attribution remains
 per-chip, and no cross-chip critical-path claim is permitted.
+
+## Current hardware attribution
+
+The full native-reference request audit passes: 121 committed tokens, 17 actual
+T8 verifier calls on each chip. The first replay is retained but excluded from
+the 16 steady-replay medians. Both-chip replay counts and operation coverage
+match; no dropped-marker warning occurs inside a marked verifier interval.
+Setup has dropped-marker warnings and is not used for this attribution.
+
+| Per-chip observed interval | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Kernel envelope | 61.539 ms | 61.542 ms |
+| Union of kernel intervals | 60.216 ms | 60.205 ms |
+| Uncovered intervals | 1.324 ms | 1.336 ms |
+
+| Chip 0 operation group | Calls/replay | Median summed kernel time |
+| --- | ---: | ---: |
+| All matrix multiplications | 321 | 32.050 ms |
+| Gate/up, 39 occupied cores | 128 | 11.787 ms |
+| Down/output projections, 32 occupied cores | 128 | 10.803 ms |
+| GDN input projection, 43 occupied cores | 48 | 5.741 ms |
+| GDN recurrence, 96 cores | 48 | 6.290 ms |
+| Native decode SDPA, 110 cores | 128 | 5.827 ms |
+
+The matrix subgroups are included in the all-matmul row; do not add them again.
+The 32-core group mixes MLP down and attention/GDN output projections. Operation
+sums can overlap, and durations include waits; they do not prove memory versus
+compute saturation. Nevertheless, the roughly61.5 ms device envelope accounts
+for the existing roughly62 ms verifier cost: host scheduling is not the main
+missing improvement in this path.
+
+Memory peaks at92.871 GiB with no OOM or limit events. The collection fix works
+for this request, but its memory headroom remains tight. Request SHA256:
+`e3e1cca731143f18609428636776266923396bb2af70c6214cad956c000c2f36`.
+Device CSV SHA256:
+`675084153c2411ff8d834b251e98acb1877c7f8cfc866a47282fde3e7b7546ac`.
+
+Next isolate smaller activation tiles on the unchanged quantized matmul path,
+including input/output conversion and captured replay. The pinned runtime
+supports16-row tiles on 1D multicast; compressed-weight tiles below16 are
+explicitly rejected. This tests wasted padded-row work, not another core-grid
+sweep. Simulator correctness comes before hardware timing; no speedup is assumed.

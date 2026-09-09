@@ -19,6 +19,10 @@ matched DFlash-versus-MTP comparisons.
 **4K caching reaches60.33 TG; the uncached 8K repeat reaches53.48 TG.**
 Caching improves matched4K decode by2.58%, but full requests worsen7.09->7.41 s.
 [Cache results and remaining overhead](docs/dflash-kv-cache-2026-09-09.md).
+The latest4K captured-update comparison is flat: **62.11 versus62.01 TG**.
+Current device profiling accounts for **61.54 ms of the roughly62 ms verifier**;
+matrix operations dominate. This is not primarily host-side scheduling latency.
+[Current verifier attribution](docs/current-verifier-profile-2026-09-09.md).
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
