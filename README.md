@@ -106,13 +106,12 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 
 The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
 requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
-higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) has a verified CPU
-backbone and 162 passing learned feature-projection/normalization simulator checks.
-The first complete learned TT layer now executes all phases and passes **208
-exact replay checks**, but still fails **78/192 numerical comparisons**. It is
-not qualified. The backend-matched five-layer CPU reference passes **96 exact
-checks**, retaining the original eager controls; this does not clear TT numerical
-failures. All five TT layers and target integration remain pending:
+higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now has a complete
+learned TT layer in **one device trace, without host TP handoffs**. All **534
+same-arithmetic simulator checks** pass, including changing-input replays.
+The backend-matched five-layer CPU reference passes 96 exact checks, but the
+earlier **78/192 CPU numerical failures remain open**; the transport pass does
+not clear them. All five TT layers and target integration remain pending:
 **no DSpark hardware TG claim**. [Layer evidence](docs/dspark-learned-layer-2026-09-10.md).
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,

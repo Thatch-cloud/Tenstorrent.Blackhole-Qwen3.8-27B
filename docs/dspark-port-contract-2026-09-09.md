@@ -435,8 +435,9 @@ without relaxing limits or requalifying the reference. The complete layer
 remains unqualified. A separate five-layer CPU reference now passes 96 exact
 checks against the original eager controls and the declared FP32-policy upstream
 topology. This preserves, rather than replaces, the failed TT gate. Device-only
-TP handoffs pass 144 exact simulator checks; the complete single-trace layer is
-next. [Layer scope](dspark-learned-layer-2026-09-10.md).
+TP handoffs pass 144 exact simulator checks, and the complete single-trace learned
+layer passes another 534 same-arithmetic checks. Five-layer TT execution remains
+pending. [Layer scope](dspark-learned-layer-2026-09-10.md).
 
 ## Evidence and next gates
 

@@ -275,25 +275,50 @@ Exit 0, source/native closure and clean teardown were independently reconciled.
 Report `scripts/ci/dspark-mesh-simulator.json`, SHA256
 `b5bf2abecce186a86721b3abfc35b0194e87f777ec6caa5c70da340914915355`.
 The simulator explicitly uses one link; this does **not** qualify the physical
-four-link fabric or measure speed. The complete single-trace layer is implemented
-and its learned-weight simulator matrix is running; it has no terminal result yet.
-The old numerical failures remain open.
+four-link fabric or measure speed. The old numerical failures remain open.
+
+### Complete layer in one device trace
+
+Run `20260909T201255Z-393` passes **534/534 exact checks**, with clean exit 0.
+All attention, MLP and residual operations execute together, including both TP
+collectives; no host copies or CPU arithmetic separate the phases inside the trace.
+
+| Full-layer transport requirement | Passing checks |
+| --- | ---: |
+| All 26 eager stages, three cases, both chips | 156 |
+| Four changing-input trace replays, all stages and both chips | 208 |
+| Borrowed inputs unchanged | 112 |
+| All eleven learned weights before/after, both chips | 44 |
+| Omitted-update negative controls | 2 |
+| Inactive attention/output rows stay zero | 12 |
+
+Saved eager tensors match the retained same-arithmetic native control bitwise.
+Coordinates, replay hashes, stable bindings, all 40 source hashes, 1,496 native
+fingerprints, saved operands and whole-checkpoint closure were independently
+reconciled. Report `scripts/ci/dspark-layer-mesh-simulator.json`, SHA256
+`1374f6cbd1704a04069d29b8fa0b32db523972298e19699d0b45df2848a8607a`.
+
+This qualifies **transport and capture of one learned layer**, not its failed CPU
+numerical gate, all five layers, physical fabric, coding acceptance or throughput.
+History remains 32 rows with seven proposal rows. No hardware run follows from
+this component result alone.
 
 The next five-layer device chain is also wired, keeping projected context and
 rotary inputs shared while passing each layer's actual output into the next.
-Three orchestration tests pass, but it has not executed five learned TT layers.
+All 1,190 host tests and 59 simulator-harness tests pass, but this chain has not
+executed five learned TT layers.
 Feature projection and the full-vocabulary selector remain separate components.
 
 ## Next gates
 
-1. Join the complete learned layer into one trace using the qualified device
-   boundaries; compare against the retained same-arithmetic native control.
-   Reconcile remaining arithmetic differences against the backend-matched reference.
-2. Qualify all 664 checks, restore the original native runtime, then independently
-   reconcile the source-bound report.
-3. Connect all five learned layers and selector, then the real TP collective and
-   target-verification path. Measure coding acceptance and committed PP / CTX / TG
-   through CI before any serving change.
+1. Execute all five learned layers and final normalization with changing-input
+   trace replays. Compare against the backend-matched CPU reference; retain the
+   separate original numerical failures rather than relabeling them as passes.
+2. Connect feature projection, the full-vocabulary selector and actual target
+   features/LM head. Extend history to 4K; retain mask, ownership and target-state gates.
+3. Measure coding acceptance and committed PP / CTX / TG through CI. Wider useful
+   proposals and/or a faster verifier remain necessary for 200 TG; do not infer
+   speed or coding quality from a component pass or change serving defaults.
 
 The measured single-stream hardware result remains **PP 3,324.52 / CTX 4,096 /
 TG 74.27**. No layer-component pass changes that result or establishes 200 TG.
