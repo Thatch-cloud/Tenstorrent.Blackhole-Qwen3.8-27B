@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--key-chunk-size', type=int, choices=(32, 64), default=32)
+    parser.add_argument('--fp32-io', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     if hashlib.sha256(options.fixture.read_bytes()).hexdigest() != options.sha256:
@@ -45,6 +46,7 @@ def run(options, kernel_audit):
         value.repeat_interleave(4, dim=1), attn_mask=mask, is_causal=False)[..., :8, :]
     report = dict(passed=False, scope=__doc__, fixture_sha256=options.sha256,
         native_kernel=kernel_audit, key_chunk_size=options.key_chunk_size, checks=[],
+        fp32_io=options.fp32_io, probe_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         source_rank=0, scope_limit='One captured rank replicated on two simulator chips; not original rank-one validation')
     mesh, output = None, None
     inputs = []
@@ -53,10 +55,20 @@ def run(options, kernel_audit):
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         mesh.enable_program_cache()
         for value in values:
-            inputs.append(ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16,
+            inputs.append(ttnn.from_torch(value.float() if options.fp32_io else value, device=mesh,
+                dtype=ttnn.float32 if options.fp32_io else ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
-        output = draft_sdpa(ttnn, *inputs, key_chunk_size=options.key_chunk_size)
+        if options.fp32_io:
+            kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+            program = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8), q_chunk_size=32,
+                k_chunk_size=options.key_chunk_size, exp_approx_mode=False)
+            output = ttnn.transformer.scaled_dot_product_attention(*inputs[:3], attn_mask=inputs[3],
+                is_causal=False, scale=128 ** -0.5, program_config=program, compute_kernel_config=kernel,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            output = draft_sdpa(ttnn, *inputs, key_chunk_size=options.key_chunk_size)
         ttnn.synchronize_device(mesh)
         shards = ttnn.get_device_tensors(output)
         if len(shards) != 2:

@@ -23,13 +23,13 @@ The latest4K captured-update comparison is flat: **62.11 versus62.01 TG**.
 Current device profiling accounts for **61.54 ms of the roughly62 ms verifier**;
 matrix operations dominate. This is not primarily host-side scheduling latency.
 [Current verifier attribution](docs/current-verifier-profile-2026-09-09.md).
-**Now testing:** a 16-row-tile MLP with unchanged target weights and arithmetic.
-The complete simulator path passes 48 bitwise comparisons; hardware compares
-real weights against native execution, including conversions and communication.
-The first hardware job stopped after its link check: **no MLP result**, despite
-a green CI status. Routing is corrected; the retry must produce and validate
-all real-weight comparisons and ABBA samples before passing.
-No new PP/CTX/TG result or serving change is claimed.
+**Latest kernel result: smaller MLP tiles are rejected for speed.**
+Real-weight hardware passes exact eager and changed-input trace checks, but
+native execution takes **0.33481 ms** versus **0.35055 ms** for the candidate:
+**4.70% slower**, including conversions and four-link communication.
+All nine ABBA blocks regress. This is a single-layer result, not a TG change.
+[Evidence and harness fixes](docs/tiny-tile-projections-2026-09-09.md).
+The 48-comparison simulator pass established correctness, not performance.
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only

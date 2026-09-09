@@ -82,7 +82,13 @@ real layer0 hardware ABBA against actual native forward, including the collectiv
 Run34303979499 on `6457ec8` exits after the link prerequisite, despite a green
 CI status: no MLP test or timing exists. Routing is corrected and executed shell
 tests cover the transition. A mandatory host-side artifact validator now rejects
-missing/incomplete MLP comparisons or timing blocks. Hardware retry pending.
+missing/incomplete MLP comparisons or timing blocks. The corrected run34305753974
+on `87d4cab` passes6 eager and12 changed-input traced exact checks using real
+layer0 weights, but all9 ABBA blocks regress: native0.334811ms versus
+candidate0.350553ms, **4.70% slower**, including staging, both conversions and
+the same four-link collective. Independent artifact validation passes and
+`eligible_for_full_model_gate=false`. Do not integrate this candidate or present
+the simulator pass as a performance result. No PP/CTX/TG gain or serving change.
 [Evidence](tiny-tile-projections-2026-09-09.md).
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 

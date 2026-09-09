@@ -1,6 +1,6 @@
-# Smaller activation tiles: simulator gate
+# Smaller activation tiles: correctness passes, hardware regresses
 
-**Combined simulator gate passed; no hardware timing or throughput claim.** The current request
+**Rejected for speed: 4.70% slower on real target weights.** The current request
 profile measures32.050 ms of summed matrix operations per chip. This experiment
 tests16-row activation tiles for T8, retaining native BF4 gate/up, BF8 down,
 LoFi/FP32 destination accumulation, packer L1 accumulation and the native1D grid.
@@ -43,7 +43,7 @@ with both traces live, persistent addresses, input immutability, and two stale-i
 negative controls. It closes both devices cleanly. Simulation duration is not a
 hardware performance measurement; no collective is included in this simulator gate.
 
-Next hardware gate: `tiny-mlp`, actual layer0 weights, native `Qwen36MLP.forward`
+Hardware gate: `tiny-mlp`, actual layer0 weights, native `Qwen36MLP.forward`
 control, three changed inputs and nine ABBA blocks. Both arms include input staging
 and the same four-link native reduce-scatter; candidate timings include both DMA
 boundaries. Require bitwise native equality, then a greater-than2% win in every
@@ -57,7 +57,8 @@ cover that transition and failed build/link/MLP cases. The host wrapper now
 requires the MLP artifact and independently validates sources, six eager checks,
 12 traced checks, all nine ABBA blocks and every summary against raw samples.
 The original hardware packer remains unchanged; simulator compatibility is not
-hardware qualification. Retry pending; no hardware MLP timing is available.
+hardware qualification. These failed attempts produce no MLP timing; the completed
+result below is from the corrected route and audited native-source gate.
 The routing/required-artifact fix passes883 CI host tests and60 speculative-harness tests.
 
 The routed retry34304793770 reaches the MLP source gate but rejects `tp_common.py`
@@ -74,6 +75,31 @@ hardware `5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66`.
 All other source checks remain exact. The exception is recorded in the result;
 it does not qualify prefill or relax numerical comparisons. Future source changes
 still fail closed. No hardware MLP timing is available from either rejected run.
+
+## Completed hardware result
+
+[Run34305753974](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34305753974),
+code `87d4cab`, passes correctness and independent artifact validation.
+
+| Check | Result |
+| --- | --- |
+| Scope | Layer0, T8, one stream, two P150A; unchanged BF4 gate/up and BF8 down |
+| Eager / changed-input trace checks | 6 / 12 exact comparisons |
+| Timing | 9 ABBA blocks, 3 seeds, 50 replays per sample |
+| Native MLP | 0.334811 ms |
+| 16-row MLP with both DMA conversions | 0.350553 ms |
+| Change | +15.74 microseconds / +4.70% latency; every block slower |
+| Full-model promotion | Rejected; `eligible_for_full_model_gate=false` |
+
+Both arms include replicated DRAM input staging and the same explicit four-link
+native reduce-scatter. Timed outputs, immutable inputs and stable bindings are
+checked. The original hardware packer is unchanged. Do not multiply this layer
+timing by64 and call it measured full-model performance or PP/CTX/TG.
+
+Artifact: `hardware-evidence.local/34305753974/artifacts/qwen-hardware-inventory-34305753974/tiny-mlp.json`.
+SHA256: `e03eb5d368dc036bbccda4b97a22023de86b6030e36aef2a61eb42ea858d979f`.
+The result rules out this complete small-tile composition as a speed improvement;
+it does not by itself prove DRAM saturation or rule out different weight layouts.
 
 The existing audited patch is `optimisation/sim/blackhole-packer-zero-flags.patch`.
 The isolated graft header hash is

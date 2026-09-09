@@ -63,3 +63,22 @@ for the failed native-attention candidate.
 Validation: 759 host tests and 60 speculative-harness tests pass; shell syntax
 and patch checks pass. Temporary simulator source, packer and shared-library
 changes were restored to their original hashes after testing.
+
+## September 9 diagnostic: FP32 input is unsupported
+
+The simulator-only operand probe adds `--fp32-io` to test whether preserving FP32
+I/O changes the learned attention mismatch, with precise exponential and the
+existing scoped FP32-intermediate prototype. It does not bypass native validation.
+Run `20260909T030947Z-391` fails before the SDPA kernel: the pinned operation
+accepts BFLOAT16/BFLOAT8_B/BFLOAT4_B Q/K/V, not FLOAT32. This is an unsupported
+signature, not a numerical pass or a measured speed result. No hardware dispatch.
+
+The earlier `030915Z-431` attempt only failed to find a relative fixture path;
+the actual diagnostic uses an absolute path because the simulator wrapper changes
+directory. Both failures are retained. Native source grafts and both shared
+libraries are restored to their original hashes afterward.
+
+FP32 intermediate buffers alone do not guarantee FP32 arithmetic: the pinned
+unpacker converts FP32 FPU operands to TF32, unlike direct-to-destination SFPU
+operations. Whether that accounts for the saved learned mismatch remains
+unproven. Do not relax numerical thresholds or promote the failed native path.
