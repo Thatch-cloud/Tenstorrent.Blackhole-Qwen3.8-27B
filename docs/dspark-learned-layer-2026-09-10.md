@@ -422,13 +422,43 @@ It does not discard query row zero or feed mask-token embeddings into inactive
 padding rows. Caller validation, actual device execution and target-state
 verification are still required before request measurements.
 
+## Combined hardware result
+
+Run [`34413173251`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251)
+on code `23ce458a9b65ec6b3dc8badd7f905a12032c6262` completes cleanly, exit 0.
+The complete learned FC/normalization, all five layers and final normalization
+execute in **one device trace with four explicitly selected physical links**.
+
+| Measurement | Result | Scope |
+| --- | --- | --- |
+| Warm replay mean | **10.1900 ms/block** | Three batches of ten queued replays; excludes input update/readback |
+| History / query rows | **32 / 7** | Synthetic feature/noise inputs, not a target request |
+| Functional checks | **2,398 pass** | All 137 stages, 58 parameters, changing inputs, ownership and padding |
+| Separate CPU diagnostics | **6/72 pass** | Numerical gate remains failed; not relabeled as functional success |
+| Complete probe wall time | **44.36 s** | CPU references, upload, compile, checks and timing |
+| Native runtime build | **262 s** | First cache miss; built library now retained for reuse |
+| PP / committed TG | **Not measured** | No target head, Markov feedback or target verification in this run |
+
+All matrix coordinates, 62 checkpoint tensor fingerprints, 55 source hashes,
+1,496 native hashes and replay/eager hashes were independently reconciled.
+The retained report is `scripts/ci/dspark-pipeline-hardware.json`, SHA-256
+`632215b0a7c90420ab53ad06ecabf82e8124ee8262f4d9ca11ccaae4851a7262`.
+Final-normalization relative L2 differences versus the declared CPU backend are
+1.43–1.56% across the three synthetic cases. Earlier numerical failures remain
+open. This is neither coding-acceptance evidence nor a comparison against the
+complete DFlash2 proposal time.
+
+The next targeted simulator check covers **seven-row embedding lookup, hidden
+gather and zero padding only**, using a small synthetic table. It does not rerun
+the full model. Real target features/embeddings/head and Markov feedback are
+the next hardware integration step.
+
 ## Next gates
 
-1. Execute all five learned layers and final normalization on hardware with changing-input
-   trace replays. Compare against the backend-matched CPU reference; retain the
-   separate original numerical failures rather than relabeling them as passes.
-2. Connect feature projection, the full-vocabulary selector and actual target
-   features/LM head. Extend history to 4K; retain mask, ownership and target-state gates.
+1. Connect actual target features/embeddings/LM head and the full-vocabulary
+   Markov selector, preserving target state and changing-input trace replay.
+2. Extend history to 4K and qualify useful wider proposals; retain mask,
+   ownership, numerical diagnostics and exact target-state gates.
 3. Measure coding acceptance and committed PP / CTX / TG through CI. Wider useful
    proposals and/or a faster verifier remain necessary for 200 TG; do not infer
    speed or coding quality from a component pass or change serving defaults.

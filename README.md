@@ -108,12 +108,12 @@ The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
 requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
 higher.
 
-**DSpark remains experimental.** One learned layer and full-vocabulary transport
-pass targeted simulation. The [hardware integration run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251)
-joins learned FC and all five layers in one trace, using four fabric links.
-Target integration and the earlier numerical differences remain open; **no DSpark
-TG result yet**. Checks now run before compilation, and unchanged native builds
-are cached. [Evidence and next gates](docs/dspark-learned-layer-2026-09-10.md).
+**DSpark remains experimental.** [Hardware integration passes](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251):
+learned FC plus all five layers in one trace, using four fabric links.
+The warm replay mean is **10.19 ms/block at 32 history rows / seven query rows**.
+This excludes embeddings, target head, Markov selection and verification—**not TG**.
+Target integration and numerical differences remain open. Checks now run before
+compilation, and native builds are cached. [Evidence and next gates](docs/dspark-learned-layer-2026-09-10.md).
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

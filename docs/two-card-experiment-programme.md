@@ -133,6 +133,15 @@ defaults change. Numerical fixes are not assumed to be faster.
 This component fix does not change the measured 74.27 TG hardware result.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 
+**Complete DSpark backbone now executes on hardware.** Run `34413173251`
+passes 2,398 functional checks for learned FC plus all five layers in one trace,
+using four explicit links. Warm queued replay averages **10.19 ms/block** at
+32 history / seven query rows. This excludes embeddings, LM head, Markov
+feedback and verification: **not committed TG**. Separate CPU diagnostics pass
+6/72; the numerical gate stays open. Probe wall time is 44.36 seconds after a
+262-second first native build, now cached. Next: the small seven-row embedding
+layout gate, actual target integration, then useful wider blocks and 4K history.
+
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness
