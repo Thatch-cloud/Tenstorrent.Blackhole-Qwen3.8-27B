@@ -381,10 +381,12 @@ class FullDFlashRequestTests(unittest.TestCase):
         base = dict(os.environ, QWEN_DFLASH_CONTEXT='4096', QWEN_DFLASH_CAPTURE='1', QWEN_DFLASH_DRAFTS='7',
             QWEN_DFLASH_VERIFIER_PROFILE='1', QWEN_DFLASH_PROJECTION_ABBA='0', QWEN_DFLASH_CACHE_ABBA='0',
             QWEN_DFLASH_CONVOLUTION_ABBA='0', QWEN_DFLASH_COMMIT_ABBA='0', QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1',
-            TTNN_OP_PROFILER='1', TT_METAL_DEVICE_PROFILER='1', TT_METAL_PROFILER_TRACE_TRACKING='1', TT_METAL_PROFILER_CPP_POST_PROCESS='1')
+            TTNN_OP_PROFILER='1', TT_METAL_DEVICE_PROFILER='1', TT_METAL_PROFILER_TRACE_TRACKING='1',
+            TT_METAL_PROFILER_CPP_POST_PROCESS='1', TT_METAL_PROFILER_MID_RUN_DUMP='1')
         for key, value in (('QWEN_DFLASH_CONTEXT', '8192'), ('QWEN_DFLASH_CAPTURE', '0'), ('QWEN_DFLASH_DRAFTS', '31'),
                 ('QWEN_DFLASH_CACHE_ABBA', '1'), ('QWEN_DFLASH_PROJECTION_ABBA', '1'), ('TTNN_OP_PROFILER', '0'),
-                ('TT_METAL_DEVICE_PROFILER', '0'), ('TT_METAL_PROFILER_TRACE_TRACKING', '0'), ('TT_METAL_PROFILER_CPP_POST_PROCESS', '0')):
+                ('TT_METAL_DEVICE_PROFILER', '0'), ('TT_METAL_PROFILER_TRACE_TRACKING', '0'),
+                ('TT_METAL_PROFILER_CPP_POST_PROCESS', '0'), ('TT_METAL_PROFILER_MID_RUN_DUMP', '0')):
             result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
                 '--request-pilot', '--norm-batch'], env={**base, key: value}, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)

@@ -67,6 +67,16 @@ class RequestVerifierProfileTests(unittest.TestCase):
                     self.fail('Observer yielded for another runtime')
         engine.operations.ReadDeviceProfiler.assert_not_called()
 
+    def test_each_profiler_flag_including_incremental_dump_is_required(self):
+        engine = self.engine()
+        self.assertIn('TT_METAL_PROFILER_MID_RUN_DUMP', PROFILER_FLAGS)
+        for missing in PROFILER_FLAGS:
+            with self.subTest(missing=missing), patch.dict(os.environ, {name: '1' for name in PROFILER_FLAGS}):
+                del os.environ[missing]
+                with self.assertRaisesRegex(ValueError, 'incremental device-data dumps'):
+                    RequestVerifierProfile(engine.operations, engine.mesh, signpost=Mock())
+        engine.operations.ReadDeviceProfiler.assert_not_called()
+
 
 class RequestProfileReportTests(unittest.TestCase):
     def fixture(self):

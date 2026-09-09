@@ -60,8 +60,12 @@ static-profile sums are not a current critical-path measurement.
 actual cached T8 commit-only verifier calls, retains all native-reference audits
 and emits no PP/TG result. Runtime replay counts must match every marked request
 call on both chips; report per-chip envelopes, operation/core sums and host call
-costs separately. No new kernel math or trace contents;859 CI and60 harness tests
-pass. Hardware run34296336943 on `8460b69` is running, not a result yet.
+costs separately. No new kernel math or trace contents;860 CI and60 harness tests
+pass. Hardware run34296336943 on `8460b69` passed its complete request audit but
+hit the96 GiB host limit during profiler finalization (`oom_kill=1`); no device
+CSV survived. The collection fix requires incremental profiler dumps, keeping
+all17 actual verifier calls and every correctness audit. Hardware retry pending;
+no new performance result.
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**

@@ -8,13 +8,13 @@ import time
 
 
 PROFILER_FLAGS = ('TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER', 'TT_METAL_PROFILER_TRACE_TRACKING',
-    'TT_METAL_PROFILER_CPP_POST_PROCESS')
+    'TT_METAL_PROFILER_CPP_POST_PROCESS', 'TT_METAL_PROFILER_MID_RUN_DUMP')
 
 
 class RequestVerifierProfile:
     def __init__(self, operations, mesh, *, signpost=None):
         if not all(os.environ.get(name) == '1' for name in PROFILER_FLAGS):
-            raise ValueError('Request attribution requires all four runtime profiler flags')
+            raise ValueError('Request attribution requires runtime profiling with incremental device-data dumps')
         if signpost is None:
             from tracy import signpost
         self.operations, self.mesh, self.signpost = operations, mesh, signpost

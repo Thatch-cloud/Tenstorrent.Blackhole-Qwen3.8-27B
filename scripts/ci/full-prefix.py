@@ -13,6 +13,7 @@ import time
 from gdn_snapshot import ActiveSnapshot
 from attention_batch import capture_operation
 from verifier_trace_profile import PROFILE_BASE_FLAGS, PROFILE_BEST_FLAGS
+from request_verifier_profile import PROFILER_FLAGS
 
 
 def active_serial_logits(logits, vocab_size):
@@ -115,8 +116,7 @@ def main():
     if dflash_profile not in ('0', '1') or (dflash_profile == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba, dflash_cache_abba, dflash_projection_abba))
-             or not all(os.environ.get(name) == '1' for name in ('TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER',
-                 'TT_METAL_PROFILER_TRACE_TRACKING', 'TT_METAL_PROFILER_CPP_POST_PROCESS')))):
+             or not all(os.environ.get(name) == '1' for name in PROFILER_FLAGS))):
         parser.error('Request verifier profiling requires the isolated cached 4K T8 audit and all profiler flags')
     if dflash_projection_abba not in ('0', '1') or (dflash_projection_abba == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'

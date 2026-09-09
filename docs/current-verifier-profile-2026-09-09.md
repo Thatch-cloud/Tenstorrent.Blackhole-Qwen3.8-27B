@@ -40,7 +40,7 @@ not CPU utilization.
 
 ## Gate status
 
-859 CI tests and60 harness tests pass. Tests cover real-call observation, error
+860 CI tests and60 harness tests pass. Tests cover real-call observation, error
 handling, profiling-only summaries, markers, both-chip coverage, replay counts,
 overlapping intervals and rejected mixed configurations. The parser also reads
 the preserved older C++ CSV successfully; that is a format check, not new timing.
@@ -48,4 +48,34 @@ the preserved older C++ CSV successfully; that is a format check, not new timing
 This changes instrumentation only: no new kernel math, trace contents or serving
 defaults. The underlying runtime already passed learned simulator and full-request
 hardware gates. [Hardware run34296336943](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34296336943)
-is running on `8460b69`; it has not produced an attribution result yet.
+on `8460b69` failed during profiler finalization, after the complete request audit
+passed. It is not a new throughput result.
+
+## Profiler memory failure and correction
+
+| Evidence | Result |
+| --- | --- |
+| Saved request | Passed, CTX4,096, 121 committed tokens through EOS; all 17 real verifier calls recorded |
+| Correctness and marker revalidation | Passed against the downloaded request and console artifacts |
+| Container memory | Peak 103,079,215,104 bytes (96 GiB); `oom_kill=1`, `oom=12` |
+| Device attribution | Missing C++ CSV; no kernel attribution can be claimed |
+
+Request artifact SHA256:
+`a430df3e2934355eb638c7242c15a0d0374d08147581debf762d82cb8f737487`.
+The saved host profile places 1.048 s of 1.136 s in the blocking verifier
+replay/readback callback across 17 calls. This is not evidence of a Python-only
+bottleneck or a replacement for the missing device measurements.
+
+The wrapper previously disabled mid-run dumps. At pinned TT-Metal `9f9cd4f`,
+`ReadDeviceProfiler` then retains device markers until final processing.
+Incremental dumps instead analyze and append the C++ CSV, then clear those
+markers. The retry requires `TT_METAL_PROFILER_MID_RUN_DUMP=1` and passes Tracy's
+`--dump-device-data-mid-run` option. It retains every real verifier call and all
+native audits, with before/after cgroup evidence; it does not raise the memory
+limit or reduce correctness coverage.
+
+The tests also reject missing incremental-dump configuration before opening
+hardware or observing a request. This is a source-grounded collection fix, not
+yet a successful hardware profile.
+Mid-run dumping weakens cross-device clock alignment; attribution remains
+per-chip, and no cross-chip critical-path claim is permitted.
