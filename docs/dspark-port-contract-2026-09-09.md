@@ -127,7 +127,7 @@ The original FP32 gate rejects this policy. No tolerance is widened.
 | Gate | Current result |
 | --- | --- |
 | Small native-policy simulator, 64 IDs / 3 proposals | **80 checks pass**, both chips, exact scores, changed-input replay and clean exit |
-| Learned native-policy simulator, 248,320 IDs / 7 proposals | Running: `20260909T123008Z-401`; not qualified yet |
+| Learned native-policy simulator, 248,320 IDs / 7 proposals | First eager trajectory passes on both chips; `20260909T123008Z-401` continues, not qualified yet |
 | Unchanged target tokens/GDN/KV with DSpark | Not integrated or measured |
 
 The small run is `20260909T122916Z-419`; report SHA256:
@@ -168,6 +168,33 @@ Primary sources at Transformers commit
 [`cc832f9`](https://github.com/huggingface/transformers/tree/cc832f9055ba11c8c55f918ab4bda9472b910d48):
 [YaRN parameters](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/modeling_rope_utils.py),
 [Qwen3 rotary forward](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/models/qwen3/modeling_qwen3.py).
+
+### Native rotary gate prepared
+
+The simulator-only rotary composition is queued behind the complete Markov gate;
+it must not open a second simulator while the first is active. No rotary device
+result is claimed yet. The native operation receives FP32-widened BF16 heads and
+YaRN tables, then returns BF16 proposal heads. This is not a new fused kernel.
+
+| Coverage | Required check |
+| --- | --- |
+| TP2 query heads | 16 heads/chip, seven live rows, padded to32 |
+| TP2 key heads | Four heads/chip,39 and4,103 live rows, padded to64 and4,128 |
+| Absolute positions | Changed tables alone change live output; includes the8192 boundary and last position262143 |
+| Padding | Poisoning only unused rows must leave every live output bit unchanged |
+| Trace | Five changed-input replays per shape; all padded outputs and addresses match their own eager reference |
+| Ownership | Every borrowed head/table input remains bitwise unchanged; missing table updates are detected |
+
+The planned matrix has234 checks. CPU comparisons retain the existing widened
+draft-rotary threshold of0.01 relative/absolute; raw full/valid-row errors and
+bitwise equality are reported separately. Exact CPU YaRN tables do not imply
+bitwise-exact device multiplication. Replay and padding isolation require exact
+bits regardless of that numerical threshold. Final target-token/state and coding
+quality gates are unchanged and still outstanding.
+
+Validation:1,085 host tests and58 simulator-harness tests pass, including64 DSpark
+CPU tests. `dspark_rotary_gate.py` independently rejects missing coordinates,
+failed controls, stale sources, unclean teardown and unsupported arithmetic policy.
 
 ## Complete learned weights staged
 

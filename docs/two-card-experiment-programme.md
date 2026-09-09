@@ -36,12 +36,16 @@ isolates native BF16 grouped-product matmul rounding:64 learned columns match
 the existing Blackhole arithmetic reference bitwise, while addition is exact.
 The failed FP32 gate remains rejected. The separate native-arithmetic policy now
 passes80 small simulator checks; learned248,320-ID/7-proposal run
-`20260909T123008Z-401` is underway, not qualified. It retains independent FP32
-diagnostics rather than widening the old tolerance. DSpark-specific YaRN CPU
+`20260909T123008Z-401` passes its first eager trajectory on both chips and continues;
+it is not qualified yet. It retains independent FP32 diagnostics rather than
+widening the old tolerance. DSpark-specific YaRN CPU
 tables match pinned upstream functions bitwise at21 selected positions through
 262143; this is not a262K model run. Both Markov matrices agree with the verified
-3.714GB checkpoint. No DSpark backbone, target integration, acceptance or hardware
-throughput is certified. [Detailed boundaries](dspark-port-contract-2026-09-09.md).
+3.714GB checkpoint. A234-check native rotary matrix is prepared and queued behind
+the Markov gate, covering position changes, poisoned padding and exact own-policy
+replay. All1,085 host and58 harness tests pass; these are not rotary device results.
+No DSpark backbone, target integration, acceptance or hardware throughput is
+certified. [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.

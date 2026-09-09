@@ -9,7 +9,7 @@ import unittest
 
 @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'Linux shell regression test')
 class DispatchWrapperTests(unittest.TestCase):
-    def run_edit_race(self, source):
+    def run_edit_race(self, source, probe='dispatch-probe'):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             simulator = root / 'simulator'
@@ -27,7 +27,7 @@ class DispatchWrapperTests(unittest.TestCase):
             wrapper = root / 'run-dispatch-probe.sh'
             wrapper.write_text(source)
             environment = {**os.environ, 'SIM_ROOT': str(root), 'QWEN_SIM_PACKER_ZERO_GRAFT': '0',
-                'QWEN_SIM_SHARED_BDF': '0', 'QWEN_SIM_DISPATCH_PROBE': 'dispatch-probe', 'KERNEL_TIMEOUT': '10'}
+                'QWEN_SIM_SHARED_BDF': '0', 'QWEN_SIM_DISPATCH_PROBE': probe, 'KERNEL_TIMEOUT': '10'}
             process = subprocess.Popen(['bash', str(wrapper)], env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
@@ -63,6 +63,13 @@ class DispatchWrapperTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn('unexpected EOF', output)
         self.assertEqual(statuses, [])
+
+    def test_dspark_rotary_route_preserves_terminal_status(self):
+        source = Path(__file__).with_name('run-dispatch-probe.sh').read_text()
+        code, output, statuses = self.run_edit_race(source, 'dspark-rotary-probe')
+        self.assertEqual(code, 0, output)
+        self.assertIn('dspark-rotary-probe.json', output)
+        self.assertEqual(statuses, ['0'])
 
 
 if __name__ == '__main__':
