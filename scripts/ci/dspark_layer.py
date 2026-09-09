@@ -2,10 +2,11 @@
 
 from dspark_attention import execute as attend
 from dspark_projection import compute_config, require_tensor
+from dspark_residual import add as add_residual
 from dspark_rotary_device import execute as rotate
 
 
-POLICY = 'TP2 BF16 learned weights; HiFi4 FP32 projections; explicit BF16 casts; composed FP32 RMS/rotary/SiLU; precise chunk64 attention; FP32 TP sums'
+POLICY = 'TP2 BF16 learned weights; HiFi4 FP32 projections; explicit BF16 casts; composed FP32 RMS/rotary/SiLU; precise chunk64 attention; FP32 TP sums; explicitly widened residual operands'
 CONTEXT_ROWS = 32
 PROPOSAL_ROWS = 7
 PADDED_ROWS = 32
@@ -130,7 +131,7 @@ def reduce_residual(operations, first, second, residual, retain):
     require_tensor(operations,residual,(1,1,32,5120),operations.bfloat16)
     summed = retain(operations.add(first,second,dtype=operations.float32,memory_config=operations.DRAM_MEMORY_CONFIG))
     narrowed = retain(operations.typecast(summed,operations.bfloat16))
-    output = retain(operations.add(residual,narrowed,dtype=operations.bfloat16,memory_config=operations.DRAM_MEMORY_CONFIG))
+    output = add_residual(operations,residual,narrowed,retain,widen_inputs=True)
     return summed,narrowed,output
 
 

@@ -21,7 +21,7 @@ from native_draft_sdpa import KERNEL_DIRECTORY, SOURCE_HASHES, audit_active_kern
 
 SOURCES = ('dspark-layer-probe.py','dspark_layer.py','dspark_layer_reference.py','dspark_layer_gate.py',
     'dspark_projection.py','dspark-projection-probe.py','dspark_norm_precision.py','dspark_projection_gate.py',
-    'dspark_attention.py','draft_attention.py','dspark_rotary_device.py','dspark_rope_tables.py',
+    'dspark_attention.py','draft_attention.py','dspark_rotary_device.py','dspark_rope_tables.py','dspark_residual.py',
     'dspark_backbone_reference.py','dspark-backbone-cpu.py','dspark_intake.py','dspark_checkpoint.py',
     'dspark_weights.py','dspark_markov_fixture.py','dspark_markov_gate.py','feature_projection.py',
     'attention_batch.py','gdn_multitoken_conv.py','native_draft_sdpa.py',

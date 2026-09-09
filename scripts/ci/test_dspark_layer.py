@@ -136,12 +136,15 @@ class DSparkLayerTests(unittest.TestCase):
     def test_tp_sum_is_fp32_then_bf16_then_residual(self):
         runtime = operations()
         summed,output = SimpleNamespace(),SimpleNamespace()
-        runtime.add.side_effect = [summed,output]
+        runtime.add.return_value = summed
         residual = tensor((1,1,32,5120))
-        result = reduce_residual(runtime,tensor((1,1,32,5120),'fp32'),tensor((1,1,32,5120),'fp32'),residual,lambda value:value)
+        retain = lambda value:value
+        with patch('dspark_layer.add_residual',return_value=output) as added:
+            result = reduce_residual(runtime,tensor((1,1,32,5120),'fp32'),tensor((1,1,32,5120),'fp32'),residual,retain)
+        runtime.add.assert_called_once()
         self.assertEqual(runtime.add.call_args_list[0].kwargs['dtype'],'fp32')
         self.assertEqual(runtime.typecast.call_args.args,(summed,'bf16'))
-        self.assertEqual(runtime.add.call_args_list[1].args,(residual,runtime.typecast.return_value))
+        added.assert_called_once_with(runtime,residual,runtime.typecast.return_value,retain,widen_inputs=True)
         self.assertEqual(result,(summed,runtime.typecast.return_value,output))
 
     def test_reference_preserves_residual_rounding_and_half_split_rotary(self):

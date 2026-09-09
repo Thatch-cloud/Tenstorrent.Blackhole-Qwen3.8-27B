@@ -74,8 +74,21 @@ alternative passing threshold. All six cases/chips remain in
 
 A short residual diagnostic reproduces all 12 native controls exactly. Merely
 requesting an FP32 output before a BF16 cast still fails all 12 candidate exact
-checks, with clean exit 1. The next probe must widen the operands too; no
-full-weight reload is needed to isolate this arithmetic.
+checks, with clean exit 1. Explicitly widening **both BF16 inputs** before the
+FP32 addition and final BF16 cast fixes this on all retained operands:
+`20260909T180713Z-404` passes 12 exact native controls, 12 exact CPU-reference
+candidates and 24 unchanged-input checks (48/48), with clean exit 0 and unchanged
+native runtime. No full-weight reload or CPU arithmetic fallback is involved.
+Report `scripts/ci/dspark-residual-wide-simulator.json`, SHA256
+`850be2b14fc5c1f87e7320e85fc841b008f4ecbf05de1c98b23633fd12f4e116`.
+
+Both layer residual boundaries now explicitly use this helper, and its source
+is included in the layer report closure. This is an integrated candidate, not
+a new full-layer pass: learned attention and down-projection discrepancies
+remain open. Their saved operands are the next short diagnostic fixtures;
+the original 102/192 failure and all qualification thresholds are retained.
+The integrated helper passes all 1,160 host tests and 59 simulator-harness tests;
+the simulator wrapper also passes shell syntax validation.
 
 | Full-matrix requirement | Checks |
 | --- | ---: |

@@ -98,6 +98,10 @@ all input, parameter, padding and CPU checks pass. Native grafts are restored,
 the failed evidence is retained, and no hardware promotion follows. Own-input
 attribution separates accumulated error from attention/down-projection and
 residual-rounding differences. All 1,154 host and 59 harness tests pass at this checkpoint.
+The captured-input residual follow-up passes **48/48 exact checks** after
+explicitly widening both operands. Both layer residuals now use that candidate;
+attention/down-projection diagnostics and the full 664-check gate remain open.
+This component fix does not change the measured 74.27 TG hardware result.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
