@@ -11,12 +11,12 @@ from attention_batch import capture_operation
 from dspark_attention import full_mask, validate_mask
 from dspark_backend_reference import FP32Backbone
 from dspark_checkpoint import CHECKPOINT_SHA256
-from dspark_hardware_gate import simulator_preflight, native_fingerprints, require_compatible_native
+from dspark_hardware_gate import digest, simulator_preflight, native_fingerprints, require_compatible_native
 from dspark_intake import FILES, TAPS
 from dspark_layer import SPECIFICATIONS, WIDE_POLICY
 from dspark_layer_diagnostic import error_summary
 from dspark_pipeline import INPUTS, PARAMETERS, execute, flatten, pack_parameter
-from dspark_projection import digest, tensor_digest
+from dspark_projection import tensor_digest
 from dspark_rope_tables import DSparkRotary
 from dspark_weights import VerifiedWeights
 from feature_projection import require_projection_environment
@@ -70,6 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint','config','output'):
         parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--preflight',action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ,True)
     link_policy = validate(os.environ)
@@ -82,6 +83,7 @@ def main():
         'dspark_pipeline.py','dspark_backbone_mesh.py','dspark-pipeline-hardware.py','dspark_hardware_gate.py',
         'dspark_backend_reference.py','dspark_backend_attribution.py','dspark_upstream_backbone.py',
         'dspark_rope_reference.py','dspark-hardware-fixtures.py','run-dspark-hardware.sh','dspark-hardware-suite.sh'}
+    source_names.update(('dspark_runtime_cache.py','ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py'))
 
     def source_hashes():
         return {name:digest(Path(__file__).parent/name) for name in sorted(source_names)}
@@ -90,6 +92,13 @@ def main():
     root = Path(os.environ['TT_METAL_HOME'])
     native = native_fingerprints(root,layer_report)
     require_compatible_native(native,layer_report['native_sources'])
+    if options.preflight:
+        import sys
+
+        cases = fixtures(json.loads(options.config.read_text()))
+        options.output.write_text(json.dumps(dict(passed=True,scope='Python/config/source/input compatibility; no device execution',
+            python=sys.version,cases=len(cases),sources=source_hashes(),native_sources=native,simulator_preflight=gate),indent=2)+'\n')
+        return
     report = dict(passed=False,closed_cleanly=False,checkpoint_closed=False,scope=__doc__,backend='hardware',
         context_rows=32,proposal_rows=7,layers=5,learned_parameters=58,policy=WIDE_POLICY,
         target_integrated=False,full_pipeline_captured=False,backbone_with_projection_captured=False,

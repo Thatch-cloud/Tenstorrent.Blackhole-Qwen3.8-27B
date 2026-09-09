@@ -370,6 +370,18 @@ integration, 4K history and committed-token acceptance remain subsequent gates.
 All 1,213 host tests and 59 simulator-harness tests pass before dispatch.
 Hardware run [`34410668392`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34410668392)
 uses immutable code `b8acf391414efe0a5fab03daaf39255f6d89327c`.
+It failed **before opening the mesh**: the pinned image uses Python 3.10.12,
+but the simulator-side file hash helper requires Python 3.11. The checkpoint
+was successfully staged and verified; no backbone timing or numerical result
+was produced. The failed-run record retains exit 1 and its log hash.
+
+The hardware adapter now uses a streaming SHA-256 helper without changing any
+frozen arithmetic/reference source. Python/config/source/input preflight runs
+**before** compilation. The first attempt spent 260 seconds rebuilding the
+runtime; a new content-addressed cache preserves that isolated library for
+subsequent runs, keyed by the pinned image, build scripts and registration patch.
+Cache restores verify both library paths and reapply the audited CCL source
+patches. Cache hits and timing are recorded; savings are not yet measured.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven

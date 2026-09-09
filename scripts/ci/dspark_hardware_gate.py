@@ -1,15 +1,22 @@
 """Scope the hardware integration experiment to unchanged simulator-tested arithmetic."""
 
+import hashlib
 import json
 from pathlib import Path
-
-from dspark_projection import digest
 
 
 REPORTS = {
     'dspark-projection-composed-simulator.json':'082e2ba464320b7ad91312e196b8c5f75406a6d2494ed7f1ebafd184b55303dc',
     'dspark-layer-mesh-simulator.json':'1374f6cbd1704a04069d29b8fa0b32db523972298e19699d0b45df2848a8607a',
 }
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda:stream.read(1048576),b''):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
 def simulator_preflight(root):

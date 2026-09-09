@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dspark_hardware_gate import REPORTS, simulator_preflight, require_compatible_native
+from dspark_hardware_gate import REPORTS, digest, simulator_preflight, require_compatible_native
 from test_dspark_intake import configuration
 
 
@@ -20,6 +20,16 @@ def dependency(name):
 
 
 class DSparkHardwareGateTests(unittest.TestCase):
+    def test_sha256_supports_the_python310_hardware_runtime(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'payload'
+            data = b'complete payload' * 100000
+            path.write_bytes(data)
+            with patch.object(hashlib,'file_digest',side_effect=AssertionError('Python3.11-only API'),create=True):
+                self.assertEqual(digest(path),hashlib.sha256(data).hexdigest())
+
     def test_current_complete_component_evidence_does_not_claim_pipeline_or_numerical_qualification(self):
         result = simulator_preflight(ROOT)
         self.assertEqual(result['reports'],REPORTS)

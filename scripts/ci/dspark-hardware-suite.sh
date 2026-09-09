@@ -10,8 +10,11 @@ test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
 export PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+python3 /experiment-scripts/ci/dspark-pipeline-hardware.py --preflight \
+    --checkpoint /dspark/model.safetensors --config /dspark/config.json \
+    --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
-bash /experiment-scripts/ci/ccl-links-build.sh
+python3 /experiment-scripts/ci/dspark_runtime_cache.py
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e

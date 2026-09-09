@@ -1,0 +1,16 @@
+{
+  "run_id": 34410668392,
+  "source_revision": "b8acf391414efe0a5fab03daaf39255f6d89327c",
+  "artifact_id": 10127299332,
+  "conclusion": "failure",
+  "probe_exit_status": 1,
+  "python_version_from_build_log": "3.10.12",
+  "runtime_build_seconds": 260,
+  "probe_log_sha256": "7e2269f4561d138611083280bd905424158a50cc97b14dd45a1db0a9384617ff",
+  "error": "AttributeError: module 'hashlib' has no attribute 'file_digest'",
+  "failed_stage": "config hash before report creation and mesh open",
+  "checkpoint_staged_and_verified": true,
+  "backbone_executed": false,
+  "committed_tg": null,
+  "scope": "Host Python compatibility failure, not kernel execution or a numerical result"
+}
