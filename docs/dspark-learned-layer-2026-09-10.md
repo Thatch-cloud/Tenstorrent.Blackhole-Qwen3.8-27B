@@ -305,7 +305,19 @@ this component result alone.
 
 The next five-layer device chain is also wired, keeping projected context and
 rotary inputs shared while passing each layer's actual output into the next.
-The complete learned run `20260909T205211Z-403` is now active on code `e83cbdb`.
+The complete learned run `20260909T205211Z-403` on code `e83cbdb` was interrupted
+by an unclean WSL restart during the fifth layer's weight loading. It recorded
+88 passing parameter checks but **no five-layer forward result**. The launcher
+ended with status 1; the native wrapper's exit-status file is missing, so this
+is not a clean kernel failure or a passing matrix. The raw report and a separate
+interruption record are retained.
+
+Windows also reported `Thread failed to start`. Host memory pressure is a
+plausible cause, not proven. All 1,496 native fingerprints remain unchanged.
+The retry now requires a **per-run 3-GiB memory / 4-GiB swap cgroup budget**,
+with boot identity and OOM counters recorded. Global WSL settings, serving
+defaults, arithmetic and the complete test matrix are unchanged.
+
 It uploads and audits one tensor at a time rather than keeping duplicate CPU
 copies of all weights. Its matrix includes all 56 backbone parameters, all 131
 device stage tensors, three eager cases and four changing-input trace replays:
@@ -321,8 +333,8 @@ or discard the anchor query row. Four bridge orchestration tests pass; its
 vocabulary collective still needs simulation before integration.
 Its full-size transport probe is prepared with 50 checks, including swapped-rank
 and dropped-row-zero controls. This uses synthetic logits, not target weights or
-Markov inference. It will run only after the active backbone simulation closes;
-the active run's source-pinned wrapper remains unchanged.
+Markov inference. It is the next bounded-memory simulator check before retrying
+the complete backbone; no native process from the interrupted run remains.
 
 ## Next gates
 

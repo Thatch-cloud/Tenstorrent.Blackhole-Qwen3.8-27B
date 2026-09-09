@@ -17,6 +17,7 @@ from dspark_weights import VerifiedWeights
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from projection_link_policy import validate
+from sim_memory_budget import require_clean, snapshot
 
 
 BACKEND_REPORT = 'dspark-backend-cpu-reference.json'
@@ -41,7 +42,7 @@ def dependency(name):
 LAYER = dependency('dspark-layer-mesh-probe')
 BACKEND = dependency('dspark-backend-reference')
 SOURCES = tuple(sorted(set(LAYER.SOURCES+BACKEND.SOURCES+('dspark-backbone-mesh-probe.py',
-    'dspark_backbone_mesh.py',BACKEND_REPORT,LAYER_REPORT))))
+    'dspark_backbone_mesh.py','sim_memory_budget.py',BACKEND_REPORT,LAYER_REPORT))))
 
 
 def source_hashes():
@@ -83,10 +84,11 @@ def main():
     link_policy = validate(os.environ)
     outputs_path = options.output.with_suffix('.operands.pt')
     if (options.output.exists() or outputs_path.exists() or os.environ.get('QWEN_SIM_SHARED_BDF')!='1'
+            or os.environ.get('QWEN_SIM_BOUNDED_MEMORY')!='1'
             or Path(os.environ['TT_METAL_SIMULATOR']).parent.name!='shared-bdf'
             or any(os.environ.get(name)=='1' for name in ('QWEN_HARDWARE_TESTS','QWEN_CARDS_ALLOCATED',
                 'QWEN_PRECISE_DRAFT_ACTIVE','QWEN_SIM_PACKER_ZERO_GRAFT'))):
-        raise ValueError('Fresh simulator evidence, shared BDF and original runtime required; hardware is prohibited')
+        raise ValueError('Fresh bounded-memory simulator evidence, shared BDF and original runtime required; hardware is prohibited')
     original,control = load_capture(options.capture,options.operands,composed_layer=True)
     backend,cpu = load_backend(options.backend_outputs)
     layer_path = Path(__file__).with_name(LAYER_REPORT)
@@ -109,7 +111,7 @@ def main():
         retained_layer_numerical_gate_passed=False,closed_cleanly=False,checkpoint_closed=False,
         scope=__doc__,backend='simulator',layers=5,context_rows=32,proposal_rows=7,policy=WIDE_POLICY,
         link_policy=link_policy,tolerance=TOLERANCE,checkpoint_sha256=CHECKPOINT_SHA256,
-        sources=sources,native_sources=native,capture_sha256=COMPOSED_REPORT_SHA256,
+        sources=sources,native_sources=native,resources_before=snapshot(bounded=True),capture_sha256=COMPOSED_REPORT_SHA256,
         operands_sha256=COMPOSED_OPERANDS_SHA256,layer_report_sha256=LAYER_REPORT_SHA256,
         backend_report_sha256=BACKEND_REPORT_SHA256,backend_outputs_sha256=BACKEND_OUTPUTS_SHA256,
         reference_context='CPU uses frozen FC context; device uses retained learned native FC context',
@@ -305,6 +307,8 @@ def main():
             report['sources_after'],report['native_sources_after'] = source_hashes(),LAYER.MESH.fingerprints(root)
             if report['sources_after']!=report['sources'] or report['native_sources_after']!=report['native_sources']:
                 raise ValueError('Backbone sources or native runtime changed')
+            report['resources_after'] = snapshot(bounded=True)
+            require_clean(report['resources_before'],report['resources_after'])
             if eager:
                 with outputs_path.open('xb') as stream:
                     torch.save(dict(sources=report['sources'],native_sources=report['native_sources'],policy=WIDE_POLICY,

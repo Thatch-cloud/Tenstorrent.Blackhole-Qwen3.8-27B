@@ -13,13 +13,14 @@ from dspark_vocabulary_fixture import inputs as fixture_inputs
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from projection_link_policy import validate
+from sim_memory_budget import require_clean, snapshot
 
 
 spec = importlib.util.spec_from_file_location('vocabulary_native',Path(__file__).with_name('dspark-mesh-probe.py'))
 MESH = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(MESH)
 SOURCES = tuple(sorted(set(MESH.SOURCES+('dspark-vocabulary-probe.py','dspark_vocabulary.py',
-    'dspark_vocabulary_fixture.py','dspark_inputs.py'))))
+    'dspark_vocabulary_fixture.py','dspark_inputs.py','sim_memory_budget.py'))))
 REPLAYS = (0,2,1,0)
 COUNTS = dict(eager_checks=12,replay_checks=16,input_checks=14,stale_controls=2,fixture_controls=6)
 
@@ -35,6 +36,7 @@ def main():
     require_projection_environment(os.environ,False)
     policy = validate(os.environ)
     if (options.output.exists() or os.environ.get('QWEN_SIM_SHARED_BDF')!='1'
+            or os.environ.get('QWEN_SIM_BOUNDED_MEMORY')!='1'
             or Path(os.environ['TT_METAL_SIMULATOR']).parent.name!='shared-bdf'
             or any(os.environ.get(name)=='1' for name in ('QWEN_HARDWARE_TESTS','QWEN_CARDS_ALLOCATED',
                 'QWEN_PRECISE_DRAFT_ACTIVE','QWEN_SIM_PACKER_ZERO_GRAFT'))):
@@ -45,7 +47,8 @@ def main():
 
     root = Path(os.environ['TT_METAL_HOME'])
     report = dict(passed=False,closed_cleanly=False,scope=__doc__,backend='simulator',link_policy=policy,
-        sources=source_hashes(),native_sources=MESH.fingerprints(root),vocabulary=248320,proposal_rows=7,
+        sources=source_hashes(),native_sources=MESH.fingerprints(root),resources_before=snapshot(bounded=True),
+        vocabulary=248320,proposal_rows=7,
         synthetic_logits=True,target_head_executed=False,markov_executed=False,physical_fabric_tested=False,
         target_integrated=False,full_pipeline_captured=False,eligible_for_hardware=False,
         **{name:[] for name in COUNTS})
@@ -156,6 +159,8 @@ def main():
             report['sources_after'],report['native_sources_after'] = source_hashes(),MESH.fingerprints(root)
             if report['sources_after']!=report['sources'] or report['native_sources_after']!=report['native_sources']:
                 raise ValueError('Vocabulary handoff sources or native runtime changed')
+            report['resources_after'] = snapshot(bounded=True)
+            require_clean(report['resources_before'],report['resources_after'])
             report['closed_cleanly'] = True
         except BaseException as error:
             report['passed'] = False

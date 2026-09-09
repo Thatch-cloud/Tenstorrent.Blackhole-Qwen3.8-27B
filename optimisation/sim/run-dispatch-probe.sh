@@ -31,8 +31,15 @@ if [ "${QWEN_SIM_SHARED_BDF:-0}" = 1 ]; then
 fi
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
+launcher=()
+case "${QWEN_SIM_BOUNDED_MEMORY:-0}" in
+    0) ;;
+    1) launcher=(systemd-run --scope --quiet --collect --unit="qwen-ttsim-$RUN_ID"
+        -p MemoryMax=3221225472 -p MemorySwapMax=4294967296 --) ;;
+    *) printf 'QWEN_SIM_BOUNDED_MEMORY must be 0 or 1\n' >&2; exit 64 ;;
+esac
 PROBE=${QWEN_SIM_DISPATCH_PROBE:-dispatch-probe}
-[[ "$PROBE" = dspark-layer-probe || "$PROBE" = dspark-residual-probe || "$PROBE" = dspark-attention-captured-probe || "$PROBE" = dspark-mesh-probe || "$PROBE" = dspark-layer-mesh-probe || "$PROBE" = dspark-backbone-mesh-probe ]] ||
+[[ "$PROBE" = dspark-layer-probe || "$PROBE" = dspark-residual-probe || "$PROBE" = dspark-attention-captured-probe || "$PROBE" = dspark-mesh-probe || "$PROBE" = dspark-layer-mesh-probe || "$PROBE" = dspark-backbone-mesh-probe || "$PROBE" = dspark-vocabulary-probe ]] ||
 [[ "$PROBE" = dspark-norm-precision-probe || "$PROBE" = dspark-projection-probe || "$PROBE" = dspark-attention-probe || "$PROBE" = dspark-rotary-probe || "$PROBE" = dspark-markov-rounding-probe || "$PROBE" = dspark-markov-probe || "$PROBE" = proposal-native-attention-probe || "$PROBE" = tensix-mlp-view-probe || "$PROBE" = draft-live-attention-probe || "$PROBE" = tensix-weight-stream-probe || "$PROBE" = tensix-stream-projection-probe || "$PROBE" = tensix-stream-mlp-probe ]] ||
 [[ "$PROBE" = tensor-prefetch-capability || "$PROBE" = draft-live-qk-probe || "$PROBE" = tiny-mlp-probe || "$PROBE" = tiny-tile-matmul-probe || "$PROBE" = draft-kv-history-probe || "$PROBE" = draft-kv-projection-probe || "$PROBE" = dflash-prefill-window-probe || "$PROBE" = draft-convolution-fused-probe || "$PROBE" = dflash-proposal-trace-probe || "$PROBE" = native-draft-operands-probe || "$PROBE" = draft-head-layout-probe || "$PROBE" = draft-key-concat-probe || "$PROBE" = dflash-history-probe ]] ||
 [[ "$PROBE" = mtp-feedback-probe || "$PROBE" = real-attention-probe || "$PROBE" = short-attention-replay-probe || "$PROBE" = sampling-native-rows-probe || "$PROBE" = mtp-hidden-row-probe || "$PROBE" = draft-attention-trace-probe || "$PROBE" = draft-mlp-trace-probe || "$PROBE" = draft-mlp-replay-probe || "$PROBE" = packed-weight-probe || "$PROBE" = fused-batch-probe || "$PROBE" = draft-head-probe ]] ||
@@ -42,7 +49,7 @@ REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$REPORT"
 cd "$SIM_ROOT"
 status=0
-timeout -k 10 "${KERNEL_TIMEOUT:-300}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/../../scripts/ci/$PROBE.py" \
+"${launcher[@]}" timeout -k 10 "${KERNEL_TIMEOUT:-300}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/../../scripts/ci/$PROBE.py" \
     --output "$REPORT" "$@" 2>&1 | tee "$SIM_ROOT/results/$RUN_ID-$PROBE.log" || status=$?
 printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-$PROBE.exit-status"
 exit "$status"
