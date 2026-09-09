@@ -72,6 +72,17 @@ class DSparkHardwareGateTests(unittest.TestCase):
         self.assertFalse(torch.equal(cases[0]['values']['q_cos'],cases[1]['values']['q_cos']))
         self.assertFalse(torch.equal(cases[0]['values']['noise'],cases[2]['values']['noise']))
 
+    def test_prebuild_only_defers_library_alignment_not_source_qualification(self):
+        native = {'build_Release/lib/_ttnncpp.so':'installed','build_Release/ttnn/_ttnncpp.so':'staged','kernel.cpp':'same'}
+        simulator = {**native,'build_Release/lib/_ttnncpp.so':'sim','build_Release/ttnn/_ttnncpp.so':'sim'}
+        require_compatible_native(native,simulator,require_built_library=False)
+        with self.assertRaises(ValueError):
+            require_compatible_native(native,simulator)
+        with self.assertRaises(ValueError):
+            require_compatible_native({**native,'kernel.cpp':'changed'},simulator,require_built_library=False)
+        with self.assertRaises(ValueError):
+            require_compatible_native({},simulator,require_built_library=False)
+
     def test_cached_config_is_verified_before_reuse_without_network(self):
         module = dependency('dspark-hardware-fixtures')
         with tempfile.TemporaryDirectory() as directory:

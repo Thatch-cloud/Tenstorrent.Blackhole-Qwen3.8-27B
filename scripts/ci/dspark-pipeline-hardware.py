@@ -91,13 +91,14 @@ def main():
     layer_report = json.loads(Path(__file__).with_name('dspark-layer-mesh-simulator.json').read_text())
     root = Path(os.environ['TT_METAL_HOME'])
     native = native_fingerprints(root,layer_report)
-    require_compatible_native(native,layer_report['native_sources'])
+    require_compatible_native(native,layer_report['native_sources'],require_built_library=not options.preflight)
     if options.preflight:
         import sys
 
         cases = fixtures(json.loads(options.config.read_text()))
         options.output.write_text(json.dumps(dict(passed=True,scope='Python/config/source/input compatibility; no device execution',
-            python=sys.version,cases=len(cases),sources=source_hashes(),native_sources=native,simulator_preflight=gate),indent=2)+'\n')
+            python=sys.version,cases=len(cases),sources=source_hashes(),native_sources=native,simulator_preflight=gate,
+            built_library_validation='deferred until build/cache restore; mandatory before device execution'),indent=2)+'\n')
         return
     report = dict(passed=False,closed_cleanly=False,checkpoint_closed=False,scope=__doc__,backend='hardware',
         context_rows=32,proposal_rows=7,layers=5,learned_parameters=58,policy=WIDE_POLICY,

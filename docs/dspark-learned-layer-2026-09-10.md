@@ -402,6 +402,13 @@ built library. Twelve targeted restoration/cache/compatibility checks pass.
 The source-aligned retry is
 [`34412639592`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34412639592),
 code `d1bd01191ff236994bf1bbc63ceeec1e819b828b`.
+It confirms the slice restoration and native numerical-source parity, then
+stops at an incorrectly placed **pre-build** library-alignment check. The image's
+installed and staged libraries are not identical until the existing build step
+synchronizes them. That alignment check now runs after build/cache restore,
+still mandatorily before device execution; source checks remain before build.
+Seven compatibility tests pass, including rejection of mismatched post-build
+libraries and changed sources at either stage. No numerical gate is waived.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven

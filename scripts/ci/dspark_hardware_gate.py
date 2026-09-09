@@ -51,10 +51,12 @@ def native_fingerprints(root, simulator_report):
     return {name:digest(root/name) for name in sorted(names)}
 
 
-def require_compatible_native(native, simulator):
+def require_compatible_native(native, simulator, *, require_built_library=True):
+    if type(require_built_library) is not bool:
+        raise ValueError('Explicit pre-build or built-library validation stage required')
     rebuilt = {'build_Release/lib/_ttnncpp.so','build_Release/ttnn/_ttnncpp.so'}
     for name,sha in simulator.items():
         if name not in rebuilt and not name.startswith('simulator/') and native.get(name)!=sha:
             raise ValueError('Hardware numerical source differs from simulated arithmetic: '+name)
-    if any(name not in native for name in rebuilt) or len({native[name] for name in rebuilt})!=1:
+    if any(name not in native for name in rebuilt) or (require_built_library and len({native[name] for name in rebuilt})!=1):
         raise ValueError('Both runtime library paths must resolve to the same audited build')
