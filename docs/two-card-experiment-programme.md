@@ -93,7 +93,11 @@ all Q/K/V heads, full 17,408-channel MLP and explicit TP partial-sum boundaries.
 CPU preflight matches all six upstream checkpoints exactly. Its 664-check
 simulator matrix is separate from hardware/fabric qualification; the initial
 eager diagnostic cannot substitute for that matrix. Eager-only run
-`20260909T173511Z-440` is active, with all 1,154 host and 59 harness tests passing.
+`20260909T173511Z-440` completes all phases but fails 102/192 eager comparisons;
+all input, parameter, padding and CPU checks pass. Native grafts are restored,
+the failed evidence is retained, and no hardware promotion follows. Own-input
+attribution separates accumulated error from attention/down-projection and
+residual-rounding differences. All 1,154 host and 59 harness tests pass at this checkpoint.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
