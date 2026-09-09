@@ -1,6 +1,6 @@
 # Learned DSpark projection and normalization
 
-**Next step toward the complete learned drafter, not a new speed result.**
+**Complete learned FC/norm simulator matrix: 162 checks pass. Not a speed result.**
 The selector, rotary and attention components already have separate simulator
 evidence. This test starts connecting the actual backbone weights to the frozen,
 upstream-checked CPU reference.
@@ -12,7 +12,7 @@ upstream-checked CPU reference.
 | Fixtures | Two original CPU-reference patterns, each with 32 feature rows |
 | Parameters | Complete pinned BF16 `fc.weight` and `hidden_norm.weight` |
 | Projection | Native HiFi4 matmul with FP32 partials; no weight quantization |
-| Normalization | FP32 sum, BF16 projection, unweighted BF16 RMSNorm, separate BF16 gamma product |
+| Qualified normalization | FP32 square/reduce/rsqrt/product, explicit BF16 rounding, separate BF16 gamma product |
 | Comparator | Frozen learned CPU backbone, independently matched to upstream at 48 stages |
 
 The 32 rows are historical feature rows, not concurrent requests. DSpark rounds
@@ -49,10 +49,14 @@ and ownership checks pass. Every physical output row is included.
 
 ## Current status
 
-- 1,133 host tests and 59 simulator-harness tests pass, plus wrapper syntax.
+- **Corrected run `20260909T165726Z-382` passes all 162 checks**, including the
+  complete frozen-backbone comparisons, changed-input replay and ownership.
+  Independent qualification passes after clean mesh/checkpoint closure and
+  outer exit 0. Source/native fingerprints and both binaries remain unchanged.
+- 1,142 host tests and 59 simulator-harness tests pass, plus wrapper syntax.
 - The saved CPU inputs, projected-context tensors and all seven frozen reference
   sources match their recorded hashes. The learned gamma is not the identity.
-- Run `20260909T162015Z-395` completes all 162 checks but **fails two final-output
+- Original native-RMS run `20260909T162015Z-395` completes all 162 checks but **fails two final-output
   comparisons**: pattern 1 has four out-of-threshold elements on each chip.
   All 130 replay/input/parameter/control checks and 30 of 32 eager comparisons
   pass. The original native runtime and packer remain unchanged; mesh and
@@ -67,10 +71,17 @@ and ownership checks pass. Every physical output row is included.
 - Setup attempt `20260909T161941Z-387` failed before opening a mesh because the
   wrapper changes directory to `/opt/ttsim`; the retry supplies absolute paths.
 
-Next, fix the numerical mismatch and requalify the complete matrix, connect one learned attention/MLP layer,
+Next, connect one learned attention/MLP layer,
 then all five layers and the real target/collective path. A component pass does
 not establish coding acceptance or progress to 200 TG by itself. The retained
 4K hardware result remains PP 3,324.52 / CTX 4,096 / TG 74.27 for one stream.
+
+Qualified full-matrix report: `scripts/ci/dspark-projection-composed-simulator.json`.
+SHA256: `082e2ba464320b7ad91312e196b8c5f75406a6d2494ed7f1ebafd184b55303dc`.
+The complete observed tensor capture is retained locally, SHA256
+`ea13e5e19b8c041fdd8560982c03e5bfcc6e2d0e95747d285e95173b4af709e1`.
+The original failed reports remain unchanged; only the explicit composed policy
+qualifies. Fabric, a complete captured pipeline and target integration still do not.
 
 ## Numerical attribution
 

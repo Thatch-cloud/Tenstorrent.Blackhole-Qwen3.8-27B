@@ -78,13 +78,15 @@ locks released, and independent qualification passes. Learned TT backbone and
 real-target integration remain next; this is not a hardware or coding-quality result.
 [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
-The learned DSpark FC/normalization matrix completes all 162 checks but fails two
-final-output comparisons: four elements per chip on pattern 1. Full checkpoint
-tensors, all 5,120 outputs, two frozen CPU patterns and changed-input traces are
-retained; replay and ownership pass, with clean exit 1. The original tolerance
-rejects the result. An eager-only operand capture now isolates the numerical
-failure. Neither that diagnostic nor the explicit host handoff qualifies fabric
-or a complete pipeline. [Evidence](dspark-learned-projection-2026-09-10.md).
+The learned DSpark FC/normalization now **passes all 162 simulator checks** in
+run `20260909T165726Z-382`: full checkpoint tensors, all 5,120 outputs, two frozen
+CPU patterns and exact changed-input traces. Explicit FP32 normalization fixes
+the original accumulated rounding errors without changing the tolerance.
+Ownership, clean exit 0 and independent source/native reconciliation pass;
+1,142 host and 59 harness tests pass. Original native-RMS failures remain rejected.
+The explicit host handoff does not qualify fabric or a complete pipeline.
+One learned TT layer, then all five and target integration remain next.
+[Evidence](dspark-learned-projection-2026-09-10.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.

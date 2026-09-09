@@ -109,7 +109,9 @@ requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
 higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now has a verified
 learned CPU backbone and separate selector, rotary and full-context attention
 simulator passes. The 64-key attention candidate passes all 236 checks without
-loosening accuracy limits; historical failures remain recorded. The complete
+loosening accuracy limits. The complete learned feature projection and explicit
+FP32 normalization now pass 162 simulator checks, including changed-input replay;
+this is not a fabric or speed result. Historical failures remain recorded. The complete
 learned TT backbone and target integration are still pending: no DSpark TG claim.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,

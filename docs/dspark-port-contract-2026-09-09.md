@@ -1,6 +1,6 @@
 # DSpark v2: port contract, not a speed result
 
-**Status: selector, composed rotary and precise chunk64 attention pass; learned FC/norm accuracy remains open.**
+**Status: selector, composed rotary, precise chunk64 attention and learned FC/norm pass their component simulator gates.**
 No integrated DSpark backbone, acceptance or hardware throughput result exists yet.
 The native-attention DFlash2 candidate now reaches74.27 committed TG at CTX4,096
 across two matched runs. Its roughly62ms T8 verifier exceeds the entire35.59ms
@@ -411,11 +411,13 @@ The first learned TT composition now uses the complete 5,120-by-25,600 FC and
 direct RMS weights, the original two CPU input patterns and all 32 feature rows.
 It preserves DSpark's BF16 rounding before gamma multiplication. Projection and
 normalization are separately traced with an explicitly host-staged partial-sum
-handoff; this is not a fabric or complete-pipeline qualification. The 162-check
-matrix completes but fails two frozen-backbone comparisons (four elements per
-chip, pattern 1). Replay and ownership pass, with clean exit 1. The unchanged
-accuracy gate rejects it; an eager-only operand capture is now diagnosing the
-failure, not qualifying a device pipeline.
+handoff; this is not a fabric or complete-pipeline qualification. Original native
+RMS fails two frozen-backbone comparisons because projection and normalization
+rounding errors accumulate. Explicit FP32 normalization composition fixes those
+fixtures without changing the threshold. Run `20260909T165726Z-382` passes all
+162 checks, changed-input replay, clean closure and independent reconciliation.
+All 1,142 host and 59 harness tests pass. The original failures remain rejected;
+one complete learned TT layer and then all five layers remain next.
 [Scope and next gates](dspark-learned-projection-2026-09-10.md).
 
 ## Evidence and next gates
@@ -430,8 +432,8 @@ do not grant hardware or serving qualification.
 
 1. Retain the qualified native-arithmetic Markov, composed-rotary and explicit
    precise 64-key attention policies; preserve their original failed policies.
-2. Port learned feature projection/normalization and one complete layer to TTsim
-   against the frozen CPU backbone, then all five layers. Retain changed-input,
+2. Connect the qualified learned feature projection/normalization to one complete
+   TTsim layer against the frozen CPU backbone, then all five layers. Retain changed-input,
    mask, trace-ownership and target-isolation gates; CPU tests are not TT evidence.
 3. Run a complete seven-proposal hardware correctness/acceptance baseline through
    CI, then separately qualify wider proposals. Keep all rejections and overhead.
