@@ -275,8 +275,14 @@ Exit 0, source/native closure and clean teardown were independently reconciled.
 Report `scripts/ci/dspark-mesh-simulator.json`, SHA256
 `b5bf2abecce186a86721b3abfc35b0194e87f777ec6caa5c70da340914915355`.
 The simulator explicitly uses one link; this does **not** qualify the physical
-four-link fabric or measure speed. The complete layer is not yet a single trace,
-and the old numerical failures remain open.
+four-link fabric or measure speed. The complete single-trace layer is implemented
+and its learned-weight simulator matrix is running; it has no terminal result yet.
+The old numerical failures remain open.
+
+The next five-layer device chain is also wired, keeping projected context and
+rotary inputs shared while passing each layer's actual output into the next.
+Three orchestration tests pass, but it has not executed five learned TT layers.
+Feature projection and the full-vocabulary selector remain separate components.
 
 ## Next gates
 
