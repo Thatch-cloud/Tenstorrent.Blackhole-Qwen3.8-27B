@@ -4,6 +4,9 @@ The uninstrumented [hardware comparison](tensix-pooled-mlp-2026-09-09.md)
 measures **0.335 ms native versus 0.744 ms streamed**, with exact outputs.
 This diagnostic locates that regression before another kernel change.
 
+[CI 34332550656](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34332550656)
+is running on immutable tag `ci-qwen-hardware-9f52675`; no attribution result yet.
+
 | Setting | Attribution run |
 | --- | --- |
 | Hardware/model | Same two P150A cards and real Layer-0 BF4/BF4/BF8 weights |

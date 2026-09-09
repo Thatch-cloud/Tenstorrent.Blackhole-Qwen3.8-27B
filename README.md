@@ -20,6 +20,8 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   correctness pass, but the complete MLP takes **0.744 ms versus 0.335 ms native**.
   It loses all nine comparisons and is not promoted. More active cores do not
   guarantee lower latency. [Results](docs/tensix-pooled-mlp-2026-09-09.md).
+  [Device attribution is running](docs/tensix-mlp-device-profile-2026-09-09.md)
+  to locate the regression before another kernel change.
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
