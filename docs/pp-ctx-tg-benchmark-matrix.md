@@ -11,6 +11,8 @@
 | Lead at 8K, same-code repeat | **3,298.59** | **8,192** | **53.48** | **1** | Up to 8 | 121, 121 | **8.70 s** |
 | 4K cache ABBA, uncached control | **3,293.42** | **4,096** | **58.81** | **1** | Up to 8 | 121, 121 | **7.09 s** |
 | 4K cache ABBA, cached candidate | **3,307.88** | **4,096** | **60.33** | **1** | Up to 8 | 121, 121 | **7.41 s** |
+| 4K update ABBA, cached eager-update control | **3,297.43** | **4,096** | **62.01** | **1** | Up to 8 | 121, 121 | **7.47 s** |
+| 4K update ABBA, captured-update candidate | **3,292.61** | **4,096** | **62.11** | **1** | Up to 8 | 121, 121 | **7.14 s** |
 
 CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
@@ -33,6 +35,9 @@ The separate4K cache ABBA34291073085 passes all correctness checks and measures
 2.58% faster decode but worse full-request time. New-row K/V projection remains
 eager during publication; this is not the runtime used for the8K measurements.
 [Cache result and bottleneck](dflash-kv-cache-2026-09-09.md).
+Update-capture run34294263149 retains caching in both arms. Its0.15% decode
+difference is smaller than the timing spread; the62.11 row is not evidence of
+a meaningful capture speedup, nor a matched improvement over the prior60.33 row.
 
 | Metric | Definition |
 | --- | --- |
@@ -52,7 +57,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | Cached3,307.88 /60.33; matched control3,293.42 /58.81 | Reduce cache publication and target verification cost |
+| 4,096 | 1 | Latest cached3,297.43 /62.01; update-capture3,292.61 /62.11 | Capture is flat; prioritize current target-verifier attribution |
 | 8,192 | 1 | Repeat3,298.59 /53.48; first3,149.33 /46.20 | Retain both runs; original stall remains unexplained |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |

@@ -125,7 +125,7 @@ assembly. It does not claim to capture the whole publication or target verifier.
 | --- | --- |
 | Host validation | 851 CI tests and60 harness tests pass; historical artifact rates reproduce unchanged |
 | Learned simulator | Passed `20260908T235318Z-417-draft-kv-history-probe --capture-projection` |
-| Hardware | [Run34294263149](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34294263149) dispatched on `7780527`; no result yet |
+| Hardware | [Run34294263149](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34294263149) passed on `7780527`; no meaningful decode improvement |
 
 The simulator retains the earlier attention-operand, full-history, live-trace
 and atomic-publication checks. It adds eager-versus-captured projection checks
@@ -140,12 +140,46 @@ state/live-trace and four full-history checks also pass, with four detected
 stale-cache controls. All12 source hashes match `8a12962`.
 Report SHA256: `30fcfa5a8128b72bb980a6508c5432a392fd8a7f86c09ac5efb39f0010c64ca2`.
 
-The planned hardware ABBA keeps **K/V caching enabled in both arms**; only update
+The hardware ABBA keeps **K/V caching enabled in both arms**; only update
 projection capture changes. Both audits must still compare complete historical
 K/V and full cached/uncached proposals. Each committed block must report exactly
 one projection replay in the candidate and none in the eager-update control.
 Report setup, publication and PP/CTX/TG separately; setup is not amortized.
 
-This targets the measured update cost, not a claim that cache work alone can
-reach200. The target verifier still needs a substantial independent reduction
-from61.69 ms/block.
+### Captured-update hardware result
+
+| Metric | Eager-update cached control | Captured-update cached candidate |
+| --- | ---: | ---: |
+| PP tok/s | 3,297.43 | 3,292.61 |
+| CTX / streams | 4,096 / 1 | 4,096 / 1 |
+| Committed TG tok/s | 62.01 | 62.11 |
+| Individual TG samples | 61.48 /62.56 | 60.39 /63.92 |
+| Mean complete prefill + setup + decode | 7.47 s | 7.14 s |
+| Draft ms/block | 39.83 | 40.31 |
+| Verifier input staging ms/block | 1.97 | 1.58 |
+| Verify/readback ms/block | 61.78 | 61.90 |
+| Publication/commit ms/block | 10.72 | 10.29 |
+| Complete cycle ms/block | 114.66 | 114.48 |
+
+The paired decode change is only **+0.15%**, far smaller than the sample spread.
+Do not present the difference from the earlier60.33-TG run as a capture gain:
+this run's eager-update control also reaches62.01 TG. Setup varies substantially;
+the lower full-request mean is not an isolated setup optimization result.
+
+All six requests retain121 decode tokens,17 blocks and105/119 accepted drafts,
+with exact native tokens/GDN/valid-KV/inactive slots. Both audits pass17 full
+cached/uncached proposal checks,17 eager/trace checks,360 complete historical
+K/V checks and680 convolution comparisons. Each captured-update request records
+exactly17 projection replays; the paired eager-update requests record zero.
+Artifact SHA256: `74b1c52d47be24113839c1e7d6f49a4264661c63db32aee8282446c7441c760d`.
+
+**Decision: correctness qualified, not promoted for performance.** Capturing
+projection alone saves only0.43 ms/block of publication/commit in this run;
+the remaining bank-tail assembly and feature publication need attribution before
+another cache kernel is selected. The target verifier remains the larger limit.
+
+These cache experiments do not establish a path to200 by themselves. At the
+current acceptance pattern,200 requires a whole cycle below35.59 ms; verification
+alone still takes61.90 ms. Current-runtime verifier attribution is the next
+priority, rather than repeating rejected core-grid sweeps or claiming accumulated
+component gains equal committed throughput.

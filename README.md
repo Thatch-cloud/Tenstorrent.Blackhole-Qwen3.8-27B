@@ -86,6 +86,9 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
 the drafting saving; caching is not enabled in serving or the8K ladder rows.
+Capturing cache updates separately passes correctness but is effectively flat:
+**PP3,292.61 /CTX4,096 /TG62.11**, versus cached eager-update **62.01 TG**.
+That0.15% difference is within timing spread; it is not a performance promotion.
 
 ## Serving baseline
 
