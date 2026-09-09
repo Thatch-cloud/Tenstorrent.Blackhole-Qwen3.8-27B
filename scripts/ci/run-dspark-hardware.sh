@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+test "${QWEN_CARDS_ALLOCATED:-0}" = 1
+test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
+test -z "${TT_METAL_SIMULATOR:-}"
+output=experiment-results
+mkdir -p "$output"
+PYTHONPATH=scripts/ci python3 -c \
+    'import json; from dspark_hardware_gate import simulator_preflight; print(json.dumps(simulator_preflight("scripts/ci"),indent=2))' \
+    > "$output/dspark-simulator-preflight.json"
+fixture=/home/thatch/.cache/qwen-experiments/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393
+timeout -k 10 1200 python3 scripts/ci/dspark-hardware-fixtures.py --output "$fixture" \
+    > "$output/dspark-checkpoint-manifest.json"
+image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+test_id=''
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [ -n "$test_id" ]; then
+        docker logs "$test_id" > "$output/dspark-container.log" 2>&1 || true
+        docker cp "$test_id:/experiment/results/." "$output/" || true
+        docker inspect --format '{{json .State}}' "$test_id" > "$output/dspark-container-state.json" || true
+        docker rm -f "$test_id" >/dev/null || true
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+volume=qwen-experiments-f1e9b1a64b4f
+if docker volume inspect "$volume" >/dev/null 2>&1; then
+    test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$volume")" = true
+else
+    docker volume create --label thatch.qwen.experiment-cache=true "$volume" >/dev/null
+fi
+test_id=$(docker create --network none --hostname qwen-experiment --add-host qwen-experiment:127.0.0.1 \
+    --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+    --pids-limit 4096 --memory 96g --cpus 24 --shm-size 8g \
+    --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \
+    --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+    --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+    --mount "type=bind,src=$fixture,dst=/dspark,readonly" \
+    --mount "type=volume,src=$volume,dst=/experiment-cache" \
+    --label thatch.qwen.baseline=true --workdir /opt/vllm-tt-plugin \
+    --label "thatch.qwen.workflow-run=${GITHUB_RUN_ID:-untracked}" \
+    --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
+    -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
+    -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \
+    -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e TT_METAL_HOME=/opt/tt-metal \
+    -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels -e MESH_DEVICE=P300 \
+    -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+    -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
+    --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
+docker cp scripts "$test_id:/experiment-scripts"
+docker cp optimisation "$test_id:/experiment-optimisation"
+docker cp optimisation/sim/sdpa-graft-registration.patch "$test_id:/tmp/ccl-graft-registration.patch"
+docker start -a "$test_id" | tee "$output/dspark-console.log"
+test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0

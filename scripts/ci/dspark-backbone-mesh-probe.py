@@ -114,7 +114,7 @@ def main():
         sources=sources,native_sources=native,resources_before=snapshot(bounded=True),capture_sha256=COMPOSED_REPORT_SHA256,
         operands_sha256=COMPOSED_OPERANDS_SHA256,layer_report_sha256=LAYER_REPORT_SHA256,
         backend_report_sha256=BACKEND_REPORT_SHA256,backend_outputs_sha256=BACKEND_OUTPUTS_SHA256,
-        reference_context='CPU uses frozen FC context; device uses retained learned native FC context',
+        reference_context='CPU uses frozen FC context; device uses retained learned native FC context',resource_samples=[],
         full_backbone_captured=False,full_pipeline_captured=False,simulated_collectives=True,
         physical_fabric_tested=False,target_integrated=False,eligible_for_hardware=False,
         **{name:[] for name in (*CHECK_COUNTS,*REFERENCE_COUNTS)})
@@ -175,8 +175,7 @@ def main():
                     raise AssertionError('Learned parameter bits changed')
 
         for name in PARAMETERS:
-            if name.endswith('input_layernorm.weight') or name=='norm.weight':
-                progress('upload_and_audit_'+name)
+            progress('upload_and_audit_'+name)
             value,sharded = pack_parameter(name,reader.tensor(name))
             for chip in range(2):
                 expected_parameter_hashes[name,chip] = tensor_digest(value[chip:chip+1] if sharded else value)
@@ -184,6 +183,7 @@ def main():
             parameter_bindings[name] = addresses(ttnn,parameters[name])
             del value
             audit_parameter(name,'before')
+            report['resource_samples'].append(dict(parameter=name,phase='before',**snapshot(bounded=True)))
         layer_weights = tuple({name:parameters[f'layers.{layer}.{name}'] for name in SPECIFICATIONS} for layer in range(5))
         values = {case:[fixture['context'],fixture['noise'],*fixture['tables']['q'],*fixture['tables']['k'],
             fixture['mask'],fixture['live']] for case,fixture in enumerate(fixtures)}
@@ -278,12 +278,17 @@ def main():
         trace = None
         release_owned(ttnn,transient)
         transient.clear()
-        progress('audit_all_56_parameters_after')
         for name in PARAMETERS:
+            progress('audit_after_'+name)
             audit_parameter(name,'after')
+            report['resource_samples'].append(dict(parameter=name,phase='after',**snapshot(bounded=True)))
         expected_counts = {**CHECK_COUNTS,**REFERENCE_COUNTS}
         if {name:len(report[name]) for name in expected_counts}!=expected_counts:
             raise AssertionError('All 2394 functional checks and 72 separate numerical diagnostics required')
+        if len(report['resource_samples'])!=2*len(PARAMETERS):
+            raise AssertionError('Memory-budget evidence for every parameter audit required')
+        for sample in report['resource_samples']:
+            require_clean(report['resources_before'],sample)
         if any(not entry['detected'] for entry in report['stale_controls']):
             raise AssertionError('Omitted backbone input updates must be detectable')
         report['cpu_numerical_gate_passed'] = all(entry['passed'] for name in REFERENCE_COUNTS for entry in report[name])

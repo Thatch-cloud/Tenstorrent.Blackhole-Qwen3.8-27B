@@ -117,9 +117,17 @@ also passes **534/534 exact checks in one device trace**, including all 208
 changing-input replay comparisons against saved native tensors. All five learned
 TT matrix `20260909T205211Z-403` was interrupted by an unclean WSL restart during
 weight loading: 88 parameter checks, no five-layer forward result, and no clean
-native exit status. The interruption is retained. Retry requires a per-run
-3-GiB memory / 4-GiB swap cgroup cap; all 56 parameters and separate functional/
-numerical reporting remain required. Simulated one-link collectives do not qualify physical links.
+native exit status. The interruption is retained; whole-model TTsim is now an
+optional diagnostic, not the next integration prerequisite. Changed kernels/layouts
+still require targeted simulation; the complete backbone moves to hardware CI.
+Full-vocabulary device transport passes **50/50 checks**, clean exit 0, no OOM
+or swap use (run `20260909T213101Z-407`). This uses synthetic logits, not the
+target head or Markov feedback. Any simulator retry requires the per-run
+3-GiB memory / 4-GiB swap cap. Simulated one-link collectives do not qualify physical links.
+Batch related variants in one loaded hardware session, screen matched PP / CTX /
+TG early, and reserve the full coding/context ladder for promising candidates.
+Prioritize the roughly 62-ms verifier and longer useful accepted blocks; retain
+all target token/state checks and report CPU numerical diagnostics separately.
 Neither numerical limits nor serving
 defaults change. Numerical fixes are not assumed to be faster.
 This component fix does not change the measured 74.27 TG hardware result.

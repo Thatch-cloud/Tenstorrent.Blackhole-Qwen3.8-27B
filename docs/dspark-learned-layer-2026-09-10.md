@@ -314,7 +314,7 @@ interruption record are retained.
 
 Windows also reported `Thread failed to start`. Host memory pressure is a
 plausible cause, not proven. All 1,496 native fingerprints remain unchanged.
-The retry now requires a **per-run 3-GiB memory / 4-GiB swap cgroup budget**,
+Any future simulator retry requires a **per-run 3-GiB memory / 4-GiB swap cgroup budget**,
 with boot identity and OOM counters recorded. Global WSL settings, serving
 defaults, arithmetic and the complete test matrix are unchanged.
 
@@ -329,16 +329,49 @@ Feature projection and the full-vocabulary selector remain separate components.
 An unqualified target-head bridge is prepared: borrow the existing TP2 LM head,
 gather all 248,320 vocabulary scores on-device, and preserve query rows zero
 through six for Markov selection. It does not reuse DFlash2's top-16 shortlist
-or discard the anchor query row. Four bridge orchestration tests pass; its
-vocabulary collective still needs simulation before integration.
-Its full-size transport probe is prepared with 50 checks, including swapped-rank
-and dropped-row-zero controls. This uses synthetic logits, not target weights or
-Markov inference. It is the next bounded-memory simulator check before retrying
-the complete backbone; no native process from the interrupted run remains.
+or discard the anchor query row. Four bridge orchestration tests pass.
+The full-size transport probe now passes **50/50 checks**, including changing-input
+trace replay, swapped-rank and dropped-row-zero controls. Run
+`20260909T213101Z-407` exits cleanly with status 0; report SHA-256
+`e95f780502fefcafa5b07c813614450c88609044abf27e606aab11d4b293216c`.
+Peak cgroup memory is 2,032,467,968 bytes, with no swap use or OOM events.
+All 21 source and 1,496 native fingerprints remain unchanged.
+This validates synthetic full-size logits transport, **not target weights,
+Markov inference or physical links**.
+
+## Faster experiment cycle
+
+Whole-model TTsim is no longer the prerequisite for integration. The interrupted
+run spent roughly half an hour loading weights without a five-layer result.
+Keep its optional diagnostic matrix; do not restart it as the next experiment.
+
+| Stage | Where | Required evidence |
+| --- | --- | --- |
+| Changed arithmetic/layout | Targeted TTsim | Numerical, replay and ownership checks for the change |
+| Complete learned backbone | Hardware CI | All five layers, actual device handoffs, changing inputs; separate CPU diagnostics |
+| Target integration | Same pinned hardware runtime | Actual features, embeddings, LM head and Markov feedback; exact target verification |
+| Fast screen | One loaded model per CI job | Matched PP / CTX / TG, acceptance and verifier/draft/publication time |
+| Promotion | Hardware coding/context ladder | Repeatable committed-TG gain and unchanged token/state correctness |
+
+Reuse the existing ABBA and runtime/weight caches rather than rebuilding unchanged
+components. Reject regressions before expanding the coding/context matrix.
+The approximately 62-ms verifier and useful accepted proposal length are the
+priority; small isolated kernel wins are not substitutes for request throughput.
+
+The new opt-in `dspark-backbone` suite uses the existing exclusive hardware
+workflow and pinned image. It joins **learned FC + normalization + all five
+layers + final normalization** in one trace, with four explicitly selected
+physical fabric links. One checkpoint load supports three input cases, four
+changing-input replays and 30 warm timed replays. It audits all 58 parameters,
+137 stage tensors, borrowed inputs and zero padding. Compilation/loading time
+is separate from warm backbone time; **neither is committed TG**.
+Its input features and noise are still synthetic. Target embedding/head/Markov
+integration, 4K history and committed-token acceptance remain subsequent gates.
+All 1,213 host tests and 59 simulator-harness tests pass before dispatch.
 
 ## Next gates
 
-1. Execute all five learned layers and final normalization with changing-input
+1. Execute all five learned layers and final normalization on hardware with changing-input
    trace replays. Compare against the backend-matched CPU reference; retain the
    separate original numerical failures rather than relabeling them as passes.
 2. Connect feature projection, the full-vocabulary selector and actual target
