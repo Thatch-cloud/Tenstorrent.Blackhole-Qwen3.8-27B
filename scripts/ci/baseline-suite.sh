@@ -30,7 +30,7 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             echo 'Explicit-link hardware collective still invoked fallback discovery' >&2
             exit 1
         fi
-        exit 0
+        if [ "${QWEN_TINY_MLP:-0}" != 1 ]; then exit 0; fi
     fi
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then

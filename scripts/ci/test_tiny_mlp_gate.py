@@ -1,7 +1,11 @@
 from copy import deepcopy
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
-from tiny_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER, SOURCES, qualify
+from tiny_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER, SOURCES, qualify, qualify_hardware
 
 
 class TinyMlpGateTests(unittest.TestCase):
@@ -59,3 +63,64 @@ class TinyMlpGateTests(unittest.TestCase):
                     checks[0]['stale_input_detected' if group == 'negative_controls' else 'exact'] = False
                 with self.subTest(group=group, mutation=mutation), self.assertRaises(ValueError):
                     qualify(report, sources, native)
+
+    def hardware_fixture(self):
+        return dict(passed=True, stage='complete', rows=8, streams=1, layer=0, collective_links=4,
+            seeds=[1659, 2670, 3781], repeats_per_sample=50, control_ms=2.0, candidate_ms=1.0,
+            eligible_for_full_model_gate=True,
+            eager_checks=[dict(pattern=pattern, chip=chip, exact=True) for pattern in range(3) for chip in range(2)],
+            trace_checks=[dict(pattern=pattern, arm=arm, chip=chip, exact=True)
+                for pattern in range(3) for arm in range(2) for chip in range(2)],
+            blocks=[dict(pattern=pattern, block=block, samples_ms=[2.0, 1.0, 1.0, 2.0],
+                control_ms=2.0, candidate_ms=1.0, ratio=2.0) for pattern in range(3) for block in range(3)])
+
+    def test_complete_hardware_matrix_recomputes_from_all_samples(self):
+        report = self.hardware_fixture()
+        self.assertTrue(qualify_hardware(report)['eligible_for_full_model_gate'])
+        report['candidate_ms'] = 2.0
+        report['eligible_for_full_model_gate'] = False
+        for block in report['blocks']:
+            block.update(samples_ms=[2.0] * 4, candidate_ms=2.0, ratio=1.0)
+        self.assertFalse(qualify_hardware(report)['eligible_for_full_model_gate'])
+
+    def test_incomplete_duplicate_or_failed_hardware_comparisons_reject(self):
+        for group in ('eager_checks', 'trace_checks', 'blocks'):
+            for mutation in ('missing', 'duplicate'):
+                report = self.hardware_fixture()
+                if mutation == 'missing':
+                    report[group].pop()
+                else:
+                    report[group][0] = deepcopy(report[group][1])
+                with self.subTest(group=group, mutation=mutation), self.assertRaises(ValueError):
+                    qualify_hardware(report)
+        report = self.hardware_fixture()
+        report['eager_checks'][0]['exact'] = False
+        with self.assertRaises(ValueError):
+            qualify_hardware(report)
+
+    def test_invalid_raw_samples_or_invented_summaries_reject(self):
+        for mutation in ('nan', 'negative', 'missing_sample', 'block_summary', 'total', 'eligibility', 'failure'):
+            report = self.hardware_fixture()
+            if mutation == 'nan':
+                report['blocks'][0]['samples_ms'][0] = float('nan')
+            elif mutation == 'negative':
+                report['blocks'][0]['samples_ms'][0] = -1
+            elif mutation == 'missing_sample':
+                report['blocks'][0]['samples_ms'].pop()
+            elif mutation == 'block_summary':
+                report['blocks'][0]['control_ms'] = 99
+            elif mutation == 'total':
+                report['control_ms'] = 99
+            elif mutation == 'eligibility':
+                report['eligible_for_full_model_gate'] = False
+            else:
+                report['passed'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                qualify_hardware(report)
+
+    def test_missing_hardware_artifact_cannot_pass_the_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('tiny_mlp_gate.py')),
+                '--hardware-result', str(Path(directory) / 'missing.json')], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FileNotFoundError', result.stderr)

@@ -222,3 +222,7 @@ docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
+if [ "$tiny_mlp" = 1 ]; then
+    docker cp "$test_id:/experiment/results/tiny-mlp.json" "$output/tiny-mlp.json"
+    python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"
+fi

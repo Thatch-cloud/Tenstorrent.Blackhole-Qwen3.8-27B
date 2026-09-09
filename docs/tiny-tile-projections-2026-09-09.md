@@ -50,8 +50,15 @@ boundaries. Require bitwise native equality, then a greater-than2% win in every
 block before a full-model test. A single-layer win is not a PP/CTX/TG result.
 Hardware refuses incomplete or source-mismatched simulator evidence.
 Hardware run [34303979499](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34303979499)
-is in progress on `6457ec8`; no result is available yet. The original hardware
-packer remains unchanged; simulator compatibility is not hardware qualification.
+on `6457ec8` is **not a valid MLP pass**. CI is green, but the shell exits after
+the CCL prerequisite; no `tiny-mlp.json` exists and the MLP script never runs.
+The corrected route continues to the real test. Executed shell-routing tests
+cover that transition and failed build/link/MLP cases. The host wrapper now
+requires the MLP artifact and independently validates sources, six eager checks,
+12 traced checks, all nine ABBA blocks and every summary against raw samples.
+The original hardware packer remains unchanged; simulator compatibility is not
+hardware qualification. Retry pending; no hardware MLP timing is available.
+The routing/required-artifact fix passes883 CI host tests and60 speculative-harness tests.
 
 The existing audited patch is `optimisation/sim/blackhole-packer-zero-flags.patch`.
 The isolated graft header hash is

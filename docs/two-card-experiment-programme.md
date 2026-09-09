@@ -79,7 +79,10 @@ comparisons on both simulated chips, including both DMA boundaries. Stock
 multiplication dropped small tiles; FPU rounding also failed exactness. The new
 product keeps native SFPU semantics and16-row buffers. No timing claim: next is
 real layer0 hardware ABBA against actual native forward, including the collective.
-Run34303979499 on `6457ec8` is in progress; no new PP/CTX/TG result yet.
+Run34303979499 on `6457ec8` exits after the link prerequisite, despite a green
+CI status: no MLP test or timing exists. Routing is corrected and executed shell
+tests cover the transition. A mandatory host-side artifact validator now rejects
+missing/incomplete MLP comparisons or timing blocks. Hardware retry pending.
 [Evidence](tiny-tile-projections-2026-09-09.md).
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 

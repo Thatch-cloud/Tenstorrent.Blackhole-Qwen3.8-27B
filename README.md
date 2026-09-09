@@ -26,7 +26,9 @@ matrix operations dominate. This is not primarily host-side scheduling latency.
 **Now testing:** a 16-row-tile MLP with unchanged target weights and arithmetic.
 The complete simulator path passes 48 bitwise comparisons; hardware compares
 real weights against native execution, including conversions and communication.
-[Hardware ABBA in progress](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34303979499).
+The first hardware job stopped after its link check: **no MLP result**, despite
+a green CI status. Routing is corrected; the retry must produce and validate
+all real-weight comparisons and ABBA samples before passing.
 No new PP/CTX/TG result or serving change is claimed.
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still

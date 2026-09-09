@@ -1,5 +1,12 @@
 """Fail-closed source and comparison manifest for the small-tile MLP gate."""
 
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import statistics
+
 
 SOURCES = (
     'tiny_mlp.py', 'tiny-mlp-probe.py', 'tiny_tile_dma.py', 'tiny_tile_dma.cpp', 'tiny_tile_matmul.py',
@@ -42,3 +49,64 @@ def qualify(report, sources, native_sources):
             or any(check.get('stale_input_detected') is not True for check in negative)):
         raise ValueError('Both stale-input negative controls required')
     return dict(passed=True, eager_checks=len(eager), trace_checks=len(trace), negative_controls=len(negative))
+
+
+def qualify_hardware(report):
+    if (report.get('passed') is not True or report.get('stage') != 'complete'
+            or (report.get('rows'), report.get('streams'), report.get('layer'), report.get('collective_links')) != (8, 1, 0, 4)
+            or report.get('seeds') != [1659, 2670, 3781] or report.get('repeats_per_sample') != 50):
+        raise ValueError('Completed real-weight T8 hardware comparison required')
+    eager, trace, blocks = (report.get(name, []) for name in ('eager_checks', 'trace_checks', 'blocks'))
+    if (len(eager) != 6 or any(check.get('exact') is not True for check in eager)
+            or {(check.get('pattern'), check.get('chip')) for check in eager}
+            != {(pattern, chip) for pattern in range(3) for chip in range(2)}):
+        raise ValueError('Complete native-reference eager comparisons required')
+    if (len(trace) != 12 or any(check.get('exact') is not True for check in trace)
+            or {(check.get('pattern'), check.get('arm'), check.get('chip')) for check in trace}
+            != {(pattern, arm, chip) for pattern in range(3) for arm in range(2) for chip in range(2)}):
+        raise ValueError('Complete native-reference changed-input traces required')
+    if (len(blocks) != 9 or {(block.get('pattern'), block.get('block')) for block in blocks}
+            != {(pattern, block) for pattern in range(3) for block in range(3)}):
+        raise ValueError('All nine matched ABBA blocks required')
+    def matching(actual, expected):
+        return (type(actual) in (int, float) and math.isfinite(actual)
+            and math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-12))
+    for block in blocks:
+        samples = block.get('samples_ms', [])
+        if len(samples) != 4 or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in samples):
+            raise ValueError('Four positive finite ABBA samples required')
+        baseline, candidate = statistics.mean((samples[0], samples[3])), statistics.mean(samples[1:3])
+        if not all(matching(block.get(name), expected) for name, expected in (
+                ('control_ms', baseline), ('candidate_ms', candidate), ('ratio', baseline / candidate))):
+            raise ValueError('ABBA block summaries must match raw samples')
+    for name in ('control_ms', 'candidate_ms'):
+        if not matching(report.get(name), statistics.mean(block[name] for block in blocks)):
+            raise ValueError('Hardware summary must match complete ABBA samples')
+    eligible = all(block['ratio'] > 1.02 for block in blocks)
+    if report.get('eligible_for_full_model_gate') is not eligible:
+        raise ValueError('Full-model eligibility must match every timing block')
+    return dict(passed=True, control_ms=report['control_ms'], candidate_ms=report['candidate_ms'],
+        eligible_for_full_model_gate=eligible, scope='Single-layer hardware gate, not PP/CTX/TG')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--hardware-result', type=Path, required=True)
+    options = parser.parse_args()
+    root = Path(__file__).parent
+    simulator_path = root / 'tiny-mlp-simulator.json'
+    simulator = json.loads(simulator_path.read_text())
+    report = json.loads(options.hardware_result.read_text())
+    sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in SOURCES}
+    if (report.get('sources') != sources
+            or report.get('simulator_report_sha256') != hashlib.sha256(simulator_path.read_bytes()).hexdigest()
+            or report.get('hardware_script_sha256') != hashlib.sha256((root / 'tiny-mlp-hardware.py').read_bytes()).hexdigest()):
+        raise ValueError('Hardware evidence must match current code and simulator report')
+    gate = qualify(simulator, sources, report.get('native_sources', {}))
+    if report.get('simulator_gate') != gate:
+        raise ValueError('Recorded simulator prerequisite must match independently validated gate')
+    print(json.dumps(qualify_hardware(report)))
+
+
+if __name__ == '__main__':
+    main()
