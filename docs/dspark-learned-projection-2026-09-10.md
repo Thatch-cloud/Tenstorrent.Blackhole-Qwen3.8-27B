@@ -52,12 +52,22 @@ and ownership checks pass. Every physical output row is included.
 - 1,133 host tests and 59 simulator-harness tests pass, plus wrapper syntax.
 - The saved CPU inputs, projected-context tensors and all seven frozen reference
   sources match their recorded hashes. The learned gamma is not the identity.
-- Run `20260909T162015Z-395` is active using the original native runtime and packer.
-  There is no device qualification yet.
+- Run `20260909T162015Z-395` completes all 162 checks but **fails two final-output
+  comparisons**: pattern 1 has four out-of-threshold elements on each chip.
+  All 130 replay/input/parameter/control checks and 30 of 32 eager comparisons
+  pass. The original native runtime and packer remain unchanged; mesh and
+  checkpoint close cleanly, with outer exit 1. Independent qualification rejects it.
+- The failed JSON is `scripts/ci/dspark-projection-simulator-failed.json`, SHA256
+  `7babee248db2d25c3e6561bb0ee83159fa25a9301a472cae2d494ade3761aa36`.
+  No tolerance, frozen reference or hardware eligibility is changed.
+- Eager-only diagnostic `20260909T163428Z-430` captures actual intermediate
+  tensors for isolating projection versus normalization error. It skips replay
+  deliberately, and cannot qualify the complete matrix even if numerical checks pass.
+  All 11 focused host tests pass, including capture integrity and mode rejection.
 - Setup attempt `20260909T161941Z-387` failed before opening a mesh because the
   wrapper changes directory to `/opt/ttsim`; the retry supplies absolute paths.
 
-Next, reconcile this complete matrix, connect one learned attention/MLP layer,
+Next, fix the numerical mismatch and requalify the complete matrix, connect one learned attention/MLP layer,
 then all five layers and the real target/collective path. A component pass does
 not establish coding acceptance or progress to 200 TG by itself. The retained
 4K hardware result remains PP 3,324.52 / CTX 4,096 / TG 74.27 for one stream.

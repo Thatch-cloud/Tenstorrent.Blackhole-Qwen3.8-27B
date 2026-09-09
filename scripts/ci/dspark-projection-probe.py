@@ -49,12 +49,30 @@ def fingerprints(root, *, packer_compat=False):
     return result
 
 
+def save_operands(path, report, *, features, contexts, gamma, eager):
+    import torch
+
+    payload = dict(checkpoint_sha256=report['checkpoint_sha256'], reference=report['reference'],
+        sources=report['sources'], native_sources=report['native_sources'], policy=POLICY,
+        features=features, contexts=contexts, gamma=gamma, eager=eager)
+    with path.open('xb') as stream:
+        torch.save(payload, stream)
+    return dict(path=str(path), sha256=digest(path))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--cpu-outputs', type=Path, required=True)
+    parser.add_argument('--save-operands', action='store_true')
+    parser.add_argument('--eager-only', action='store_true')
     options = parser.parse_args()
+    if options.eager_only and not options.save_operands:
+        parser.error('Eager-only diagnostics require --save-operands')
+    operands_path = options.output.with_suffix('.operands.pt')
+    if options.save_operands and operands_path.exists():
+        parser.error('Refusing to replace an existing operand capture')
     require_projection_environment(os.environ, False)
     if os.environ.get('QWEN_HARDWARE_TESTS') == '1' or os.environ.get('QWEN_CARDS_ALLOCATED') == '1':
         raise RuntimeError('Simulator-only component; no hardware allocation accepted')
@@ -64,6 +82,7 @@ def main():
     root = Path(os.environ['TT_METAL_HOME'])
     packer_compat = os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1'
     report = dict(passed=False, closed_cleanly=False, checkpoint_closed=False, backend='simulator', scope=__doc__,
+        mode='eager_diagnostic' if options.eager_only else 'matrix',
         rows=32, input_width=25600, output_width=5120, fixtures=2, taps=list(TAPS), policy=POLICY,
         tolerance=TOLERANCE, handoff=HANDOFF, fabric_tested=False, full_pipeline_captured=False,
         target_integrated=False, eligible_for_hardware=False, checkpoint_sha256=CHECKPOINT_SHA256,
@@ -207,6 +226,9 @@ def main():
                 audit_inputs('eager',pattern,pattern)
                 release_owned(ttnn,transient)
                 transient.clear()
+            if options.eager_only:
+                progress(f'{phase}_eager_complete')
+                continue
             update(0)
             progress(f'{phase}_capture')
             trace,result = capture_operation(ttnn,mesh,run)
@@ -237,6 +259,9 @@ def main():
             transient.clear()
             progress(f'{phase}_complete')
         audit_parameters('after')
+        if options.save_operands:
+            report['operands'] = save_operands(operands_path, report, features=features, contexts=contexts,
+                gamma=gamma, eager=eager)
         failed = sum(not entry['passed'] for entry in report['eager_checks'])
         if failed:
             raise AssertionError(f'{failed} learned comparisons fail the declared accuracy policy')

@@ -15,7 +15,8 @@ from dspark_projection import EAGER_STAGES, EXACT_STAGES, HANDOFF, POLICY, PROJE
 def qualify(report, *, sources, native, reference, exit_status, packer_compat=False):
     if (exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('error') or report.get('cleanup_error')
-            or report.get('backend') != 'simulator' or report.get('checkpoint_sha256') != CHECKPOINT_SHA256
+            or report.get('backend') != 'simulator' or report.get('mode') != 'matrix'
+            or report.get('checkpoint_sha256') != CHECKPOINT_SHA256
             or report.get('reference') != reference or report.get('policy') != POLICY or report.get('tolerance') != TOLERANCE
             or report.get('handoff') != HANDOFF or report.get('taps') != list(TAPS)
             or type(packer_compat) is not bool or report.get('packer_compat') is not packer_compat

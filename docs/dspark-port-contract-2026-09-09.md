@@ -1,6 +1,6 @@
 # DSpark v2: port contract, not a speed result
 
-**Status: learned native-selector and composed-rotary gates pass; full-attention accuracy remains open.**
+**Status: selector, composed rotary and precise chunk64 attention pass; learned FC/norm accuracy remains open.**
 No integrated DSpark backbone, acceptance or hardware throughput result exists yet.
 The native-attention DFlash2 candidate now reaches74.27 committed TG at CTX4,096
 across two matched runs. Its roughly62ms T8 verifier exceeds the entire35.59ms
@@ -412,7 +412,10 @@ direct RMS weights, the original two CPU input patterns and all 32 feature rows.
 It preserves DSpark's BF16 rounding before gamma multiplication. Projection and
 normalization are separately traced with an explicitly host-staged partial-sum
 handoff; this is not a fabric or complete-pipeline qualification. The 162-check
-simulator run is active, with 1,133 host and 59 harness tests passing.
+matrix completes but fails two frozen-backbone comparisons (four elements per
+chip, pattern 1). Replay and ownership pass, with clean exit 1. The unchanged
+accuracy gate rejects it; an eager-only operand capture is now diagnosing the
+failure, not qualifying a device pipeline.
 [Scope and next gates](dspark-learned-projection-2026-09-10.md).
 
 ## Evidence and next gates
