@@ -42,12 +42,14 @@ adoption. Next capture incremental K/V projection, while retaining the separate
 target-verifier optimization requirement; neither is a200-TG claim.
 [Gates](dflash-kv-cache-2026-09-09.md).
 
-**Captured K/V update gate running.** Fixed32-row learned projections now have
+**Captured K/V update simulator gate passed.** Fixed32-row learned projections now have
 an opt-in trace with stable feature/absolute-RoPE inputs; bank-tail assembly and
-atomic publication remain unchanged. Simulator235318Z-417 tests changed features
-and positions on both chips;851 CI plus60 harness tests pass. The new4K hardware
-ABBA retains caching in both arms and isolates projection capture. It is not yet
-dispatched or a measured speedup. The original60.33-TG result remains eager-update.
+atomic publication remain unchanged. Simulator235318Z-417 passes12 exact
+projection comparisons with changed features/positions and all earlier cache,
+attention-operand and live-trace checks. All12 source hashes match `8a12962`;
+851 CI plus60 harness tests pass. The new4K hardware ABBA retains caching in
+both arms and isolates projection capture. No captured-update hardware rate
+exists yet. The original60.33-TG result remains eager-update.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

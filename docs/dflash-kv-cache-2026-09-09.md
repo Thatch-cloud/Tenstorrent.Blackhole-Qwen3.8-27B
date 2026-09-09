@@ -124,14 +124,21 @@ assembly. It does not claim to capture the whole publication or target verifier.
 | New gate | Status |
 | --- | --- |
 | Host validation | 851 CI tests and60 harness tests pass; historical artifact rates reproduce unchanged |
-| Learned simulator | Running `20260908T235318Z-417-draft-kv-history-probe --capture-projection` |
-| Hardware | `full-dflash-kv-projection-request` prepared, not dispatched; simulator pass required first |
+| Learned simulator | Passed `20260908T235318Z-417-draft-kv-history-probe --capture-projection` |
+| Hardware | `full-dflash-kv-projection-request` ready; no captured-update hardware result yet |
 
 The simulator retains the earlier attention-operand, full-history, live-trace
 and atomic-publication checks. It adds eager-versus-captured projection checks
 on both chips for changed accepted features and absolute positions4093/4100,
 including a one-row update after a seven-row commit. Inputs outside the committed
 prefix stay zero padded. No new kernel math, precision or serving default changes.
+
+The run exits0 and closes both devices after1,268.0 s. It passes12 exact
+projection comparisons across three replays, including changed features and
+positions4093/4100; eight attention-operand,36 proposal-input replay,18 unchanged
+state/live-trace and four full-history checks also pass, with four detected
+stale-cache controls. All12 source hashes match `8a12962`.
+Report SHA256: `30fcfa5a8128b72bb980a6508c5432a392fd8a7f86c09ac5efb39f0010c64ca2`.
 
 The planned hardware ABBA keeps **K/V caching enabled in both arms**; only update
 projection capture changes. Both audits must still compare complete historical
