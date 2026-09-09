@@ -100,6 +100,16 @@ child zones must not be summed. Transfer the measurement method: named semantic
 zones, worst-chip comparisons, and separate uninstrumented application timing.
 Do not transplant its MoE timing or infer two-card B1 decode speed from it.
 
+**Next kernel: skip padded draft-query QK work.** T8 has8 live query rows but
+the cached SFPU dot evaluates32. The opt-in kernel retains live FP32 arithmetic
+and zeros only raw padded scores; the single-allowed-key padding mask preserves
+all final attention rows. Initial learned-operand simulation passes12 eager and
+36 replay component checks plus four stale controls. Final source qualification
+and2K-history simulation precede hardware ABBA; no new TG result. The hardware
+route tests complete attention without downloading model weights or rebuilding
+the native runtime, and requires both source-pinned reports before device access.
+[Scope, padding proof and gates](live-query-attention-2026-09-09.md).
+
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
 candidate78.061082 (+8.10%). Drafting falls31.054947 ->24.811769ms/block;

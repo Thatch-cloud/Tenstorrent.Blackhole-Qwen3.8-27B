@@ -12,6 +12,12 @@ dflash_projection_abba=0
 dflash_profile=0
 dflash_context=0
 tiny_mlp=0
+live_qk=0
+if [ "$mode" = live-qk ]; then
+    live_qk=1
+    mode=baseline
+    [[ "${QWEN_CODING_REQUEST:-0}" = 0 && "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
+fi
 if [ "$mode" = tiny-mlp ]; then
     tiny_mlp=1
     mode=full-norm-engine
@@ -68,6 +74,7 @@ fi
 [[ "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 || ( "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 &&
     ( "$mode" = sampling-kernel || "$mode" = learned-attention || ( "$mode" = full-norm-engine && "${QWEN_CODING_REQUEST:-0}" = 1 && "${QWEN_LOOKUP_CAP_ABBA:-0}" = 0 ) ) ) ]]
 descriptor=p300_mesh_graph_descriptor.textproto
+if [ "$live_qk" = 1 ]; then descriptor=p150_x2_mesh_graph_descriptor.textproto; fi
 if [ "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]; then descriptor=p150_x2_mesh_graph_descriptor.textproto; fi
 projection_links=1
 ccl_build=0
@@ -188,6 +195,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_PROJECTION_ABBA=$dflash_projection_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
+    -e "QWEN_LIVE_QK=$live_qk" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
@@ -222,6 +230,12 @@ docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
+if [ "$live_qk" = 1 ]; then
+    for context in 31 2048; do
+        docker cp "$test_id:/experiment/results/live-qk-$context.json" "$output/live-qk-$context.json"
+        python3 scripts/ci/live_qk_gate.py --hardware-result "$output/live-qk-$context.json"
+    done
+fi
 if [ "$tiny_mlp" = 1 ]; then
     docker cp "$test_id:/experiment/results/tiny-mlp.json" "$output/tiny-mlp.json"
     python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"

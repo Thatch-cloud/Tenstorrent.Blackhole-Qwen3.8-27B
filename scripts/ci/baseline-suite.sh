@@ -16,6 +16,21 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_LIVE_QK:-0}" = 1 ]; then
+    [[ "${QWEN_RUN_MODE:-baseline}" = baseline && "${QWEN_CCL_LAZY_BUILD:-0}" = 0 ]]
+    PYTHONPATH="/experiment-scripts/ci:$PYTHONPATH" python3 -c \
+        'import json; from live_qk_gate import native_hashes; print(json.dumps(native_hashes("/opt/tt-metal")))' \
+        > /experiment/results/live-qk-native-hashes.json
+    PYTHONPATH="/experiment-scripts/ci:$PYTHONPATH" python3 -c \
+        'import json; from pathlib import Path; from live_qk_gate import native_hashes, source_hashes, qualify_simulator; sources=source_hashes(); native=native_hashes("/opt/tt-metal"); [qualify_simulator(json.loads(Path(f"/experiment-scripts/ci/live-qk-simulator-{context}.json").read_text()), context, sources, native) for context in (31, 2048)]'
+    for context in 31 2048; do
+        OMP_NUM_THREADS=1 timeout -k 15 600 python3 /experiment-scripts/ci/draft-live-qk-probe.py \
+            --hardware --attention --context "$context" \
+            --simulator-report "/experiment-scripts/ci/live-qk-simulator-$context.json" \
+            --output "/experiment/results/live-qk-$context.json"
+    done
+    exit
+fi
 if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
     PYTHONPATH="/experiment-speculative:$PYTHONPATH" python3 /experiment-scripts/ci/full_mtp_request.py \
         --weights /models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \

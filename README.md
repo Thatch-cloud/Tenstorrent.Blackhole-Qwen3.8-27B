@@ -30,6 +30,9 @@ native execution takes **0.33481 ms** versus **0.35055 ms** for the candidate:
 All nine ABBA blocks regress. This is a single-layer result, not a TG change.
 [Evidence and harness fixes](docs/tiny-tile-projections-2026-09-09.md).
 The 48-comparison simulator pass established correctness, not performance.
+**Next:** skip unused draft-query QK rows. Learned-operand attention passes exact
+simulator comparisons; the2K-history gate is running before hardware timing.
+[Live-query experiment](docs/live-query-attention-2026-09-09.md).
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
