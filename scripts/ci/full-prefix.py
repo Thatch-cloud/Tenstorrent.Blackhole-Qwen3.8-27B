@@ -114,6 +114,12 @@ def main():
     dflash_projection_abba = os.environ.get('QWEN_DFLASH_PROJECTION_ABBA', '0')
     dflash_profile = os.environ.get('QWEN_DFLASH_VERIFIER_PROFILE', '0')
     dflash_live_query_abba = os.environ.get('QWEN_DFLASH_LIVE_QUERY_ABBA', '0')
+    dflash_target_links_abba = os.environ.get('QWEN_DFLASH_TARGET_LINKS_ABBA', '0')
+    if dflash_target_links_abba not in ('0', '1') or (dflash_target_links_abba == '1' and
+            (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
+             or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba,
+                 dflash_cache_abba, dflash_projection_abba, dflash_profile, dflash_live_query_abba)))):
+        parser.error('Target-link ABBA requires the isolated cached 4K T8 lead')
     if dflash_live_query_abba not in ('0', '1') or (dflash_live_query_abba == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba,
@@ -414,6 +420,10 @@ def main():
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
+    if dflash_target_links_abba == '1':
+        from target_link_request import source_hashes as target_link_hashes
+
+        report['target_link_request_sources'] = target_link_hashes(Path(__file__).parent)
     if dflash_live_query_abba == '1':
         from live_attention_request_gate import qualify_inputs
 
@@ -864,14 +874,25 @@ def main():
                         if dflash_live_query_abba == '1':
                             arms = tuple((True, True, audit, True, False, candidate) for candidate, audit in
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
-                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture, live_query_qk in arms:
+                        arms = tuple((*arm, False) for arm in arms)
+                        if dflash_target_links_abba == '1':
+                            arms = tuple((True, True, audit, True, False, False, four_links) for four_links, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture, live_query_qk, target_four_links in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
                                 commit_only_gdn=commit_only, fused_convolution=fused_convolution,
                                 cache_history=cache_history,
                                 cache_projection_capture=cache_projection_capture,
                                 live_query_qk=live_query_qk,
+                                target_four_links=target_four_links,
                                 repetition=len(report['request_checks']))), flush=True)
-                            result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
+                            measure = measure_dflash_request
+                            if dflash_target_links_abba == '1':
+                                from functools import partial
+                                from target_link_request import measure_target_links
+
+                                measure = partial(measure_target_links, measure_dflash_request, candidate=target_four_links)
+                            result = measure(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
@@ -894,6 +915,8 @@ def main():
                         summarize = summarize_dflash_projection_requests
                     if dflash_live_query_abba == '1':
                         summarize = summarize_dflash_live_query_requests
+                    if dflash_target_links_abba == '1':
+                        from target_link_request import summarize
                     if dflash_profile == '1':
                         report['request_summary'] = summarize_dflash_requests(report['request_checks'], audit_only=True)
                         report.update(instrumented_timing=True, correctness_only=True,

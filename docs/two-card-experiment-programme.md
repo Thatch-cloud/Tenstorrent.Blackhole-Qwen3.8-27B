@@ -141,6 +141,12 @@ collective adapter preserves the borrowed partial output instead of letting the
 native wrapper forcibly deallocate it. This is not a bandwidth or TG result.
 [Projection gates](tensix-streamed-projection-2026-09-09.md).
 [Pooled MLP and hardware gate](tensix-pooled-mlp-2026-09-09.md).
+The sampler's four-link override is separate from the target model's CCL helper,
+whose pinned P300 lookup defaults to two links. A separate
+[cached 4K whole-request ABBA](target-model-link-counts-2026-09-09.md) measures
+target two-versus-four-link requests with unchanged native MLP kernels, sampler
+and drafter. It records actual helper calls and cross-arm final GDN/KV/inactive
+digests; no link-count speed improvement is claimed before that test.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

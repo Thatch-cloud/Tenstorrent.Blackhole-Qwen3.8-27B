@@ -35,6 +35,12 @@ def qualify_hardware(report):
                     ('pool_buffers', 2), ('repeats_per_sample', 50)))
             or report.get('seeds') != [1659, 2670, 3781]):
         raise ValueError('Clean real-weight T8 complete MLP comparison including copy and four-link CCL required')
+    native_links = report.get('native_requested_links')
+    if (not isinstance(native_links, dict) or set(native_links) != {'default', 'axis0', 'axis1'}
+            or any(type(value) is not int or value not in (1, 2, 4) for value in native_links.values())
+            or report.get('matched_requested_links') != dict(default=4, axis0=4, axis1=4)
+            or any(type(value) is not int for value in report['matched_requested_links'].values())):
+        raise ValueError('Record original link requests and match all control/candidate collective requests at four links')
     matrix(report.get('eager_checks'), ('pattern', 'chip'),
         {(pattern, chip) for pattern in range(3) for chip in range(2)}, ('exact',))
     matrix(report.get('trace_checks'), ('pattern', 'arm', 'chip'),

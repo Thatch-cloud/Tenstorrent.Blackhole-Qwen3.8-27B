@@ -93,11 +93,15 @@ def main():
         if (args.dim, args.hidden_dim, args.num_devices, args.decode_grid_w) != (5120, 17408, 2, 11):
             raise ValueError('Pinned model and two-card worker grid required')
         collectives = TT_CCL(mesh)
+        report['native_requested_links'] = {name: collectives.get_num_links(axis)
+            for name, axis in (('default', None), ('axis0', 0), ('axis1', 1))}
         def four_links(cluster_axis=None):
             if cluster_axis is not None and (type(cluster_axis) is not int or cluster_axis not in (0, 1)):
                 raise ValueError('Qualified pair collective axis required')
             return 4
         collectives.get_num_links = four_links
+        report['matched_requested_links'] = {name: collectives.get_num_links(axis)
+            for name, axis in (('default', None), ('axis0', 0), ('axis1', 1))}
         state = load_mlp_layer(args.CKPT_DIR, 0)
         mlp = Qwen36MLP(mesh, state, None, args=args, tt_ccl=collectives)
         del state

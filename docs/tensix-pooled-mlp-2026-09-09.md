@@ -27,7 +27,7 @@ same FIFOs and output workspace. This is not yet a 64-layer model result.
 | --- | --- | --- |
 | Full gate/up/down separately | Both chips, exact native controls, all 32 physical rows, changed-input traces | Pass |
 | Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Running |
-| Host safeguards | 959 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
+| Host safeguards | 974 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
 | Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Wired; not dispatched |
 | Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not qualified |
 
@@ -50,11 +50,21 @@ There is no extra output copy and no replacement collective kernel. Source hashe
 pin the native wrapper; tests verify every argument and prohibit deallocation.
 Hardware comparisons still use the actual native MLP forward as the control.
 
+The opt-in full-verifier adapter is prepared but not enabled. Its host tests
+require all 64 MLP calls in order, one shared workspace, exception-safe method
+restoration and no deallocation of aliased caller inputs. It retains the native
+input-memory conversion. Device correctness and full-request speed remain open.
+
 ## Hardware decision
 
 CI suite: `tensix-stream-mlp`. Source/simulator preflight runs before the CCL build
 or device probes. It requires the simulator report **and** its successful exit
 artifact; missing or changed evidence stops the job.
+
+The component test records the helper's original link requests and explicitly
+matches control and candidate at four links. A separate
+[whole-request two-versus-four-link test](target-model-link-counts-2026-09-09.md)
+keeps that policy change separate from weight streaming.
 
 Each timed trace includes input copying, all MLP operations and the four-link
 native collective. The test retains all 36 ABBA samples, 50 replays per sample,

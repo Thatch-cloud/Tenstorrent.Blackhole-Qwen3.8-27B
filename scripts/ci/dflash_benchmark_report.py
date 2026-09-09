@@ -26,6 +26,8 @@ def report_rows(report):
             summarize = summarize_dflash_projection_requests
         if any(entry.get('live_query_qk') is True for entry in requests):
             summarize = summarize_dflash_live_query_requests
+        if any(entry.get('target_four_links') is True for entry in requests):
+            from target_link_request import summarize
         combined = summarize(requests)
         summaries = [(arm, combined[arm], report['request_summary'][arm]) for arm in ('control', 'candidate')]
     else:
@@ -49,6 +51,8 @@ def report_rows(report):
             path.append('captured K/V update')
         if summary.get('live_query_qk'):
             path.append('live-query QK')
+        if 'target_collective_links' in summary:
+            path.append(f"target CCL {summary['target_collective_links']} links")
         output.append(dict(arm=arm, path=' + '.join(path), **summary['benchmark']))
     return output
 

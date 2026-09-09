@@ -19,6 +19,8 @@ class TensixMlpHardwareGateTests(unittest.TestCase):
         return dict(passed=True, closed_cleanly=True, backend='hardware', stage='complete', rows=8,
             streams=1, layer=0, collective_links=4, pool_buffers=2, repeats_per_sample=50,
             seeds=[1659, 2670, 3781], dram_boundary=True, native_collective=True, all_samples_retained=True,
+            native_requested_links=dict(default=2, axis0=2, axis1=2),
+            matched_requested_links=dict(default=4, axis0=4, axis1=4),
             eager_checks=[dict(pattern=pattern, chip=chip, exact=True) for pattern in range(3) for chip in range(2)],
             trace_checks=[dict(pattern=pattern, arm=arm, chip=chip, exact=True)
                 for pattern in range(3) for arm in range(2) for chip in range(2)],
@@ -37,6 +39,21 @@ class TensixMlpHardwareGateTests(unittest.TestCase):
             result = qualify_hardware(self.fixture(faster))
             self.assertTrue(result['passed'])
             self.assertEqual(result['eligible_for_full_model_gate'], faster)
+
+    def test_native_link_count_is_recorded_without_confusing_it_with_the_matched_override(self):
+        for links in (1, 2, 4):
+            report = self.fixture()
+            report['native_requested_links'] = dict(default=links, axis0=links, axis1=links)
+            self.assertTrue(qualify_hardware(report)['passed'])
+        for field in ('native_requested_links', 'matched_requested_links'):
+            for value in (None, {}, dict(default=4, axis0=True, axis1=4), dict(default=4, axis0=4.0, axis1=4)):
+                report = {**self.fixture(), field: value}
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    qualify_hardware(report)
+        report = self.fixture()
+        report['matched_requested_links']['axis0'] = 2
+        with self.assertRaises(ValueError):
+            qualify_hardware(report)
 
     def test_all_comparisons_and_timed_outputs_are_required(self):
         original = self.fixture()

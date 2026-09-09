@@ -214,7 +214,7 @@ def summarize_dflash_cache_requests(requests):
 
 
 def summarize_dflash_abba_requests(requests, *, arm_key):
-    if arm_key not in ('commit_only_gdn', 'fused_convolution', 'cache_history', 'cache_projection_capture', 'live_query_qk'):
+    if arm_key not in ('commit_only_gdn', 'fused_convolution', 'cache_history', 'cache_projection_capture', 'live_query_qk', 'target_four_links'):
         raise ValueError('Explicit isolated DFlash2 experiment arm required')
     if (len(requests) != 6
             or [entry.get(arm_key) for entry in requests] != [False, True, False, True, True, False]
@@ -232,7 +232,7 @@ def summarize_dflash_abba_requests(requests, *, arm_key):
     for entry in requests:
         if (any(entry[key] != reference[key] for key in identity)
                 or any(entry.get(key, False) is not reference.get(key, False)
-                    for key in ('commit_only_gdn', 'fused_convolution', 'cache_history', 'cache_projection_capture', 'live_query_qk') if key != arm_key)
+                    for key in ('commit_only_gdn', 'fused_convolution', 'cache_history', 'cache_projection_capture', 'live_query_qk', 'target_four_links') if key != arm_key)
                 or any(entry['dflash'][key] != reference['dflash'][key] for key in draft_identity)
                 or [tuple(block[key] for key in block_identity) for block in entry['blocks']] != expected_blocks):
             raise ValueError('Matched ABBA requires identical inputs, proposals, acceptance, sources and four-link configuration')
