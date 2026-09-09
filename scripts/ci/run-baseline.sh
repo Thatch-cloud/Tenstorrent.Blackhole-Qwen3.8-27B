@@ -2,6 +2,9 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
+tensix_mlp_packet=${QWEN_TENSIX_PACKET_READS:-0}
+[[ "$tensix_mlp_packet" = 0 || "$tensix_mlp_packet" = 1 ]]
+if [ "$tensix_mlp_packet" = 1 ]; then test "$mode" = tensix-stream-mlp-16; fi
 mtp_drafts=0
 dflash_drafts=0
 dflash_capture=0
@@ -230,6 +233,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
     -e "QWEN_TENSIX_MLP_PRODUCERS=$tensix_mlp_producers" \
+    -e "QWEN_TENSIX_MLP_PACKET=$tensix_mlp_packet" \
     -e "QWEN_LIVE_QK=$live_qk" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \

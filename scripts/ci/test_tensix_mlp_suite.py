@@ -5,7 +5,7 @@ import unittest
 
 
 class TensixMlpSuiteTests(unittest.TestCase):
-    def run_route(self, enabled=True, failure='', profile=False, producers=8):
+    def run_route(self, enabled=True, failure='', profile=False, producers=8, single_packet=False):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
         start = source.index('if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then')
         end = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then', start)
@@ -28,6 +28,7 @@ timeout() {
         environment = dict(os.environ, QWEN_CCL_LAZY_BUILD='1', QWEN_TENSIX_MLP=str(int(enabled)),
             QWEN_TENSIX_MLP_PROFILE=str(int(profile)),
             QWEN_TENSIX_MLP_PRODUCERS=str(producers),
+            QWEN_TENSIX_MLP_PACKET=str(int(single_packet)),
             QWEN_TINY_MLP='0', QWEN_MTP_DRAFTS='0', QWEN_DFLASH_DRAFTS='0',
             QWEN_RUN_MODE='full-norm-engine', FAILURE=failure)
         return subprocess.run(['bash', '-c', stub + source[start:end] + source[model_start:model_end]],
@@ -46,6 +47,20 @@ timeout() {
         self.assertIn('--simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json', lines[-1])
         self.assertIn('--output /experiment/results/tensix-mlp.json', lines[-1])
         self.assertNotIn('full-prefix.py', result.stdout)
+
+    def test_single_packet_uses_its_own_prerequisite_and_explicit_flag(self):
+        result = self.run_route(producers=16, single_packet=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 5)
+        for line in (lines[0], lines[-1]):
+            self.assertIn('--single-packet', line)
+            self.assertIn('tensix-mlp-simulator-16-packet.json', line)
+            self.assertIn('tensix-mlp-simulator-16-packet.exit-status', line)
+        for options in (dict(producers=8), dict(producers=16, profile=True)):
+            invalid = self.run_route(single_packet=True, **options)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertEqual(invalid.stdout, '')
 
     def test_link_probe_is_not_mislabeled_as_mlp_success(self):
         result = self.run_route(enabled=False)

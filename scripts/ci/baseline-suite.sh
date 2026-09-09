@@ -52,8 +52,17 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
         producers=${QWEN_TENSIX_MLP_PRODUCERS:-8}
         suffix=''
         if [ "$producers" = 16 ]; then suffix=-16; else test "$producers" = 8; fi
+        packet_args=()
+        packet=${QWEN_TENSIX_MLP_PACKET:-0}
+        [[ "$packet" = 0 || "$packet" = 1 ]]
+        if [ "$packet" = 1 ]; then
+            test "$producers" = 16
+            test "${QWEN_TENSIX_MLP_PROFILE:-0}" = 0
+            suffix=-16-packet
+            packet_args=(--single-packet)
+        fi
         python3 /experiment-scripts/ci/tensix-stream-mlp-hardware.py --preflight \
-            --producers "$producers" \
+            --producers "$producers" "${packet_args[@]}" \
             --simulator-report "/experiment-scripts/ci/tensix-mlp-simulator$suffix.json" \
             --simulator-exit-status "/experiment-scripts/ci/tensix-mlp-simulator$suffix.exit-status" \
             --output /experiment/results/tensix-mlp-preflight.json
@@ -362,8 +371,17 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
         producers=${QWEN_TENSIX_MLP_PRODUCERS:-8}
         suffix=''
         if [ "$producers" = 16 ]; then suffix=-16; else test "$producers" = 8; fi
+        packet_args=()
+        packet=${QWEN_TENSIX_MLP_PACKET:-0}
+        [[ "$packet" = 0 || "$packet" = 1 ]]
+        if [ "$packet" = 1 ]; then
+            test "$producers" = 16
+            test "${QWEN_TENSIX_MLP_PROFILE:-0}" = 0
+            suffix=-16-packet
+            packet_args=(--single-packet)
+        fi
         timeout -k 30 1200 python3 -u /experiment-scripts/ci/tensix-stream-mlp-hardware.py \
-            --producers "$producers" \
+            --producers "$producers" "${packet_args[@]}" \
             --simulator-report "/experiment-scripts/ci/tensix-mlp-simulator$suffix.json" \
             --simulator-exit-status "/experiment-scripts/ci/tensix-mlp-simulator$suffix.exit-status" \
             --output /experiment/results/tensix-mlp.json

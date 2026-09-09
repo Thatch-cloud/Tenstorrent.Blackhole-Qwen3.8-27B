@@ -15,6 +15,23 @@ from test_tensix_mlp_weight_views import simulator_fixture as view_fixture
 
 
 class TensixMlpHardwareGateTests(unittest.TestCase):
+    def test_single_packet_requires_matching_simulator_and_all_hardware_reader_engagements(self):
+        report = self.fixture(producers=16)
+        report.update(single_packet=True, reader_engagements=[dict(tile_bytes=size, block_rows=8,
+            receiver_columns=columns, total_columns=width)
+            for size, columns, width in ((576, 4, 272), (576, 4, 272), (1088, 2, 160)) for chip in range(2)])
+        self.assertTrue(qualify_hardware(report)['passed'])
+        simulator = test_tensix_mlp_gate.TensixMlpGateTests().fixture(16)
+        root = Path('/experiment')
+        with patch('tensix_mlp_hardware_gate.read_prerequisite', return_value=simulator) as read, \
+                self.assertRaisesRegex(ValueError, 'reader policy'):
+            validate_sources(report, root)
+        read.assert_called_once_with(root / 'tensix-mlp-simulator-16-packet.json',
+            root / 'tensix-mlp-simulator-16-packet.exit-status')
+        report['reader_engagements'].pop()
+        with self.assertRaises(ValueError):
+            qualify_hardware(report)
+
     def test_sixteen_producer_hardware_cannot_use_eight_producer_simulation(self):
         report = self.fixture(producers=16)
         self.assertTrue(qualify_hardware(report)['passed'])

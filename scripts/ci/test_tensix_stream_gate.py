@@ -7,6 +7,27 @@ from tensix_weight_stream import stream_geometry
 
 
 class TensixStreamGateTests(unittest.TestCase):
+    def test_packet_gate_needs_full_extent_exact_engagement_and_terminal_outer_status(self):
+        report = self.fixture()
+        report.update(geometry=json.loads(json.dumps(stream_geometry('gate', 20, 16))),
+            arm_policies=['generic', 'single-packet'], stage='complete', target_integrated=False, eligible_for_hardware=False,
+            sources_after=report['sources'], native_sources_after=report['native_sources'],
+            reader_engagements=[dict(tile_bytes=576, block_rows=8, receiver_columns=4, total_columns=272)] * 2)
+        with self.assertRaises(ValueError):
+            qualify(report, report['sources'], report['native_sources'])
+        self.assertTrue(qualify(report, report['sources'], report['native_sources'],
+            single_packet=True, exit_status='0')['full_projection'])
+        for status in (None, '1', '124'):
+            with self.assertRaises(ValueError):
+                qualify(report, report['sources'], report['native_sources'], single_packet=True, exit_status=status)
+        for key, value in (('stage', 'allocated'), ('reader_engagements', []), ('sources_after', {}),
+                ('native_sources_after', {}), ('eligible_for_hardware', True),
+                ('geometry', json.loads(json.dumps(stream_geometry('gate', 5, 16))))):
+            changed = deepcopy(report)
+            changed[key] = value
+            with self.assertRaises(ValueError):
+                qualify(changed, report['sources'], report['native_sources'], single_packet=True, exit_status='0')
+
     def fixture(self):
         return dict(passed=True, closed_cleanly=True, backend='simulator',
             sources={name: 'a' * 64 for name in SOURCES}, native_sources={name: 'b' * 64 for name in NATIVE_SOURCES},

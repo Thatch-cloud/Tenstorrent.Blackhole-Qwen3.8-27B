@@ -6,12 +6,30 @@ import unittest
 from unittest.mock import patch
 
 from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER, SOURCES
-from tensix_mlp_gate import main, qualify, qualify_producers
+from tensix_mlp_gate import main, qualify, qualify_producers, qualify_reader
 from tensix_weight_stream import stream_geometry
 from tiny_mlp_gate import HARDWARE_TP_COMMON, SIMULATOR_TP_COMMON, TP_COMMON
 
 
 class TensixMlpGateTests(unittest.TestCase):
+    def test_single_packet_requires_explicit_policy_all_readers_and_unchanged_sources(self):
+        report = self.fixture(16)
+        report.update(single_packet=True, sources_after=report['sources'], native_sources_after=report['native_sources'])
+        report['reader_engagements'] = [dict(tile_bytes=size, block_rows=8, receiver_columns=columns, total_columns=width)
+            for fixture in range(2) for size, columns, width in ((576, 4, 272), (576, 4, 272), (1088, 2, 160))
+            for chip in range(2)]
+        with self.assertRaises(ValueError):
+            qualify(report, report['sources'], report['native_sources'])
+        self.assertTrue(qualify(report, report['sources'], report['native_sources'], single_packet=True)['single_packet'])
+        for key, value in (('single_packet', 1), ('sources_after', {}), ('native_sources_after', {}),
+                ('reader_engagements', report['reader_engagements'][:-1]), ('producers_per_card', 8)):
+            changed = deepcopy(report)
+            changed[key] = value
+            with self.assertRaises(ValueError):
+                qualify(changed, report['sources'], report['native_sources'], single_packet=True)
+        with self.assertRaises(ValueError):
+            qualify_reader(self.fixture(), 'true')
+
     def test_producer_count_mapping_and_runtime_must_match(self):
         report = self.fixture(16)
         self.assertEqual(qualify_producers(report, 16), 16)

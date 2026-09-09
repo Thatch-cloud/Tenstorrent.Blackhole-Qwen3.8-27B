@@ -12,6 +12,7 @@ from gdn_multitoken_conv import addresses, release_owned
 from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, SOURCES, hashes
 from tensix_projection_raw import copy_raw, raw_shape
 from tensix_stream_mlp import StreamBufferPool, execute_from_dram, prepare_mlp
+from tensix_weight_packet import packet_runtime
 from tiny_mlp import execute
 from tiny_tile_matmul import PROJECTIONS
 
@@ -20,8 +21,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--producers', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--single-packet', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
+    if options.single_packet and options.producers != 16:
+        parser.error('Single-packet candidate requires the fixed sixteen-producer mapping')
     if os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') != '1':
         parser.error('Explicit scoped simulator packer compatibility graft required')
     native_root = Path(os.environ['TT_METAL_HOME'])
@@ -32,6 +36,7 @@ def main():
     report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__, rows=8, compared_rows=32,
         fixtures=2, components=list(COMPONENTS), packer_zero_graft=True, shared_pool=True, shared_workspace=True,
         full_mlp=True, dram_boundary=True, producers_per_card=options.producers,
+        single_packet=options.single_packet, reader_engagements=[],
         sources=hashes(Path(__file__).parent, SOURCES), native_sources=hashes(native_root, NATIVE_SOURCES),
         control_checks=[], eager_checks=[], replay_checks=[], input_checks=[], negative_controls=[], fixture_checks=[])
     mesh, pool = None, None
@@ -40,6 +45,8 @@ def main():
         storage.append(value)
         return value
     def progress(stage):
+        report['stage'] = stage
+        options.output.write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(dict(stage=stage)), flush=True)
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
@@ -67,9 +74,10 @@ def main():
             torch.zeros((1, 1, 8, 5120 if name == 'partial' else 8704), dtype=torch.bfloat16), device=mesh,
             dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG,
             mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))) for name in COMPONENTS}
-        pool = StreamBufferPool(ttnn, mesh, options.producers)
+        candidate_operations = packet_runtime(ttnn, report['reader_engagements']) if options.single_packet else ttnn
+        pool = StreamBufferPool(candidate_operations, mesh, options.producers)
         for fixture in range(2):
-            prepared_mlp.append(prepare_mlp(ttnn, mesh, local_input, weights[fixture], workspace, pool, native_root))
+            prepared_mlp.append(prepare_mlp(candidate_operations, mesh, local_input, weights[fixture], workspace, pool, native_root))
         report['producer_mappings'] = {name: projection.geometry['mapping']
             for name, projection in prepared_mlp[0].projections.items()}
         report['pool_buffers'] = len(pool.entries)
@@ -128,7 +136,7 @@ def main():
                     release_owned(ttnn, transient)
                     transient.clear()
                 references[pattern].append(controls[0])
-                actual = execute_from_dram(ttnn, source, prepared_mlp[fixture])
+                actual = execute_from_dram(candidate_operations, source, prepared_mlp[fixture])
                 for component, name in enumerate(COMPONENTS):
                     current = raw(actual[name])
                     for chip in range(2):
@@ -153,7 +161,7 @@ def main():
         upload(0)
         for fixture in range(2):
             trace, unused_result = capture_operation(ttnn, mesh,
-                lambda fixture=fixture: execute_from_dram(ttnn, source, prepared_mlp[fixture]))
+                lambda fixture=fixture: execute_from_dram(candidate_operations, source, prepared_mlp[fixture]))
             traces.append(trace)
         for repetition, pattern in enumerate((0, 1, 0)):
             upload(pattern)
@@ -195,6 +203,12 @@ def main():
                 release_owned(ttnn, owned)
                 ttnn.close_mesh_device(mesh)
             report['closed_cleanly'] = True
+            report['sources_after'] = hashes(Path(__file__).parent, SOURCES)
+            report['native_sources_after'] = hashes(native_root, NATIVE_SOURCES)
+            if report['sources_after'] != report['sources'] or report['native_sources_after'] != report['native_sources']:
+                report['passed'] = False
+                raise ValueError('MLP probe or native sources changed during execution')
+            progress('complete' if report['passed'] else 'failed')
         finally:
             if not report['closed_cleanly']:
                 report['passed'] = False

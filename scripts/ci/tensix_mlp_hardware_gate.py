@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 
 from sampling_link_policy import SOURCES as FABRIC_SOURCES
-from tensix_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers
+from tensix_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers, qualify_reader
 from tensix_stream_gate import matrix
 from tensix_mlp_view_gate import prerequisite as view_prerequisite
 from tensix_mlp_weight_views import qualify_views
@@ -41,6 +41,7 @@ def qualify_hardware(report):
             or report.get('seeds') != [1659, 2670, 3781]):
         raise ValueError('Clean real-weight T8 complete MLP comparison including copy and four-link CCL required')
     qualify_producers(report)
+    qualify_reader(report, report.get('single_packet', False), fixtures=1)
     native_links = report.get('native_requested_links')
     if (not isinstance(native_links, dict) or set(native_links) != {'default', 'axis0', 'axis1'}
             or any(type(value) is not int or value not in (1, 2, 4) for value in native_links.values())
@@ -89,11 +90,13 @@ def qualify_hardware(report):
 
 def validate_sources(report, root):
     producers = qualify_producers(report)
-    suffix = '-16' if producers == 16 else ''
+    single_packet = qualify_reader(report, report.get('single_packet', False), fixtures=1)
+    suffix = '-16-packet' if single_packet else '-16' if producers == 16 else ''
     simulator_path = root / f'tensix-mlp-simulator{suffix}.json'
     status_path = root / f'tensix-mlp-simulator{suffix}.exit-status'
     simulator = read_prerequisite(simulator_path, status_path)
     qualify_producers(simulator, producers)
+    qualify_reader(simulator, single_packet)
     sources = hashes(root, SOURCES)
     if (report.get('sources') != sources or report.get('hardware_sources') != hashes(root, HARDWARE_SOURCES)
             or report.get('model_sources') != MODEL_SOURCES or report.get('fabric_sources') != FABRIC_SOURCES
@@ -101,7 +104,7 @@ def validate_sources(report, root):
             or report.get('simulator_exit_sha256') != hashlib.sha256(status_path.read_bytes()).hexdigest()
             or report.get('native_sources', {}).get(PACKER) != ORIGINAL_PACKER):
         raise ValueError('Hardware evidence must match current code, exact simulator result, native model and original packer')
-    gate = qualify(simulator, sources, report.get('native_sources'))
+    gate = qualify(simulator, sources, report.get('native_sources'), single_packet=single_packet)
     if gate != report.get('simulator_gate'):
         raise ValueError('Recorded prerequisite differs from independent simulator qualification')
     view_evidence = report.get('view_prerequisite')

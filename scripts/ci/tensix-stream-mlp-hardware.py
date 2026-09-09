@@ -14,13 +14,14 @@ from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from sampling_link_policy import audit
 from tensix_mlp_collective import reduce_partial
-from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers
+from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers, qualify_reader
 from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, read_prerequisite
 from tensix_mlp_view_gate import NATIVE_SOURCES as VIEW_NATIVE_SOURCES, prerequisite as view_prerequisite
 from tensix_mlp_weight_views import tensor_spec, weight_views
 from tensix_mlp_profile import MlpTraceProfile, require_profile_mode
 from tensix_projection_raw import copy_raw, raw_shape
 from tensix_stream_mlp import StreamBufferPool, execute_from_dram, prepare_mlp
+from tensix_weight_packet import packet_runtime
 
 
 def main():
@@ -31,13 +32,17 @@ def main():
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--producers', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--single-packet', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, True)
+    if options.single_packet and (options.producers != 16 or options.profile):
+        parser.error('Single-packet comparison requires sixteen producers and uninstrumented timing')
     require_profile_mode(os.environ, options.profile)
     native_root, root = Path(os.environ['TT_METAL_HOME']), Path(__file__).parent
     report = dict(passed=False, closed_cleanly=False, backend='hardware', scope=__doc__, rows=8, streams=1, layer=0,
         collective_links=4, repeats_per_sample=50, seeds=[1659, 2670, 3781], dram_boundary=True,
         producers_per_card=options.producers,
+        single_packet=options.single_packet, reader_engagements=[],
         native_collective=True, all_samples_retained=True, eager_checks=[], trace_checks=[], negative_controls=[],
         input_checks=[], timed_checks=[], blocks=[], profile_checks=[],
         instrumented_timing=options.profile, correctness_only=options.profile,
@@ -61,7 +66,7 @@ def main():
         if (report['native_sources'][PACKER] != ORIGINAL_PACKER or report['model_sources'] != MODEL_SOURCES
                 or os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT')):
             raise ValueError('Original hardware packer and reviewed native MLP/CCL required; no simulator graft')
-        report['simulator_gate'] = qualify(prerequisite, report['sources'], report['native_sources'])
+        report['simulator_gate'] = qualify(prerequisite, report['sources'], report['native_sources'], single_packet=options.single_packet)
         qualify_producers(prerequisite, options.producers)
         report['view_prerequisite'] = view_prerequisite(root, hashes(native_root, VIEW_NATIVE_SOURCES))
         report['fabric_sources'] = audit(native_root, os.environ)
@@ -140,8 +145,10 @@ def main():
             torch.zeros((1, 1, 8, 5120 if name == 'partial' else 8704), dtype=torch.bfloat16), device=mesh,
             dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG,
             mesh_mapper=mapper)) for name in COMPONENTS}
-        pool = StreamBufferPool(ttnn, mesh, options.producers)
-        prepared = prepare_mlp(ttnn, mesh, local_input, weights, workspace, pool, native_root)
+        candidate_operations = packet_runtime(ttnn, report['reader_engagements']) if options.single_packet else ttnn
+        pool = StreamBufferPool(candidate_operations, mesh, options.producers)
+        prepared = prepare_mlp(candidate_operations, mesh, local_input, weights, workspace, pool, native_root)
+        qualify_reader(report, options.single_packet, fixtures=1)
         report['producer_mappings'] = {name: projection.geometry['mapping']
             for name, projection in prepared.projections.items()}
         qualify_producers(report, options.producers)
@@ -165,7 +172,7 @@ def main():
         def forward(candidate, storage):
             if not candidate:
                 return retain(storage, mlp.forward(source))
-            result = execute_from_dram(ttnn, source, prepared)
+            result = execute_from_dram(candidate_operations, source, prepared)
             return retain(storage, reduce_partial(ttnn, mesh, collectives, result['partial'], args.ccl_topology()))
         references, source_words = [], []
         progress('weights_ready')

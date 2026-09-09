@@ -2,6 +2,14 @@
 
 ## Current programme position - 2026-09-10
 
+**New target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
+mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
+changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency
+claim. Full-size BF4 transport passes 24 exact checks and clean exit; BF8 is
+running. Full-MLP and CI gates require their own single-packet evidence;
+nothing is promoted or dispatched to hardware yet.
+[Experiment and gates](weight-read-packets-2026-09-10.md).
+
 **Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native
 approximate draft attention improves control61.47TG by22.68% in
 [34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182).

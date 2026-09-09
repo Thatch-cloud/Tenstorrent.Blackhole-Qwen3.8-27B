@@ -13,7 +13,7 @@ from tensix_weight_stream import stream_geometry
 
 COMPONENTS = ('gate', 'up', 'hidden', 'partial')
 SOURCES = (*PROJECTION_SOURCES, 'tensix_stream_mlp.py', 'tensix-stream-mlp-probe.py',
-    'tensix_mlp_gate.py', 'tiny_mlp.py', 'tiny_mlp_gate.py')
+    'tensix_mlp_gate.py', 'tiny_mlp.py', 'tiny_mlp_gate.py', 'tensix_weight_packet.py', 'tensix_weight_packet_reader.cpp')
 NATIVE_SOURCES = (*PROJECTION_NATIVE, 'ttnn/cpp/ttnn/operations/eltwise/binary/binary.cpp',
     'ttnn/cpp/ttnn/operations/eltwise/binary/binary_nanobind.cpp',
     'ttnn/cpp/ttnn/operations/eltwise/binary_ng/device/binary_ng_device_operation.cpp',
@@ -28,7 +28,8 @@ NATIVE_SOURCES = (*PROJECTION_NATIVE, 'ttnn/cpp/ttnn/operations/eltwise/binary/b
     'ttnn/cpp/ttnn/operations/data_movement/copy/device/kernels/writer_unary_start_id.cpp',
     'ttnn/cpp/ttnn/operations/eltwise/unary/device/kernels/dataflow/reader_unary_interleaved_start_id.cpp',
     'ttnn/cpp/ttnn/operations/eltwise/unary/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp',
-    'ttnn/cpp/ttnn/operations/data_movement/sharded/device/kernels/compute/eltwise_copy.cpp')
+    'ttnn/cpp/ttnn/operations/data_movement/sharded/device/kernels/compute/eltwise_copy.cpp',
+    'tt_metal/hw/inc/api/dataflow/dataflow_api.h', 'tt_metal/hw/inc/api/tensor/tensor_accessor.h')
 
 
 def qualify_producers(report, expected=None):
@@ -43,7 +44,22 @@ def qualify_producers(report, expected=None):
     return count
 
 
-def qualify(report, sources, native_sources):
+def qualify_reader(report, single_packet=False, *, fixtures=2):
+    if type(single_packet) is not bool or report.get('single_packet', False) is not single_packet:
+        raise ValueError('Explicit matching generic or single-packet weight-reader policy required')
+    expected = []
+    if single_packet:
+        if report.get('producers_per_card') != 16:
+            raise ValueError('Single-packet candidate retains exactly sixteen producers')
+        expected = [dict(tile_bytes=size, block_rows=8, receiver_columns=columns, total_columns=width)
+            for unused_fixture in range(fixtures) for size, columns, width in ((576, 4, 272), (576, 4, 272), (1088, 2, 160))
+            for unused_chip in range(2)]
+    if report.get('reader_engagements', []) != expected:
+        raise ValueError('Every candidate gate/up/down reader on both chips must be engaged exactly once per fixture')
+    return single_packet
+
+
+def qualify(report, sources, native_sources, *, single_packet=False):
     if (not isinstance(report, dict) or report.get('backend') != 'simulator' or report.get('error')
             or any(report.get(field) is not True for field in ('passed', 'closed_cleanly', 'packer_zero_graft',
                 'shared_pool', 'shared_workspace', 'full_mlp', 'dram_boundary'))
@@ -52,6 +68,10 @@ def qualify(report, sources, native_sources):
             or report.get('components') != list(COMPONENTS)):
         raise ValueError('Clean full-size T8 MLP simulation with two pooled FIFOs and shared workspace required')
     qualify_producers(report)
+    qualify_reader(report, single_packet)
+    if single_packet and (report.get('sources_after') != report.get('sources')
+            or report.get('native_sources_after') != report.get('native_sources')):
+        raise ValueError('Single-packet probe and native sources must remain unchanged through teardown')
     if not isinstance(sources, dict) or set(sources) != set(SOURCES) or report.get('sources') != sources:
         raise ValueError('Current complete MLP sources required')
     if (not isinstance(native_sources, dict) or not isinstance(report.get('native_sources'), dict)
@@ -89,6 +109,8 @@ def qualify(report, sources, native_sources):
             or any(len({pair[chip] for pair in bindings}) != 6 for chip in range(2))):
         raise ValueError('Both synthetic fixtures need six distinct physical weight buffers per chip')
     result = dict(passed=True, full_mlp=True, scope='Exact simulated pre-collective MLP; not hardware speed or model TG')
+    if single_packet:
+        result['single_packet'] = True
     if equivalence:
         result['native_equivalence'] = 'Pinned prefill-only tp_common difference; T8 decode helper unchanged'
     return result
@@ -99,11 +121,12 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--native-root', type=Path, required=True)
     parser.add_argument('--exit-status', type=Path, required=True)
+    parser.add_argument('--single-packet', action='store_true')
     options = parser.parse_args()
     if options.exit_status.read_text().strip() != '0':
         raise ValueError('Clean outer simulator wrapper exit required')
     print(json.dumps(qualify(json.loads(options.report.read_text()), hashes(Path(__file__).parent, SOURCES),
-        hashes(options.native_root, NATIVE_SOURCES))))
+        hashes(options.native_root, NATIVE_SOURCES), single_packet=options.single_packet)))
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ from attention_batch import capture_operation
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from tensix_weight_stream import execute_stream, prepare_stream, stream_geometry
+from tensix_weight_packet import packet_runtime
 
 
 def raw_copy_program(operations, source, destination, geometry):
@@ -45,10 +46,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--projection', choices=('gate', 'down'), required=True)
     parser.add_argument('--blocks', type=int, default=5)
+    parser.add_argument('--producers', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--single-packet', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
-    geometry = stream_geometry(options.projection, options.blocks)
+    geometry = stream_geometry(options.projection, options.blocks, options.producers)
     import torch
     import ttnn
 
@@ -56,16 +59,24 @@ def main():
     report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__, geometry=geometry,
         operand_scope='Two synthetic compressed weight patterns, independent data on each chip',
         sources=hashes(Path(__file__).parent, ('tensix-weight-stream-probe.py', 'tensix_weight_stream.py',
+            'tensix_weight_packet.py', 'tensix_weight_packet_reader.cpp',
             'tensix_weight_stream_reader.cpp', 'tensix_weight_stream_writer.cpp', 'tensix_weight_stream_sink.cpp',
             'tensix_weight_stream_raw.cpp', 'tiny_tile_matmul.py', 'attention_batch.py', 'feature_projection.py',
             'gdn_multitoken_conv.py')),
         native_sources=hashes(native, ('tt_metal/hw/inc/api/remote_circular_buffer.h',
+            'tt_metal/hw/inc/api/dataflow/dataflow_api.h', 'tt_metal/hw/inc/api/tensor/tensor_accessor.h',
+            'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h',
+            'build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so',
             'tt_metal/impl/buffers/global_circular_buffer.cpp', 'ttnn/core/global_circular_buffer.cpp',
             'ttnn/cpp/ttnn-nanobind/program_descriptors.cpp')),
+        arm_policies=['generic', 'single-packet' if options.single_packet else 'generic'],
+        target_integrated=False, eligible_for_hardware=False, reader_engagements=[],
         eager_checks=[], replay_checks=[], negative_controls=[])
     mesh = None
     owned, pipelines, traces = [], [], []
     def progress(stage):
+        report['stage'] = stage
+        options.output.write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(dict(stage=stage, projection=options.projection, blocks=options.blocks)), flush=True)
     try:
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
@@ -86,8 +97,11 @@ def main():
                 layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
         reference = owned[1]
-        for output in owned[2:]:
-            pipelines.append(prepare_stream(ttnn, mesh, source, output, geometry))
+        for arm, output in enumerate(owned[2:]):
+            operations = packet_runtime(ttnn, report['reader_engagements']) if options.single_packet and arm == 1 else ttnn
+            pipelines.append(prepare_stream(operations, mesh, source, output, geometry))
+        if len(report['reader_engagements']) != (2 if options.single_packet else 0):
+            raise AssertionError('Exactly one candidate reader per chip must be engaged')
         direct_program = raw_copy_program(ttnn, source, reference, geometry)
         bindings = [addresses(ttnn, value) for value in owned]
         if any(len({binding[chip] for binding in bindings}) != len(owned) for chip in range(2)):
@@ -165,6 +179,12 @@ def main():
                 prepared = None
                 ttnn.close_mesh_device(mesh)
             report['closed_cleanly'] = True
+            report['sources_after'] = hashes(Path(__file__).parent, report['sources'])
+            report['native_sources_after'] = hashes(native, report['native_sources'])
+            if report['sources_after'] != report['sources'] or report['native_sources_after'] != report['native_sources']:
+                report['passed'] = False
+                raise ValueError('Stream probe or native sources changed during execution')
+            progress('complete' if report['passed'] else 'failed')
         finally:
             if not report['closed_cleanly']:
                 report['passed'] = False

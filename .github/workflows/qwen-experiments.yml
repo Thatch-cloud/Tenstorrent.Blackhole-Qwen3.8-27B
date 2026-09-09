@@ -12,6 +12,10 @@ on:
         description: Inventory only; recover exact pinned image by verified registry digest, without card access
         type: boolean
         default: false
+      weight_packets:
+        description: Fixed single-packet weight reads; sixteen-producer MLP suite only, requires its own simulator evidence
+        type: boolean
+        default: false
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
         type: boolean
@@ -68,6 +72,10 @@ jobs:
         shell: bash
         run: |
           test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+          if [ "${{ inputs.weight_packets }}" = true ]; then
+            test "${{ inputs.suite }}" = tensix-stream-mlp-16
+            test "${{ inputs.simulator_only }}" = false
+          fi
           if [ "${{ inputs.simulator_only }}" = true ]; then
             test "${{ inputs.suite }}" = learned-attention
             test "${{ inputs.reset_authorized }}" = false
@@ -243,6 +251,7 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: tensix-stream-mlp-16
+          QWEN_TENSIX_PACKET_READS: ${{ inputs.weight_packets && '1' || '0' }}
         run: timeout 3600 bash scripts/ci/run-baseline.sh
       - name: Simulator-qualified live-query attention hardware comparison
         if: inputs.suite == 'live-qk'
