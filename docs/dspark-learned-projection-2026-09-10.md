@@ -60,10 +60,10 @@ and ownership checks pass. Every physical output row is included.
 - The failed JSON is `scripts/ci/dspark-projection-simulator-failed.json`, SHA256
   `7babee248db2d25c3e6561bb0ee83159fa25a9301a472cae2d494ade3761aa36`.
   No tolerance, frozen reference or hardware eligibility is changed.
-- Eager-only diagnostic `20260909T163428Z-430` captures actual intermediate
-  tensors for isolating projection versus normalization error. It skips replay
-  deliberately, and cannot qualify the complete matrix even if numerical checks pass.
-  All 11 focused host tests pass, including capture integrity and mode rejection.
+- Eager-only diagnostic `20260909T163428Z-430` reproduces the same two failures
+  and saves the actual intermediate tensors. It skips replay deliberately and
+  cannot qualify the complete matrix. All 1,137 host and 59 harness tests pass
+  at this checkpoint, including capture integrity and mode rejection.
 - Setup attempt `20260909T161941Z-387` failed before opening a mesh because the
   wrapper changes directory to `/opt/ttsim`; the retry supplies absolute paths.
 
@@ -71,3 +71,35 @@ Next, fix the numerical mismatch and requalify the complete matrix, connect one 
 then all five layers and the real target/collective path. A component pass does
 not establish coding acceptance or progress to 200 TG by itself. The retained
 4K hardware result remains PP 3,324.52 / CTX 4,096 / TG 74.27 for one stream.
+
+## Numerical attribution
+
+The captured values reproduce all original final-output comparisons. On both
+patterns, CPU normalization of the **actual device projection** passes the
+unchanged backbone threshold. Native normalization compared with its own CPU
+input reference also passes individually. The combined errors cross the limit
+at four pattern-1 elements; this is accumulated error, not corrupt weights or
+stale replay. No reference values are substituted into device execution.
+
+| Pattern-1 coordinate (row, feature) | Frozen CPU | Native result | Allowed error |
+| --- | ---: | ---: | ---: |
+| 5, 1268 | 1.273438 | 1.250000 | 0.022734 |
+| 14, 4682 | 1.148438 | 1.125000 | 0.021484 |
+| 17, 2451 | -4.218750 | -4.156250 | 0.052188 |
+| 24, 1969 | 2.750000 | 2.703125 | 0.037500 |
+
+The attribution report is `scripts/ci/dspark-projection-attribution.json`, SHA256
+`e5231cdcb460c43262a4ae4770d322226f9363d507238aea1a5cb9c3034fae31`.
+Captured operand SHA256:
+`896140c440c4a84552a1ef303ee79d7ae970ba354a4ef14ae036da6a0528b3bd`.
+
+| Normalization diagnostic | Outcome |
+| --- | --- |
+| FP32 native RMS input/output, explicit BF16 cast | Same four failures per chip; rejected, clean exit 1 |
+| Explicit square / sum / rsqrt / product | API setup initially rejected an unsupported sum keyword; no numerical claim |
+| Same composition using the installed sum signature | Run `20260909T165149Z-403` active |
+
+These short diagnostics reuse the hash-pinned **observed** FC output, avoiding
+another full weight upload. They still require exact native-control reproduction
+and unchanged borrowed inputs. Even a pass must be followed by the complete
+learned FC/norm matrix with changed-input replay; no hardware or speed claim follows.

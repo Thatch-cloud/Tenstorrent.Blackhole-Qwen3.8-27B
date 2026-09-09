@@ -73,10 +73,12 @@ class DispatchWrapperTests(unittest.TestCase):
 
     def test_dspark_projection_route_preserves_terminal_status(self):
         source = Path(__file__).with_name('run-dispatch-probe.sh').read_text()
-        code, output, statuses = self.run_edit_race(source, 'dspark-projection-probe')
-        self.assertEqual(code, 0, output)
-        self.assertIn('dspark-projection-probe.json', output)
-        self.assertEqual(statuses, ['0'])
+        for probe in ('dspark-projection-probe','dspark-norm-precision-probe'):
+            with self.subTest(probe=probe):
+                code, output, statuses = self.run_edit_race(source, probe)
+                self.assertEqual(code, 0, output)
+                self.assertIn(probe+'.json', output)
+                self.assertEqual(statuses, ['0'])
 
 
 if __name__ == '__main__':
