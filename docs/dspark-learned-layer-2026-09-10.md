@@ -319,6 +319,10 @@ gather all 248,320 vocabulary scores on-device, and preserve query rows zero
 through six for Markov selection. It does not reuse DFlash2's top-16 shortlist
 or discard the anchor query row. Four bridge orchestration tests pass; its
 vocabulary collective still needs simulation before integration.
+Its full-size transport probe is prepared with 50 checks, including swapped-rank
+and dropped-row-zero controls. This uses synthetic logits, not target weights or
+Markov inference. It will run only after the active backbone simulation closes;
+the active run's source-pinned wrapper remains unchanged.
 
 ## Next gates
 
