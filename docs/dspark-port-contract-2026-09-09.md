@@ -420,6 +420,12 @@ All 1,142 host and 59 harness tests pass. The original failures remain rejected;
 one complete learned TT layer and then all five layers remain next.
 [Scope and next gates](dspark-learned-projection-2026-09-10.md).
 
+The complete layer-zero arithmetic port is now prepared: all eleven learned
+parameters, all local heads, full MLP width and both TP reduction boundaries.
+Its CPU layer matches all six frozen upstream checkpoints exactly. A separate
+664-check simulator matrix covers the complete layer; device execution is not
+qualified yet. [Layer scope](dspark-learned-layer-2026-09-10.md).
+
 ## Evidence and next gates
 
 `scripts/ci/dspark-intake-v2.json` preserves the successful metadata report.
