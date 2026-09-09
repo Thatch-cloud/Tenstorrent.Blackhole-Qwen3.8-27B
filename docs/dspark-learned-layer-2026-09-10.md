@@ -242,10 +242,47 @@ required before connecting this candidate to a 4K request.
 | Inactive output rows remain zero | 12 |
 | **Total** | **664** |
 
+## Backend-matched CPU reference
+
+The complete five-layer CPU reference passes **96/96 exact checks**: 48 retained
+eager controls and 48 comparisons against the reviewed upstream topology with an
+explicit FP32 attention/rotary policy. BF16 linear, normalization and output
+boundaries remain unchanged. This is a declared custom backend, not a claim of
+stock SGLang or FlashAttention equivalence.
+
+All 62 checkpoint tensors, source closure, repeated and changed inputs, and the
+saved stage tensors were independently reconciled. The original eager reference
+and the 78 TT numerical failures remain intact; native matmul is not emulated.
+Report `scripts/ci/dspark-backend-cpu-reference.json`, SHA256
+`efd8bd223ad7adf373efe41fff93488a309efff278e7efcf138f111b00835d37`.
+All 1,181 host tests pass at this checkpoint.
+
+## Device-only TP boundaries
+
+Shared-BDF simulation `20260909T200506Z-380` passes **144/144 exact checks** on
+the saved learned attention and MLP partials. Both boundaries now use a device
+all-gather and rank-ordered slices, followed by the unchanged residual arithmetic.
+There is no host tensor staging inside either captured boundary.
+
+| Boundary requirement | Passing checks |
+| --- | ---: |
+| Eager outputs against retained native tensors | 36 |
+| Changing-input trace replays and stable output bindings | 48 |
+| Borrowed inputs unchanged | 56 |
+| Omitted-update negative controls | 4 |
+
+Exit 0, source/native closure and clean teardown were independently reconciled.
+Report `scripts/ci/dspark-mesh-simulator.json`, SHA256
+`b5bf2abecce186a86721b3abfc35b0194e87f777ec6caa5c70da340914915355`.
+The simulator explicitly uses one link; this does **not** qualify the physical
+four-link fabric or measure speed. The complete layer is not yet a single trace,
+and the old numerical failures remain open.
+
 ## Next gates
 
-1. Validate a backend-matched upstream CPU reference and reconcile the remaining
-   native arithmetic differences; retain the original failures and tensors.
+1. Join the complete learned layer into one trace using the qualified device
+   boundaries; compare against the retained same-arithmetic native control.
+   Reconcile remaining arithmetic differences against the backend-matched reference.
 2. Qualify all 664 checks, restore the original native runtime, then independently
    reconcile the source-bound report.
 3. Connect all five learned layers and selector, then the real TP collective and

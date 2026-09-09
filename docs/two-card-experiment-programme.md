@@ -109,8 +109,13 @@ evidence are retained. All 48 sampled historical down-projection coordinates
 match native grouped arithmetic exactly (not full-output qualification).
 The complete 664-check layer gate remains open. A controlled CPU comparison
 identifies an eager-BF16 versus FP32 attention/rotary mismatch as part of the
-remaining error; backend-matched upstream validation is next. Neither numerical
-limits nor serving defaults change. Numerical fixes are not assumed to be faster.
+remaining error. Backend-matched five-layer CPU validation now passes **96/96
+exact checks**: 48 original eager controls and 48 declared FP32-policy upstream
+comparisons. It does not emulate native matmul or clear the TT failures. Device-only
+TP handoffs pass **144/144 simulator checks**, including exact changing-input trace
+replays against saved learned tensors. A complete single-trace layer is next;
+simulated one-link collectives do not qualify physical links. Neither numerical limits nor serving
+defaults change. Numerical fixes are not assumed to be faster.
 This component fix does not change the measured 74.27 TG hardware result.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 

@@ -110,8 +110,9 @@ higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) has a verified CP
 backbone and 162 passing learned feature-projection/normalization simulator checks.
 The first complete learned TT layer now executes all phases and passes **208
 exact replay checks**, but still fails **78/192 numerical comparisons**. It is
-not qualified. A CPU/device attention-backend mismatch explains part of the gap;
-limits remain unchanged. All five layers and target integration remain pending:
+not qualified. The backend-matched five-layer CPU reference passes **96 exact
+checks**, retaining the original eager controls; this does not clear TT numerical
+failures. All five TT layers and target integration remain pending:
 **no DSpark hardware TG claim**. [Layer evidence](docs/dspark-learned-layer-2026-09-10.md).
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
