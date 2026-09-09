@@ -12,6 +12,7 @@ dflash_projection_abba=0
 dflash_profile=0
 dflash_live_query_abba=0
 dflash_target_links_abba=0
+dflash_native_proposal_abba=0
 dflash_context=0
 tiny_mlp=0
 tensix_mlp=0
@@ -34,6 +35,11 @@ if [[ "$mode" = tensix-stream-mlp || "$mode" = tensix-stream-mlp-profile || "$mo
     tensix_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
+fi
+if [ "$mode" = full-dflash-native-proposal-request ]; then
+    dflash_context=4096
+    dflash_native_proposal_abba=1
+    mode=full-dflash-trace-request
 fi
 if [ "$mode" = full-dflash-target-links-request ]; then
     dflash_context=4096
@@ -217,6 +223,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_CACHE_ABBA=$dflash_cache_abba" \
     -e "QWEN_DFLASH_PROJECTION_ABBA=$dflash_projection_abba" \
     -e "QWEN_DFLASH_LIVE_QUERY_ABBA=$dflash_live_query_abba" \
+    -e "QWEN_DFLASH_NATIVE_PROPOSAL_ABBA=$dflash_native_proposal_abba" \
     -e "QWEN_DFLASH_TARGET_LINKS_ABBA=$dflash_target_links_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
@@ -258,6 +265,10 @@ docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
+if [ "$dflash_native_proposal_abba" = 1 ]; then
+    docker cp "$test_id:/experiment/results/full-dflash-request.json" "$output/full-dflash-request.json"
+    python3 scripts/ci/proposal_native_request.py --hardware-result "$output/full-dflash-request.json"
+fi
 if [ "$dflash_target_links_abba" = 1 ]; then
     docker cp "$test_id:/experiment/results/full-dflash-request.json" "$output/full-dflash-request.json"
     python3 scripts/ci/target_link_request.py --hardware-result "$output/full-dflash-request.json"

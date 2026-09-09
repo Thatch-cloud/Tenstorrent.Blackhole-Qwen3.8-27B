@@ -70,6 +70,43 @@ class DraftAttentionBranchTests(unittest.TestCase):
                     lambda value: value, parameters=parameters, context=context)
         operations.matmul.assert_not_called()
 
+    def test_approximate_native_branch_is_local_and_requires_its_own_mask_proof(self):
+        operations, weights, convolution, hidden, history, mask, rope = self.fixture()
+        mesh, output = object(), object()
+        transient = []
+        def retain(value):
+            transient.append(value)
+            return value
+        parameters = prepare_attention_branch(operations, mesh, weights, convolution, lambda value: value,
+            native_head_layout=True, native_proposal_attention=True)
+        with self.assertRaisesRegex(ValueError, 'own validated mask'):
+            execute_attention_branch(operations, mesh, object(), hidden, history, mask, rope,
+                retain, parameters=parameters, context=31)
+        operations.matmul.assert_not_called()
+        with patch('draft_attention_branch.grouped_causal_convolution', return_value=object()), \
+                patch('draft_attention_branch.gather_add_projection', return_value=object()), \
+                patch('draft_attention_branch.split_projected_heads', return_value={name: object() for name in ('q', 'k', 'v')}), \
+                patch('draft_attention_branch.concatenate_query_heads', return_value=object()), \
+                patch('draft_attention_branch.composed_draft_attention') as composed, \
+                patch('draft_attention_branch.draft_sdpa') as precise, \
+                patch('proposal_native_attention.attention', return_value=output) as native:
+            execute_attention_branch(operations, mesh, object(), hidden, history, mask, rope, retain,
+                parameters=parameters, context=31, native_proposal_mask_validated=True)
+            native.assert_called_once()
+            self.assertTrue(native.call_args.kwargs['mask_validated'])
+            self.assertIn(output, transient)
+            composed.assert_not_called()
+            precise.assert_not_called()
+
+    def test_native_proposal_selection_rejects_unqualified_combinations_before_upload(self):
+        for changed in (dict(block_rows=32), dict(precise_native=True), dict(live_query_qk=True),
+                        dict(native_head_layout=False), dict(native_proposal_attention=1)):
+            operations, weights, convolution, unused_hidden, unused_history, unused_mask, unused_rope = self.fixture()
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                prepare_attention_branch(operations, object(), weights, convolution, lambda value: value,
+                    **{'native_proposal_attention': True, 'native_head_layout': True, **changed})
+            operations.from_torch.assert_not_called()
+
     def test_native_branch_replaces_composition_and_retains_output(self):
         operations, weights, convolution, hidden, history, mask, rope = self.fixture()
         mesh, collective, native_output = object(), object(), object()

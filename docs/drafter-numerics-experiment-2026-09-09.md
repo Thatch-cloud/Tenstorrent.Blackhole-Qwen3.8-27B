@@ -1,7 +1,7 @@
 # Separate experiment: faster approximate drafting
 
 **Both proposal-only native-attention simulator gates pass.**
-No complete-request integration or performance result yet. Keep the exact
+The complete-request comparison is implemented; no hardware result yet. Keep the exact
 live-query candidate separate. The failed native-SDPA numerical tests remain
 failed; their tolerances and results are unchanged.
 
@@ -19,10 +19,10 @@ failed; their tolerances and results are unchanged.
 - Nine experiment and15 native source hashes are bound to the report. Native
   sources must remain unchanged within the declared simulator packer scope,
   and the outer wrapper must exit successfully.
-- 1,008 CI tests and57 simulator-harness tests pass. Next is request integration
-  with exact native target tokens/state and separate
-  proposal-policy acceptance reporting. No hardware dispatch is authorized by
-  a finite-output check alone.
+- The primitive gate passes1,008 CI tests and57 simulator-harness tests. The
+  subsequent request integration passes1,021 CI tests and the same57 harness
+  tests, including separate proposal-policy acceptance reporting. A finite-output
+  check alone does not authorize hardware promotion.
 
 The first original-packer attempt, `20260909T102155Z-400`, exits1 at TT-Sim's
 `tensix_pacr: Disable_pack_zero_flags` limitation, before producing a numerical
@@ -56,6 +56,35 @@ Both outer exits are zero; their shared exit-file SHA256 is
 `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`.
 Reports and exit files are checked in byte-identically under
 `scripts/ci/proposal-native-attention-simulator-{31,2048}.*`.
+
+## Complete-request comparison
+
+Suite: `full-dflash-native-proposal-request`, opt-in only.
+
+| Setting | Control and candidate |
+| --- | --- |
+| Workload | One coding request at CTX4,096; captured T8 DFlash2 |
+| Changed | Candidate uses native BF16 attention only inside the drafter |
+| Unchanged | Target kernels/sampling/rollback, cached draft K/V, fused convolution, commit-only GDN |
+| Order | One audit per policy, then uninstrumented control/candidate/candidate/control |
+| Exactness | Native target tokens, active GDN, valid KV and inactive state in every request |
+| Draft policy | Proposals may differ between policies; each must reproduce its own audited trajectory |
+| Reporting | PP / CTX / committed TG, setup-inclusive latency, acceptance and per-block costs |
+
+Every proposal mask is validated before upload/capture. Failed updates revoke
+the prior mask authorization. Each audited policy retains eager/trace, cached/
+full-history projection, convolution and committed target-feature checks.
+Proposal counts, matching prefixes and committed frontiers are independently
+reconciled against the final token tape, including EOS truncation.
+
+Both simulator reports and outer exits are checked before build/device work.
+Twenty-six integration/source files are fingerprinted in each request; the
+original native packer is required. The final artifact must record clean device
+teardown and pass the host-side policy validator after the container exits0.
+Existing exact-arithmetic ABBAs still reject this different-proposal policy.
+
+No request result exists yet. The hardware comparison does not itself replace
+the held-out executable coding gate or authorize serving changes.
 
 ## Different acceptance question
 

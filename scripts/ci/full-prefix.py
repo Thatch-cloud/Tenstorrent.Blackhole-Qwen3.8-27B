@@ -115,6 +115,12 @@ def main():
     dflash_profile = os.environ.get('QWEN_DFLASH_VERIFIER_PROFILE', '0')
     dflash_live_query_abba = os.environ.get('QWEN_DFLASH_LIVE_QUERY_ABBA', '0')
     dflash_target_links_abba = os.environ.get('QWEN_DFLASH_TARGET_LINKS_ABBA', '0')
+    dflash_native_proposal_abba = os.environ.get('QWEN_DFLASH_NATIVE_PROPOSAL_ABBA', '0')
+    if dflash_native_proposal_abba not in ('0', '1') or (dflash_native_proposal_abba == '1' and
+            (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
+             or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba, dflash_cache_abba,
+                 dflash_projection_abba, dflash_profile, dflash_live_query_abba, dflash_target_links_abba)))):
+        parser.error('Native proposal ABBA requires the isolated cached 4K T8 lead and unchanged target verifier')
     if dflash_target_links_abba not in ('0', '1') or (dflash_target_links_abba == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba,
@@ -428,6 +434,10 @@ def main():
         from live_attention_request_gate import qualify_inputs
 
         report['live_attention_simulator_reports'] = qualify_inputs(os.environ['TT_METAL_HOME'])
+    if dflash_native_proposal_abba == '1':
+        from proposal_native_request import qualify_inputs
+
+        report['proposal_native_inputs'] = qualify_inputs(os.environ['TT_METAL_HOME'])
     if options.batch:
         report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
     if options.coding_cost:
@@ -878,13 +888,18 @@ def main():
                         if dflash_target_links_abba == '1':
                             arms = tuple((True, True, audit, True, False, False, four_links) for four_links, audit in
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
-                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture, live_query_qk, target_four_links in arms:
+                        arms = tuple((*arm, False) for arm in arms)
+                        if dflash_native_proposal_abba == '1':
+                            arms = tuple((True, True, audit, True, False, False, False, candidate) for candidate, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture, live_query_qk, target_four_links, native_proposal_attention in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
                                 commit_only_gdn=commit_only, fused_convolution=fused_convolution,
                                 cache_history=cache_history,
                                 cache_projection_capture=cache_projection_capture,
                                 live_query_qk=live_query_qk,
                                 target_four_links=target_four_links,
+                                native_proposal_attention=native_proposal_attention,
                                 repetition=len(report['request_checks']))), flush=True)
                             measure = measure_dflash_request
                             if dflash_target_links_abba == '1':
@@ -899,7 +914,7 @@ def main():
                                 proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only,
                                 fused_convolution=fused_convolution, cache_history=cache_history,
                                 cache_projection_capture=cache_projection_capture, profile_verifier=dflash_profile == '1',
-                                live_query_qk=live_query_qk)
+                                live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -917,6 +932,8 @@ def main():
                         summarize = summarize_dflash_live_query_requests
                     if dflash_target_links_abba == '1':
                         from target_link_request import summarize
+                    if dflash_native_proposal_abba == '1':
+                        from proposal_native_request import summarize
                     if dflash_profile == '1':
                         report['request_summary'] = summarize_dflash_requests(report['request_checks'], audit_only=True)
                         report.update(instrumented_timing=True, correctness_only=True,
@@ -1235,20 +1252,27 @@ def main():
             report['failure_evidence'] = error.evidence
         raise
     finally:
+        report['closed_cleanly'] = False
         output_path.write_text(json.dumps(report, indent=2))
-        if sampler is not None:
-            sampler.reset_trace()
-        if mesh is not None:
-            if generator is not None:
-                for store in getattr(generator, "_bucket_trace_store", {}).values():
-                    for per_device in store[0].values():
-                        if per_device:
-                            for trace in per_device.values():
-                                ttnn.release_trace(mesh, trace)
-            for group in feature_prefix_pool.values():
-                for value in group:
-                    ttnn.deallocate(value)
-            ttnn.close_mesh_device(mesh)
+        try:
+            if sampler is not None:
+                sampler.reset_trace()
+            if mesh is not None:
+                if generator is not None:
+                    for store in getattr(generator, "_bucket_trace_store", {}).values():
+                        for per_device in store[0].values():
+                            if per_device:
+                                for trace in per_device.values():
+                                    ttnn.release_trace(mesh, trace)
+                for group in feature_prefix_pool.values():
+                    for value in group:
+                        ttnn.deallocate(value)
+                ttnn.close_mesh_device(mesh)
+            report['closed_cleanly'] = True
+        finally:
+            if not report['closed_cleanly']:
+                report['passed'] = False
+            output_path.write_text(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

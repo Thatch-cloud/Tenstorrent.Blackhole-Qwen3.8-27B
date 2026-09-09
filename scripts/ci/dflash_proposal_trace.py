@@ -65,6 +65,8 @@ class PreparedDFlashProposal:
         operations, device = self.operations, self.device
         if getattr(device, 'live_query_qk', False):
             device.validated_live_masks.discard(addresses(operations, bucket.mask))
+        if getattr(device, 'native_proposal_attention', False):
+            device.validated_native_proposal_masks.discard(addresses(operations, bucket.mask))
         if self.kv_history is not None and (self.kv_history.pending is not None
                 or self.kv_history.position != device.position or self.kv_history.history_rows != device.history_rows):
             raise ValueError('Proposal replay requires a fully committed matching K/V frontier')
@@ -73,6 +75,10 @@ class PreparedDFlashProposal:
             from draft_live_qk import validate_live_qk_mask
 
             validate_live_qk_mask(host['mask'])
+        if getattr(device, 'native_proposal_attention', False):
+            from proposal_native_attention import validate_mask
+
+            validate_mask(host['mask'])
         sources = [host['identifiers'], host['mask'], *host['rope']['q'], *host['rope']['k']]
         destinations = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k']]
         for value, destination in zip(sources, destinations, strict=True):
@@ -96,6 +102,8 @@ class PreparedDFlashProposal:
                 raise AssertionError('Prepared proposal input addresses moved')
             if getattr(device, 'live_query_qk', False):
                 device.validated_live_masks.add(addresses(operations, bucket.mask))
+            if getattr(device, 'native_proposal_attention', False):
+                device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
         finally:
             release_owned(operations, owned)
 
@@ -146,6 +154,8 @@ class PreparedDFlashProposal:
         for bucket in self.buckets.values():
             if getattr(self.device, 'live_query_qk', False):
                 self.device.validated_live_masks.discard(addresses(self.operations, bucket.mask))
+            if getattr(self.device, 'native_proposal_attention', False):
+                self.device.validated_native_proposal_masks.discard(addresses(self.operations, bucket.mask))
             release_owned(self.operations, bucket.owned)
             bucket.owned.clear()
         release_owned(self.operations, self.owned)

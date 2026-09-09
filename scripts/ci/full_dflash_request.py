@@ -65,9 +65,12 @@ def summarize_dflash_requests(requests, *, audit_only=False):
     cache_history = reference.get('cache_history', False)
     cache_projection_capture = reference.get('cache_projection_capture', False)
     live_query_qk = reference.get('live_query_qk', False)
+    native_proposal_attention = reference.get('native_proposal_attention', False)
     if (type(commit_only) is not bool or type(fused_convolution) is not bool or type(cache_history) is not bool
             or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
-            or type(live_query_qk) is not bool or (live_query_qk and not cache_history)):
+            or type(live_query_qk) is not bool or (live_query_qk and not cache_history)
+            or type(native_proposal_attention) is not bool or (native_proposal_attention and
+                (not cache_history or live_query_qk or cache_projection_capture))):
         raise ValueError('Explicit Boolean GDN and convolution arms required')
     identity = ('prompt_tokens', 'emitted', 'max_new_tokens', 'eos_ids', 'vocab_size', 'committed_decode_tokens')
     for entry in requests:
@@ -80,6 +83,7 @@ def summarize_dflash_requests(requests, *, audit_only=False):
                 or entry.get('cache_history', False) is not cache_history
                 or entry.get('cache_projection_capture', False) is not cache_projection_capture
                 or entry.get('live_query_qk', False) is not live_query_qk
+                or entry.get('native_proposal_attention', False) is not native_proposal_attention
                 or entry.get('selected_drafter') != 'dflash2' or entry.get('sampler_num_links') != 4
                 or not entry.get('fabric_sources') or entry['fabric_sources'] != reference.get('fabric_sources')):
             raise ValueError('Complete identical outputs, exact target state and the audited four-link pair required')
@@ -90,6 +94,13 @@ def summarize_dflash_requests(requests, *, audit_only=False):
                 or not entry['dflash'].get('proposal_contexts') or type(entry['dflash'].get('validated_live_masks')) is not int
                 or entry['dflash'].get('validated_live_masks') != len(entry['dflash']['proposal_contexts'])):
             raise ValueError('Every captured live-query bucket requires a validated mask')
+        if native_proposal_attention and (entry['dflash'].get('native_proposal_attention') is not True
+                or entry['dflash'].get('proposal_capture') is not True or entry['dflash'].get('block_rows') != 8
+                or not entry['dflash'].get('proposal_contexts')
+                or type(entry['dflash'].get('validated_native_proposal_masks')) is not int
+                or entry['dflash']['validated_native_proposal_masks'] != len(entry['dflash']['proposal_contexts'])
+                or entry['dflash'].get('attention') != 'Native BF16 proposal-only attention; not an exact replacement'):
+            raise ValueError('Every native proposal bucket requires its own validated mask and explicit approximate policy')
         count = entry['committed_decode_tokens']
         if (type(count) is not int or count <= 0 or count != len(entry['emitted']) - 1
                 or sum(block['committed'] for block in entry['blocks']) != count
@@ -192,6 +203,7 @@ def summarize_dflash_requests(requests, *, audit_only=False):
         cache_history=cache_history,
         cache_projection_capture=cache_projection_capture,
         live_query_qk=live_query_qk,
+        native_proposal_attention=native_proposal_attention,
         prefill_setup_decode_ms=[entry['prefill_setup_decode_ms'] for entry in measured],
         feature_setup_ms=[entry['feature_setup_ms'] for entry in measured],
         scope='Complete coding-request pilot; not a component rate, MTP comparison or held-out quality certification')
@@ -214,6 +226,8 @@ def summarize_dflash_cache_requests(requests):
 
 
 def summarize_dflash_abba_requests(requests, *, arm_key):
+    if any(entry.get('native_proposal_attention', False) is not False for entry in requests):
+        raise ValueError('Different proposal arithmetic requires its separate policy comparison gate')
     if arm_key not in ('commit_only_gdn', 'fused_convolution', 'cache_history', 'cache_projection_capture', 'live_query_qk', 'target_four_links'):
         raise ValueError('Explicit isolated DFlash2 experiment arm required')
     if (len(requests) != 6
@@ -281,7 +295,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
                           audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False,
                           commit_only_gdn=False, fused_convolution=False, cache_history=False, cache_projection_capture=False,
-                          profile_verifier=False, live_query_qk=False):
+                          profile_verifier=False, live_query_qk=False, native_proposal_attention=False):
     import torch
     from full_request import measure_request
     from models.tt_transformers.tt.ccl import TT_CCL
@@ -291,6 +305,9 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             or type(cache_history) is not bool or (cache_history and (not proposal_capture or block_rows != 8))
             or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
             or type(live_query_qk) is not bool or (live_query_qk and (not cache_history or cache_projection_capture))
+            or type(native_proposal_attention) is not bool or (native_proposal_attention and
+                (not cache_history or not commit_only_gdn or not fused_convolution or live_query_qk
+                 or cache_projection_capture or profile_verifier or len(prompt) != 4096))
             or type(profile_verifier) is not bool or (profile_verifier and (not audit_features or not commit_only_gdn
                 or not proposal_capture or not fused_convolution or not cache_history or cache_projection_capture
                 or block_rows != 8 or len(prompt) != 4096 or live_query_qk))
@@ -367,7 +384,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows,
             proposal_capture=proposal_capture, max_new_tokens=max_new_tokens, fused_convolution=fused_convolution,
             feature_start=window['start'], cache_history=cache_history, cache_projection_capture=cache_projection_capture,
-            live_query_qk=live_query_qk)
+            live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention)
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
@@ -393,6 +410,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['cache_history'] = cache_history
         result['cache_projection_capture'] = cache_projection_capture
         result['live_query_qk'] = live_query_qk
+        result['native_proposal_attention'] = native_proposal_attention
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
             prefill_window=window, prefill_checks=prefill_checks, prefill_chunks=prefill_chunks,
             prefill_assembly_checks=prefill_assembly_checks,
@@ -401,10 +419,13 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             history_checks=device.kv_history.checks if device.kv_history is not None else [],
             cache_projection_replays=device.kv_history.projection.calls if cache_projection_capture else 0,
             live_query_qk=live_query_qk, validated_live_masks=len(device.validated_live_masks),
+            native_proposal_attention=native_proposal_attention,
+            validated_native_proposal_masks=len(device.validated_native_proposal_masks),
             block_rows=block_rows, max_drafts=block_rows - 1, mask_token_id=248070,
             checkpoint_trained_block_rows=8, block_width_extrapolation=block_rows != 8,
             policy='Five learned BF16 layers, shared target head top16 and CPU FP64 learned greedy selector',
-            attention='Composed precise control; unqualified native SDPA is not enabled',
+            attention='Native BF16 proposal-only attention; not an exact replacement' if native_proposal_attention
+                else 'Composed precise control; unqualified native SDPA is not enabled',
             head_layout='Native QKV head split and concatenation; no generic sub-tile reshape',
             feature_history='Two preallocated 2048-row buffers; only committed prefixes are projected and published',
             execution='Eager request integration; setup, dispatch and compilation costs are not amortized',
@@ -436,6 +457,9 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         from live_attention_gate import source_hashes
 
         result['sources'].update(source_hashes())
+        from proposal_native_request import source_hashes as proposal_source_hashes
+
+        result['sources'].update(proposal_source_hashes())
         return result
     finally:
         try:

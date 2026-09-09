@@ -6,7 +6,7 @@ from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
 
 
-def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8, live_query_qk=False):
+def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8, live_query_qk=False, native_proposal_attention=False):
     import torch
 
     if type(native_head_layout) is not bool:
@@ -15,6 +15,9 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         raise ValueError('Explicit eight-row control or 32-row draft extrapolation required')
     if type(live_query_qk) is not bool or (live_query_qk and (block_rows != 8 or precise_native)):
         raise ValueError('Live-query QK requires the eight-row composed-attention path')
+    if type(native_proposal_attention) is not bool or (native_proposal_attention and
+            (block_rows != 8 or precise_native or live_query_qk or not native_head_layout)):
+        raise ValueError('Native proposal attention requires an isolated T8 native-head-layout experiment')
 
     native_kernel = None
     if precise_native:
@@ -38,7 +41,8 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
     base = convolution['layers.0.attention_conv.base_kernel']
     return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
         kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout, block_rows=block_rows,
-        live_query_qk=live_query_qk, norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
+        live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention,
+        norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
         convolution=upload(convolution['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()),
         bases=[upload(base[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
         projections={name: projection(name, 0) for name in ('q', 'k', 'v')},
@@ -48,7 +52,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
                              parameters, context, wide_dot_placement=False, convolution_operation=None, cached_history=None,
-                             live_query_mask_validated=False):
+                             live_query_mask_validated=False, native_proposal_mask_validated=False):
     convolve = convolution_operation or grouped_causal_convolution
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
@@ -57,6 +61,10 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     if parameters.get('live_query_qk') and (live_query_mask_validated is not True or wide_dot_placement
             or parameters.get('native_kernel') or parameters.get('block_rows', 8) != 8):
         raise ValueError('Live-query QK requires a validated T8 mask and the qualified64-worker path')
+    if parameters.get('native_proposal_attention') and (native_proposal_mask_validated is not True
+            or wide_dot_placement or parameters.get('native_kernel') or parameters.get('live_query_qk')
+            or parameters.get('block_rows', 8) != 8 or not parameters.get('native_head_layout')):
+        raise ValueError('Native proposal attention requires its own validated mask and isolated T8 policy')
     if type(context) is not int or context < 1 or context > 2048:
         raise ValueError('Explicit bounded committed feature context required')
     block_rows = parameters.get('block_rows', 8)
@@ -133,7 +141,12 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                 heads[name] = normalize_head(name, heads[name])
     attention_owned = []
     try:
-        if parameters.get('native_kernel'):
+        if parameters.get('native_proposal_attention'):
+            from proposal_native_attention import attention as native_proposal
+
+            attention = native_proposal(operations, heads['q'], heads['k'], heads['v'], mask, mask_validated=True)
+            attention_owned.append(attention)
+        elif parameters.get('native_kernel'):
             attention = draft_sdpa(operations, heads['q'], heads['k'], heads['v'], mask)
             attention_owned.append(attention)
         elif parameters.get('live_query_qk'):

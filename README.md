@@ -36,7 +36,8 @@ below are offline coding-task experiments, not held-out quality or serving certi
 [Next drafter experiment](docs/drafter-numerics-experiment-2026-09-09.md): native
 attention used only for approximate proposals. Mask/replay simulation passes at
 31/2,048 history rows, but learned numerical differences remain. Exact target
-verification stays mandatory; full-request integration and timing are next.
+verification stays mandatory. The separate full-request ABBA is implemented
+and passes1,021 host tests; hardware timing is next.
 
 ## Setup
 

@@ -16,6 +16,11 @@ unset TT_METAL_SIMULATOR TT_METAL_SLOW_DISPATCH_MODE TT_METAL_MOCK_CLUSTER_DESC_
 export PYTHONPATH=/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+if [ "${QWEN_DFLASH_NATIVE_PROPOSAL_ABBA:-0}" = 1 ]; then
+    [[ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine && "${QWEN_DFLASH_CONTEXT:-0}" = 4096 && "${QWEN_DFLASH_CAPTURE:-0}" = 1 && "${QWEN_DFLASH_DRAFTS:-0}" = 7 ]]
+    python3 /experiment-scripts/ci/proposal_native_request.py --metal-root /opt/tt-metal \
+        > /experiment/results/proposal-native-preflight.json
+fi
 if [ "${QWEN_DFLASH_LIVE_QUERY_ABBA:-0}" = 1 ]; then
     [[ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine && "${QWEN_DFLASH_CONTEXT:-0}" = 4096 && "${QWEN_DFLASH_CAPTURE:-0}" = 1 && "${QWEN_DFLASH_DRAFTS:-0}" = 7 ]]
     python3 /experiment-scripts/ci/live_attention_request_gate.py --metal-root /opt/tt-metal \
