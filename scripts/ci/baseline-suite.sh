@@ -42,6 +42,13 @@ if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
         --audit-output /experiment/results/mtp-checkpoint.json
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
+    if [ "${QWEN_TENSIX_MLP:-0}" = 1 ]; then
+        test "${QWEN_TINY_MLP:-0}" = 0
+        python3 /experiment-scripts/ci/tensix-stream-mlp-hardware.py --preflight \
+            --simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json \
+            --simulator-exit-status /experiment-scripts/ci/tensix-mlp-simulator.exit-status \
+            --output /experiment/results/tensix-mlp-preflight.json
+    fi
     if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
         python3 /experiment-scripts/ci/tiny-mlp-hardware.py --preflight \
             --simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json \
@@ -55,7 +62,7 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             echo 'Explicit-link hardware collective still invoked fallback discovery' >&2
             exit 1
         fi
-        if [ "${QWEN_TINY_MLP:-0}" != 1 ]; then exit 0; fi
+        if [[ "${QWEN_TINY_MLP:-0}" != 1 && "${QWEN_TENSIX_MLP:-0}" != 1 ]]; then exit 0; fi
     fi
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then
@@ -338,6 +345,13 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-replay ]; then
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    if [ "${QWEN_TENSIX_MLP:-0}" = 1 ]; then
+        timeout -k 30 1200 python3 -u /experiment-scripts/ci/tensix-stream-mlp-hardware.py \
+            --simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json \
+            --simulator-exit-status /experiment-scripts/ci/tensix-mlp-simulator.exit-status \
+            --output /experiment/results/tensix-mlp.json
+        exit 0
+    fi
     if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
         timeout -k 30 900 python3 -u /experiment-scripts/ci/tiny-mlp-hardware.py \
             --simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json \

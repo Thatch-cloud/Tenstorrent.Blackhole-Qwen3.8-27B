@@ -134,9 +134,13 @@ fixes that race. It is not counted as a clean suite pass.
 The new zero-copy projection reuses native matmul compute without relaxing the
 DRISC-only native entry's validator. Its five-block BF4/BF8 simulations each pass
 all32 physical output rows, native lead/expanded controls, changed-input replay
-and raw input/weight immutability. Full gate/up/down tests are running before
-complete-MLP integration and hardware timing. This is not a bandwidth or TG result.
+and raw input/weight immutability. Full gate/up/down tests now also pass, including
+clean outer wrapper exits. A complete MLP with two shared FIFOs and shared
+workspace is running in simulation before real-weight hardware ABBA. Its native
+collective adapter preserves the borrowed partial output instead of letting the
+native wrapper forcibly deallocate it. This is not a bandwidth or TG result.
 [Projection gates](tensix-streamed-projection-2026-09-09.md).
+[Pooled MLP and hardware gate](tensix-pooled-mlp-2026-09-09.md).
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

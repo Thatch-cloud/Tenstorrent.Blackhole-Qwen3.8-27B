@@ -13,6 +13,7 @@ dflash_profile=0
 dflash_live_query_abba=0
 dflash_context=0
 tiny_mlp=0
+tensix_mlp=0
 live_qk=0
 if [ "$mode" = live-qk ]; then
     live_qk=1
@@ -21,6 +22,11 @@ if [ "$mode" = live-qk ]; then
 fi
 if [ "$mode" = tiny-mlp ]; then
     tiny_mlp=1
+    mode=full-norm-engine
+    export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
+fi
+if [ "$mode" = tensix-stream-mlp ]; then
+    tensix_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
 fi
@@ -88,6 +94,7 @@ if [[ "$mode" = learned-attention && "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]]; then
 if [ "$mtp_drafts" != 0 ]; then ccl_build=1; fi
 if [ "$dflash_drafts" != 0 ]; then ccl_build=1; projection_links=4; fi
 if [ "$tiny_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
+if [ "$tensix_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
 if [[ "$mode" = learned-attention || "$mode" = learned-mlp || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
     descriptor=p150_x2_mesh_graph_descriptor.textproto
     projection_links=4
@@ -202,6 +209,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_LIVE_QUERY_ABBA=$dflash_live_query_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
+    -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_LIVE_QK=$live_qk" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
@@ -250,4 +258,8 @@ fi
 if [ "$tiny_mlp" = 1 ]; then
     docker cp "$test_id:/experiment/results/tiny-mlp.json" "$output/tiny-mlp.json"
     python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"
+fi
+if [ "$tensix_mlp" = 1 ]; then
+    docker cp "$test_id:/experiment/results/tensix-mlp.json" "$output/tensix-mlp.json"
+    python3 scripts/ci/tensix_mlp_hardware_gate.py --hardware-result "$output/tensix-mlp.json"
 fi

@@ -40,7 +40,8 @@ change firmware, or pretend programmable DRAM cores are supported.
 | Full BF4 gate transport, 5,120 x 8,704 per chip | Pass: 25,067,520 compressed bytes per chip |
 | Full BF8 down transport, 8,704 x 5,120 per chip | Kernel/cleanup audits pass; outer wrapper fails, not a clean suite pass |
 | BF4/BF8 native projections, five K blocks | Pass: native controls, all physical rows and two live traces |
-| Full native gate/up/down projections | Running sequentially, stopping on failure |
+| Full native gate/up/down projections | All pass: native controls, all physical rows, changed inputs and clean wrapper exits |
+| Complete MLP, shared FIFOs/workspace and DRAM input boundary | [Simulation running](tensix-pooled-mlp-2026-09-09.md) |
 | Real-weight complete MLP and four-link reduction | Not qualified |
 | Complete request PP / CTX / committed TG | Not qualified |
 
@@ -72,8 +73,18 @@ The matching five-block BF8 down test `20260909T064528Z-395` also passes the
 complete control/eager/replay/stale matrix, input immutability and clean wrapper
 exit. Report `scripts/ci/tensix-projection-simulator-down-5.json` has SHA256
 `245cc47837828761535d61ec1f93652f1eed6e66e1f2dee65d083eae69daf069`.
-Full gate, up and down tests follow on the same source. 933 CI and 57 simulator
-harness host tests pass; these counts are separate from the kernel checks.
+Full gate, up and down tests pass on the same projection source, with all control,
+eager, replay, stale-input and raw-word audits. Each recorded outer exit is zero.
+
+| Full projection | Local K x N | Report SHA256 |
+| --- | --- | --- |
+| Gate, 20 blocks | 5,120 x 8,704 | `490e347f42b3bf4d78087e965b6e385954dfd46126db8601b738157760153d96` |
+| Up, 20 blocks | 5,120 x 8,704 | `93c958a3dfd252be44400a6104271ed67375daa088fab261378058167423ea34` |
+| Down, 34 blocks | 8,704 x 5,120 | `dc67b26a7ff67250d5808825b10eb7f727cd8bd1e5ae9ebf0b2bad2ed2edff1e` |
+
+Reports are `scripts/ci/tensix-projection-simulator-{gate-20,up-20,down-34}.json`.
+The earlier standalone BF8 transport wrapper failure remains a failure; the
+new complete down-projection pass does not rewrite its history.
 
 ## Wrapper failure is retained
 
