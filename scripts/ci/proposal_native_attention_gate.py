@@ -15,6 +15,7 @@ SOURCES = ('proposal_native_attention.py', 'proposal-native-attention-probe.py',
     'attention_batch.py', 'gdn_multitoken_conv.py', 'feature_projection.py', 'live_qk_gate.py')
 SDPA = 'ttnn/cpp/ttnn/operations/transformer/sdpa/'
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
+SIMULATOR_PACKER = '8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7'
 NATIVE_SOURCES = (PACKER, *(SDPA + name for name in ('sdpa.cpp', 'sdpa.hpp', 'sdpa_nanobind.cpp',
     'device/sdpa_device_operation.cpp', 'device/sdpa_device_operation.hpp',
     'device/sdpa_device_operation_types.hpp', 'device/sdpa_program_factory.cpp',
@@ -34,26 +35,32 @@ def hashes(root, names):
     return {name: hashlib.sha256((Path(root) / name).read_bytes()).hexdigest() for name in names}
 
 
-def native_hashes(root):
+def native_hashes(root, *, simulator=False):
+    if type(simulator) is not bool:
+        raise ValueError('Explicit native or simulator packer scope required')
     result = hashes(root, NATIVE_SOURCES)
-    if any(result[name] != digest for name, digest in ORIGINAL.items()):
-        raise ValueError('Original native SDPA and packer required; no precision or simulator graft')
+    expected = {**ORIGINAL, **({PACKER: SIMULATOR_PACKER} if simulator else {})}
+    if any(result[name] != digest for name, digest in expected.items()):
+        raise ValueError('Original native SDPA and the explicit packer scope required; no precision graft')
     if (Path(root) / SDPA / 'device/kernels/compute/.qwen-precise-draft.lock').exists():
         raise ValueError('An active precise-draft graft owner excludes this experiment')
     return result
 
 
 def qualify(report, context, sources, native):
+    simulated_native = {**native, PACKER: SIMULATOR_PACKER} if isinstance(native, dict) else None
     if (not isinstance(report, dict) or report.get('error') or report.get('passed') is not True
             or report.get('closed_cleanly') is not True or report.get('backend') != 'simulator'
             or report.get('stage') != 'complete'
             or report.get('policy') != POLICY or type(context) is not int or context not in (31, 2048)
             or type(report.get('context')) is not int or report['context'] != context
             or report.get('target_integrated') is not False or report.get('accuracy_qualified') is not False
+            or report.get('packer_zero_graft') is not True
             or not isinstance(sources, dict) or not isinstance(native, dict)
             or report.get('sources') != sources or set(sources) != set(SOURCES)
-            or report.get('native_sources') != native or report.get('native_sources_after') != native
-            or set(native) != set(NATIVE_SOURCES) or any(native[name] != digest for name, digest in ORIGINAL.items())
+            or report.get('native_sources') != simulated_native or report.get('native_sources_after') != simulated_native
+            or set(native) != set(NATIVE_SOURCES) or native[PACKER] not in (ORIGINAL[PACKER], SIMULATOR_PACKER)
+            or any(native[name] != digest for name, digest in ORIGINAL.items() if name != PACKER)
             or report.get('fixture_sha256') != (FIXTURE_SHA256 if context == 31 else None)):
         raise ValueError('Clean source-bound proposal-only simulation with unchanged native runtime required')
     for digest in (*sources.values(), *native.values()):

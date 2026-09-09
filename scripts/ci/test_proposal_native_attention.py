@@ -84,10 +84,10 @@ class ProposalNativeAttentionGateTests(unittest.TestCase):
     def fixture(self, context=31):
         metrics = dict(max_abs=.05, mean_abs=.001, rms=.004, reference_max_abs=1., legacy_close=False)
         return dict(passed=True, closed_cleanly=True, backend='simulator', policy=POLICY, context=context, stage='complete',
-            target_integrated=False, accuracy_qualified=False,
+            target_integrated=False, accuracy_qualified=False, packer_zero_graft=True,
             sources={name: 'a' * 64 for name in gate.SOURCES},
-            native_sources={**{name: 'b' * 64 for name in gate.NATIVE_SOURCES}, **gate.ORIGINAL},
-            native_sources_after={**{name: 'b' * 64 for name in gate.NATIVE_SOURCES}, **gate.ORIGINAL},
+            native_sources={**{name: 'b' * 64 for name in gate.NATIVE_SOURCES}, **gate.ORIGINAL, gate.PACKER: gate.SIMULATOR_PACKER},
+            native_sources_after={**{name: 'b' * 64 for name in gate.NATIVE_SOURCES}, **gate.ORIGINAL, gate.PACKER: gate.SIMULATOR_PACKER},
             fixture_sha256=gate.FIXTURE_SHA256 if context == 31 else None,
             eager_checks=[dict(pattern=pattern, chip=chip, finite_all_rows=True, numerical_difference=dict(metrics))
                 for pattern in range(3) for chip in range(2)],
@@ -112,6 +112,8 @@ class ProposalNativeAttentionGateTests(unittest.TestCase):
             self.assertFalse(result['target_integrated'])
             self.assertEqual(sum(len(report[name]) for name in ('eager_checks', 'replay_checks', 'input_checks',
                 'negative_controls', 'masked_input_checks')), 76)
+            restored = {**report['native_sources'], gate.PACKER: gate.ORIGINAL[gate.PACKER]}
+            self.assertEqual(gate.qualify(report, context, report['sources'], restored), result)
 
     def test_every_check_matrix_is_required(self):
         for name in ('eager_checks', 'replay_checks', 'input_checks', 'negative_controls', 'masked_input_checks'):
@@ -130,7 +132,7 @@ class ProposalNativeAttentionGateTests(unittest.TestCase):
         for name, value in (('closed_cleanly', False), ('passed', False), ('error', 'failed'),
                 ('backend', 'hardware'), ('policy', 'exact-target'), ('accuracy_qualified', True),
                 ('target_integrated', True), ('context', True), ('fixture_sha256', None),
-                ('native_sources_after', {}), ('stage', 'running')):
+                ('native_sources_after', {}), ('stage', 'running'), ('packer_zero_graft', False)):
             report = self.fixture()
             report[name] = value
             with self.subTest(name=name), self.assertRaises(ValueError):

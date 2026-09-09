@@ -7,20 +7,30 @@ failed; their tolerances and results are unchanged.
 
 ## First implementation
 
-- Calls the unmodified native BF16 GQA operation with explicit T8 masks; no
-  precision graft, target hook, native-source edit or serving change.
+- Calls native BF16 GQA with explicit T8 masks; no SDPA precision graft, target
+  hook or serving change. The simulator-only packer compatibility exception is
+  explicit and must be restored before any hardware qualification.
 - Separate 31-row learned-operand and 2,048-row synthetic-history simulations
   record numerical errors and the original 0.01/0.01 comparison outcome. A
   proposal mask/replay pass does **not** certify attention accuracy.
 - Each context requires76 checks: six finite-output diagnostics, eight exact
   eager/replay comparisons, 56 unchanged-input checks, two stale controls and
   four masked-key/value perturbation checks, covering both chips and all32 rows.
-- Nine experiment and15 native source hashes are bound to the report; native
-  sources must remain unchanged and the outer wrapper must exit successfully.
+- Nine experiment and15 native source hashes are bound to the report. Native
+  sources must remain unchanged within the declared simulator packer scope,
+  and the outer wrapper must exit successfully.
 - 1,008 CI tests and57 simulator-harness tests pass. Simulation is next, then
   request integration with exact native target tokens/state and separate
   proposal-policy acceptance reporting. No hardware dispatch is authorized by
   a finite-output check alone.
+
+The first original-packer attempt, `20260909T102155Z-400`, exits1 at TT-Sim's
+`tensix_pacr: Disable_pack_zero_flags` limitation, before producing a numerical
+report. Preserve that failure. Native SDPA internally uses packer accumulation
+even though the public matmul configuration disables it. The retry uses the
+same reviewed, owned packer compatibility patch as the earlier MLP simulations;
+neither SDPA compute sources nor runtime binaries are changed. Re-qualification
+against the restored original packer is required afterward.
 
 ## Different acceptance question
 

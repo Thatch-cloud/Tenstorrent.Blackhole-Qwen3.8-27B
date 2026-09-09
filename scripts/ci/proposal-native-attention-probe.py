@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--fixture', type=Path)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
+    if os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') != '1':
+        parser.error('Explicit simulator-only packer compatibility scope required')
     if bool(options.fixture) != (options.context == 31):
         parser.error('Short context requires the pinned learned fixture; 2048 uses synthetic operands')
     import torch
@@ -30,7 +32,8 @@ def main():
     root = os.environ['TT_METAL_HOME']
     report = dict(passed=False, closed_cleanly=False, backend='simulator', policy=POLICY,
         context=options.context, target_integrated=False, accuracy_qualified=False, scope=__doc__,
-        sources=hashes(Path(__file__).parent, SOURCES), native_sources=native_hashes(root),
+        sources=hashes(Path(__file__).parent, SOURCES), native_sources=native_hashes(root, simulator=True),
+        packer_zero_graft=True,
         fixture_sha256=FIXTURE_SHA256 if options.fixture else None,
         operand_scope='Learned layer0 rank0 replicated on both chips plus changed synthetic inputs' if options.fixture
             else 'Synthetic 2048-row history on both chips; not learned model integration',
@@ -161,7 +164,7 @@ def main():
                 release_owned(ttnn, persistent)
                 ttnn.close_mesh_device(mesh)
             report['closed_cleanly'] = True
-            report['native_sources_after'] = native_hashes(root)
+            report['native_sources_after'] = native_hashes(root, simulator=True)
             if report['native_sources_after'] != report['native_sources']:
                 raise RuntimeError('Native sources changed during proposal simulation')
             progress('complete' if report['passed'] else 'failed')
