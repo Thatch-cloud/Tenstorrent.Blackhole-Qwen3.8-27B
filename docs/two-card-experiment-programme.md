@@ -35,19 +35,26 @@ selector qualification or hardware dispatch follows. Diagnostic120503Z-397
 isolates native BF16 grouped-product matmul rounding:64 learned columns match
 the existing Blackhole arithmetic reference bitwise, while addition is exact.
 The failed FP32 gate remains rejected. The separate native-arithmetic policy now
-passes80 small simulator checks; learned248,320-ID/7-proposal run
-`20260909T123008Z-401` passes both eager trajectories and all three changed-input
-replays on both chips; final controls/cleanup continue, so it is not qualified yet.
-It retains independent FP32 diagnostics rather than
-widening the old tolerance. DSpark-specific YaRN CPU
+passes80 small simulator checks and **100 learned248,320-ID/7-proposal checks**.
+Run`20260909T123008Z-401` completes eager, changed-input replay, immutability,
+stale controls and clean exit on both chips. All28 FP32 score comparisons still
+fail the old tolerance; these fixtures have zero greedy-token differences against
+independent FP32 trajectories. Neither result certifies target integration.
+DSpark-specific YaRN CPU
 tables match pinned upstream functions bitwise at21 selected positions through
 262143; this is not a262K model run. Both Markov matrices agree with the verified
-3.714GB checkpoint. A234-check native rotary matrix is prepared and queued behind
-the Markov gate, covering position changes, poisoned padding and exact own-policy
-replay. The full five-layer CPU backbone now matches reviewed upstream methods
-bitwise at all48 checked stages across four synthetic-input cases. All1,096 host
+3.714GB checkpoint. Native rotary fails one padded value in the unchanged accuracy
+gate; exact input/output casts isolate the error inside native rotary math. A
+separate composed FP32 candidate **passes all234 simulator checks**, with bitwise
+padded CPU outputs and exact replay/ownership/position controls, clean exit0.
+This is not a fused-kernel speed claim. The full five-layer CPU backbone matches reviewed upstream methods
+bitwise at all48 checked stages across four synthetic-input cases. The composed
+rotary's widened arithmetic is distinct from that backbone's BF16 product rounding.
+All1,102 host
 and58 harness tests pass. This establishes a CPU reference, not a TT backbone,
 real-target integration, coding acceptance or hardware throughput result.
+The serving input contract is now explicit: anchor plus six masks, sample all
+seven draft rows, then verify anchor plus seven proposals. No DFlash2 row-dropping.
 [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at

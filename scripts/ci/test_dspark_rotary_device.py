@@ -18,10 +18,40 @@ def runtime():
     return SimpleNamespace(bfloat16='bf16', float32='fp32', TILE_LAYOUT='tile', DRAM_MEMORY_CONFIG='dram',
         MathFidelity=SimpleNamespace(HiFi4='hifi4'), WormholeComputeKernelConfig=MagicMock(return_value='kernel'),
         typecast=MagicMock(side_effect=lambda *args: object()),
+        slice=MagicMock(side_effect=lambda *args, **kwargs: object()),
+        neg=MagicMock(return_value=object()), concat=MagicMock(return_value=object()),
+        multiply=MagicMock(side_effect=lambda *args, **kwargs: object()), add=MagicMock(return_value=object()),
         experimental=SimpleNamespace(rotary_embedding_hf=MagicMock(return_value=object())))
 
 
 class DSparkRotaryDeviceTests(unittest.TestCase):
+    def test_composed_path_uses_half_split_and_separate_fp32_products(self):
+        operations = runtime()
+        inputs = [tensor((1, 16, 32, 128)), tensor((1, 1, 32, 128)), tensor((1, 1, 32, 128))]
+        owned = []
+        result = execute(operations, *inputs, owned, composed=True)
+        self.assertEqual(len(owned), 11)
+        self.assertIs(result, owned[-1])
+        self.assertEqual([call.args for call in operations.slice.call_args_list],
+            [(owned[0], (0, 0, 0, 0), (1, 16, 32, 64)),
+             (owned[0], (0, 0, 0, 64), (1, 16, 32, 128))])
+        operations.neg.assert_called_once_with(owned[4], memory_config='dram')
+        operations.concat.assert_called_once_with([owned[5], owned[3]], dim=3, memory_config='dram')
+        self.assertEqual([call.args for call in operations.multiply.call_args_list],
+            [(owned[0], owned[1]), (owned[6], owned[2])])
+        for call in operations.multiply.call_args_list:
+            self.assertFalse(call.kwargs['fast_and_approximate_mode'])
+        operations.add.assert_called_once_with(owned[7], owned[8], dtype='fp32', memory_config='dram')
+        operations.typecast.assert_called_with(owned[9], 'bf16')
+        operations.experimental.rotary_embedding_hf.assert_not_called()
+        operations.WormholeComputeKernelConfig.assert_not_called()
+
+    def test_variant_requires_explicit_boolean(self):
+        operations = runtime()
+        with self.assertRaises(ValueError):
+            execute(operations, None, None, None, [], composed='false')
+        operations.typecast.assert_not_called()
+
     def test_native_path_widens_all_operands_and_preserves_borrowed_inputs(self):
         operations = runtime()
         inputs = [tensor((1, 16, 32, 128)), tensor((1, 1, 32, 128)), tensor((1, 1, 32, 128))]

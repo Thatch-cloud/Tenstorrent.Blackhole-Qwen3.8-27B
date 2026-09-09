@@ -8,14 +8,17 @@ from pathlib import Path
 
 from dspark_intake import FILES
 from dspark_markov_gate import coordinates
-from dspark_rotary_device import CASES, POLICY
+from dspark_rotary_device import CASES, COMPOSED_POLICY, POLICY
 
 
-def qualify(report, *, sources, native, cpu_report_sha256, exit_status):
+def qualify(report, *, sources, native, cpu_report_sha256, exit_status, composed=False):
+    if type(composed) is not bool:
+        raise ValueError('Explicit boolean rotary variant required')
+    policy = COMPOSED_POLICY if composed else POLICY
     if (exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('error') or report.get('stage') != 'complete' or report.get('backend') != 'simulator'
             or report.get('target_integrated') is not False or report.get('eligible_for_hardware') is not False
-            or report.get('accuracy_policy') != POLICY or report.get('config_sha256') != FILES['config.json'][1]
+            or report.get('accuracy_policy') != policy or report.get('config_sha256') != FILES['config.json'][1]
             or not cpu_report_sha256 or report.get('cpu_report_sha256') != cpu_report_sha256
             or not sources or not native or report.get('sources') != sources or report.get('sources_after') != sources
             or report.get('native_sources') != native or report.get('native_sources_after') != native):
@@ -45,9 +48,11 @@ def qualify(report, *, sources, native, cpu_report_sha256, exit_status):
         if (any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in (error, valid_error))
                 or valid_error > error or type(exact) is not bool or (exact and error != 0)):
             raise ValueError('Finite full/valid-row errors and truthful bitwise diagnostics required')
+        if composed and exact is not True:
+            raise ValueError('Composed rotary requires bitwise CPU equality on every padded output')
     counts = {name: len(report[name]) for name in
         ('eager_checks', 'replay_checks', 'input_checks', 'dependency_controls', 'stale_controls')}
-    return dict(passed=True, checks=sum(counts.values()), counts=counts, accuracy_policy=POLICY,
+    return dict(passed=True, checks=sum(counts.values()), counts=counts, accuracy_policy=policy,
         worst_cpu_error=max(entry['max_abs'] for entry in report['eager_checks']),
         worst_valid_cpu_error=max(entry['valid_max_abs'] for entry in report['eager_checks']),
         bitwise_cpu_checks=sum(entry['cpu_bitwise_exact'] for entry in report['eager_checks']),
@@ -60,13 +65,14 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--exit-status', type=Path, required=True)
     parser.add_argument('--metal-root', type=Path, required=True)
+    parser.add_argument('--composed', action='store_true')
     options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('dspark_rotary_probe', Path(__file__).with_name('dspark-rotary-probe.py'))
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
     result = qualify(json.loads(options.report.read_text()), sources=probe.source_hashes(),
         native=probe.fingerprints(options.metal_root), cpu_report_sha256=probe.CPU_REPORT_SHA256,
-        exit_status=options.exit_status.read_text())
+        exit_status=options.exit_status.read_text(), composed=options.composed)
     print(json.dumps(result, indent=2))
 
 

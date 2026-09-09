@@ -1,0 +1,339 @@
+{
+  "passed": false,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "target_integrated": false,
+  "eligible_for_hardware": false,
+  "scope": "Simulator-only DSpark rotary on synthetic heads, absolute YaRN positions and exact own-policy replay.",
+  "accuracy_policy": "FP32-intermediate native rotary with BF16 tables/output; proposal-only, CPU rtol=atol=0.01",
+  "cases": [
+    [
+      16,
+      7,
+      32
+    ],
+    [
+      4,
+      39,
+      64
+    ],
+    [
+      4,
+      4103,
+      4128
+    ]
+  ],
+  "config_sha256": "dd65fb1b01c2adea69512ff2990a79d58eb7fe2c7ea97375aa66f657a29a5bfd",
+  "cpu_report_sha256": "97424ecd6a1355d24c7f4c73bfd07c9ca3c8035e452b032cf91d20d6412043f9",
+  "sources": {
+    "dspark-rotary-probe.py": "0f632df4ee95904bed805b2f670ed4fd28a076e746cda17254853b00a4e4d94e",
+    "dspark_rotary_device.py": "740ebc38d03e9a5292d5ce000a51d5ca3c4a407f8a00e9c4726324e80520e7ba",
+    "dspark_rope_tables.py": "956b673a8c1edf76d7d3c1a29874d0dbb9245a4d61517ffd585b083638221961",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "draft_head_preparation.py": "9e5043a8f55e4e9b2ed5269fb9c784b64d2326299ded984ba2d5c2fe7a18e23f",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources": {
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/compute/eltwise_typecast.cpp": "07b98d17daa6d774f9c99ac826decb2b342340c585f2043ef091b35f43c93aab",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_typecast_rm_chunked.cpp": "ebb03496df267db4a3b0f21eced084f93b2cf1461de4ef676bd607bf27bd5fe0",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_unary_interleaved_start_id_metal2.cpp": "47ba112145b6e3df8e289dfe4569dd4306ca01da505b0bf7aeaa22923493b793",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_unary_sharded_metal2.cpp": "071e57b193c557a632763bf7871530a4756bc6ea8e51bfff37e6f16795a2265b",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/writer_typecast_rm_chunked.cpp": "62d6b6fb3f435740a7223e59d485962ad53f7471d4910bd280d58d6b5efd22ea",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/writer_unary_interleaved_start_id_metal2.cpp": "8902124716d1253cec98e8408d12f7d147a3eabbda5d1a2d2a3938090c274fe3",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op.cpp": "25c534b7f88b9a52f329624ddf07143a32b766165f7c6c8e07ff9e046380f14b",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op.hpp": "5cbabe6dec26afd0765612fe76c1db9cce0eb3ff37a3f9c7ee0b55391703e164",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op_types.hpp": "a852dc801c0905fc5cd618f7079069296a693075f8ba47dff42b7d2a4c4e9acb",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_program_factory.cpp": "9df010063fb7014b4bd8c434d9deedc8ddab860ce127d571038c5fa24c9822d3",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_program_factory.hpp": "5d73b8f4143b67fc5ce8494fe3a85795b378a3401c096cc9c92b01fee34029e0",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_rm_chunked_program_factory.cpp": "66f2eee8cfc3867fb6a8a564bbbae210fafca8ae55c6f37679ca9b774db77a35",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_rm_chunked_program_factory.hpp": "d70e947be429ca07fe36d4ba5d7578c223f12630939c63afff6e9ce928c140a6",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_sharded_program_factory.cpp": "8611b911a75fc583d7ccaaf623578ed36cf2abeeeb87c4a3a7695331c259d191",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_sharded_program_factory.hpp": "b8e4e14dadcbe0c05cc4361ca24de3e45e0b3ad55c3dceda38bf66ad7ed178b2",
+    "ttnn/cpp/ttnn/operations/copy/typecast/typecast.cpp": "469360dc3997e6ebf9ff3c52df04562070f8716fae2e94c1cd37e7cdcd4d481c",
+    "ttnn/cpp/ttnn/operations/copy/typecast/typecast.hpp": "6a31689df4e9c089f30def661da991f75b0a7f067298bb15290c1fbf691209a7",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf.cpp": "c1447ed4f2cc625b3791c89b56d47757de8c0409f6949441eb487abeb8eeff96",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf_sharded.cpp": "2dbdb085f8d656c32177367258cc80b4faa2fe9c734d1c8ba5a991910176aade",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf_single_tile_sharded.cpp": "677f03d986a0624e6175315dee5ea6e7649e97c04aaba7758af4d155d4e6612a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_interleaved.cpp": "71fc76994a0d1e5c351099565617bdbc1f4a9e0679b683594ce873ae19a40f2e",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_sharded.cpp": "e33b4811e9aeef259f6bbee274585d014f468edc2994d9ac1c6ce260bcd1d853",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_interleaved_start_id.cpp": "5120f80b4b1be164ed3fedd58a68e2355a5e04d061e9ecbef17b34b63092194d",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_interleaved_start_id_sharded.cpp": "ae1f83a8bc79f7bda4ea7c0c7cb218ffe029294413b59a589238d2f0a6d5d3d0",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_sharded.cpp": "db969b0d731f67176b9a54d3829c26fb6e8ad118c961913d17185e491b6d759a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/writer_rotary_embedding_hf_interleaved.cpp": "a686b99a9c145a38c12f8aedcdfd7d70b384f7f9b5f01803b2b2940892e6bae8",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation.cpp": "018b3e3410b083472323f70882fbe53c73f99e4d71c521c8995b97b5edc33224",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation.hpp": "d4da478991e96343370cc9bcd7807cae34ac0dcbc5351aa3164d40ea43cdbd9a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation_types.hpp": "0e859a9f0d75db3a86a111d716932f5c4620e9f6151ce398237fdad6635719e8",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_multi_core_program_factory.cpp": "55f83c442280698f509d8785d2b5ff93a52aeb398df23cdd8b47b1ef8b3ae36e",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_multi_core_program_factory.hpp": "08969f7c140273de49edc05690366aa615b125753803cb6e8f3ca56003f208ce",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_sharded_program_factory.cpp": "03d7ea526441ca8dde14f115cf4ec622d525d7525559de822548390d8f46a2c5",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_sharded_program_factory.hpp": "f228f8b2a3c04eb9751a0f7aa93243a3e1f5e8d7c117916994264ddea742c94f",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf.cpp": "738c42b64e1f27eb31a52287723f9757803c8992520d598711a39332aa93cf76",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf.hpp": "a9f74a9ae2e82bc62e984688abf91271b5a8077be8b71bdb44cf9759c42eb5db",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf_nanobind.cpp": "928f342bffefaeded4a61b44b794d9916b959bb363e5020ae0b18ddb13a1be59",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf_nanobind.hpp": "55a0b1d8c69cb25046272cee1916613491f79218121607fd236544219c780d04"
+  },
+  "eager_checks": [
+    {
+      "case": 0,
+      "pattern": 0,
+      "chip": 0,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    },
+    {
+      "case": 0,
+      "pattern": 0,
+      "chip": 1,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    },
+    {
+      "case": 0,
+      "pattern": 1,
+      "chip": 0,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    },
+    {
+      "case": 0,
+      "pattern": 1,
+      "chip": 1,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    },
+    {
+      "case": 0,
+      "pattern": 2,
+      "chip": 0,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    },
+    {
+      "case": 0,
+      "pattern": 2,
+      "chip": 1,
+      "full_padded_close": true,
+      "cpu_bitwise_exact": false,
+      "max_abs": 0.03125,
+      "valid_max_abs": 0.03125
+    }
+  ],
+  "replay_checks": [],
+  "input_checks": [
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "case": 0,
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 2,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "dependency_controls": [],
+  "stale_controls": [],
+  "stage": "failed",
+  "error": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 1 / 65536 (0.0%)\nGreatest absolute difference: 0.015625 at index (0, 8, 10, 31) (up to 0.01 allowed)\nGreatest relative difference: 0.043478261679410934 at index (0, 8, 10, 31) (up to 0.01 allowed)",
+  "sources_after": {
+    "dspark-rotary-probe.py": "0f632df4ee95904bed805b2f670ed4fd28a076e746cda17254853b00a4e4d94e",
+    "dspark_rotary_device.py": "740ebc38d03e9a5292d5ce000a51d5ca3c4a407f8a00e9c4726324e80520e7ba",
+    "dspark_rope_tables.py": "956b673a8c1edf76d7d3c1a29874d0dbb9245a4d61517ffd585b083638221961",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "draft_head_preparation.py": "9e5043a8f55e4e9b2ed5269fb9c784b64d2326299ded984ba2d5c2fe7a18e23f",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources_after": {
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/compute/eltwise_typecast.cpp": "07b98d17daa6d774f9c99ac826decb2b342340c585f2043ef091b35f43c93aab",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_typecast_rm_chunked.cpp": "ebb03496df267db4a3b0f21eced084f93b2cf1461de4ef676bd607bf27bd5fe0",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_unary_interleaved_start_id_metal2.cpp": "47ba112145b6e3df8e289dfe4569dd4306ca01da505b0bf7aeaa22923493b793",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/reader_unary_sharded_metal2.cpp": "071e57b193c557a632763bf7871530a4756bc6ea8e51bfff37e6f16795a2265b",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/writer_typecast_rm_chunked.cpp": "62d6b6fb3f435740a7223e59d485962ad53f7471d4910bd280d58d6b5efd22ea",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/kernels/dataflow/writer_unary_interleaved_start_id_metal2.cpp": "8902124716d1253cec98e8408d12f7d147a3eabbda5d1a2d2a3938090c274fe3",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op.cpp": "25c534b7f88b9a52f329624ddf07143a32b766165f7c6c8e07ff9e046380f14b",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op.hpp": "5cbabe6dec26afd0765612fe76c1db9cce0eb3ff37a3f9c7ee0b55391703e164",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_device_op_types.hpp": "a852dc801c0905fc5cd618f7079069296a693075f8ba47dff42b7d2a4c4e9acb",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_program_factory.cpp": "9df010063fb7014b4bd8c434d9deedc8ddab860ce127d571038c5fa24c9822d3",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_program_factory.hpp": "5d73b8f4143b67fc5ce8494fe3a85795b378a3401c096cc9c92b01fee34029e0",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_rm_chunked_program_factory.cpp": "66f2eee8cfc3867fb6a8a564bbbae210fafca8ae55c6f37679ca9b774db77a35",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_rm_chunked_program_factory.hpp": "d70e947be429ca07fe36d4ba5d7578c223f12630939c63afff6e9ce928c140a6",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_sharded_program_factory.cpp": "8611b911a75fc583d7ccaaf623578ed36cf2abeeeb87c4a3a7695331c259d191",
+    "ttnn/cpp/ttnn/operations/copy/typecast/device/typecast_sharded_program_factory.hpp": "b8e4e14dadcbe0c05cc4361ca24de3e45e0b3ad55c3dceda38bf66ad7ed178b2",
+    "ttnn/cpp/ttnn/operations/copy/typecast/typecast.cpp": "469360dc3997e6ebf9ff3c52df04562070f8716fae2e94c1cd37e7cdcd4d481c",
+    "ttnn/cpp/ttnn/operations/copy/typecast/typecast.hpp": "6a31689df4e9c089f30def661da991f75b0a7f067298bb15290c1fbf691209a7",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf.cpp": "c1447ed4f2cc625b3791c89b56d47757de8c0409f6949441eb487abeb8eeff96",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf_sharded.cpp": "2dbdb085f8d656c32177367258cc80b4faa2fe9c734d1c8ba5a991910176aade",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/compute/rotary_embedding_hf_single_tile_sharded.cpp": "677f03d986a0624e6175315dee5ea6e7649e97c04aaba7758af4d155d4e6612a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_interleaved.cpp": "71fc76994a0d1e5c351099565617bdbc1f4a9e0679b683594ce873ae19a40f2e",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_sharded.cpp": "e33b4811e9aeef259f6bbee274585d014f468edc2994d9ac1c6ce260bcd1d853",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_interleaved_start_id.cpp": "5120f80b4b1be164ed3fedd58a68e2355a5e04d061e9ecbef17b34b63092194d",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_interleaved_start_id_sharded.cpp": "ae1f83a8bc79f7bda4ea7c0c7cb218ffe029294413b59a589238d2f0a6d5d3d0",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/reader_rotary_embedding_hf_single_tile_sharded.cpp": "db969b0d731f67176b9a54d3829c26fb6e8ad118c961913d17185e491b6d759a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/kernels/dataflow/writer_rotary_embedding_hf_interleaved.cpp": "a686b99a9c145a38c12f8aedcdfd7d70b384f7f9b5f01803b2b2940892e6bae8",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation.cpp": "018b3e3410b083472323f70882fbe53c73f99e4d71c521c8995b97b5edc33224",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation.hpp": "d4da478991e96343370cc9bcd7807cae34ac0dcbc5351aa3164d40ea43cdbd9a",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_device_operation_types.hpp": "0e859a9f0d75db3a86a111d716932f5c4620e9f6151ce398237fdad6635719e8",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_multi_core_program_factory.cpp": "55f83c442280698f509d8785d2b5ff93a52aeb398df23cdd8b47b1ef8b3ae36e",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_multi_core_program_factory.hpp": "08969f7c140273de49edc05690366aa615b125753803cb6e8f3ca56003f208ce",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_sharded_program_factory.cpp": "03d7ea526441ca8dde14f115cf4ec622d525d7525559de822548390d8f46a2c5",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/device/rotary_embedding_hf_sharded_program_factory.hpp": "f228f8b2a3c04eb9751a0f7aa93243a3e1f5e8d7c117916994264ddea742c94f",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf.cpp": "738c42b64e1f27eb31a52287723f9757803c8992520d598711a39332aa93cf76",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf.hpp": "a9f74a9ae2e82bc62e984688abf91271b5a8077be8b71bdb44cf9759c42eb5db",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf_nanobind.cpp": "928f342bffefaeded4a61b44b794d9916b959bb363e5020ae0b18ddb13a1be59",
+    "ttnn/cpp/ttnn/operations/experimental/transformer/rotary_embedding_hf/rotary_embedding_hf_nanobind.hpp": "55a0b1d8c69cb25046272cee1916613491f79218121607fd236544219c780d04"
+  }
+}

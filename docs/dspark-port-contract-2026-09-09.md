@@ -127,13 +127,19 @@ The original FP32 gate rejects this policy. No tolerance is widened.
 | Gate | Current result |
 | --- | --- |
 | Small native-policy simulator, 64 IDs / 3 proposals | **80 checks pass**, both chips, exact scores, changed-input replay and clean exit |
-| Learned native-policy simulator, 248,320 IDs / 7 proposals | Both eager trajectories and all three changed-input replays pass; `20260909T123008Z-401` continues through final controls/cleanup, not qualified yet |
+| Learned native-policy simulator, 248,320 IDs / 7 proposals | **100 checks pass**, both chips, exact native-policy scores, changed-input replay, immutability, stale controls and clean exit0 |
 | Unchanged target tokens/GDN/KV with DSpark | Not integrated or measured |
 
 The small run is `20260909T122916Z-419`; report SHA256:
 `a92ea83d79602e14603757ad1ab42f6b1472f2a643dc99302e5261490d36346c`.
 Its toy weights are exactly representable and do not establish learned accuracy.
-The learned run retains all100 required checks and a bounded three-hour timeout.
+The learned run `20260909T123008Z-401` is complete and independently reconciled:
+28 eager,42 replay,20 input,8 weight and2 stale checks. Its report is
+`scripts/ci/dspark-markov-native-simulator-learned.json`, SHA256
+`cd53b2cf20f4be1a2cae1b4f52b3162f6e5527fa194795dd53068cae88cd3a5a`.
+All28 same-input FP32 score comparisons still fail the original tolerance;
+worst difference is0.0034258366. Greedy tokens agree on these28 checks against
+independent FP32 trajectories, not a universal token-equality or quality claim.
 Progress distinguishes CPU reference generation, enqueued steps, synchronization
 and completed audits. An enqueued step is not reported as completed computation.
 
@@ -169,12 +175,39 @@ Primary sources at Transformers commit
 [YaRN parameters](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/modeling_rope_utils.py),
 [Qwen3 rotary forward](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/models/qwen3/modeling_qwen3.py).
 
-### Native rotary gate prepared
+### Native rotary failed; composed alternative passes
 
-The simulator-only rotary composition is queued behind the complete Markov gate;
-it must not open a second simulator while the first is active. No rotary device
-result is claimed yet. The native operation receives FP32-widened BF16 heads and
-YaRN tables, then returns BF16 proposal heads. This is not a new fused kernel.
+The native rotary run `20260909T132948Z-2600` fails its unchanged0.01 relative/
+absolute gate and exits cleanly. Six query-head checks pass before the poisoned
+padding case fails one padded element. Key shapes and trace controls are not
+qualified by this run. Its report is `scripts/ci/dspark-rotary-simulator-failed.json`,
+SHA256 `8ef56e1c600bb996c9ee82d426018ebeff3e38cae4761fc376d465af2d27276d`.
+
+Diagnostic rerun `20260909T133332Z-387` reproduces the failure. All three BF16-to-FP32
+input casts and the final BF16 cast are exact; the discrepancy is inside native
+rotary math. At the failing coordinate, CPU FP32 gives0.3603515625 and native
+FP32 gives0.375, rounding to BF16 values0.359375 and0.375 respectively. This does
+not establish a particular mantissa-rounding mechanism. The failing row is
+padded, but the whole-padded gate remains required rather than being removed.
+
+An explicit `--composed` candidate uses separate slice/negate/concatenate,
+FP32 multiply and add operations, followed by BF16 output. It is **not fused**
+and makes no speed claim. Its CPU reference is unchanged, with a stronger
+bitwise gate on every padded output. The original native policy remains rejected.
+
+Composed run`20260909T134544Z-456` now passes **all234 checks**, independently
+reconciled against unchanged sources and native runtime, with clean exit0.
+All24 padded CPU comparisons are bitwise exact (maximum error0), all30 replays
+are exact, and input/padding/position/stale controls pass. Report:
+`scripts/ci/dspark-rotary-composed-simulator.json`, SHA256
+`769c301f85ce5816495f0fdc763bbc7a4b4bc6868b32332cd094098d61fee5c7`.
+Qualify with`dspark_rotary_gate.py --composed`; the default native-policy gate
+does not accept this candidate's report.
+
+This reference widens products and addition to FP32 before BF16 output. It is
+**not** the upstream eager backbone's BF16-product-rounding policy. Matching
+this primitive reference does not establish bitwise upstream backbone equality;
+learned proposal, acceptance and unchanged target-token/state gates remain open.
 
 | Coverage | Required check |
 | --- | --- |
@@ -185,15 +218,15 @@ YaRN tables, then returns BF16 proposal heads. This is not a new fused kernel.
 | Trace | Five changed-input replays per shape; all padded outputs and addresses match their own eager reference |
 | Ownership | Every borrowed head/table input remains bitwise unchanged; missing table updates are detected |
 
-The planned matrix has234 checks. CPU comparisons retain the existing widened
+The matrix has234 checks. Native-policy CPU comparisons retain the existing widened
 draft-rotary threshold of0.01 relative/absolute; raw full/valid-row errors and
 bitwise equality are reported separately. Exact CPU YaRN tables do not imply
 bitwise-exact device multiplication. Replay and padding isolation require exact
 bits regardless of that numerical threshold. Final target-token/state and coding
 quality gates are unchanged and still outstanding.
 
-Validation:1,085 host tests and58 simulator-harness tests pass, including64 DSpark
-CPU tests. `dspark_rotary_gate.py` independently rejects missing coordinates,
+Validation after the composed candidate:1,102 host tests and58 simulator-harness
+tests pass. `dspark_rotary_gate.py` independently rejects missing coordinates,
 failed controls, stale sources, unclean teardown and unsupported arithmetic policy.
 
 ### Learned CPU backbone matches upstream
@@ -232,6 +265,29 @@ harness tests pass, including75 DSpark tests. Next port the learned operations
 and full-context mask to TT without substituting DFlash2's2K window or eight-row
 proposal convention. CPU correctness is not permission to skip the target audits.
 
+### Serving row convention: anchor plus six masks
+
+The pinned SGLang DSpark adapter defaults `sample_from_anchor=True`. For the
+published seven-proposal block, the boundary is:
+
+| Stage | Rows |
+| --- | --- |
+| Draft query IDs | Anchor/bonus token followed by six mask IDs248070 |
+| Sampled draft outputs | All seven rows, including row zero |
+| Target verification input | Anchor followed by all seven proposals: eight rows |
+
+`dspark_inputs.py` encodes this convention with ID, shape and absolute-position
+checks. It rejects a full block without room inside262,144 positions; a shorter
+end-of-context fallback is not implemented. Do not copy DFlash2's eight-query-row,
+drop-row-zero convention. This helper is not integrated into target execution.
+
+Primary sources at SGLang commit`708f51e44bc64f546a60fa9631f0e7d99493d0a0`:
+[configuration](https://github.com/sgl-project/sglang/blob/708f51e44bc64f546a60fa9631f0e7d99493d0a0/python/sglang/srt/speculative/dspark_components/dspark_config.py)
+and [draft input/output construction](https://github.com/sgl-project/sglang/blob/708f51e44bc64f546a60fa9631f0e7d99493d0a0/python/sglang/srt/speculative/dspark_components/dspark_draft.py).
+The inert source copies hash to`73c3dc2986fa57eebcf61fdf47a817920a918f35e1414a724a0a0a3e44a7e577`
+and`ee063303d98d0f592a61b7168dbbf4fd1713d4cde8b6b0166149b1258d909c36`
+respectively. Neither module is executed.
+
 ## Complete learned weights staged
 
 The3,714,723,322-byte object is downloaded to the D: worktree and verified
@@ -260,8 +316,8 @@ The header SHA256 is
 `992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1`.
 All simulator/hardware/serving eligibility flags remain false.
 
-1. Qualify the separate native-arithmetic Markov policy without erasing the FP32
-   failure; validate target-feature, YaRN and full-attention primitives. Weights are staged.
+1. Retain the qualified native-arithmetic Markov policy and its failed FP32
+   comparison; resolve rotary and validate target-feature/full-attention primitives.
 2. Port learned primitives to TTsim, including changed inputs, masks, trace
    ownership and exact target-verifier isolation. CPU tests are not that gate.
 3. Run a complete seven-proposal hardware correctness/acceptance baseline through

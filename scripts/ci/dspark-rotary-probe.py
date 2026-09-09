@@ -10,7 +10,7 @@ from attention_batch import capture_operation
 from draft_head_preparation import rope_reference
 from dspark_intake import FILES
 from dspark_rope_tables import DSparkRotary
-from dspark_rotary_device import CASES, POLICY, execute, fixtures
+from dspark_rotary_device import CASES, COMPOSED_POLICY, POLICY, execute, fixtures
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 
@@ -35,11 +35,13 @@ def source_hashes():
 def fingerprints(root):
     binaries = ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')
     paths = [Path(PACKER), *map(Path, binaries)]
-    for name in ('experimental/transformer/rotary_embedding_hf', 'copy/typecast'):
+    for name in ('experimental/transformer/rotary_embedding_hf', 'copy/typecast',
+            'data_movement/slice', 'data_movement/concat', 'eltwise/unary',
+            'eltwise/binary', 'eltwise/binary_ng'):
         selected = [path.relative_to(root) for path in (root / 'ttnn/cpp/ttnn/operations' / name).rglob('*')
             if path.suffix in ('.cpp', '.hpp', '.h') and path.is_file()]
         if not selected:
-            raise ValueError('Native rotary/typecast source tree missing')
+            raise ValueError(f'Native rotary dependency source tree missing: {name}')
         paths.extend(selected)
     result = {str(path): digest(root / path) for path in sorted(paths)}
     if result[PACKER] != ORIGINAL_PACKER or any(result[name] != BINARY_SHA256 for name in binaries):
@@ -64,6 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--composed', action='store_true', help='Test separate elementwise path with bitwise CPU gate')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     import torch
@@ -72,7 +75,8 @@ def main():
     rotary = configuration(options.config)
     root = Path(os.environ['TT_METAL_HOME'])
     report = dict(passed=False, closed_cleanly=False, backend='simulator', target_integrated=False,
-        eligible_for_hardware=False, scope=__doc__, accuracy_policy=POLICY, cases=[list(case) for case in CASES],
+        eligible_for_hardware=False, scope=__doc__, accuracy_policy=COMPOSED_POLICY if options.composed else POLICY,
+        cases=[list(case) for case in CASES],
         config_sha256=FILES['config.json'][1], cpu_report_sha256=CPU_REPORT_SHA256,
         sources=source_hashes(), native_sources=fingerprints(root), eager_checks=[], replay_checks=[],
         input_checks=[], dependency_controls=[], stale_controls=[])
@@ -121,7 +125,7 @@ def main():
                             tensor=index, chip=chip, exact=True))
 
             def run():
-                return execute(ttnn, *persistent, transient)
+                return execute(ttnn, *persistent, transient, composed=options.composed)
 
             references = []
             for pattern, values in enumerate(patterns):
@@ -132,7 +136,18 @@ def main():
                 observed = [host(output, chip) for chip in range(2)]
                 for chip, actual in enumerate(observed):
                     expected = rope_reference(values[0][chip:chip + 1], *values[1:])
-                    torch.testing.assert_close(actual.float(), expected.float(), rtol=.01, atol=.01)
+                    try:
+                        torch.testing.assert_close(actual.float(), expected.float(), rtol=.01, atol=.01)
+                        if options.composed and not equal_bits(actual, expected):
+                            raise AssertionError('Composed rotary differs from the unchanged bitwise CPU reference')
+                    except AssertionError:
+                        path = options.output.with_suffix('.operands.pt')
+                        torch.save(dict(case=case, pattern=pattern, chip=chip, live_rows=live_rows,
+                            heads=values[0][chip:chip + 1], cosine=values[1], sine=values[2],
+                            wide_inputs=[host(value, chip) for value in transient[:3]],
+                            native_wide_output=host(transient[-2], chip), actual=actual, expected=expected), path)
+                        report['failure_operands'] = dict(path=str(path), sha256=digest(path))
+                        raise
                     report['eager_checks'].append(dict(case=case, pattern=pattern, chip=chip,
                         full_padded_close=True, cpu_bitwise_exact=equal_bits(actual, expected),
                         max_abs=float((actual.float() - expected.float()).abs().max()),

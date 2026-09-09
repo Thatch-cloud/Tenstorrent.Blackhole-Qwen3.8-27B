@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from dspark_intake import FILES
-from dspark_rotary_device import CASES, POLICY
+from dspark_rotary_device import CASES, COMPOSED_POLICY, POLICY
 from dspark_rotary_gate import qualify
 
 
@@ -29,11 +29,32 @@ def fixture():
         stale_controls=[dict(case=case, chip=chip, missing_update_detected=True) for case in range(3) for chip in range(2)])
 
 
-def check(report, status='0'):
-    return qualify(report, sources={'probe': 'sha'}, native={'binary': 'sha'}, cpu_report_sha256='cpu-comparison', exit_status=status)
+def check(report, status='0', *, composed=False):
+    return qualify(report, sources={'probe': 'sha'}, native={'binary': 'sha'}, cpu_report_sha256='cpu-comparison',
+        exit_status=status, composed=composed)
 
 
 class DSparkRotaryGateTests(unittest.TestCase):
+    def test_composed_policy_is_explicit_and_requires_every_output_exact(self):
+        report = fixture()
+        with self.assertRaises(ValueError):
+            check(report, composed=True)
+        report['accuracy_policy'] = COMPOSED_POLICY
+        with self.assertRaises(ValueError):
+            check(report)
+        with self.assertRaises(ValueError):
+            check(report, composed=True)
+        for entry in report['eager_checks']:
+            entry.update(cpu_bitwise_exact=True, max_abs=0, valid_max_abs=0)
+        result = check(report, composed=True)
+        self.assertEqual(result['checks'], 234)
+        self.assertEqual(result['bitwise_cpu_checks'], 24)
+        with self.assertRaises(ValueError):
+            check(report, composed='true')
+        report['eager_checks'][-1].update(cpu_bitwise_exact=False, max_abs=.001)
+        with self.assertRaises(ValueError):
+            check(report, composed=True)
+
     def test_complete_primitive_gate_does_not_certify_hardware_or_exact_cpu_arithmetic(self):
         result = check(fixture())
         self.assertEqual(result['checks'], 234)
