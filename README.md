@@ -18,10 +18,13 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
 - **Next verifier experiment:** eight spare Tensix cores stream compressed
   weights to 68/80 compute workers. Full projections **and the pooled complete MLP**
-  pass exact simulation. Real-weight hardware comparison is next; no hardware
-  speed result yet. [Qualification](docs/tensix-pooled-mlp-2026-09-09.md).
-- **Running in parallel:** [4K target-link ABBA](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34327029099)
-  compares two versus four target-model links; sampler and drafter stay unchanged.
+  pass exact simulation. The first hardware attempt stops before candidate
+  execution on a 2D/4D weight-shape mismatch. The metadata-only fix passes
+  full-size simulation; hardware retry is next. No hardware speed result yet.
+  [Qualification](docs/tensix-pooled-mlp-2026-09-09.md).
+- **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
+  62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
+  are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
 
 Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
 Native drafter SDPA remains disabled after its numerical gate failed. All rates

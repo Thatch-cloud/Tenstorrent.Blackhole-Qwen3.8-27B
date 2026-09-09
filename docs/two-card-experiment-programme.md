@@ -148,7 +148,17 @@ whose pinned P300 lookup defaults to two links. A separate
 [cached 4K whole-request ABBA](target-model-link-counts-2026-09-09.md) measures
 target two-versus-four-link requests with unchanged native MLP kernels, sampler
 and drafter. It records actual helper calls and cross-arm final GDN/KV/inactive
-digests; no link-count speed improvement is claimed before that test.
+digests. Run34327029099 passes correctness: at CTX4096, two-link control is
+PP3324.76/TG62.39; four-link candidate is PP3430.28/TG61.41. The candidate is
+1.57% slower in TG in this ABBA and is not promoted.
+
+The first pooled-MLP hardware attempt,34327911787, fails during preparation:
+native weights are2D, while the qualified candidate requires4D. No candidate
+kernel or timing executes; teardown is clean. A separate full-size metadata-view
+simulation now passes exact borrowed-buffer/content/lifetime checks on both
+chips and the actual native shard axes, with clean teardown and zero exit.
+The unchanged full-MLP kernel gate still passes. Both hardware arms stay at
+four links for the metadata-only retry;983 CI and57 simulator-harness tests pass.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

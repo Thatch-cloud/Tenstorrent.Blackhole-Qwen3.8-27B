@@ -11,16 +11,20 @@ from sampling_link_policy import SOURCES as FABRIC_SOURCES
 from tensix_mlp_gate import ORIGINAL_PACKER, PACKER, qualify
 from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, qualify_hardware, validate_evidence
 import test_tensix_mlp_gate
+from test_tensix_mlp_weight_views import simulator_fixture as view_fixture
 
 
 class TensixMlpHardwareGateTests(unittest.TestCase):
     def fixture(self, faster=True):
         candidate = 0.3 if faster else 0.5
+        views = view_fixture()['weight_views']
+        native = {name: check['native'] for name, check in views.items()}
         return dict(passed=True, closed_cleanly=True, backend='hardware', stage='complete', rows=8,
             streams=1, layer=0, collective_links=4, pool_buffers=2, repeats_per_sample=50,
             seeds=[1659, 2670, 3781], dram_boundary=True, native_collective=True, all_samples_retained=True,
             native_requested_links=dict(default=2, axis0=2, axis1=2),
             matched_requested_links=dict(default=4, axis0=4, axis1=4),
+            weight_views=views, native_weights=native, native_weights_after=deepcopy(native),
             eager_checks=[dict(pattern=pattern, chip=chip, exact=True) for pattern in range(3) for chip in range(2)],
             trace_checks=[dict(pattern=pattern, arm=arm, chip=chip, exact=True)
                 for pattern in range(3) for arm in range(2) for chip in range(2)],
@@ -116,6 +120,7 @@ class TensixMlpHardwareGateTests(unittest.TestCase):
         report.update(sources=simulator['sources'], hardware_sources=hardware_sources, model_sources=MODEL_SOURCES,
             fabric_sources=FABRIC_SOURCES, native_sources={**simulator['native_sources'], PACKER: ORIGINAL_PACKER})
         report['simulator_gate'] = qualify(simulator, report['sources'], report['native_sources'])
+        report['view_prerequisite'] = dict(native_sources={'view.cpp': 'a' * 64}, gate={'passed': True})
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             simulator_path, status_path = root / 'tensix-mlp-simulator.json', root / 'tensix-mlp-simulator.exit-status'
@@ -124,11 +129,13 @@ class TensixMlpHardwareGateTests(unittest.TestCase):
             report['simulator_report_sha256'] = hashlib.sha256(simulator_path.read_bytes()).hexdigest()
             report['simulator_exit_sha256'] = hashlib.sha256(status_path.read_bytes()).hexdigest()
             def validate(value):
-                with patch('tensix_mlp_hardware_gate.hashes', side_effect=[report['sources'], hardware_sources]):
+                with patch('tensix_mlp_hardware_gate.hashes', side_effect=[report['sources'], hardware_sources]), \
+                        patch('tensix_mlp_hardware_gate.view_prerequisite', return_value=report['view_prerequisite']):
                     return validate_evidence(value, root)
             self.assertTrue(validate(report)['passed'])
             for name in ('sources', 'hardware_sources', 'model_sources', 'fabric_sources', 'simulator_gate',
-                    'simulator_report_sha256', 'simulator_exit_sha256', 'native_sources'):
+                    'simulator_report_sha256', 'simulator_exit_sha256', 'native_sources', 'view_prerequisite',
+                    'weight_views', 'native_weights', 'native_weights_after'):
                 changed = {**report, name: {}}
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     validate(changed)
@@ -152,7 +159,8 @@ class TensixMlpHardwareGateTests(unittest.TestCase):
                 str(status_path), '--output', str(output_path), '--preflight']
             with patch('sys.argv', arguments), patch.dict('os.environ', {'TT_METAL_HOME': str(root)}, clear=True), \
                     patch.object(module, 'require_projection_environment'), patch.object(module, 'audit', return_value=FABRIC_SOURCES), \
-                    patch.object(module, 'hashes', side_effect=[simulator['sources'], native, {}, MODEL_SOURCES]), \
+                    patch.object(module, 'hashes', side_effect=[simulator['sources'], native, {}, MODEL_SOURCES, {}]), \
+                    patch.object(module, 'view_prerequisite', return_value={'passed': True}), \
                     patch.dict('sys.modules', {'ttnn': None, 'torch': None}):
                 module.main()
             result = json.loads(output_path.read_text())

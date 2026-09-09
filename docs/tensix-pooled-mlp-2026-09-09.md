@@ -27,8 +27,9 @@ same FIFOs and output workspace. This is not yet a 64-layer model result.
 | --- | --- | --- |
 | Full gate/up/down separately | Both chips, exact native controls, all 32 physical rows, changed-input traces | Pass |
 | Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Pass |
-| Host safeguards | 974 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
-| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Wired; not dispatched |
+| Native weight views | Full 2D native shards, exact 4D aliases on both chips, original packer | Pass |
+| Host safeguards | 983 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
+| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | First attempt fails before candidate execution; qualified metadata fix ready for retry |
 | Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not qualified |
 
 The complete-MLP simulator gate requires 32 native-control comparisons, 32 eager
@@ -43,6 +44,33 @@ SHA256 `8dfa6e6b1f5a41cede8a8c0166319286971d359b94856ddfe9b8f7b8ee992c6c`.
 Its `.exit-status` companion is checked in too. The native simulator packer was
 restored to its original hash, both native Python binaries remain unchanged,
 and the owned graft lock is removed. Qualification passes again after restoration.
+
+## First hardware attempt: loader shape mismatch
+
+[CI 34327911787](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34327911787)
+passes simulator/source preflight but stops during preparation, before any
+candidate kernel, output comparison or timing. Both devices close cleanly.
+
+The native loader returns 2D weights: gate/up `[5120,8704]`, down `[8704,5120]`
+per chip. The qualified streamed path expects `[1,1,K,N]`. The fix uses native
+`ttnn.experimental.view`, borrowing the same two physical buffers. It does not
+repack, loosen kernel validation, mutate `mlp.weights`, or change arithmetic.
+
+The dedicated simulator probe exercises full-size native column-sharded
+gate/up and row-sharded down weights. It checks both chip addresses, exact
+dequantized contents, original metadata/lifetime, and no new program-cache entry.
+The original packer is used. This separate evidence supplements, rather than
+replaces, the unchanged 20-file complete-MLP arithmetic qualification.
+
+View probe `20260909T083448Z-382` passes all six chip/weight checks and exits
+zero after clean teardown. Report SHA256:
+`0e824e62d3a4eec10ad7ffcf4b4f4063a866857436652d301a4894a347feb097`.
+The report and outer exit artifact are checked in. Both independent simulator
+gates pass again against current sources and the original native runtime.
+
+The retry keeps both arms at four links, isolating the shape fix. Four links
+showed no whole-request TG gain; changing link policy during this retry would
+mix two changes. No new kernel speed or model-throughput claim is made yet.
 
 ## Collective ownership matters
 

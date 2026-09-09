@@ -1,8 +1,29 @@
 # Target-model link counts: separate from the sampler
 
 **[CI 34327029099](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34327029099)
-is running on `1c72ef3`; no speed result yet.** This is separate from
-the streamed-MLP kernel work and does not change serving defaults.
+passes correctness on `1c72ef3`, but four target links do not improve TG.**
+This is separate from streamed-MLP kernel work. Serving defaults are unchanged.
+
+## Result: one coding stream
+
+| Target links | PP tok/s | CTX tokens | TG committed tok/s | Prefill + setup + decode |
+| --- | ---: | ---: | ---: | ---: |
+| Two, control | 3,324.76 | 4,096 | **62.39** | 6.60 s |
+| Four, candidate | 3,430.28 | 4,096 | 61.41 | 7.27 s |
+
+Four links are **1.57% slower in TG** in this ABBA; no promotion. This single
+comparison does not establish that two links always win. Both arms emit the
+same 121 committed decode tokens per request, plus the prefill seed, through EOS.
+Final GDN, valid KV and inactive-state digests match across arms.
+
+Rates retain all four timed requests and use total tokens / total measured time.
+CTX includes the chat template. PP includes feature capture and first-token
+selection; TG includes drafting, verification/readback and publication. Setup
+is not amortized. The total excludes model loading; this is not a serving test.
+
+The artifact report SHA256 is
+`e68fbe62d5e4ee848ec8b8f4f5782ad814b1727ca1b4d12d03b2d5ac53b6b4b3`.
+The independent validator and PP / CTX / TG report generator both pass.
 
 ## Why test this?
 

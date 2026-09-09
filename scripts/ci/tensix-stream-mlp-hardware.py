@@ -16,6 +16,8 @@ from sampling_link_policy import audit
 from tensix_mlp_collective import reduce_partial
 from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify
 from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, read_prerequisite
+from tensix_mlp_view_gate import NATIVE_SOURCES as VIEW_NATIVE_SOURCES, prerequisite as view_prerequisite
+from tensix_mlp_weight_views import tensor_spec, weight_views
 from tensix_projection_raw import copy_raw, raw_shape
 from tensix_stream_mlp import StreamBufferPool, execute_from_dram, prepare_mlp
 
@@ -50,10 +52,11 @@ def main():
                 or os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT')):
             raise ValueError('Original hardware packer and reviewed native MLP/CCL required; no simulator graft')
         report['simulator_gate'] = qualify(prerequisite, report['sources'], report['native_sources'])
+        report['view_prerequisite'] = view_prerequisite(root, hashes(native_root, VIEW_NATIVE_SOURCES))
         report['fabric_sources'] = audit(native_root, os.environ)
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
-        for name in NATIVE_SOURCES:
+        for name in dict.fromkeys((*NATIVE_SOURCES, *VIEW_NATIVE_SOURCES)):
             source = native_root / name
             if source.is_file():
                 destination = options.output.parent / 'tensix-mlp-native-sources' / name
@@ -109,7 +112,11 @@ def main():
         if (not mlp._mlp_1d_decode or mlp._dram_sharded or compute.math_fidelity != ttnn.MathFidelity.LoFi
                 or not compute.fp32_dest_acc_en or not compute.packer_l1_acc or not compute.math_approx_mode):
             raise ValueError('Unchanged interleaved native LoFi FP32/approximate matmul with L1 accumulation required')
-        weights = dict(gate=mlp.weights.w1, up=mlp.weights.w3, down=mlp.weights.w2)
+        native_weights = dict(gate=mlp.weights.w1, up=mlp.weights.w3, down=mlp.weights.w2)
+        report['native_weights'] = {name: tensor_spec(ttnn, value) for name, value in native_weights.items()}
+        progress('native_weights_loaded')
+        weights, report['weight_views'] = weight_views(ttnn, native_weights)
+        progress('weight_views_validated')
         mapper = ttnn.ReplicateTensorToMesh(mesh)
         patterns = [torch.randn((1, 1, 8, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
             for seed in report['seeds']]
@@ -213,6 +220,9 @@ def main():
         report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
         report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
         report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
+        report['native_weights_after'] = {name: tensor_spec(ttnn, value) for name, value in native_weights.items()}
+        if report['native_weights_after'] != report['native_weights']:
+            raise AssertionError('Native control weight metadata or storage changed during the experiment')
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         progress('failed')

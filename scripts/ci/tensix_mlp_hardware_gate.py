@@ -10,10 +10,12 @@ import statistics
 from sampling_link_policy import SOURCES as FABRIC_SOURCES
 from tensix_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify
 from tensix_stream_gate import matrix
+from tensix_mlp_view_gate import prerequisite as view_prerequisite
+from tensix_mlp_weight_views import qualify_views
 
 
 HARDWARE_SOURCES = ('tensix-stream-mlp-hardware.py', 'tensix_mlp_hardware_gate.py',
-    'tensix_mlp_collective.py', 'sampling_link_policy.py')
+    'tensix_mlp_collective.py', 'sampling_link_policy.py', 'tensix_mlp_weight_views.py', 'tensix_mlp_view_gate.py')
 MODEL_SOURCES = {
     'models/demos/blackhole/qwen36/tt/mlp.py': 'b9c8193ee4e9b0151646a58573641e3343b1ae9f51240c472cea78cd857a2257',
     'models/tt_transformers/tt/ccl.py': 'b901f03f960eeb552b1a3dca30e63f66abb4530144efe4a45cdb5edb55bc5a9d',
@@ -41,6 +43,10 @@ def qualify_hardware(report):
             or report.get('matched_requested_links') != dict(default=4, axis0=4, axis1=4)
             or any(type(value) is not int for value in report['matched_requested_links'].values())):
         raise ValueError('Record original link requests and match all control/candidate collective requests at four links')
+    qualify_views(report.get('weight_views'))
+    if (report.get('native_weights') != {name: check['native'] for name, check in report['weight_views'].items()}
+            or report.get('native_weights_after') != report['native_weights']):
+        raise ValueError('Native control weights must retain original metadata and buffers throughout the experiment')
     matrix(report.get('eager_checks'), ('pattern', 'chip'),
         {(pattern, chip) for pattern in range(3) for chip in range(2)}, ('exact',))
     matrix(report.get('trace_checks'), ('pattern', 'arm', 'chip'),
@@ -91,6 +97,10 @@ def validate_evidence(report, root):
     gate = qualify(simulator, sources, report.get('native_sources'))
     if gate != report.get('simulator_gate'):
         raise ValueError('Recorded prerequisite differs from independent simulator qualification')
+    view_evidence = report.get('view_prerequisite')
+    if (not isinstance(view_evidence, dict)
+            or view_evidence != view_prerequisite(root, view_evidence.get('native_sources'))):
+        raise ValueError('Exact simulator-qualified metadata views required alongside unchanged MLP kernel evidence')
     return qualify_hardware(report)
 
 
