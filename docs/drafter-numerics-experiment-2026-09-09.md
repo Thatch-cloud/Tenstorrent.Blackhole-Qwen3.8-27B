@@ -125,8 +125,33 @@ Artifact10100693555 is220,927 bytes, archive SHA256:
 `6357e83d308be6c855bdf6003b0e65e4500c2305759d3767bd26072be5ad206e`.
 
 Same-code [repeat34343945544](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34343945544)
-uses the same immutable tag; its result is pending. The measured gain is not
-yet a cross-run or held-out coding-quality claim. Serving defaults stay unchanged.
+uses the same immutable tag and passes the dedicated hardware step, clean
+teardown and independent downloaded-artifact validation. All proposal counts
+and each policy's trajectories reproduce the first run.
+
+| Repeat arm | PP tok/s | CTX | TG tok/s | Individual TG | Mean total request |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Control | 3,292.38 | 4,096 | 61.08 | 61.12 / 61.05 | 7.38 s |
+| Candidate | 3,326.31 | 4,096 | **73.16** | 76.39 / 70.19 | 6.67 s |
+
+The repeat gain is19.77%. Drafting is40.24/20.87ms per block; verification
+61.73/61.80ms; publication11.68/12.15ms. All samples and stalls remain included.
+Across both runs, four timed requests per arm pool to:
+
+| Arm | PP tok/s | CTX | Committed TG tok/s | Mean total request |
+| --- | ---: | ---: | ---: | ---: |
+| Control | 3,315.21 | 4,096 | 61.28 | 7.39 s |
+| Candidate | 3,324.52 | 4,096 | **74.27** | 6.65 s |
+
+This is a repeat-confirmed **21.21%** gain, not a held-out coding-quality claim.
+All12 complete requests, including four audits, retain exact target tokens and
+state. There are still only two independent ABBA runs on one coding prompt.
+Serving defaults stay unchanged.
+
+Repeat report SHA256:
+`5e08cc943e5b0be222330822124f6c72d08b06f1877c8019d02977df5a7afc28`.
+Artifact10101166229 is220,861 bytes, archive SHA256:
+`3b3cba1a058e0b14f93b14c77a574e0ca325414c2976f1647c64ff9e2462c893`.
 
 At7.12 committed tokens/block, 200 TG requires a complete cycle of35.59 ms.
 The unchanged verifier alone takes61.72 ms, before drafting and publication.

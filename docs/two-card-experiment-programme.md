@@ -11,8 +11,19 @@ acceptance stays105/119 per request. The unchanged verifier remains61.72ms/block
 above the entire35.59ms cycle budget for200TG at this acceptance rate.
 Independent artifact/source/teardown validation passes. Same-tag repeat
 [34343945544](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34343945544)
-is underway; held-out coding and serving acceptance remain open.
+also passes: PP3,326.31 / CTX4,096 / TG73.16 versus control61.08. Pooling four
+timed requests per arm across both runs gives **74.27 versus61.28TG (+21.21%)**;
+all12 requests retain exact target tokens/state. Held-out coding and serving
+acceptance remain open. No candidate sample or stall is discarded.
 [Full PP / CTX / TG and acceptance table](drafter-numerics-experiment-2026-09-09.md).
+
+**Next wider-drafter prerequisite: pinned DSpark intake.** The published v2
+checkpoint is not DFlash2-compatible: full attention, YaRN rotary tables and a
+sequential full-vocabulary Markov head replace the sliding-window/convolution/
+top16 path. Bounded metadata intake and14 CPU contract/selector tests pass;
+no learned weights or TT kernel have run. Training16 does not qualify serving15
+proposals: the published serving convention is7 proposals/8 target rows.
+[Port boundaries and next gates](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.

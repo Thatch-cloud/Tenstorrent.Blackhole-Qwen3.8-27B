@@ -15,6 +15,8 @@
 | 4K update ABBA, captured-update candidate | **3,292.61** | **4,096** | **62.11** | **1** | Up to 8 | 121, 121 | **7.14 s** |
 | 4K proposal ABBA, composed-attention control | **3,338.37** | **4,096** | **61.47** | **1** | Up to 8 | 121, 121 | **7.41 s** |
 | 4K proposal ABBA, native approximate draft attention | **3,322.74** | **4,096** | **75.42** | **1** | Up to 8 | 121, 121 | **6.62 s** |
+| 4K proposal repeat, composed-attention control | **3,292.38** | **4,096** | **61.08** | **1** | Up to 8 | 121, 121 | **7.38 s** |
+| 4K proposal repeat, native approximate draft attention | **3,326.31** | **4,096** | **73.16** | **1** | Up to 8 | 121, 121 | **6.67 s** |
 
 CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
@@ -45,7 +47,11 @@ Native approximate draft-attention run34342721182 improves its matched control
 by22.68%. All six requests preserve exact native target tokens/state; proposal
 trajectories differ, while total acceptance is105/119 for each policy/request.
 Candidate samples77.37/73.56TG and control59.69/63.37 remain included. Same-code
-repeat34343945544 is pending; this is not held-out coding-quality certification.
+repeat34343945544 also passes: candidate76.39/70.19TG versus61.12/61.05 control.
+Both runs pool to **PP3,324.52 / CTX4,096 / TG74.27** candidate, versus
+**PP3,315.21 / TG61.28** control:21.21% higher committed TG. Four timed requests
+per arm are included; all12 requests including audits retain exact target state
+and tokens. This is one prompt, not held-out coding-quality certification.
 [Source-pinned evidence and block costs](drafter-numerics-experiment-2026-09-09.md).
 
 | Metric | Definition |
@@ -66,7 +72,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | Native draft attention3,322.74 /75.42; matched control3,338.37 /61.47 | Repeat gain; target verifier remains61.72ms/block |
+| 4,096 | 1 | Native draft attention pooled3,324.52 /74.27; control3,315.21 /61.28 | Gain repeats; target verifier remains about62ms/block |
 | 8,192 | 1 | Repeat3,298.59 /53.48; first3,149.33 /46.20 | Retain both runs; original stall remains unexplained |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |

@@ -9,10 +9,10 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 - **Best single stream: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
   commit-only GDN and fused draft convolution improve the matched control by
   8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
-- **New 4K result: PP 3,322.74 / CTX 4,096 / TG 75.42**, versus 61.47 TG
-  in the matched control (**+22.68%**). Native attention changes draft proposals
-  only; all six requests retain exact target tokens and state. Same-code repeat
-  is underway. [Results](docs/drafter-numerics-experiment-2026-09-09.md).
+- **Repeat-confirmed 4K result: PP 3,324.52 / CTX 4,096 / TG 74.27**, versus
+  61.28 TG control (**+21.21%**, pooling both runs). Native attention changes
+  draft proposals only; all 12 requests retain exact target tokens and state.
+  [Results](docs/drafter-numerics-experiment-2026-09-09.md).
 - **8K:** the uncached repeat reaches 53.48 TG. This uses the older draft path,
   not the new 4K candidate; these are not scaling guarantees.
 - **Main bottleneck:** the 4K target verifier takes about 62 ms/block, almost
@@ -81,6 +81,7 @@ These are offline complete requests, not endpoint streaming measurements.
 | 3,149.33 | 8,192 | **46.20** | First run: publication stall included; TG41.94 / 51.43 |
 | 3,298.59 | 8,192 | **53.48** | Same-code repeat: two 121-token EOS samples; TG53.40 / 53.57 |
 | 3,322.74 | 4,096 | **75.42** | New approximate-drafter candidate: two 121-token EOS samples; matched control61.47 |
+| 3,326.31 | 4,096 | **73.16** | Same-code repeat: two 121-token EOS samples; matched control61.08 |
 | — | 16,384 | — | Planned |
 | — | 32,768 | — | Planned |
 | — | 64,504 | — | Planned; reserves generation space below 65,536 |
@@ -98,6 +99,11 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 46.20 TG and 10.24 s initially. This is repeatability evidence, not a code gain.
 [8K result and timing spread](docs/dflash-8k-context-2026-09-09.md).
 [Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
+
+The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
+requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
+higher. [DSpark intake](docs/dspark-port-contract-2026-09-09.md) is a separate
+CPU-only compatibility step, not another measured drafter or speed result.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
