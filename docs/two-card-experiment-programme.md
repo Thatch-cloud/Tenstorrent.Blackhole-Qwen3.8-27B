@@ -164,9 +164,12 @@ four links for the metadata-only retry;983 CI and57 simulator-harness tests pass
 Retry34330511791 passes all118 hardware checks and clean teardown, but takes
 2.22x native MLP latency. Preserve this negative result; profile the transport
 and consumer before another kernel change. It provides no new PP/CTX/TG result.
-The [device attribution suite](tensix-mlp-device-profile-2026-09-09.md) is ready:
-same qualified kernels and real weights, twenty fully accounted trace replays,
-both-chip operation/RISC durations, and no instrumented-speed promotion.
+The [device attribution suite](tensix-mlp-device-profile-2026-09-09.md) passes
+34332550656: same qualified kernels and real weights, twenty fully accounted
+trace replays on both chips. Gate/up/down are roughly222/217/244us streamed
+versus96/88/122us native. Copy and collective do not explain the regression.
+Next: test16 rather than8 producers, keeping compute/maths/FIFOs/CCL unchanged;
+full-size simulator qualification precedes hardware. No instrumented-speed promotion.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

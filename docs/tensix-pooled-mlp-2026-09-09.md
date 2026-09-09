@@ -25,7 +25,9 @@ These are component milliseconds, **not PP or TG**. No full-model promotion run
 is justified. Next diagnostic: measure producer/forwarding/consumer costs before
 changing the streaming pipeline; contention and credit waits remain hypotheses.
 The separate [device attribution suite](tensix-mlp-device-profile-2026-09-09.md)
-uses unchanged qualified kernels and cannot qualify instrumented timing for promotion.
+passes in34332550656: gate/up/down account for most of the loss, not the copy or
+collective. It uses unchanged qualified kernels and cannot qualify instrumented
+timing for promotion. The next isolated hypothesis is producer issue capacity.
 
 ## What this adds
 
