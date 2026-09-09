@@ -20,7 +20,8 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   weights to 68/80 compute workers. Full projections **and the pooled complete MLP**
   pass exact simulation. The first hardware attempt stops before candidate
   execution on a 2D/4D weight-shape mismatch. The metadata-only fix passes
-  full-size simulation; hardware retry is next. No hardware speed result yet.
+  full-size simulation; [hardware retry is running](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34330511791).
+  No hardware speed result yet.
   [Qualification](docs/tensix-pooled-mlp-2026-09-09.md).
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter

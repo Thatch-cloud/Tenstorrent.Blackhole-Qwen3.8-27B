@@ -29,7 +29,7 @@ same FIFOs and output workspace. This is not yet a 64-layer model result.
 | Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Pass |
 | Native weight views | Full 2D native shards, exact 4D aliases on both chips, original packer | Pass |
 | Host safeguards | 983 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
-| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | First attempt fails before candidate execution; qualified metadata fix ready for retry |
+| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Retry34330511791 running on the simulator-qualified metadata fix |
 | Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not qualified |
 
 The complete-MLP simulator gate requires 32 native-control comparisons, 32 eager
@@ -71,6 +71,10 @@ gates pass again against current sources and the original native runtime.
 The retry keeps both arms at four links, isolating the shape fix. Four links
 showed no whole-request TG gain; changing link policy during this retry would
 mix two changes. No new kernel speed or model-throughput claim is made yet.
+
+[Retry 34330511791](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34330511791)
+runs the immutable `ci-qwen-hardware-b668f14` tag. Native view-source hashes and
+the new simulator report/exit are checked before any hardware device is opened.
 
 ## Collective ownership matters
 
