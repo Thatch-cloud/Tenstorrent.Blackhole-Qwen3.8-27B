@@ -1,6 +1,6 @@
 # Separate experiment: faster approximate drafting
 
-**Proposal-only native attention and its simulator gate are implemented.**
+**Both proposal-only native-attention simulator gates pass.**
 No complete-request integration or performance result yet. Keep the exact
 live-query candidate separate. The failed native-SDPA numerical tests remain
 failed; their tolerances and results are unchanged.
@@ -19,8 +19,8 @@ failed; their tolerances and results are unchanged.
 - Nine experiment and15 native source hashes are bound to the report. Native
   sources must remain unchanged within the declared simulator packer scope,
   and the outer wrapper must exit successfully.
-- 1,008 CI tests and57 simulator-harness tests pass. Simulation is next, then
-  request integration with exact native target tokens/state and separate
+- 1,008 CI tests and57 simulator-harness tests pass. Next is request integration
+  with exact native target tokens/state and separate
   proposal-policy acceptance reporting. No hardware dispatch is authorized by
   a finite-output check alone.
 
@@ -30,7 +30,32 @@ report. Preserve that failure. Native SDPA internally uses packer accumulation
 even though the public matmul configuration disables it. The retry uses the
 same reviewed, owned packer compatibility patch as the earlier MLP simulations;
 neither SDPA compute sources nor runtime binaries are changed. Re-qualification
-against the restored original packer is required afterward.
+against the restored original packer also passes. The packer matches its original
+backup byte-for-byte, both native binaries retain their original hashes, and
+the owned compatibility lock is released.
+
+## Simulator results
+
+| Draft history | Operands | Maximum absolute error | Original 0.01/0.01 test | Mask/replay gate |
+| ---: | --- | ---: | --- | --- |
+| 31 | Saved learned layer0/rank0 | 0.392848 | Fails, unchanged | Pass:76 checks |
+| 2,048 | Synthetic | 0.004196 | Passes this fixture only | Pass:76 checks |
+
+The learned case has mean absolute error0.048489 and RMS0.064525. Both cases
+replicate the same operands onto two chips; these are not learned rank-one or
+full-model tests. Changed-input and fully masked K/V perturbations also pass.
+These history lengths are not model CTX benchmark rows. No hardware latency,
+proposal acceptance, coding-quality result or TG gain is established.
+
+| Completed run | Report SHA256 |
+| --- | --- |
+| `20260909T102545Z-403` | `bbe085e7f873820e9e01c286653f213b20452dcdc6252638d499e6de14e3c2c7` |
+| `20260909T102636Z-527` | `fea42395d6cb9203663016a007636d7d873f147a2d97f1a2e7dcd34dcc6dd42a` |
+
+Both outer exits are zero; their shared exit-file SHA256 is
+`9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`.
+Reports and exit files are checked in byte-identically under
+`scripts/ci/proposal-native-attention-simulator-{31,2048}.*`.
 
 ## Different acceptance question
 

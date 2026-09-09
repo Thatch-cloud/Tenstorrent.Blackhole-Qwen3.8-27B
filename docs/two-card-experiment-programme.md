@@ -187,6 +187,11 @@ A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must
 not turn failed native-attention numerical tests into passing exactness claims.
+Its native-attention primitive now passes76 mask/replay checks at each of31
+and2,048 draft-history rows, with unchanged SDPA sources and restored native
+packer/binaries. The learned maximum error0.392848 remains recorded as a failed
+original numerical comparison. Full-request policy integration and exact native
+target token/GDN/KV audits are next; no hardware speed or TG result exists yet.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

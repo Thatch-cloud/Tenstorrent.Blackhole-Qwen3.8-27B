@@ -33,6 +33,11 @@ Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-0
 Native drafter SDPA remains disabled after its numerical gate failed. All rates
 below are offline coding-task experiments, not held-out quality or serving certification.
 
+[Next drafter experiment](docs/drafter-numerics-experiment-2026-09-09.md): native
+attention used only for approximate proposals. Mask/replay simulation passes at
+31/2,048 history rows, but learned numerical differences remain. Exact target
+verification stays mandatory; full-request integration and timing are next.
+
 ## Setup
 
 | Component | Experiment setup |
