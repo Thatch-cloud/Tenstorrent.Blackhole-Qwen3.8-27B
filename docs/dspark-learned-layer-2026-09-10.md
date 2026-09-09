@@ -150,6 +150,27 @@ the next full matrix includes all three cases, both chips and changed-input
 replays of attention, MLP and final reduction. An isolated attention pass or
 native arithmetic sample cannot substitute for that matrix.
 
+Full-matrix run `20260909T183658Z-393` uses code `779ae7f` and the original
+runtime. At launch, all 1,169 host tests and 59 harness tests pass. This run has
+no hardware allocation and must retain any numerical failures alongside replay
+and ownership results; a replay pass cannot turn a numerical failure green.
+
+### Long-context preparation
+
+The layer bring-up still has **32 historical rows**, not the 4K benchmark
+context. Extending the existing 1D projection naively would assign all 128 M
+tiles of a 4K history to each output-column worker. A separate, unqualified
+`dspark_history_projection.py` candidate distributes the M dimension across
+eight worker rows, while retaining the complete learned 5,120-by-512 local K/V
+matrix. At 4K it assigns 16 M tiles and two N tiles per worker on an 8x8 grid.
+
+The installed native binary accepts that 2D program configuration; four host
+tests verify geometry, precision, ownership and rejection guards. This is **not
+a simulator pass, an L1-capacity measurement or a speedup**. It is not wired into
+the active layer run. Learned full-size simulation against the existing tiled
+native projection, history masking/rotary and full-context attention remain
+required before connecting this candidate to a 4K request.
+
 | Full-matrix requirement | Checks |
 | --- | ---: |
 | Frozen CPU layer checkpoints | 6 |
