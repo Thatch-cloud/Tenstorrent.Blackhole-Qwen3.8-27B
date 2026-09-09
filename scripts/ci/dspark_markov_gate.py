@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 from dspark_markov_fixture import expected_manifest
+from dspark_native_reference import POLICY
 
 
 def coordinates(entries, fields, expected, flags):
@@ -29,7 +30,7 @@ def coordinates(entries, fields, expected, flags):
         raise ValueError('Missing required audit coordinates')
 
 
-def qualify(report, *, sources, native, exit_status):
+def qualify_structure(report, *, sources, native, exit_status, policy, eager_flags):
     if (exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('error') or report.get('backend') != 'simulator' or report.get('stage') != 'complete'
             or report.get('target_integrated') is not False or report.get('eligible_for_hardware') is not False
@@ -39,7 +40,7 @@ def qualify(report, *, sources, native, exit_status):
     vocabulary, steps = report.get('vocabulary'), report.get('proposals')
     if type(vocabulary) is not int or type(steps) is not int or (vocabulary, steps) not in ((64, 3), (248320, 7)):
         raise ValueError('Qualified toy3 or learned full-vocabulary7 proposal geometry required')
-    if report.get('accuracy_policy') != 'FP32 bias and sum; no SGLang BF16 bitwise claim':
+    if report.get('accuracy_policy') != policy:
         raise ValueError('Explicit prototype arithmetic policy required')
     learned = vocabulary == 248320
     if report.get('fixture') != (expected_manifest() if learned else None):
@@ -48,7 +49,7 @@ def qualify(report, *, sources, native, exit_status):
     replay_order = [*range(patterns), 0]
     coordinates(report.get('eager_checks'), ('pattern', 'step', 'chip'),
         {(pattern, step, chip) for pattern in range(patterns) for step in range(steps) for chip in range(2)},
-        ('token_exact', 'full_vocabulary_close'))
+        eager_flags)
     coordinates(report.get('replay_checks'), ('repetition', 'pattern', 'step', 'chip'),
         {(repetition, pattern, step, chip) for repetition, pattern in enumerate(replay_order)
             for step in range(steps) for chip in range(2)}, ('token_and_scores_exact', 'bindings_stable'))
@@ -77,16 +78,73 @@ def qualify(report, *, sources, native, exit_status):
         scope='Replicated selector only; synthetic base logits, no learned backbone, fabric, acceptance or TG evidence')
 
 
+def qualify(report, *, sources, native, exit_status):
+    if report.get('native_arithmetic_reference') or 'fp32_replacement_qualified' in report:
+        raise ValueError('Native arithmetic reports cannot replace the original FP32 gate')
+    return qualify_structure(report, sources=sources, native=native, exit_status=exit_status,
+        policy='FP32 bias and sum; no SGLang BF16 bitwise claim', eager_flags=('token_exact', 'full_vocabulary_close'))
+
+
+def qualify_native(report, *, sources, native, exit_status):
+    result = qualify_structure(report, sources=sources, native=native, exit_status=exit_status,
+        policy=POLICY, eager_flags=('token_exact', 'full_vocabulary_exact'))
+    if (report.get('native_arithmetic_reference') is not True or report.get('fp32_replacement_qualified') is not False
+            or report.get('fp32_diagnostic_tolerances') != dict(rtol=1e-4, atol=1e-4)):
+        raise ValueError('Separate native proposal policy and original FP32 diagnostic tolerances required')
+    vocabulary = result['vocabulary']
+    by_coordinate = {(entry['pattern'], entry['step'], entry['chip']): entry for entry in report['eager_checks']}
+    for entry in report['eager_checks']:
+        if entry['max_abs'] != 0:
+            raise ValueError('Native arithmetic requires exact full-vocabulary scores, not a widened tolerance')
+        for field in ('previous', 'fp32_previous'):
+            if type(entry.get(field)) is not int or not 0 <= entry[field] < vocabulary:
+                raise ValueError('Both native and independent FP32 predecessor IDs required')
+        for field in ('same_input_fp32', 'fp32_trajectory'):
+            diagnostic = entry.get(field)
+            if not isinstance(diagnostic, dict):
+                raise ValueError('Complete independent and same-input FP32 diagnostics required')
+            error, mismatched = diagnostic.get('max_abs'), diagnostic.get('mismatched')
+            close, token = diagnostic.get('full_vocabulary_close'), diagnostic.get('token')
+            if (type(error) not in (int, float) or not math.isfinite(error) or error < 0
+                    or type(mismatched) is not int or not 0 <= mismatched <= vocabulary
+                    or type(close) is not bool or close != (mismatched == 0)
+                    or (error == 0 and mismatched != 0) or type(token) is not int or not 0 <= token < vocabulary):
+                raise ValueError('Finite, consistent original-tolerance FP32 diagnostics and greedy IDs required')
+        pattern, step, chip = (entry[field] for field in ('pattern', 'step', 'chip'))
+        if step:
+            previous = by_coordinate[pattern, step - 1, chip]
+            expected_native, expected_fp32 = previous['token'], previous['fp32_trajectory']['token']
+        else:
+            anchors = (1596, vocabulary - 1) if result['learned_matrices'] else (2, vocabulary - 1, 0)
+            expected_native = expected_fp32 = anchors[pattern]
+        if entry['previous'] != expected_native or entry['fp32_previous'] != expected_fp32:
+            raise ValueError('Each arithmetic policy must retain its own sequential predecessor trajectory')
+        if entry['previous'] == entry['fp32_previous'] and entry['same_input_fp32'] != entry['fp32_trajectory']:
+            raise ValueError('Identical predecessor inputs must have identical FP32 diagnostics')
+        peer = by_coordinate[pattern, step, 1 - chip]
+        if any(entry[field] != peer[field] for field in
+                ('previous', 'fp32_previous', 'same_input_fp32', 'fp32_trajectory')):
+            raise ValueError('Replicated chips must agree on retained FP32 diagnostics')
+    entries = report['eager_checks']
+    result.update(accuracy_policy=POLICY, fp32_replacement_qualified=False,
+        worst_same_input_fp32_error=max(entry['same_input_fp32']['max_abs'] for entry in entries),
+        fp32_score_checks_failed=sum(not entry['fp32_trajectory']['full_vocabulary_close'] for entry in entries),
+        fp32_token_checks_differed=sum(entry['token'] != entry['fp32_trajectory']['token'] for entry in entries))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--exit-status', type=Path, required=True)
     parser.add_argument('--metal-root', type=Path, required=True)
+    parser.add_argument('--native-reference', action='store_true', help='Qualify only the separate native proposal policy')
     options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('dspark_markov_probe_source', Path(__file__).with_name('dspark-markov-probe.py'))
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
-    result = qualify(json.loads(options.report.read_text()), sources=probe.source_hashes(),
+    qualifier = qualify_native if options.native_reference else qualify
+    result = qualifier(json.loads(options.report.read_text()), sources=probe.source_hashes(),
         native=probe.fingerprints(options.metal_root), exit_status=options.exit_status.read_text())
     print(json.dumps(result, indent=2))
 

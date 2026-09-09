@@ -46,7 +46,9 @@ class DSparkMarkovDeviceTests(unittest.TestCase):
         operations.WormholeComputeKernelConfig = MagicMock(return_value='kernel')
         operations.MathFidelity = SimpleNamespace(HiFi4='hifi4')
         owned = []
-        records = execute(operations, *values, owned)
+        enqueued = []
+        records = execute(operations, *values, owned, on_step_enqueued=enqueued.append)
+        self.assertEqual(enqueued, list(range(7)))
         self.assertEqual([call.args[0] for call in operations.embedding.call_args_list], [values[0], *tokens[:-1]])
         self.assertTrue(all(call.args[1] is values[2] for call in operations.embedding.call_args_list))
         self.assertEqual([record['token'] for record in records], tokens)
@@ -67,6 +69,13 @@ class DSparkMarkovDeviceTests(unittest.TestCase):
         values[2].dtype = 'float32'
         with self.assertRaises(ValueError):
             execute(operations, *values, [])
+        operations.embedding.assert_not_called()
+
+    def test_invalid_observer_fails_before_dispatch(self):
+        operations, values = operands()
+        operations.embedding = MagicMock()
+        with self.assertRaises(ValueError):
+            execute(operations, *values, [], on_step_enqueued=True)
         operations.embedding.assert_not_called()
 
 

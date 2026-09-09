@@ -8,12 +8,14 @@ from pathlib import Path
 
 from attention_batch import capture_operation
 from dspark_markov_device import execute
+from dspark_native_reference import POLICY, NativeMarkovReference, audit_scores
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 
 
 SOURCES = ('dspark-markov-probe.py', 'dspark_markov_device.py', 'dspark_markov.py', 'dspark_intake.py',
-    'dspark_markov_fixture.py', 'attention_batch.py', 'gdn_multitoken_conv.py')
+    'dspark_markov_fixture.py', 'attention_batch.py', 'gdn_multitoken_conv.py',
+    'dspark_native_reference.py', 'projection_rounding.py')
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 BINARY_SHA256 = 'd2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24'
@@ -43,6 +45,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path)
+    parser.add_argument('--native-reference', action='store_true',
+        help='Separate approximate proposal policy; exact grouped-product oracle, not FP32 replacement qualification')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     import torch
@@ -69,6 +73,9 @@ def main():
         fixture=fixture, sources=source_hashes(), native_sources=fingerprints(root), scope=__doc__,
         target_integrated=False, eligible_for_hardware=False, accuracy_policy='FP32 bias and sum; no SGLang BF16 bitwise claim',
         eager_checks=[], replay_checks=[], input_checks=[], weight_checks=[], stale_controls=[])
+    if options.native_reference:
+        report.update(accuracy_policy=POLICY, native_arithmetic_reference=True, fp32_replacement_qualified=False,
+            fp32_diagnostic_tolerances=dict(rtol=1e-4, atol=1e-4))
     mesh, trace = None, None
     persistent, transient = [], []
 
@@ -77,6 +84,15 @@ def main():
         print(json.dumps(dict(stage=stage, vocabulary=vocabulary, proposals=steps)), flush=True)
 
     try:
+        native_references = []
+        if options.native_reference:
+            oracle = NativeMarkovReference(predecessor, successor)
+            for pattern, (anchor, base) in enumerate(patterns):
+                progress(f'native_reference_{pattern}_start')
+                native_references.append(oracle.trajectory(base.reshape(1, steps, vocabulary), int(anchor.item()),
+                    progress=lambda step: progress(f'native_reference_{pattern}_step_{step}_complete')))
+            del oracle
+        progress('opening_mesh')
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=268435456)
         mesh.enable_program_cache()
@@ -105,7 +121,9 @@ def main():
             ttnn.synchronize_device(mesh)
 
         def run():
-            return execute(ttnn, persistent[2], persistent[3], persistent[0], persistent[1], transient)
+            return execute(ttnn, persistent[2], persistent[3], persistent[0], persistent[1], transient,
+                on_step_enqueued=lambda step: print(json.dumps(dict(event='step_enqueued', step=step,
+                    stage=report['stage'])), flush=True))
 
         def inspect(records, chip):
             return [(host(record['token'], chip).long(), host(record['scores'], chip).float()) for record in records]
@@ -128,18 +146,27 @@ def main():
         references = []
         for pattern, (anchor, base) in enumerate(patterns):
             update(pattern)
+            progress(f'eager_{pattern}_enqueue')
             records = run()
+            progress(f'eager_{pattern}_synchronize')
             ttnn.synchronize_device(mesh)
             expected = []
-            previous = anchor.reshape(1).long()
-            for step in range(steps):
-                scores = base[0, 0, step][None] + predecessor[previous].float() @ successor.float().T
-                previous = scores.argmax(-1)
-                expected.append((previous.clone(), scores))
+            if not options.native_reference:
+                previous = anchor.reshape(1).long()
+                for step in range(steps):
+                    scores = base[0, 0, step][None] + predecessor[previous].float() @ successor.float().T
+                    previous = scores.argmax(-1)
+                    expected.append((previous.clone(), scores))
+            progress(f'eager_{pattern}_audit')
             observed = [inspect(records, chip) for chip in range(2)]
             for chip, values in enumerate(observed):
-                for step, ((token, scores), (expected_token, expected_scores)) in enumerate(zip(values, expected, strict=True)):
+                for step, (token, scores) in enumerate(values):
                     scores = scores.reshape(1, vocabulary)
+                    if options.native_reference:
+                        report['eager_checks'].append(dict(pattern=pattern, step=step, chip=chip,
+                            **audit_scores(scores, int(token.item()), native_references[pattern][step])))
+                        continue
+                    expected_token, expected_scores = expected[step]
                     torch.testing.assert_close(scores, expected_scores, rtol=1e-4, atol=1e-4)
                     if not torch.equal(token.reshape(1), expected_token):
                         raise AssertionError('Full-vocabulary greedy Markov proposal differs from CPU reference')
@@ -152,10 +179,12 @@ def main():
             transient.clear()
             progress(f'eager_{pattern}_complete')
         update(0)
+        progress('trace_capture')
         trace, records = capture_operation(ttnn, mesh, run)
         output_bindings = [[addresses(ttnn, record[name]) for name in ('token', 'scores')] for record in records]
         for repetition, pattern in enumerate((*range(len(patterns)), 0)):
             update(pattern)
+            progress(f'replay_{repetition}_execute')
             ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
             if ([addresses(ttnn, tensor) for tensor in persistent] != bindings or output_bindings !=
                     [[addresses(ttnn, record[name]) for name in ('token', 'scores')] for record in records]):
@@ -169,6 +198,7 @@ def main():
                         chip=chip, token_and_scores_exact=True, bindings_stable=True))
             audit_inputs('replay', repetition, pattern)
             progress(f'replay_{repetition}_complete')
+        progress('stale_control_execute')
         ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
         for chip in range(2):
             observed = inspect(records, chip)

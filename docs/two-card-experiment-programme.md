@@ -1,6 +1,6 @@
 # Qwen3.8-27B: two-card experiment programme
 
-## Current programme position - 2026-09-09
+## Current programme position - 2026-09-10
 
 **Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native
 approximate draft attention improves control61.47TG by22.68% in
@@ -34,11 +34,14 @@ absolute difference0.0025434494. It closes cleanly with outer exit1; no learned
 selector qualification or hardware dispatch follows. Diagnostic120503Z-397
 isolates native BF16 grouped-product matmul rounding:64 learned columns match
 the existing Blackhole arithmetic reference bitwise, while addition is exact.
-The failed FP32 gate remains rejected; a separate native-arithmetic proposal
-policy needs full-vocabulary feedback and unchanged-target correctness gates.
-Both Markov matrices are hash-pinned and agree with the completely verified
-3.714GB checkpoint. All1,057 host and57 harness tests pass. No DSpark backbone,
-fabric integration, acceptance or hardware throughput is certified by this work.
+The failed FP32 gate remains rejected. The separate native-arithmetic policy now
+passes80 small simulator checks; learned248,320-ID/7-proposal run
+`20260909T123008Z-401` is underway, not qualified. It retains independent FP32
+diagnostics rather than widening the old tolerance. DSpark-specific YaRN CPU
+tables match pinned upstream functions bitwise at21 selected positions through
+262143; this is not a262K model run. Both Markov matrices agree with the verified
+3.714GB checkpoint. No DSpark backbone, target integration, acceptance or hardware
+throughput is certified. [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.

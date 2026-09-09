@@ -1,0 +1,79 @@
+{
+  "cpu_reference_passed": true,
+  "backend": "cpu",
+  "upstream_revision": "cc832f9055ba11c8c55f918ab4bda9472b910d48",
+  "upstream_sources": {
+    "modeling_rope_utils.py.source.txt": "200d1fb4ed77132634761e279abba73d48d8bd8d8075de9c54ccc4f7f6671553",
+    "modeling_qwen3.py.source.txt": "fbdcfeeb1b54135ca67ba7df924da92f4b264e1252b517eea2de989289ebaeab"
+  },
+  "config_sha256": "dd65fb1b01c2adea69512ff2990a79d58eb7fe2c7ea97375aa66f657a29a5bfd",
+  "positions": [
+    0,
+    1,
+    6,
+    7,
+    169,
+    170,
+    4095,
+    4096,
+    8191,
+    8192,
+    16383,
+    16384,
+    32767,
+    32768,
+    64503,
+    64504,
+    65535,
+    65536,
+    131071,
+    131072,
+    262143
+  ],
+  "inverse_frequency_exact": true,
+  "attention_scaling_exact": true,
+  "attention_scaling": 1.3465735902799727,
+  "correction_range": [
+    14,
+    29
+  ],
+  "checks": [
+    {
+      "dtype": "torch.float32",
+      "table": "cosine",
+      "values": 2688,
+      "bitwise_exact": true,
+      "sha256": "1c9ed4bc82412fb6d3cc5e1e4819f6bcd8a75243d63728714337a8ba8e3a7d60"
+    },
+    {
+      "dtype": "torch.float32",
+      "table": "sine",
+      "values": 2688,
+      "bitwise_exact": true,
+      "sha256": "8826516ddb4c79342ba1e2b88bd7a8d5c84da4c373d59d4a2d2e3ea227687a2c"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "table": "cosine",
+      "values": 2688,
+      "bitwise_exact": true,
+      "sha256": "56d04dbbe67ab6527c918b8f3ddec46e1e24094e1e231b4f309462b8f331eee8"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "table": "sine",
+      "values": 2688,
+      "bitwise_exact": true,
+      "sha256": "5494d748ec1687108b92eb856537f8fcd30ebc776be3d8c65de36d116afc6bbc"
+    }
+  ],
+  "target_integrated": false,
+  "eligible_for_hardware": false,
+  "serving_qualified": false,
+  "scope": "Static pre-normalized YaRN config and selected absolute-position tables only; decorators disabled, no model code imported",
+  "sources": {
+    "dspark_rope_reference.py": "871f3b0634a5c1e8e179fe6449a3b2007f84551e2afaa2dfeeb89b202011cd4a",
+    "dspark_rope_tables.py": "956b673a8c1edf76d7d3c1a29874d0dbb9245a4d61517ffd585b083638221961",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f"
+  }
+}

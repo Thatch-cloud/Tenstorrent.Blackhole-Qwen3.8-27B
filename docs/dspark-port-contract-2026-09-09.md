@@ -116,11 +116,58 @@ Saved operand SHA256:
 `d050d3be174cf85dc3b87bbd0aa0323f6fbd308fa57b3ffd68eadbbd2d049d5c`.
 Both simulator processes terminate cleanly; no hardware job is dispatched.
 
-Next evaluate an explicitly separate native-arithmetic proposal policy using
-the validated grouped-product reference, while retaining raw FP32 differences
-and the original rejected gate. Full-vocabulary deterministic feedback and
-eventual unchanged-target token/state audits remain mandatory. This is not
-permission to substitute a different arithmetic reference for target correctness.
+### Separate native-arithmetic experiment - September 10
+
+`--native-reference` is opt-in. It requires bitwise-exact native scores against
+the grouped-product oracle, while recording both same-input FP32 differences
+and an independent FP32 proposal trajectory. Each trajectory uses its own
+previous selected token; disagreement cannot be hidden by reusing the native ID.
+The original FP32 gate rejects this policy. No tolerance is widened.
+
+| Gate | Current result |
+| --- | --- |
+| Small native-policy simulator, 64 IDs / 3 proposals | **80 checks pass**, both chips, exact scores, changed-input replay and clean exit |
+| Learned native-policy simulator, 248,320 IDs / 7 proposals | Running: `20260909T123008Z-401`; not qualified yet |
+| Unchanged target tokens/GDN/KV with DSpark | Not integrated or measured |
+
+The small run is `20260909T122916Z-419`; report SHA256:
+`a92ea83d79602e14603757ad1ab42f6b1472f2a643dc99302e5261490d36346c`.
+Its toy weights are exactly representable and do not establish learned accuracy.
+The learned run retains all100 required checks and a bounded three-hour timeout.
+Progress distinguishes CPU reference generation, enqueued steps, synchronization
+and completed audits. An enqueued step is not reported as completed computation.
+
+Reconcile the separate policy with `dspark_markov_gate.py --native-reference`;
+without that flag, the CLI continues to require the original FP32 policy.
+Full-vocabulary deterministic feedback and eventual unchanged-target token/state
+audits remain mandatory. Neither selector gate certifies a complete model.
+
+### YaRN CPU tables - September 10
+
+DSpark now has separate positional tables; DFlash2's unscaled tables are not reused.
+The checkpoint's factor32 YaRN scales **both** cosine and sine by1.3465735903,
+including position zero. Its correction band is14..29 of the64 frequencies.
+
+| Check | Result |
+| --- | --- |
+| All64 inverse frequencies and attention scale | Exact against pinned Transformers5.8.1 functions |
+| FP32 and BF16 cosine/sine, all128 columns | Bitwise exact at21 selected absolute positions, including8191/8192 and262143 |
+| Chunked tables and seven-row query suffix | CPU tests pass; absolute positions preserved |
+| TT rotary operation, learned attention, full model | Still pending |
+
+The reference checker verifies source hashes before extracting only the reviewed
+YaRN parameter and rotary-forward functions. No Transformers package is installed,
+no checkpoint model code is imported, and dynamic decorators are disabled for this
+static YaRN comparison. This is CPU table evidence, not262K model execution.
+Report: `scripts/ci/dspark-yarn-cpu-reference.json`, SHA256
+`97424ecd6a1355d24c7f4c73bfd07c9ca3c8035e452b032cf91d20d6412043f9`.
+Validation:1,077 CI host tests and57 simulator-harness tests pass, including
+56 DSpark CPU tests. These counts are separate from actual simulator execution.
+
+Primary sources at Transformers commit
+[`cc832f9`](https://github.com/huggingface/transformers/tree/cc832f9055ba11c8c55f918ab4bda9472b910d48):
+[YaRN parameters](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/modeling_rope_utils.py),
+[Qwen3 rotary forward](https://github.com/huggingface/transformers/blob/cc832f9055ba11c8c55f918ab4bda9472b910d48/src/transformers/models/qwen3/modeling_qwen3.py).
 
 ## Complete learned weights staged
 

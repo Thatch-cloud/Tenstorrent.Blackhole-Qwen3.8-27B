@@ -19,8 +19,10 @@ def validate(operations, anchor, base_logits, predecessor, successor):
     return shape[2], shape[3]
 
 
-def execute(operations, anchor, base_logits, predecessor, successor, owned):
+def execute(operations, anchor, base_logits, predecessor, successor, owned, *, on_step_enqueued=None):
     steps, vocabulary = validate(operations, anchor, base_logits, predecessor, successor)
+    if on_step_enqueued is not None and not callable(on_step_enqueued):
+        raise ValueError('Step observer must be callable')
     grid = (2, 1) if vocabulary == 64 else (10, 10)
     program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
         in0_block_w=1, out_subblock_h=1, out_subblock_w=1, per_core_M=1,
@@ -46,4 +48,6 @@ def execute(operations, anchor, base_logits, predecessor, successor, owned):
         token = retain(operations.argmax(linear, dim=-1, keepdim=False))
         previous = retain(operations.reshape(token, (1, 1, 1, 1)))
         records.append(dict(token=token, scores=scores))
+        if on_step_enqueued is not None:
+            on_step_enqueued(step)
     return records
