@@ -31,7 +31,10 @@ def qualify(report, sources, native_sources):
         raise ValueError('Pinned native sources and original hardware packer required')
     expected_native = dict(native_sources, **{PACKER: SIMULATOR_PACKER})
     if report.get('native_sources') != expected_native:
-        raise ValueError('Native configuration or operation changed since simulation')
+        recorded = report.get('native_sources', {})
+        changed = sorted(name for name in set(recorded) | set(expected_native)
+            if recorded.get(name) != expected_native.get(name))
+        raise ValueError(f'Native configuration or operation changed since simulation: {changed}')
     components = ('gate', 'up', 'hidden', 'partial')
     eager = report.get('eager_checks', [])
     trace = report.get('trace_checks', [])

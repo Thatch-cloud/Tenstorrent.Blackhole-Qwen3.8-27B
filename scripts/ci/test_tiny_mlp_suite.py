@@ -12,6 +12,7 @@ class TinyMlpSuiteTests(unittest.TestCase):
         model_start = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then')
         model_end = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-selection ]; then', model_start)
         stub = '''set -euo pipefail
+python3() { printf 'preflight %s\\n' "$*"; if [[ "$FAILURE" == preflight ]]; then return 16; fi; }
 bash() { printf 'build %s\\n' "$*"; if [[ "$FAILURE" == build ]]; then return 17; fi; }
 tee() { cat; }
 grep() { return 1; }
@@ -31,8 +32,9 @@ timeout() {
         result = self.run_route()
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 4)
-        for line, name in zip(lines, ('ccl-links-build.sh', 'ccl-link-probe.py', 'device-readback.py', 'tiny-mlp-hardware.py'), strict=True):
+        self.assertEqual(len(lines), 5)
+        self.assertIn('--preflight', lines[0])
+        for line, name in zip(lines, ('tiny-mlp-hardware.py', 'ccl-links-build.sh', 'ccl-link-probe.py', 'device-readback.py', 'tiny-mlp-hardware.py'), strict=True):
             self.assertIn(name, line)
         self.assertIn('--simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json', lines[-1])
         self.assertIn('--output /experiment/results/tiny-mlp.json', lines[-1])
@@ -45,7 +47,7 @@ timeout() {
         self.assertNotIn('tiny-mlp-hardware.py', result.stdout)
 
     def test_each_failed_prerequisite_and_mlp_stops_the_suite(self):
-        for failure, code, calls in (('build', 17, 1), ('link', 18, 2), ('mlp', 19, 4)):
+        for failure, code, calls in (('preflight', 16, 1), ('build', 17, 2), ('link', 18, 3), ('mlp', 19, 5)):
             result = self.run_route(failure=failure)
             with self.subTest(failure=failure):
                 self.assertEqual(result.returncode, code, result.stderr)

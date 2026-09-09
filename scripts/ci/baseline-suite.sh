@@ -22,6 +22,11 @@ if [ "${QWEN_MTP_DRAFTS:-0}" != 0 ]; then
         --audit-output /experiment/results/mtp-checkpoint.json
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
+    if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
+        python3 /experiment-scripts/ci/tiny-mlp-hardware.py --preflight \
+            --simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json \
+            --output /experiment/results/tiny-mlp-preflight.json
+    fi
     bash /experiment-scripts/ci/ccl-links-build.sh
     if [[ "${QWEN_MTP_DRAFTS:-0}" = 0 && "${QWEN_DFLASH_DRAFTS:-0}" = 0 ]]; then
         OMP_NUM_THREADS=1 timeout -k 15 900 python3 -u /experiment-scripts/ci/ccl-link-probe.py \

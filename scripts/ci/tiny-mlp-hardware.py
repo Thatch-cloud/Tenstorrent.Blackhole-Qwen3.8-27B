@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--simulator-report', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--preflight', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, True)
     native_root = Path(os.environ['TT_METAL_HOME'])
@@ -34,11 +35,27 @@ def main():
         precision='Unchanged BF4 gate/up, BF8 down, LoFi FP32 matmul accumulation with packer L1 accumulation',
         seeds=[1659, 2670, 3781], repeats_per_sample=50, eager_checks=[], trace_checks=[], blocks=[],
         sources=sources, native_sources=native_sources,
-        simulator_gate=qualify(prerequisite, sources, native_sources),
         simulator_report_sha256=hashlib.sha256(options.simulator_report.read_bytes()).hexdigest(),
         hardware_script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        fabric_sources=audit(native_root, os.environ), collective_links=4,
+        collective_links=4,
         timing_scope='Captured complete MLP including both DMA boundaries and native reduce-scatter; upload, capture and validation excluded')
+    try:
+        report['simulator_gate'] = qualify(prerequisite, sources, native_sources)
+        report['fabric_sources'] = audit(native_root, os.environ)
+    except BaseException as error:
+        report['stage'] = 'preflight_failed'
+        report['error'] = f'{type(error).__name__}: {error}'
+        for name in NATIVE_SOURCES:
+            destination = options.output.parent / 'tiny-mlp-native-sources' / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((native_root / name).read_bytes())
+        options.output.write_text(json.dumps(report, indent=2))
+        raise
+    if options.preflight:
+        report.update(stage='preflight_complete', preflight_passed=True)
+        options.output.write_text(json.dumps(report, indent=2))
+        print('MLP source preflight passed; no device opened', flush=True)
+        return
     import torch
     import ttnn
     from models.demos.blackhole.qwen36.tests.test_factory import load_mlp_layer
