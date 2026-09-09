@@ -66,7 +66,10 @@ needed for the transport-only experiment.
 CI uses suite `tensix-stream-mlp-16` with `weight_packets=true`. It requires the
 separate `tensix-mlp-simulator-16-packet.json` and successful outer exit file;
 generic-reader evidence cannot qualify this candidate. The input defaults false,
-and incompatible suites/profiling are rejected. **No hardware job is dispatched yet.**
+and incompatible suites/profiling are rejected. Hardware comparison
+[34371489865](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865)
+is running from immutable tag `ci-qwen-hardware-a32cf2a`. All 388 existing runner
+workflow grants are retained; only this exact tagged workflow is added.
 
 The BF4 report is `scripts/ci/weight-packet-gate-simulator.json`, SHA256
 `04e0877c40970158954cc9e656dc22b8b70beb4af01371bdb9324d8761af7aa9`.
@@ -82,7 +85,7 @@ with its successful outer exit file. It contains 32 native-control, 32 eager,
 All 32 physical output rows are compared; all twelve candidate reader descriptors
 are engaged. This qualifies hardware correctness/timing tests, not a speed gain.
 
-The host checks pass: 1,119 CI tests, 58 simulator-harness tests, workflow YAML
+The current branch passes 1,123 CI tests, 58 simulator-harness tests, workflow YAML
 parsing and shell syntax. These checks are not device evidence.
 
 The goal remains 200 committed TG for one coding stream. Neither compiler size,

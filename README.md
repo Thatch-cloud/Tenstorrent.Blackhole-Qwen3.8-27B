@@ -32,7 +32,8 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 - **Next kernel test:** [fixed-packet weight reads](docs/weight-read-packets-2026-09-10.md)
   keep that mapping and native math unchanged. Full-size BF4/BF8 transport passes
   48 exact checks and the complete MLP passes 188 simulator checks. Hardware
-  timing is next; no new speed result yet.
+  [timing is running](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865);
+  no new speed result yet.
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).

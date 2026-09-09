@@ -8,8 +8,9 @@ changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency
 claim. Full-size BF4 and BF8 transport each pass 24 exact checks, clean exit and
 independent qualification. Full-MLP simulator run `20260909T145410Z-414` passes all
 188 checks and clean teardown. The original runtime is restored and both MLP and
-native-weight-view gates pass independently. Hardware ABBA is next; no speed
-promotion or new TG result yet.
+native-weight-view gates pass independently. Hardware ABBA
+[34371489865](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865)
+is running; no speed promotion or new TG result yet.
 [Experiment and gates](weight-read-packets-2026-09-10.md).
 
 **Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native

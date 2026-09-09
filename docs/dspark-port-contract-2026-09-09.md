@@ -308,9 +308,11 @@ The qualifier requires the matching explicit chunk policy and all 236 checks;
 earlier 32-key evidence cannot qualify it. Host tests verify operand preservation,
 mask semantics, actual dispatch arguments and rejection of numerical failures.
 
-Preparation passes 1,123 host tests and 58 simulator-harness tests. The device
-test waits for the active weight-reader MLP simulation and restored runtime;
-there is no new DSpark simulator, hardware, quality or TG result yet.
+Preparation passes 1,123 host tests and 58 simulator-harness tests. Simulator
+run `20260909T154029Z-441` is active after the weight-reader MLP passed and its
+runtime was restored. The saved historical failing operands and FP32 reference
+are independently verified bitwise-identical in the 64-key candidate. Partial
+checks are not qualification; there is no new hardware, quality or TG result.
 
 ### Learned CPU backbone matches upstream
 
