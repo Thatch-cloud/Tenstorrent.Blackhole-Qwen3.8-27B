@@ -109,7 +109,7 @@ requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
 higher.
 
 **DSpark remains experimental.** One learned layer and full-vocabulary transport
-pass targeted simulation. The [hardware integration run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34412639592)
+pass targeted simulation. The [hardware integration run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251)
 joins learned FC and all five layers in one trace, using four fabric links.
 Target integration and the earlier numerical differences remain open; **no DSpark
 TG result yet**. Checks now run before compilation, and unchanged native builds

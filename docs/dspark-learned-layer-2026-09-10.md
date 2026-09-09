@@ -409,6 +409,9 @@ synchronizes them. That alignment check now runs after build/cache restore,
 still mandatorily before device execution; source checks remain before build.
 Seven compatibility tests pass, including rejection of mismatched post-build
 libraries and changed sources at either stage. No numerical gate is waived.
+The corrected-stage retry is
+[`34413173251`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251),
+code `23ce458a9b65ec6b3dc8badd7f905a12032c6262`.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven
