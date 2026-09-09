@@ -1,6 +1,6 @@
 # Sixteen weight producers: test issue capacity
 
-**Implemented; full-size simulation is running. No hardware result yet.**
+**Full-size simulation passes all 188 checks. No hardware result yet.**
 This follows the [device profile](tensix-mlp-device-profile-2026-09-09.md), which
 locates the eight-producer design's regression inside gate/up/down.
 
@@ -26,15 +26,24 @@ establishes that it will. The native MLP remains the hardware control.
   single assignment, no sender/activation overlap, and identical compute arguments.
 - Simulator run `20260909T092252Z-403` uses two complete weight fixtures, all32
   physical output rows, native controls, changed-input traces and raw-word audits.
-  It is still running; a JSON body alone is not success.
+  All188 checks pass: 32 native, 32 eager, 48 replay, 70 raw-input/weight,
+  four stale-input controls and two distinct-fixture checks. Teardown and the
+  outer wrapper both finish successfully; this is not a speed measurement.
 - Simulator and hardware reports record the exact producer count and full sender
   mappings. Eight-producer evidence cannot qualify a sixteen-producer runtime.
 - CI suite `tensix-stream-mlp-16` requires `tensix-mlp-simulator-16.json` and its
-  successful outer exit artifact before build/device access. These are not yet
-  supplied. Historical eight-producer results retain their original source tags.
-- After simulation, restore the original native packer, then run the same real
-  Layer-0 nine-block ABBA. Both arms request four links; all samples and exact
-  checks remain required. No greater-than2% win in every block means no promotion.
+  successful outer exit artifact before build/device access. Both are supplied
+  byte-identically from the completed run. All20 experiment and29 native source
+  hashes match. Historical eight-producer results retain their original tags.
+- The original native packer is restored byte-identically; both native Python
+  binaries are unchanged. The independent MLP and native-weight-view gates pass
+  again against the restored runtime, and the owned simulator lock is released.
+- Next: the same real Layer-0 nine-block hardware ABBA. Both arms request four
+  links; all samples and exact checks remain required. No greater-than2% win in
+  every block means no promotion.
+
+Report SHA256: `6e3d1bb41a4a91c8c8f92741a703f512cb220740763ebc5c1fcaeec6787711fe`.
+Outer-exit SHA256: `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`.
 
 The existing reviewed packer compatibility patch is scoped to this TT-Sim run.
 No firmware or serving defaults change. Component latency remains separate from
