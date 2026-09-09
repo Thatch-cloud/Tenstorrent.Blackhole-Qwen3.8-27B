@@ -92,7 +92,8 @@ The complete learned layer-zero port is prepared with all eleven tensors,
 all Q/K/V heads, full 17,408-channel MLP and explicit TP partial-sum boundaries.
 CPU preflight matches all six upstream checkpoints exactly. Its 664-check
 simulator matrix is separate from hardware/fabric qualification; the initial
-eager diagnostic cannot substitute for that matrix.
+eager diagnostic cannot substitute for that matrix. Eager-only run
+`20260909T173511Z-440` is active, with all 1,154 host and 59 harness tests passing.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at

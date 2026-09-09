@@ -35,6 +35,16 @@ target verifier or a serving result. Those eligibility flags remain false.
 The first eager-only diagnostic skips replay to find integration errors sooner;
 it cannot qualify the complete matrix, even if its comparisons pass.
 
+## Current run
+
+- Eager-only simulator `20260909T173511Z-440` is active from code `7d892df`.
+- All 1,154 host tests and 59 simulator-harness tests pass, plus wrapper syntax.
+- The previously qualified precise-attention and packer-compatibility grafts are
+  held under an explicit owned lock; both native binaries remain unchanged.
+- This diagnostic exercises all three arithmetic phases and saves their observed
+  tensors. It has no replay or hardware eligibility; the original native files
+  must be restored after its process reaches a terminal state.
+
 | Full-matrix requirement | Checks |
 | --- | ---: |
 | Frozen CPU layer checkpoints | 6 |
