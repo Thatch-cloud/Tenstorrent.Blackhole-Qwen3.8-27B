@@ -1,8 +1,26 @@
 # Separate experiment: faster approximate drafting
 
-**Proposed, not implemented or qualified.** Keep the current exact live-query
-candidate separate. The failed native-SDPA numerical tests remain failed; do not
-relax their tolerances or relabel them as passes.
+**Proposal-only native attention and its simulator gate are implemented.**
+No complete-request integration or performance result yet. Keep the exact
+live-query candidate separate. The failed native-SDPA numerical tests remain
+failed; their tolerances and results are unchanged.
+
+## First implementation
+
+- Calls the unmodified native BF16 GQA operation with explicit T8 masks; no
+  precision graft, target hook, native-source edit or serving change.
+- Separate 31-row learned-operand and 2,048-row synthetic-history simulations
+  record numerical errors and the original 0.01/0.01 comparison outcome. A
+  proposal mask/replay pass does **not** certify attention accuracy.
+- Each context requires76 checks: six finite-output diagnostics, eight exact
+  eager/replay comparisons, 56 unchanged-input checks, two stale controls and
+  four masked-key/value perturbation checks, covering both chips and all32 rows.
+- Nine experiment and15 native source hashes are bound to the report; native
+  sources must remain unchanged and the outer wrapper must exit successfully.
+- 1,008 CI tests and57 simulator-harness tests pass. Simulation is next, then
+  request integration with exact native target tokens/state and separate
+  proposal-policy acceptance reporting. No hardware dispatch is authorized by
+  a finite-output check alone.
 
 ## Different acceptance question
 
