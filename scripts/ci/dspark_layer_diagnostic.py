@@ -38,8 +38,9 @@ def error_summary(actual, expected):
     result = difference(actual,expected,exact=False)
     if actual.dtype == torch.bfloat16:
         result['different_bits'] = int((actual.contiguous().view(torch.int16) != expected.contiguous().view(torch.int16)).sum())
-    scale = torch.linalg.vector_norm(expected.float())
-    result['relative_l2'] = float(torch.linalg.vector_norm(actual.float()-expected.float()) / scale) if scale else 0.
+    scale = float(torch.linalg.vector_norm(expected.double()))
+    distance = float(torch.linalg.vector_norm(actual.double()-expected.double()))
+    result['relative_l2'] = distance/scale if scale else (0. if distance==0 else None)
     return result
 
 

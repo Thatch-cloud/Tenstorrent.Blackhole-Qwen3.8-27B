@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dspark_layer_diagnostic import OPERANDS_SHA256, REPORT_SHA256, load_capture
 from dspark_projection import difference, digest, tensor_digest
-from dspark_residual import POLICY, add
+from dspark_residual import POLICY, WIDE_POLICY, add
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import release_owned
 
@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('output','capture','operands'):
         parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--widen-inputs',action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ,False)
     if (os.environ.get('QWEN_HARDWARE_TESTS') == '1' or os.environ.get('QWEN_CARDS_ALLOCATED') == '1'
@@ -38,7 +39,8 @@ def main():
     spec = importlib.util.spec_from_file_location('dspark_residual_runtime',Path(__file__).with_name('dspark-projection-probe.py'))
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
-    report = dict(passed=False,closed_cleanly=False,backend='simulator',scope=__doc__,policy=POLICY,
+    report = dict(passed=False,closed_cleanly=False,backend='simulator',scope=__doc__,
+        policy=WIDE_POLICY if options.widen_inputs else POLICY,widen_inputs=options.widen_inputs,
         mode='residual_diagnostic',sources=source_hashes(),native_sources=probe.fingerprints(root,composed_norm=True),
         capture_sha256=REPORT_SHA256,operands_sha256=OPERANDS_SHA256,eligible_for_hardware=False,
         full_pipeline_captured=False,target_integrated=False,fabric_tested=False,
@@ -81,7 +83,7 @@ def main():
                 progress(f'{phase}_{case}')
                 inputs = [upload(value) for value in (first,second)]
                 control = retain(ttnn.add(*inputs,dtype=ttnn.bfloat16,memory_config=ttnn.DRAM_MEMORY_CONFIG))
-                candidate = add(ttnn,*inputs,retain)
+                candidate = add(ttnn,*inputs,retain,widen_inputs=options.widen_inputs)
                 ttnn.synchronize_device(mesh)
                 expected = first+second
                 for chip in range(2):

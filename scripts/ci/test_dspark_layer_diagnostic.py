@@ -18,6 +18,11 @@ class DSparkLayerDiagnosticTests(unittest.TestCase):
         self.assertEqual(result['different_bits'],1)
         self.assertGreater(result['relative_l2'],0.)
 
+    def test_zero_reference_norm_does_not_report_a_false_zero_error(self):
+        expected = torch.zeros(2,dtype=torch.bfloat16)
+        self.assertEqual(error_summary(expected,expected)['relative_l2'],0.)
+        self.assertIsNone(error_summary(torch.ones_like(expected),expected)['relative_l2'])
+
     def test_unpinned_capture_rejects_before_loading_tensors(self):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory)/'report.json'

@@ -26,6 +26,18 @@ class DSparkResidualTests(unittest.TestCase):
                 add(runtime,first,tensor((1,1,32,5120)),lambda value:value)
         runtime.add.assert_not_called()
 
+    def test_widening_both_inputs_selects_fp32_arithmetic_not_just_output_format(self):
+        runtime = operations()
+        first,second = tensor((1,1,32,5120)),tensor((1,1,32,5120))
+        first_wide,second_wide,output = [tensor((1,1,32,5120),'fp32') for unused in range(3)]
+        runtime.typecast.side_effect = [first_wide,second_wide,output]
+        result = add(runtime,first,second,lambda value:value,widen_inputs=True)
+        self.assertEqual(runtime.typecast.call_args_list[0].args,(first,'fp32'))
+        self.assertEqual(runtime.typecast.call_args_list[1].args,(second,'fp32'))
+        self.assertEqual(runtime.add.call_args.args,(first_wide,second_wide))
+        self.assertEqual(runtime.typecast.call_args_list[2].args,(runtime.add.return_value,'bf16'))
+        self.assertIs(result,output)
+
 
 if __name__ == '__main__':
     unittest.main()
