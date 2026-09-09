@@ -27,8 +27,11 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   [Device attribution](docs/tensix-mlp-device-profile-2026-09-09.md) locates the
   slowdown in gate/up/down, not the copy or collective.
   [Sixteen producers](docs/tensix-sixteen-producers-2026-09-09.md) improve the
-  prototype to **0.456 ms**, but remain **36.17% slower than native**. All188
-  simulator and118 hardware checks pass; no promotion or new TG result.
+  prototype to **0.456 ms**, but remain **36.17% slower than native**. All 188
+  simulator and 118 hardware checks pass; no promotion or new TG result.
+- **Next kernel test:** [fixed-packet weight reads](docs/weight-read-packets-2026-09-10.md)
+  keep that mapping and native math unchanged. Full-size BF4/BF8 transport passes
+  48 exact checks; the complete MLP simulation is running. No new speed result yet.
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
@@ -102,11 +105,10 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 
 The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
 requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
-higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now includes a
-native selector simulator prototype and verified learned weights; it is not
-another integrated drafter or measured speed result.
-Its learned FP32-score gate fails; a focused diagnostic isolates native matmul
-rounding, not addition. No DSpark hardware promotion follows from the small test.
+higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now has a verified
+learned CPU backbone, a native-policy learned selector and composed rotary
+simulator passes. Its FP32-score gate and one full-attention numerical stress
+check still fail. It is not an integrated drafter or a measured speed gain.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

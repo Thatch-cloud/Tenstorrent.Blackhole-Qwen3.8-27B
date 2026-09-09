@@ -48,12 +48,15 @@ needed for the transport-only experiment.
 
 1. Full-size BF4 and BF8 transport: independent packed-word oracle, two distinct
    fixtures/chips, both arms, unchanged inputs, changed-input traces and stale controls.
-   BF4 run `20260909T141933Z-380` passes all 24 checks and clean exit 0; independent
-   qualification passes. BF8 run `20260909T143454Z-1338` is active; partial checks
-   are not qualification. Each run retains the full projection extent.
+   BF4 run `20260909T141933Z-380` and BF8 run `20260909T143454Z-1338` each pass
+   all 24 checks, clean exit 0 and independent source/geometry qualification.
+   Each run retains the full projection extent; no packer graft is used.
 2. Full T8 MLP: native arithmetic control, two complete weight fixtures, gate/up/
    product/down outputs, all 32 physical rows, pooled FIFO reuse and exact replay.
-   `--single-packet --producers 16` is implemented but has not run yet.
+   Run `20260909T145410Z-414` is active with `--single-packet --producers 16`.
+   It uses the same isolated, reviewed simulator packer compatibility patch as
+   the previous MLP qualification; this patch is never installed on hardware.
+   Partial checks do not qualify the candidate.
 3. Real Layer-0 hardware ABBA: same input staging and four-link reduction, all
    samples retained. Require a greater-than-2% win in every block before integration.
 4. Only then measure a full request in PP / CTX / TG against the retained control.
@@ -65,7 +68,10 @@ and incompatible suites/profiling are rejected. **No hardware job is dispatched 
 
 The BF4 report is `scripts/ci/weight-packet-gate-simulator.json`, SHA256
 `04e0877c40970158954cc9e656dc22b8b70beb4af01371bdb9324d8761af7aa9`.
-Its outer exit file is retained beside it. This is a transport pass, not an MLP pass.
+The BF8 report is `scripts/ci/weight-packet-down-simulator.json`, SHA256
+`a1b88912e8d79dd90347738b5fc6923fc2d0dc83535631d17fe344261395579a`.
+Both outer exit files are retained beside their reports. These are transport
+passes, not an MLP pass.
 
 The host checks pass: 1,119 CI tests, 58 simulator-harness tests, workflow YAML
 parsing and shell syntax. These checks are not device evidence.

@@ -5,9 +5,10 @@
 **New target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
 changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency
-claim. Full-size BF4 transport passes 24 exact checks and clean exit; BF8 is
-running. Full-MLP and CI gates require their own single-packet evidence;
-nothing is promoted or dispatched to hardware yet.
+claim. Full-size BF4 and BF8 transport each pass 24 exact checks, clean exit and
+independent qualification. Full-MLP simulator run `20260909T145410Z-414` is active;
+CI requires its own complete single-packet evidence. Nothing is promoted or
+dispatched to hardware yet.
 [Experiment and gates](weight-read-packets-2026-09-10.md).
 
 **Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native
