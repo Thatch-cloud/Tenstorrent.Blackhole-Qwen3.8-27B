@@ -12,7 +12,10 @@ from dspark_markov_gate import coordinates
 from native_draft_sdpa import KERNEL_DIRECTORY, SIGNATURE, SOURCE_HASHES, patched_sources
 
 
-def qualify(report, *, sources, native, exit_status, packer_compat=False, precise_native=False):
+def qualify(report, *, sources, native, exit_status, packer_compat=False, precise_native=False, key_chunk_size=32):
+    if (type(key_chunk_size) is not int or key_chunk_size not in (32, 64)
+            or type(report.get('key_chunk_size', 32)) is not int or report.get('key_chunk_size', 32) != key_chunk_size):
+        raise ValueError('Explicit matching native key chunk size required; old evidence cannot qualify chunk64')
     if (type(packer_compat) is not bool or report.get('packer_compat') is not packer_compat
             or type(precise_native) is not bool or report.get('precise_native') is not precise_native
             or exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
@@ -55,6 +58,7 @@ def qualify(report, *, sources, native, exit_status, packer_compat=False, precis
     counts = {name: len(report[name]) for name in
         ('eager_checks', 'replay_checks', 'input_checks', 'dependency_controls', 'stale_controls')}
     return dict(passed=True, checks=sum(counts.values()), counts=counts, packer_compat=packer_compat, precise_native=precise_native,
+        key_chunk_size=key_chunk_size,
         worst_cpu_error=max(entry['max_abs'] for entry in report['eager_checks']),
         worst_valid_cpu_error=max(entry['valid_max_abs'] for entry in report['eager_checks']),
         target_integrated=False, eligible_for_hardware=False,
@@ -68,6 +72,7 @@ def main():
     parser.add_argument('--metal-root', type=Path, required=True)
     parser.add_argument('--packer-compat', action='store_true')
     parser.add_argument('--precise-native', action='store_true')
+    parser.add_argument('--key-chunk-size', type=int, choices=(32, 64), default=32)
     options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('dspark_attention_probe', Path(__file__).with_name('dspark-attention-probe.py'))
     probe = importlib.util.module_from_spec(spec)
@@ -80,7 +85,8 @@ def main():
         native.update({f'{KERNEL_DIRECTORY}/{name}': hashlib.sha256(source).hexdigest()
             for name, source in patched_sources(original).items()})
     result = qualify(json.loads(options.report.read_text()), sources=probe.source_hashes(), native=native,
-        exit_status=options.exit_status.read_text(), packer_compat=options.packer_compat, precise_native=options.precise_native)
+        exit_status=options.exit_status.read_text(), packer_compat=options.packer_compat, precise_native=options.precise_native,
+        key_chunk_size=options.key_chunk_size)
     print(json.dumps(result, indent=2))
 
 

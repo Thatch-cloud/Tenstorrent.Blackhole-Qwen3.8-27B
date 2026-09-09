@@ -293,6 +293,25 @@ Changing the reference to upstream BF16 does not make these fixtures exact or
 pass the same0.01/0.01 tolerance. It is diagnostic only; no reference is replaced.
 After implementing this matrix,1,112 host tests and58 simulator-harness tests pass.
 
+### Next attention test: 64-key chunks
+
+The remaining short-context failure spans two 32-key native chunks. The next
+explicit candidate uses `--precise-native --key-chunk-size 64` to test whether
+removing that intermediate merge helps. This is a hypothesis, not a diagnosed
+root cause or a numerical pass. The default remains 32 keys.
+
+All original queries, keys, values and stress inputs are preserved bitwise.
+At 4K, only masked padding grows from 4,128 to 4,160 keys; the extra rows are
+poisoned in the padding-control fixture. Full history, seven proposal keys,
+HiFi4/FP32 accumulation and the 0.01/0.01 CPU threshold remain unchanged.
+The qualifier requires the matching explicit chunk policy and all 236 checks;
+earlier 32-key evidence cannot qualify it. Host tests verify operand preservation,
+mask semantics, actual dispatch arguments and rejection of numerical failures.
+
+Preparation passes 1,123 host tests and 58 simulator-harness tests. The device
+test waits for the active weight-reader MLP simulation and restored runtime;
+there is no new DSpark simulator, hardware, quality or TG result yet.
+
 ### Learned CPU backbone matches upstream
 
 All five learned layers now execute in the CPU reference. An independent control

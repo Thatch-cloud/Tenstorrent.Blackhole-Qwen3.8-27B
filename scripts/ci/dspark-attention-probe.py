@@ -52,6 +52,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--precise-native', action='store_true', help='Use the existing owned precise exponential graft')
+    parser.add_argument('--key-chunk-size', type=int, choices=(32, 64), default=32)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     kernel_audit = run_precise_probe(__file__) if options.precise_native else None
@@ -62,6 +63,7 @@ def main():
     packer_compat = os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1'
     report = dict(passed=False, closed_cleanly=False, backend='simulator', target_integrated=False,
         eligible_for_hardware=False, accuracy_policy=POLICY, contexts=list(CONTEXTS), scope=__doc__,
+        key_chunk_size=options.key_chunk_size,
         sources=source_hashes(), native_sources=fingerprints(root, packer_compat=packer_compat, precise_native=options.precise_native),
         packer_compat=packer_compat, precise_native=options.precise_native, kernel_audit=kernel_audit,
         eager_checks=[], replay_checks=[],
@@ -83,9 +85,9 @@ def main():
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
         mesh.enable_program_cache()
         for context in CONTEXTS:
-            patterns = fixtures(context)
+            patterns = fixtures(context, key_multiple=options.key_chunk_size)
             for values in patterns:
-                validate_mask(values[3], context)
+                validate_mask(values[3], context, key_multiple=options.key_chunk_size)
 
             def upload(value, index, device=True):
                 mapper = ttnn.ShardTensorToMesh(mesh, dim=0) if index < 3 else ttnn.ReplicateTensorToMesh(mesh)
@@ -97,7 +99,7 @@ def main():
             bindings = [addresses(ttnn, value) for value in persistent]
 
             def update(pattern):
-                validate_mask(patterns[pattern][3], context)
+                validate_mask(patterns[pattern][3], context, key_multiple=options.key_chunk_size)
                 for source, destination in zip(payloads[pattern], persistent, strict=True):
                     ttnn.copy_host_to_device_tensor(source, destination)
                 ttnn.synchronize_device(mesh)
@@ -114,7 +116,8 @@ def main():
                             tensor=index, chip=chip, exact=True))
 
             def run():
-                output = execute(ttnn, *persistent, context_rows=context, mask_validated=True)
+                output = execute(ttnn, *persistent, context_rows=context, mask_validated=True,
+                    key_chunk_size=options.key_chunk_size)
                 transient.append(output)
                 return output
 

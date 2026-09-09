@@ -57,6 +57,23 @@ class DSparkAttentionGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check(report)
 
+    def test_key_chunk_policies_cannot_relabel_previous_evidence_or_accuracy_failure(self):
+        report = fixture()
+        with self.assertRaises(ValueError):
+            check(report, key_chunk_size=64)
+        report['key_chunk_size'] = 64
+        self.assertEqual(check(report, key_chunk_size=64)['key_chunk_size'], 64)
+        with self.assertRaises(ValueError):
+            check(report)
+        for chunk in (True, 32., 16, 128):
+            report['key_chunk_size'] = chunk
+            with self.assertRaises(ValueError):
+                check(report, key_chunk_size=chunk)
+        report['key_chunk_size'] = 64
+        report['eager_checks'][0].update(full_padded_close=False, failed_elements=1)
+        with self.assertRaises(ValueError):
+            check(report, key_chunk_size=64)
+
     def test_lifecycle_and_packer_scope_cannot_be_relabelled(self):
         for key, value in (('closed_cleanly', False), ('passed', False), ('backend', 'hardware'), ('stage', 'capture'),
                 ('sources_after', {}), ('native_sources_after', {}), ('accuracy_policy', 'approximate'),
@@ -90,7 +107,7 @@ class DSparkAttentionGateTests(unittest.TestCase):
         environment.update(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'unexpected.json'
-            for flags in ([], ['--precise-native']):
+            for flags in ([], ['--precise-native'], ['--precise-native', '--key-chunk-size', '64']):
                 result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('dspark-attention-probe.py')),
                     '--output', str(output), *flags], env=environment, text=True, capture_output=True, timeout=30)
                 self.assertNotEqual(result.returncode, 0)

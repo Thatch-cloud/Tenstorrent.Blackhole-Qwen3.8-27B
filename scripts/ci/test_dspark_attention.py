@@ -59,6 +59,52 @@ class DSparkAttentionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             execute(operations, *tensors, context_rows=31, mask_validated=True)
 
+    def test_chunk64_preserves_every_existing_operand_and_masks_only_extra_padding(self):
+        for context in CONTEXTS:
+            original = fixtures(context)
+            candidate = fixtures(context, key_multiple=64)
+            for pattern, (before, after) in enumerate(zip(original, candidate, strict=True)):
+                old_extent = before[1].shape[-2]
+                self.assertTrue(torch.equal(before[0], after[0]))
+                for index in (1, 2):
+                    self.assertTrue(torch.equal(before[index], after[index][..., :old_extent, :]))
+                    self.assertTrue(torch.all(after[index][..., old_extent:, :] == (17 if pattern == 2 else 0)))
+                self.assertTrue(torch.equal(before[3], after[3][..., :old_extent]))
+                self.assertTrue(torch.isneginf(after[3][..., old_extent:]).all())
+                validate_mask(after[3], context, key_multiple=64)
+                for chip in range(2):
+                    torch.testing.assert_close(reference(after, chip), reference(before, chip), rtol=1e-6, atol=1e-6)
+        mask = full_mask(4096, key_multiple=64)
+        self.assertEqual(mask.shape[-1], 4160)
+        mask[0, 0, 0, -1] = 0
+        with self.assertRaises(ValueError):
+            validate_mask(mask, 4096, key_multiple=64)
+
+    def test_chunk64_dispatch_preserves_precision_and_rejects_unaligned_operands(self):
+        operations = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', DRAM_MEMORY_CONFIG='dram',
+            MathFidelity=SimpleNamespace(HiFi4='hifi4'), WormholeComputeKernelConfig=MagicMock(),
+            SDPAProgramConfig=MagicMock(), transformer=SimpleNamespace(scaled_dot_product_attention=MagicMock()))
+        tensors = [SimpleNamespace(shape=shape, dtype='bf16', layout='tile', memory_config=lambda: 'dram')
+            for shape in ((1, 16, 32, 128), (1, 4, 4160, 128), (1, 4, 4160, 128), (1, 1, 32, 4160))]
+        execute(operations, *tensors, context_rows=4096, mask_validated=True, key_chunk_size=64)
+        program = operations.SDPAProgramConfig.call_args.kwargs
+        compute = operations.WormholeComputeKernelConfig.call_args.kwargs
+        self.assertEqual(program['k_chunk_size'], 64)
+        self.assertFalse(program['exp_approx_mode'])
+        self.assertEqual(compute['math_fidelity'], 'hifi4')
+        self.assertTrue(compute['fp32_dest_acc_en'])
+        self.assertFalse(operations.transformer.scaled_dot_product_attention.call_args.kwargs['is_causal'])
+        with self.assertRaises(ValueError):
+            execute(operations, *tensors, context_rows=4096, mask_validated=True, key_chunk_size=32)
+
+    def test_undeclared_key_chunk_sizes_reject(self):
+        for chunk in (True, 32., 16, 128):
+            for operation in (full_mask, fixtures):
+                with self.assertRaises(ValueError):
+                    operation(31, key_multiple=chunk)
+            with self.assertRaises(ValueError):
+                execute(None, None, None, None, None, context_rows=31, mask_validated=True, key_chunk_size=chunk)
+
     def test_fixture_controls_detect_windowing_causality_and_masked_key_reads(self):
         for context in CONTEXTS:
             patterns = fixtures(context)
