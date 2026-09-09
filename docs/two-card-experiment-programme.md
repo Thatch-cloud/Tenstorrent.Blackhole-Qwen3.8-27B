@@ -78,6 +78,11 @@ locks released, and independent qualification passes. Learned TT backbone and
 real-target integration remain next; this is not a hardware or coding-quality result.
 [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
+The learned DSpark FC/normalization composition is now in simulator testing:
+full checkpoint tensors, all 5,120 outputs, two frozen CPU patterns and separate
+changed-input traces. The explicit host handoff does not qualify fabric or a
+complete captured pipeline. [162-check gate](dspark-learned-projection-2026-09-10.md).
+
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness

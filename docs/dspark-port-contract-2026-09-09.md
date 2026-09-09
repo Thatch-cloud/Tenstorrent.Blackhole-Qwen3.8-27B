@@ -405,6 +405,16 @@ is `scripts/ci/dspark-checkpoint-v2.json`, SHA256
 `da56ad1b2f262e18fedd4753f364cc24994a6556f9aa8f3f4348f8fe061a0250`.
 This is weight integrity, not learned backbone correctness.
 
+## Learned projection and normalization port
+
+The first learned TT composition now uses the complete 5,120-by-25,600 FC and
+direct RMS weights, the original two CPU input patterns and all 32 feature rows.
+It preserves DSpark's BF16 rounding before gamma multiplication. Projection and
+normalization are separately traced with an explicitly host-staged partial-sum
+handoff; this is not a fabric or complete-pipeline qualification. The 162-check
+simulator run is active, with 1,133 host and 59 harness tests passing.
+[Scope and next gates](dspark-learned-projection-2026-09-10.md).
+
 ## Evidence and next gates
 
 `scripts/ci/dspark-intake-v2.json` preserves the successful metadata report.
