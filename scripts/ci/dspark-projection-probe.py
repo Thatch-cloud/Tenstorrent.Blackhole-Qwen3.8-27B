@@ -8,7 +8,7 @@ from pathlib import Path
 from attention_batch import capture_operation
 from dspark_checkpoint import CHECKPOINT_SHA256
 from dspark_intake import TAPS
-from dspark_projection import EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
+from dspark_projection import COMPOSED_POLICY, EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
 from dspark_projection import difference, digest, load_reference, norm_references, normalize_partials, project, reference_metadata, tensor_digest
 from dspark_weights import VerifiedWeights
 from feature_projection import projection_shards, require_projection_environment
@@ -16,6 +16,7 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 SOURCES = ('dspark-projection-probe.py','dspark_projection.py','dspark_projection_gate.py',
+    'dspark_norm_precision.py',
     'dspark-backbone-cpu.py','dspark_backbone_reference.py','dspark_weights.py','dspark_checkpoint.py',
     'dspark_intake.py','dspark_markov_fixture.py','dspark_rope_tables.py','feature_projection.py',
     'attention_batch.py','gdn_multitoken_conv.py','dspark_markov_gate.py',
@@ -31,7 +32,7 @@ def source_hashes():
     return {name:digest(Path(__file__).parent/name) for name in SOURCES}
 
 
-def fingerprints(root, *, packer_compat=False):
+def fingerprints(root, *, packer_compat=False, composed_norm=False):
     binaries = ('build_Release/lib/_ttnncpp.so','build_Release/ttnn/_ttnncpp.so')
     paths = {Path(PACKER), *map(Path,binaries), *map(Path,('tt_metal/hw/inc/api/dataflow/dataflow_api.h',
         'tt_metal/hw/inc/api/dataflow/noc.h','tt_metal/hw/inc/api/tensor/tensor_accessor.h'))}
@@ -42,6 +43,17 @@ def fingerprints(root, *, packer_compat=False):
             raise ValueError('Complete native operation source trees required')
         paths.update(path.relative_to(root) for path in directory.rglob('*')
             if path.is_file() and path.suffix in ('.cpp','.hpp','.h'))
+    if type(composed_norm) is not bool:
+        raise ValueError('Explicit composed-normalization source policy required')
+    if composed_norm:
+        directories = ['ttnn/cpp/ttnn/operations/'+name for name in ('reduction','experimental/reduction','data_movement','core')]
+        directories.append('tt_metal/tt-llk/tt_llk_blackhole/common/inc')
+        for name in directories:
+            directory = root/name
+            if not directory.is_dir():
+                raise ValueError('Complete composed normalization source closure required')
+            paths.update(path.relative_to(root) for path in directory.rglob('*')
+                if path.is_file() and path.suffix in ('.cpp','.hpp','.h'))
     result = {str(path):digest(root/path) for path in sorted(paths)}
     if (type(packer_compat) is not bool or result[PACKER] != (COMPAT_PACKER if packer_compat else ORIGINAL_PACKER)
             or any(result[name] != BINARY_SHA256 for name in binaries)):
@@ -53,7 +65,7 @@ def save_operands(path, report, *, features, contexts, gamma, eager):
     import torch
 
     payload = dict(checkpoint_sha256=report['checkpoint_sha256'], reference=report['reference'],
-        sources=report['sources'], native_sources=report['native_sources'], policy=POLICY,
+        sources=report['sources'], native_sources=report['native_sources'], policy=report['policy'],
         features=features, contexts=contexts, gamma=gamma, eager=eager)
     with path.open('xb') as stream:
         torch.save(payload, stream)
@@ -67,6 +79,7 @@ def main():
     parser.add_argument('--cpu-outputs', type=Path, required=True)
     parser.add_argument('--save-operands', action='store_true')
     parser.add_argument('--eager-only', action='store_true')
+    parser.add_argument('--composed-norm', action='store_true')
     options = parser.parse_args()
     if options.eager_only and not options.save_operands:
         parser.error('Eager-only diagnostics require --save-operands')
@@ -83,10 +96,12 @@ def main():
     packer_compat = os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1'
     report = dict(passed=False, closed_cleanly=False, checkpoint_closed=False, backend='simulator', scope=__doc__,
         mode='eager_diagnostic' if options.eager_only else 'matrix',
-        rows=32, input_width=25600, output_width=5120, fixtures=2, taps=list(TAPS), policy=POLICY,
+        rows=32, input_width=25600, output_width=5120, fixtures=2, taps=list(TAPS),
+        composed_norm=options.composed_norm,policy=COMPOSED_POLICY if options.composed_norm else POLICY,
         tolerance=TOLERANCE, handoff=HANDOFF, fabric_tested=False, full_pipeline_captured=False,
         target_integrated=False, eligible_for_hardware=False, checkpoint_sha256=CHECKPOINT_SHA256,
-        packer_compat=packer_compat, sources=source_hashes(), native_sources=fingerprints(root, packer_compat=packer_compat),
+        packer_compat=packer_compat, sources=source_hashes(),
+        native_sources=fingerprints(root,packer_compat=packer_compat,composed_norm=options.composed_norm),
         eager_checks=[], replay_checks=[], input_checks=[], parameter_checks=[], stale_controls=[], rounding_controls=[])
     mesh = trace = weights = None
     owned, transient = [], []
@@ -188,7 +203,7 @@ def main():
                     ttnn.synchronize_device(mesh)
 
                 def run():
-                    return normalize_partials(ttnn,*tail_inputs,device_gamma,retain)
+                    return normalize_partials(ttnn,*tail_inputs,device_gamma,retain,composed_norm=options.composed_norm)
 
             input_bindings = [addresses(ttnn,value) for value in borrowed]
 
@@ -283,7 +298,7 @@ def main():
             report['checkpoint_closed'] = weights is not None and weights.source is None
             report['closed_cleanly'] = True
             report['sources_after'] = source_hashes()
-            report['native_sources_after'] = fingerprints(root,packer_compat=packer_compat)
+            report['native_sources_after'] = fingerprints(root,packer_compat=packer_compat,composed_norm=options.composed_norm)
             if report['sources_after'] != report['sources'] or report['native_sources_after'] != report['native_sources']:
                 raise ValueError('Projection experiment or native source changed during execution')
         except BaseException as error:

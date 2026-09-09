@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -64,6 +64,19 @@ class DSparkProjectionTests(unittest.TestCase):
         self.assertEqual(runtime.rms_norm.call_args.kwargs['epsilon'],1e-6)
         self.assertEqual(runtime.mul.call_args.args,(runtime.rms_norm.return_value,gamma))
         self.assertIs(result['context'],runtime.mul.return_value)
+
+    def test_composed_tail_uses_the_same_observed_sum_and_bf16_narrowing(self):
+        runtime = operations()
+        first,second = [tensor((1,1,32,5120),'fp32') for unused in range(2)]
+        gamma = tensor((1,1,1,5120))
+        retained = lambda value:value
+        with patch('dspark_norm_precision.normalize',return_value={'unweighted_norm':'norm','context':'context'}) as composed:
+            result = normalize_partials(runtime,first,second,gamma,retained,composed_norm=True)
+        composed.assert_called_once_with(runtime,runtime.typecast.return_value,gamma,retained,composed=True)
+        self.assertIs(result['sum'],runtime.add.return_value)
+        self.assertIs(result['narrowed'],runtime.typecast.return_value)
+        self.assertEqual(result['context'],'context')
+        runtime.rms_norm.assert_not_called()
 
     def test_rounding_reference_matches_frozen_backbone_and_detects_fused_policy(self):
         generator = torch.Generator().manual_seed(38)

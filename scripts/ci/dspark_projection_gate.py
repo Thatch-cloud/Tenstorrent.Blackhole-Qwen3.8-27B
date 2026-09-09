@@ -9,15 +9,17 @@ from pathlib import Path
 from dspark_checkpoint import CHECKPOINT_SHA256
 from dspark_intake import TAPS
 from dspark_markov_gate import coordinates
-from dspark_projection import EAGER_STAGES, EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
+from dspark_projection import COMPOSED_POLICY, EAGER_STAGES, EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
 
 
-def qualify(report, *, sources, native, reference, exit_status, packer_compat=False):
+def qualify(report, *, sources, native, reference, exit_status, packer_compat=False, composed_norm=False):
     if (exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('error') or report.get('cleanup_error')
             or report.get('backend') != 'simulator' or report.get('mode') != 'matrix'
             or report.get('checkpoint_sha256') != CHECKPOINT_SHA256
-            or report.get('reference') != reference or report.get('policy') != POLICY or report.get('tolerance') != TOLERANCE
+            or report.get('reference') != reference or report.get('policy') != (COMPOSED_POLICY if composed_norm else POLICY)
+            or type(composed_norm) is not bool or report.get('composed_norm') is not composed_norm
+            or report.get('tolerance') != TOLERANCE
             or report.get('handoff') != HANDOFF or report.get('taps') != list(TAPS)
             or type(packer_compat) is not bool or report.get('packer_compat') is not packer_compat
             or any(report.get(key) is not False for key in ('fabric_tested','full_pipeline_captured',
@@ -65,15 +67,17 @@ def main():
     parser.add_argument('--exit-status', type=Path, required=True)
     parser.add_argument('--metal-root', type=Path, required=True)
     parser.add_argument('--packer-compat', action='store_true')
+    parser.add_argument('--composed-norm', action='store_true')
     options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('dspark_projection_probe', Path(__file__).with_name('dspark-projection-probe.py'))
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
-    native = probe.fingerprints(options.metal_root, packer_compat=False)
+    native = probe.fingerprints(options.metal_root,packer_compat=False,composed_norm=options.composed_norm)
     if options.packer_compat:
         native[probe.PACKER] = probe.COMPAT_PACKER
     print(json.dumps(qualify(json.loads(options.report.read_text()), sources=probe.source_hashes(), native=native,
-        reference=probe.reference_metadata(), exit_status=options.exit_status.read_text(), packer_compat=options.packer_compat)))
+        reference=probe.reference_metadata(), exit_status=options.exit_status.read_text(),
+        packer_compat=options.packer_compat,composed_norm=options.composed_norm)))
 
 
 if __name__ == '__main__':

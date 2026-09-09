@@ -97,9 +97,18 @@ Captured operand SHA256:
 | --- | --- |
 | FP32 native RMS input/output, explicit BF16 cast | Same four failures per chip; rejected, clean exit 1 |
 | Explicit square / sum / rsqrt / product | API setup initially rejected an unsupported sum keyword; no numerical claim |
-| Same composition using the installed sum signature | Run `20260909T165149Z-403` active |
+| Same composition using the installed sum signature | **32/32 checks pass**, run `20260909T165149Z-403`; clean exit 0 |
 
 These short diagnostics reuse the hash-pinned **observed** FC output, avoiding
 another full weight upload. They still require exact native-control reproduction
 and unchanged borrowed inputs. Even a pass must be followed by the complete
 learned FC/norm matrix with changed-input replay; no hardware or speed claim follows.
+
+Independent reconciliation verifies the complete 32-check diagnostic, source and
+native fingerprints, exact native-control outputs, unchanged inputs and clean
+outer exit. Both patterns now have zero out-of-threshold backbone elements;
+maximum absolute difference is 0.03125 under the unchanged combined tolerance.
+Report `scripts/ci/dspark-norm-composed-simulator.json`, SHA256:
+`9ba3b56639ff0453bfe958ededfbec999fd464860ead06304f82ae41785bb8b0`.
+This composition is opt-in via `--composed-norm` in the full projection probe and
+qualifier. The original failing native-RMS policy remains separate and rejected.

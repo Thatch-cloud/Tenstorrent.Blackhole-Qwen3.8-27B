@@ -15,6 +15,7 @@ CPU_SHA256 = '2dcaf7f4e5d1052da206dcead5ccc54b15b0a5d9d81dc3f8605e2a5fd349b912'
 UPSTREAM_REPORT = 'dspark-backbone-upstream-reference.json'
 UPSTREAM_SHA256 = 'eb79532aeee5121b184f24121b9d2012aa9905f0a202100c98093b3657f9ed16'
 POLICY = 'BF16 learned weights; HiFi4 FP32 partials; FP32 sum; BF16 projection; unweighted BF16 RMSNorm; BF16 gamma product'
+COMPOSED_POLICY = 'BF16 learned weights; HiFi4 FP32 partials; FP32 sum; BF16 projection; composed FP32 RMS with BF16 rounding; BF16 gamma product'
 TOLERANCE = dict(rtol=0.01, atol=0.01)
 HANDOFF = 'Host staging of observed FP32 partials; separate traces; no fabric or complete captured pipeline'
 PROJECTION_STAGES = ('joined', 'partial')
@@ -97,14 +98,19 @@ def project(operations, features, weight, retain):
     return dict(joined=joined, partial=partial)
 
 
-def normalize_partials(operations, first, second, gamma, retain):
-    if not callable(retain):
+def normalize_partials(operations, first, second, gamma, retain, *, composed_norm=False):
+    if not callable(retain) or type(composed_norm) is not bool:
         raise ValueError('Explicit normalization tensor ownership required')
     for value in (first, second):
         require_tensor(operations, value, (1, 1, 32, 5120), operations.float32)
     require_tensor(operations, gamma, (1, 1, 1, 5120), operations.bfloat16)
     summed = retain(operations.add(first, second, dtype=operations.float32, memory_config=operations.DRAM_MEMORY_CONFIG))
     narrowed = retain(operations.typecast(summed, operations.bfloat16))
+    if composed_norm:
+        from dspark_norm_precision import normalize
+
+        result = normalize(operations,narrowed,gamma,retain,composed=True)
+        return dict(sum=summed,narrowed=narrowed,unweighted_norm=result['unweighted_norm'],context=result['context'])
     normalized = retain(operations.rms_norm(narrowed, epsilon=1e-6, weight=None,
         compute_kernel_config=compute_config(operations), memory_config=operations.DRAM_MEMORY_CONFIG))
     require_tensor(operations, normalized, (1, 1, 32, 5120), operations.bfloat16)

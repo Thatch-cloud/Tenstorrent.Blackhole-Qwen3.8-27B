@@ -8,7 +8,7 @@ import unittest
 
 from dspark_checkpoint import CHECKPOINT_SHA256
 from dspark_intake import TAPS
-from dspark_projection import EAGER_STAGES, EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
+from dspark_projection import COMPOSED_POLICY, EAGER_STAGES, EXACT_STAGES, HANDOFF, POLICY, PROJECTION_STAGES, TAIL_STAGES, TOLERANCE
 from dspark_projection_gate import qualify
 
 
@@ -18,7 +18,7 @@ REFERENCE = dict(tensor_sha256={'fc.weight':'fc-sha','hidden_norm.weight':'norm-
 def fixture():
     return dict(passed=True,closed_cleanly=True,checkpoint_closed=True,stage='complete',backend='simulator',mode='matrix',
         checkpoint_sha256=CHECKPOINT_SHA256,reference=REFERENCE,policy=POLICY,tolerance=TOLERANCE,handoff=HANDOFF,
-        taps=list(TAPS),packer_compat=False,rows=32,input_width=25600,output_width=5120,fixtures=2,
+        taps=list(TAPS),packer_compat=False,composed_norm=False,rows=32,input_width=25600,output_width=5120,fixtures=2,
         fabric_tested=False,full_pipeline_captured=False,target_integrated=False,eligible_for_hardware=False,
         parameter_sha256=REFERENCE['tensor_sha256'],sources={'probe':'sha'},sources_after={'probe':'sha'},
         native_sources={'runtime':'sha'},native_sources_after={'runtime':'sha'},
@@ -83,6 +83,17 @@ class DSparkProjectionGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             check(report)
         self.assertTrue(check(report,packer_compat=True)['passed'])
+
+    def test_composed_policy_requires_explicit_matching_gate_selection(self):
+        report = fixture()
+        report.update(composed_norm=True,policy=COMPOSED_POLICY)
+        with self.assertRaises(ValueError):
+            check(report)
+        self.assertEqual(check(report,composed_norm=True)['checks'],162)
+        with self.assertRaises(ValueError):
+            check(fixture(),composed_norm=True)
+        with self.assertRaises(ValueError):
+            check(report,composed_norm=1)
 
     def test_eager_only_requires_non_overwriting_operand_capture(self):
         import hashlib
