@@ -2,7 +2,7 @@
 
 ## Current programme position - 2026-09-10
 
-**New target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
+**Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
 changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency
 claim. Full-size BF4 and BF8 transport each pass 24 exact checks, clean exit and
@@ -10,7 +10,9 @@ independent qualification. Full-MLP simulator run `20260909T145410Z-414` passes 
 188 checks and clean teardown. The original runtime is restored and both MLP and
 native-weight-view gates pass independently. Hardware ABBA
 [34371489865](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865)
-is running; no speed promotion or new TG result yet.
+passes 118 correctness checks, but candidate 0.424554 ms loses to native
+0.334514 ms in all nine blocks: **26.92% slower**. Independent reconciliation
+rejects full-model promotion. No new TG result or serving change.
 [Experiment and gates](weight-read-packets-2026-09-10.md).
 
 **Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native
@@ -66,13 +68,14 @@ and58 harness tests pass. This establishes a CPU reference, not a TT backbone,
 real-target integration, coding acceptance or hardware throughput result.
 The serving input contract is now explicit: anchor plus six masks, sample all
 seven draft rows, then verify anchor plus seven proposals. No DFlash2 row-dropping.
-The separate full-context attention mask and236-check simulator matrix are now
-implemented. Native exponential fails the short-context numerical gate; the
-precise-exponential full matrix completes:216 structural checks and19/20 numerical
-comparisons pass. All4K comparisons and exact replays pass, but one short-context
-oldest-value stress element still fails the unchanged numerical gate. The run
-exits1 with clean teardown; all temporary native sources are restored and verified.
-This is not a DSpark hardware or coding-acceptance result.
+The full-context attention matrix now passes all **236 simulator checks** with
+explicit precise exponential and 64-key chunks: run `20260909T154029Z-441`.
+All 20 short/4K numerical comparisons and 24 exact replays pass with the unchanged
+0.01/0.01 CPU threshold. Historical 32-key failures remain preserved. The saved
+failing operands and FP32 reference are unchanged; only the chunking policy and
+masked 4K padding differ. Native files/binaries are restored/unchanged, ownership
+locks released, and independent qualification passes. Learned TT backbone and
+real-target integration remain next; this is not a hardware or coding-quality result.
 [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at

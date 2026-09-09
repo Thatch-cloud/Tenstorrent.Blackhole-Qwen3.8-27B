@@ -5,6 +5,20 @@ The previous sixteen-producer MLP is correct but takes 0.455749 ms versus native
 0.334690 ms. It is not promoted. This experiment changes only how those same
 sixteen producers issue their compressed-weight reads.
 
+**Hardware verdict: correct, but still slower than native. Do not promote.**
+
+| Complete Layer-0 T8 MLP | Matched mean latency |
+| --- | ---: |
+| Native control | 0.334514 ms |
+| Fixed-packet sixteen-producer candidate | 0.424554 ms |
+| Candidate penalty | **26.92% slower** |
+
+All nine ABBA blocks lose; all 118 correctness checks and independent
+source/result reconciliation pass. Timing includes input staging and the same
+four-link TP2 collective. This is not a PP / CTX / TG measurement.
+The earlier generic-reader prototype measured 0.455749 ms in a separate run:
+the lower current figure does not establish a matched reader-only speedup.
+
 | Item | Control | Candidate |
 | --- | --- | --- |
 | Read API | Generic tile/page read | Compile-time-sized single packet |
@@ -68,7 +82,8 @@ separate `tensix-mlp-simulator-16-packet.json` and successful outer exit file;
 generic-reader evidence cannot qualify this candidate. The input defaults false,
 and incompatible suites/profiling are rejected. Hardware comparison
 [34371489865](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865)
-is running from immutable tag `ci-qwen-hardware-a32cf2a`. All 388 existing runner
+completed successfully from immutable tag `ci-qwen-hardware-a32cf2a`, but its
+performance gate rejects promotion. All 388 existing runner
 workflow grants are retained; only this exact tagged workflow is added.
 
 The BF4 report is `scripts/ci/weight-packet-gate-simulator.json`, SHA256
@@ -84,6 +99,14 @@ with its successful outer exit file. It contains 32 native-control, 32 eager,
 48 replay, 70 raw-input/weight, four stale-input and two distinct-fixture checks.
 All 32 physical output rows are compared; all twelve candidate reader descriptors
 are engaged. This qualifies hardware correctness/timing tests, not a speed gain.
+
+Hardware report: `runner-evidence.local/34371489865/tensix-mlp.json`, SHA256
+`9304b0ab7e7891d376c69b5d56a5f2cfe8cc14d1087c54837a8546d5640d3516`.
+The downloaded CI artifact retains all 36 timing samples, original input/weight
+audits, source fingerprints and clean device teardown. Its independently
+recomputed `eligible_for_full_model_gate` is false. Fixed-packet dispatch alone
+does not make this within-layer streaming design competitive; the native path
+remains the control, with no serving-default change.
 
 The current branch passes 1,123 CI tests, 58 simulator-harness tests, workflow YAML
 parsing and shell syntax. These checks are not device evidence.

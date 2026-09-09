@@ -29,11 +29,10 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   [Sixteen producers](docs/tensix-sixteen-producers-2026-09-09.md) improve the
   prototype to **0.456 ms**, but remain **36.17% slower than native**. All 188
   simulator and 118 hardware checks pass; no promotion or new TG result.
-- **Next kernel test:** [fixed-packet weight reads](docs/weight-read-packets-2026-09-10.md)
-  keep that mapping and native math unchanged. Full-size BF4/BF8 transport passes
-  48 exact checks and the complete MLP passes 188 simulator checks. Hardware
-  [timing is running](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34371489865);
-  no new speed result yet.
+- **Fixed-packet reader result:** simulator and hardware correctness pass, but
+  the complete MLP takes **0.425 ms versus 0.335 ms native: 26.92% slower**.
+  It loses all nine comparisons and is not promoted.
+  [Results](docs/weight-read-packets-2026-09-10.md).
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
@@ -108,9 +107,10 @@ The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
 The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
 requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
 higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now has a verified
-learned CPU backbone, a native-policy learned selector and composed rotary
-simulator passes. Its FP32-score gate and one full-attention numerical stress
-check still fail. It is not an integrated drafter or a measured speed gain.
+learned CPU backbone and separate selector, rotary and full-context attention
+simulator passes. The 64-key attention candidate passes all 236 checks without
+loosening accuracy limits; historical failures remain recorded. The complete
+learned TT backbone and target integration are still pending: no DSpark TG claim.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

@@ -293,12 +293,12 @@ Changing the reference to upstream BF16 does not make these fixtures exact or
 pass the same0.01/0.01 tolerance. It is diagnostic only; no reference is replaced.
 After implementing this matrix,1,112 host tests and58 simulator-harness tests pass.
 
-### Next attention test: 64-key chunks
+### 64-key attention: full simulator pass
 
-The remaining short-context failure spans two 32-key native chunks. The next
-explicit candidate uses `--precise-native --key-chunk-size 64` to test whether
-removing that intermediate merge helps. This is a hypothesis, not a diagnosed
-root cause or a numerical pass. The default remains 32 keys.
+The historical short-context failure spans two 32-key native chunks. The
+explicit `--precise-native --key-chunk-size 64` candidate now passes the complete
+matrix. It removes that intermediate merge, but does not establish the exact
+internal rounding mechanism behind the failure. The default remains 32 keys.
 
 All original queries, keys, values and stress inputs are preserved bitwise.
 At 4K, only masked padding grows from 4,128 to 4,160 keys; the extra rows are
@@ -309,10 +309,23 @@ earlier 32-key evidence cannot qualify it. Host tests verify operand preservatio
 mask semantics, actual dispatch arguments and rejection of numerical failures.
 
 Preparation passes 1,123 host tests and 58 simulator-harness tests. Simulator
-run `20260909T154029Z-441` is active after the weight-reader MLP passed and its
-runtime was restored. The saved historical failing operands and FP32 reference
-are independently verified bitwise-identical in the 64-key candidate. Partial
-checks are not qualification; there is no new hardware, quality or TG result.
+run `20260909T154029Z-441` passes all **236 checks**, clean teardown and outer
+exit 0. Independent reconciliation passes after restoring the packer and both
+SDPA compute files byte-identically; both binaries are unchanged and both owned
+locks are released. The saved historical failing operands and FP32 reference
+are independently verified bitwise-identical in the 64-key candidate.
+
+| Historical rows | Numerical comparisons | Largest full/live absolute error |
+| ---: | --- | --- |
+| 31 | 10/10 pass | 0.115625 / 0.115625 |
+| 4,096 | 10/10 pass | 0.015625 / 0.006493 |
+
+These maxima use the unchanged combined relative/absolute threshold, not an
+absolute-only limit. All 24 replay, 176 input, 12 dependency and four stale-input
+checks pass too. Report `scripts/ci/dspark-attention-precise-chunk64-simulator.json`
+has SHA256 `78cc371723a1d1a8851e78e8d34fd35f5134c10d4b1e8a04385327deb482b10f`;
+its successful outer exit file is retained beside it. This qualifies a synthetic
+attention component only, not learned backbone, hardware, quality or TG.
 
 ### Learned CPU backbone matches upstream
 
@@ -399,12 +412,14 @@ Report SHA256:
 `a3b8c987b36b3129622fe3ef006a1014955f78c6d6be188538b409cc5f710673`.
 The header SHA256 is
 `992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1`.
-All simulator/hardware/serving eligibility flags remain false.
+The intake's eligibility flags remain false; separate component simulator passes
+do not grant hardware or serving qualification.
 
-1. Retain the qualified native-arithmetic Markov and composed-rotary policies,
-   preserve their original failures, and resolve the full-attention numerical gate.
-2. Port learned primitives to TTsim, including changed inputs, masks, trace
-   ownership and exact target-verifier isolation. CPU tests are not that gate.
+1. Retain the qualified native-arithmetic Markov, composed-rotary and explicit
+   precise 64-key attention policies; preserve their original failed policies.
+2. Port learned feature projection/normalization and one complete layer to TTsim
+   against the frozen CPU backbone, then all five layers. Retain changed-input,
+   mask, trace-ownership and target-isolation gates; CPU tests are not TT evidence.
 3. Run a complete seven-proposal hardware correctness/acceptance baseline through
    CI, then separately qualify wider proposals. Keep all rejections and overhead.
 4. Compare committed PP / CTX / TG on held-out executable coding tasks against
