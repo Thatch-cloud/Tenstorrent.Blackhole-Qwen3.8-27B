@@ -72,7 +72,19 @@ No OOM occurs;92.871 GiB peak still leaves tight headroom. Next test16-row
 activation tiles with unchanged compressed weights, including conversion and
 trace costs; below16 is unsupported on the pinned compressed-weight mcast path.
 This is simulator-first work, not a claimed speedup or another grid sweep.
+The first16-row projection composition fails output retile allocation on one
+core (2,061,184 bytes versus1,572,864 L1 bytes); no numerical or performance pass.
+Bounded-memory conversion is the next gate, with accumulation retained and all
+conversion costs included. [Evidence](tiny-tile-projections-2026-09-09.md).
 [Scope and gates](current-verifier-profile-2026-09-09.md).
+
+**Upstream comparison: MiniMax-M3 pipeline zone profiling.**
+[PR55654](https://github.com/tenstorrent/tt-metal/pull/55654) adds stage-local
+prefill profiling, not a Qwen decode kernel. Its attached chart compares worst-chip
+zone times at EP32/16/8 with1D fabric and a5K chunk attending50K cache. Parent and
+child zones must not be summed. Transfer the measurement method: named semantic
+zones, worst-chip comparisons, and separate uninstrumented application timing.
+Do not transplant its MoE timing or infer two-card B1 decode speed from it.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

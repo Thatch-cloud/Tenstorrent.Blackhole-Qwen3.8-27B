@@ -124,3 +124,5 @@ including input/output conversion and captured replay. The pinned runtime
 supports16-row tiles on 1D multicast; compressed-weight tiles below16 are
 explicitly rejected. This tests wasted padded-row work, not another core-grid
 sweep. Simulator correctness comes before hardware timing; no speedup is assumed.
+The first native retile composition exceeds per-core L1 during output conversion;
+it has not passed the numerical gate. [Simulator evidence](tiny-tile-projections-2026-09-09.md).
