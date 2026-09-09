@@ -63,8 +63,14 @@ def reviewed_functions(draft_path, upstream_directory):
     return {name: namespace[name] for name in FUNCTIONS}, expected
 
 
-def control_forward(functions, weights, config, features, noise, start, inspect):
+def control_forward(functions, weights, config, features, noise, start, inspect, *, attention_implementation='eager'):
     import torch
+
+    if attention_implementation not in ('eager','qwen_fp32_reference'):
+        raise ValueError('Declared eager or explicit FP32 CPU reference backend required')
+    if (attention_implementation!='eager'
+            and attention_implementation not in functions['attention'].__globals__.get('ALL_ATTENTION_FUNCTIONS',{})):
+        raise ValueError('The explicit FP32 CPU backend must be registered before model execution')
 
     def linear(name):
         return lambda value: torch.nn.functional.linear(value, weights.tensor(name))
@@ -82,7 +88,7 @@ def control_forward(functions, weights, config, features, noise, start, inspect)
     def layer(index):
         prefix = f'layers.{index}.'
         attention = SimpleNamespace(head_dim=128, num_key_value_groups=4, scaling=128 ** -.5, training=False,
-            attention_dropout=0., sliding_window=None, layer_idx=index, config=SimpleNamespace(_attn_implementation='eager'),
+            attention_dropout=0., sliding_window=None, layer_idx=index, config=SimpleNamespace(_attn_implementation=attention_implementation),
             **{name + '_proj': linear(prefix + f'self_attn.{name}_proj.weight') for name in ('q', 'k', 'v', 'o')},
             q_norm=norm(prefix + 'self_attn.q_norm.weight'), k_norm=norm(prefix + 'self_attn.k_norm.weight'))
         mlp = SimpleNamespace(gate_proj=linear(prefix + 'mlp.gate_proj.weight'), up_proj=linear(prefix + 'mlp.up_proj.weight'),
