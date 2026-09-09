@@ -31,7 +31,8 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   simulator and 118 hardware checks pass; no promotion or new TG result.
 - **Next kernel test:** [fixed-packet weight reads](docs/weight-read-packets-2026-09-10.md)
   keep that mapping and native math unchanged. Full-size BF4/BF8 transport passes
-  48 exact checks; the complete MLP simulation is running. No new speed result yet.
+  48 exact checks and the complete MLP passes 188 simulator checks. Hardware
+  timing is next; no new speed result yet.
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).

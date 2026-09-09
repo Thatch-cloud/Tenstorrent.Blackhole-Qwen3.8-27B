@@ -53,10 +53,12 @@ needed for the transport-only experiment.
    Each run retains the full projection extent; no packer graft is used.
 2. Full T8 MLP: native arithmetic control, two complete weight fixtures, gate/up/
    product/down outputs, all 32 physical rows, pooled FIFO reuse and exact replay.
-   Run `20260909T145410Z-414` is active with `--single-packet --producers 16`.
+   Run `20260909T145410Z-414` passes all 188 checks with
+   `--single-packet --producers 16`, clean teardown and outer exit 0.
    It uses the same isolated, reviewed simulator packer compatibility patch as
    the previous MLP qualification; this patch is never installed on hardware.
-   Partial checks do not qualify the candidate.
+   The original packer and both native binaries are verified restored/unchanged;
+   independent MLP and native-weight-view gates pass against the restored runtime.
 3. Real Layer-0 hardware ABBA: same input staging and four-link reduction, all
    samples retained. Require a greater-than-2% win in every block before integration.
 4. Only then measure a full request in PP / CTX / TG against the retained control.
@@ -72,6 +74,13 @@ The BF8 report is `scripts/ci/weight-packet-down-simulator.json`, SHA256
 `a1b88912e8d79dd90347738b5fc6923fc2d0dc83535631d17fe344261395579a`.
 Both outer exit files are retained beside their reports. These are transport
 passes, not an MLP pass.
+
+The complete MLP evidence is `scripts/ci/tensix-mlp-simulator-16-packet.json`,
+SHA256 `1107687be4f1ee302a8259bd2a6c84849bafb3573ffd44b78c96942be3165ced`,
+with its successful outer exit file. It contains 32 native-control, 32 eager,
+48 replay, 70 raw-input/weight, four stale-input and two distinct-fixture checks.
+All 32 physical output rows are compared; all twelve candidate reader descriptors
+are engaged. This qualifies hardware correctness/timing tests, not a speed gain.
 
 The host checks pass: 1,119 CI tests, 58 simulator-harness tests, workflow YAML
 parsing and shell syntax. These checks are not device evidence.
