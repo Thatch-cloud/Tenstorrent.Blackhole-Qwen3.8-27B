@@ -14,8 +14,12 @@ SOURCES = (
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 SIMULATOR_PACKER = '8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7'
+TP_COMMON = 'models/demos/blackhole/qwen36/tt/tp_common.py'
+SIMULATOR_TP_COMMON = 'bb43f0cde336c3f84725d47a64ed2b506b5287bdd0e910cd24b13feed0a0826a'
+HARDWARE_TP_COMMON = '5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66'
+UNCHANGED_TP_COMMON_AST = '1d3374593f1caf77b453ef22f442779f9bd4da15b4b78d86d7a2178ed5216762'
 NATIVE_SOURCES = (
-    'models/demos/blackhole/qwen36/tt/tp_common.py', 'models/demos/blackhole/qwen36/tt/mlp.py', PACKER,
+    TP_COMMON, 'models/demos/blackhole/qwen36/tt/mlp.py', PACKER,
     'ttnn/cpp/ttnn/operations/eltwise/binary_ng/device/binary_ng_program_factory.cpp',
     'ttnn/cpp/ttnn/operations/eltwise/binary_ng/device/binary_ng_device_operation.cpp',
     'tt_metal/hw/inc/api/compute/eltwise_binary_sfpu.h')
@@ -30,8 +34,12 @@ def qualify(report, sources, native_sources):
     if set(native_sources) != set(NATIVE_SOURCES) or native_sources[PACKER] != ORIGINAL_PACKER:
         raise ValueError('Pinned native sources and original hardware packer required')
     expected_native = dict(native_sources, **{PACKER: SIMULATOR_PACKER})
+    recorded = report.get('native_sources', {})
+    prefill_only_difference = (recorded.get(TP_COMMON) == SIMULATOR_TP_COMMON
+        and native_sources[TP_COMMON] == HARDWARE_TP_COMMON)
+    if prefill_only_difference:
+        expected_native[TP_COMMON] = SIMULATOR_TP_COMMON
     if report.get('native_sources') != expected_native:
-        recorded = report.get('native_sources', {})
         changed = sorted(name for name in set(recorded) | set(expected_native)
             if recorded.get(name) != expected_native.get(name))
         raise ValueError(f'Native configuration or operation changed since simulation: {changed}')
@@ -51,7 +59,12 @@ def qualify(report, sources, native_sources):
     if (len(negative) != 2 or {check.get('chip') for check in negative} != {0, 1}
             or any(check.get('stale_input_detected') is not True for check in negative)):
         raise ValueError('Both stale-input negative controls required')
-    return dict(passed=True, eager_checks=len(eager), trace_checks=len(trace), negative_controls=len(negative))
+    result = dict(passed=True, eager_checks=len(eager), trace_checks=len(trace), negative_controls=len(negative))
+    if prefill_only_difference:
+        result['native_equivalence'] = dict(scope='T8 MLP decode only; prefill placement functions differ',
+            simulator_tp_common=SIMULATOR_TP_COMMON, hardware_tp_common=HARDWARE_TP_COMMON,
+            unchanged_module_ast_sha256=UNCHANGED_TP_COMMON_AST)
+    return result
 
 
 def qualify_hardware(report):

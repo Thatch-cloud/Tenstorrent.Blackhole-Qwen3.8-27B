@@ -60,6 +60,21 @@ The original hardware packer remains unchanged; simulator compatibility is not
 hardware qualification. Retry pending; no hardware MLP timing is available.
 The routing/required-artifact fix passes883 CI host tests and60 speculative-harness tests.
 
+The routed retry34304793770 reaches the MLP source gate but rejects `tp_common.py`
+before opening the model mesh. Fast preflight34305440450 exports the difference
+without another runtime rebuild: the hardware image changes only
+`_mmrs_prefill_placement` and `matmul_reduce_scatter_prefill`. Removing those two
+prefill functions from each AST leaves the entire module identical, including
+the decode config and weight helpers. Unchanged AST SHA256:
+`1d3374593f1caf77b453ef22f442779f9bd4da15b4b78d86d7a2178ed5216762`.
+
+The decode-only gate accepts exactly this audited source pair:
+simulator `bb43f0cde336c3f84725d47a64ed2b506b5287bdd0e910cd24b13feed0a0826a`,
+hardware `5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66`.
+All other source checks remain exact. The exception is recorded in the result;
+it does not qualify prefill or relax numerical comparisons. Future source changes
+still fail closed. No hardware MLP timing is available from either rejected run.
+
 The existing audited patch is `optimisation/sim/blackhole-packer-zero-flags.patch`.
 The isolated graft header hash is
 `8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7`.

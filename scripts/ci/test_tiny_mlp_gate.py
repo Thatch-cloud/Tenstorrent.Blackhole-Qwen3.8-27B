@@ -5,7 +5,8 @@ import sys
 import tempfile
 import unittest
 
-from tiny_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER, SOURCES, qualify, qualify_hardware
+from tiny_mlp_gate import (HARDWARE_TP_COMMON, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER,
+    SIMULATOR_TP_COMMON, SOURCES, TP_COMMON, qualify, qualify_hardware)
 
 
 class TinyMlpGateTests(unittest.TestCase):
@@ -25,6 +26,22 @@ class TinyMlpGateTests(unittest.TestCase):
 
     def test_complete_unchanged_gate_qualifies_only_for_hardware_testing(self):
         self.assertEqual(qualify(*self.fixture()), dict(passed=True, eager_checks=16, trace_checks=32, negative_controls=2))
+
+    def test_only_exact_audited_prefill_source_pair_is_accepted(self):
+        report, sources, native = self.fixture()
+        report['native_sources'][TP_COMMON] = SIMULATOR_TP_COMMON
+        native[TP_COMMON] = HARDWARE_TP_COMMON
+        self.assertIn('T8 MLP decode only', qualify(report, sources, native)['native_equivalence']['scope'])
+        for changed in ('simulator', 'hardware', 'unrelated'):
+            modified, current = deepcopy(report), dict(native)
+            if changed == 'simulator':
+                modified['native_sources'][TP_COMMON] = 'changed'
+            elif changed == 'hardware':
+                current[TP_COMMON] = 'changed'
+            else:
+                current[NATIVE_SOURCES[-1]] = 'changed'
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                qualify(modified, sources, current)
 
     def test_incomplete_failure_and_ungrafted_reports_reject(self):
         for key, value in (('passed', False), ('stage', 'weights_ready'), ('rows', 1),
