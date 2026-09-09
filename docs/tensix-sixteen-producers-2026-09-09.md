@@ -1,13 +1,41 @@
 # Sixteen weight producers: test issue capacity
 
-**Full-size simulation passes all 188 checks. No hardware result yet.**
+**Correct on hardware, but 36.17% slower than native. Not promoted.**
 This follows the [device profile](tensix-mlp-device-profile-2026-09-09.md), which
 locates the eight-producer design's regression inside gate/up/down.
 
-The real-weight hardware comparison is dispatched as
+The real-weight hardware comparison passes correctness in
 [CI34337968780](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34337968780)
-on immutable tag `ci-qwen-hardware-ca22384`. A completed artifact and independent
-validation are required before reporting a hardware result.
+on immutable tag `ci-qwen-hardware-ca22384`. The downloaded artifact also passes
+independent local validation. All nine timing blocks lose against native.
+
+## Hardware result
+
+| Complete Layer-0 MLP | Latency, ms | Evidence |
+| --- | ---: | --- |
+| Native control, this run | **0.334690** | Same real weights, input copy and four-link reduction |
+| Sixteen producers, this run | **0.455749** | 36.17% slower; loses all nine ABBA blocks |
+| Eight producers, earlier run | 0.743766 | Historical comparison, not a paired arm in this run |
+
+Sixteen producers reduce the earlier prototype's latency by **38.72%**, with
+native controls effectively unchanged between runs. That is progress within
+the prototype, not a win over the existing runtime and not a new TG result.
+More producer capacity helps this design; this alone does not separate DRAM
+command issue, transfer scheduling, NoC contention and consumer waits.
+
+All118 hardware checks pass: six eager, twelve trace, four stale-input controls,
+24 raw-input/weight checks and72 timed-output checks. All36 samples are retained,
+with50 replays per sample. Native weight metadata/buffers stay unchanged and
+teardown completes cleanly. `eligible_for_full_model_gate=false`.
+
+Hardware report SHA256: `afbb889e934c36669094e0c00b287111cd923529cf65ceef97059288f3bb0e8c`.
+Artifact: `10098683116`, 70,058 bytes, SHA256
+`306648e1e1e0fce3c6f95f16a3a27d7ee579cd6e1e218830331aac9cb2b6696c`.
+
+The next kernel investigation should target producer/transfer overhead at a
+fixed mapping, rather than assuming another core-count increase will beat
+native. Any new candidate still needs its own simulator gate and matched
+hardware comparison; neither streamed version enters the full model.
 
 | Setting | Eight-producer prototype | New candidate |
 | --- | --- | --- |
@@ -43,9 +71,9 @@ establishes that it will. The native MLP remains the hardware control.
 - The original native packer is restored byte-identically; both native Python
   binaries are unchanged. The independent MLP and native-weight-view gates pass
   again against the restored runtime, and the owned simulator lock is released.
-- Next: the same real Layer-0 nine-block hardware ABBA. Both arms request four
-  links; all samples and exact checks remain required. No greater-than2% win in
-  every block means no promotion.
+- The real Layer-0 nine-block hardware ABBA completes with four links in both
+  arms. All samples and exact checks pass, but the greater-than2% win in every
+  block is absent, so the candidate is not promoted.
 
 Report SHA256: `6e3d1bb41a4a91c8c8f92741a703f512cb220740763ebc5c1fcaeec6787711fe`.
 Outer-exit SHA256: `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`.
