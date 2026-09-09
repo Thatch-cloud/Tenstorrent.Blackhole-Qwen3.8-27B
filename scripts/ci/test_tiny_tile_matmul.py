@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock
 
 from tiny_tile_matmul import PROJECTIONS, project
+from tiny_tile_dma import validate_layout
 
 
 class TinyTileMatmulTests(unittest.TestCase):
@@ -14,16 +15,18 @@ class TinyTileMatmulTests(unittest.TestCase):
         weight = SimpleNamespace(dtype='BF4')
         return operations, value, weight
 
-    def test_candidate_retiles_both_boundaries_and_retains_every_intermediate(self):
+    def test_candidate_borrows_prepared_boundaries_and_retains_its_matmul_output(self):
         operations, value, weight = self.fixture()
         retained = []
         def retain(tensor):
             retained.append(tensor)
             return tensor
-        result = project(operations, value, weight, 'program', 'compute', retain, tiny=True)
+        retile = Mock(side_effect=['small-input', 'restored-output'])
+        result = project(operations, value, weight, 'program', 'compute', retain, tiny=True, retile=retile)
         self.assertEqual(result, 'restored-output')
-        self.assertEqual(retained, ['small-input', 'projected-output', 'restored-output'])
-        self.assertEqual([call.kwargs['tile'] for call in operations.tilize.call_args_list], [(16, 32), (32, 32)])
+        self.assertEqual(retained, ['projected-output'])
+        self.assertEqual([call.args[1] for call in retile.call_args_list], [16, 32])
+        operations.tilize.assert_not_called()
         operations.linear.assert_called_once_with('small-input', weight, program_config='program',
             compute_kernel_config='compute', memory_config='L1')
 
@@ -53,3 +56,23 @@ class TinyTileMatmulTests(unittest.TestCase):
         self.assertEqual(PROJECTIONS['gate'], (5120, 8704, 44, 'bfloat4_b', True))
         self.assertEqual(PROJECTIONS['up'], (5120, 8704, 44, 'bfloat4_b', False))
         self.assertEqual(PROJECTIONS['down'], (8704, 5120, 33, 'bfloat8_b', False))
+
+    def test_prepared_conversion_is_required_before_any_candidate_operation(self):
+        operations, value, weight = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'Prepared bounded-memory'):
+            project(operations, value, weight, 'program', 'compute', lambda tensor: tensor, tiny=True)
+        operations.linear.assert_not_called()
+
+    def test_dma_only_accepts_matching_native_t8_geometries(self):
+        for width in (5120, 8704):
+            for tiles in (((16, 32), (32, 32)), ((32, 32), (16, 32))):
+                shape = (1, 1, 8, width)
+                self.assertEqual(validate_layout(shape, shape, *tiles), width // 32)
+        for shapes, tiles in (
+                (((1, 1, 8, 5120), (1, 1, 8, 8704)), ((32, 32), (16, 32))),
+                (((1, 1, 16, 5120),) * 2, ((32, 32), (16, 32))),
+                (((1, 1, 8, 4096),) * 2, ((32, 32), (16, 32))),
+                (((1, 1, 8, 5120),) * 2, ((32, 32), (32, 32))),
+                (((1, 1, 8, 5120),) * 2, ((32, 32), (8, 32)))):
+            with self.subTest(shapes=shapes, tiles=tiles), self.assertRaises(ValueError):
+                validate_layout(*shapes, *tiles)

@@ -72,10 +72,14 @@ No OOM occurs;92.871 GiB peak still leaves tight headroom. Next test16-row
 activation tiles with unchanged compressed weights, including conversion and
 trace costs; below16 is unsupported on the pinned compressed-weight mcast path.
 This is simulator-first work, not a claimed speedup or another grid sweep.
-The first16-row projection composition fails output retile allocation on one
-core (2,061,184 bytes versus1,572,864 L1 bytes); no numerical or performance pass.
-Bounded-memory conversion is the next gate, with accumulation retained and all
-conversion costs included. [Evidence](tiny-tile-projections-2026-09-09.md).
+The first16-row projection composition failed output retile allocation on one
+core (2,061,184 bytes versus1,572,864 L1 bytes). Bounded face-copy DMA now passes
+gate/up/down separately. The complete MLP passes16 eager and32 traced bitwise
+comparisons on both simulated chips, including both DMA boundaries. Stock
+multiplication dropped small tiles; FPU rounding also failed exactness. The new
+product keeps native SFPU semantics and16-row buffers. No timing claim: next is
+real layer0 hardware ABBA against actual native forward, including the collective.
+[Evidence](tiny-tile-projections-2026-09-09.md).
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 
 **Upstream comparison: MiniMax-M3 pipeline zone profiling.**

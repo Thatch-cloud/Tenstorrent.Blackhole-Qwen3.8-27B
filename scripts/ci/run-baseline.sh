@@ -11,6 +11,12 @@ dflash_cache_abba=0
 dflash_projection_abba=0
 dflash_profile=0
 dflash_context=0
+tiny_mlp=0
+if [ "$mode" = tiny-mlp ]; then
+    tiny_mlp=1
+    mode=full-norm-engine
+    export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
+fi
 if [ "$mode" = full-dflash-verifier-profile ]; then
     dflash_context=4096
     dflash_profile=1
@@ -68,6 +74,7 @@ ccl_build=0
 if [[ "$mode" = learned-attention && "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]]; then ccl_build=1; fi
 if [ "$mtp_drafts" != 0 ]; then ccl_build=1; fi
 if [ "$dflash_drafts" != 0 ]; then ccl_build=1; projection_links=4; fi
+if [ "$tiny_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
 if [[ "$mode" = learned-attention || "$mode" = learned-mlp || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
     descriptor=p150_x2_mesh_graph_descriptor.textproto
     projection_links=4
@@ -180,6 +187,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_CACHE_ABBA=$dflash_cache_abba" \
     -e "QWEN_DFLASH_PROJECTION_ABBA=$dflash_projection_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
+    -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \

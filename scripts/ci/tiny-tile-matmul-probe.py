@@ -11,6 +11,7 @@ from attention_batch import capture_operation
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from tiny_tile_matmul import PROJECTIONS, project
+from tiny_tile_dma import copy_live_rows
 
 
 def main():
@@ -27,9 +28,9 @@ def main():
     report = dict(passed=False, scope=__doc__, projection=options.projection, rows=8, input_width=input_width,
         output_width_per_chip=output_width, weight_dtype=dtype_name, activation_tiles=[32, 16],
         weights='Deterministic synthetic local matrices; not learned target weights or coding quality',
-        timing_scope='No simulator timing or throughput claim', eager_checks=[], trace_checks=[], negative_controls=[],
+        timing_scope='No simulator timing or throughput claim', dma_checks=[], eager_checks=[], trace_checks=[], negative_controls=[],
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ('tiny_tile_matmul.py', 'tiny-tile-matmul-probe.py', 'attention_batch.py')})
+            for name in ('tiny_tile_matmul.py', 'tiny-tile-matmul-probe.py', 'tiny_tile_dma.py', 'tiny_tile_dma.cpp', 'attention_batch.py')})
     native = Path(os.environ['TT_METAL_HOME'])
     report['native_sources'] = {name: hashlib.sha256((native / name).read_bytes()).hexdigest() for name in (
         'models/demos/blackhole/qwen36/tt/tp_common.py',
@@ -69,18 +70,35 @@ def main():
             for value in patterns]
         source = retain(persistent, ttnn.from_torch(patterns[0], device=mesh, dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG, mesh_mapper=mapper))
+        small_source = retain(persistent, ttnn.from_torch(torch.zeros_like(patterns[0]), device=mesh, dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT, tile=ttnn.Tile((16, 32)), memory_config=ttnn.L1_MEMORY_CONFIG, mesh_mapper=mapper))
+        restored = retain(persistent, ttnn.empty((1, 1, 8, output_width), device=mesh, dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG))
+        roundtrip = retain(persistent, ttnn.empty((1, 1, 8, input_width), device=mesh, dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG))
         bindings = [addresses(ttnn, value) for value in persistent]
         program = create_matmul_1d_decode_progcfg(8, input_width, output_width, cores,
             fused_activation=ttnn.UnaryOpType.SILU if silu else None, grid_w=11)
         report['native_program'] = str(program)
         compute = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
             fp32_dest_acc_en=True, packer_l1_acc=True)
+        def retile(value, height):
+            return copy_live_rows(mesh, value, small_source if height == 16 else restored)
         def execute(tiny, storage):
-            return project(ttnn, source, weight, program, compute, lambda value: retain(storage, value), tiny=tiny)
+            return project(ttnn, source, weight, program, compute, lambda value: retain(storage, value), tiny=tiny,
+                retile=retile if tiny else None)
         references = []
         progress('weights_ready')
         for pattern, host_input in enumerate(host_inputs):
             ttnn.copy_host_to_device_tensor(host_input, source)
+            copy_live_rows(mesh, source, small_source)
+            copy_live_rows(mesh, small_source, roundtrip)
+            for chip in range(2):
+                for height, converted in ((16, small_source), (32, roundtrip)):
+                    if not torch.equal(read(converted, chip).view(torch.int16), patterns[pattern].view(torch.int16)):
+                        raise AssertionError('Tile DMA changed active BF16 bits')
+                    report['dma_checks'].append(dict(pattern=pattern, chip=chip, tile_height=height, exact_bits=True))
+            progress(f'dma_pattern_{pattern}_passed')
             baseline = execute(False, temporary)
             expected = [read(baseline, chip) for chip in range(2)]
             references.append(expected)
@@ -114,6 +132,8 @@ def main():
                     report['trace_checks'].append(dict(pattern=pattern, arm=arm, chip=chip, exact=True))
             if bindings != [addresses(ttnn, value) for value in persistent]:
                 raise AssertionError('Input or weight storage moved under live traces')
+            if any(not torch.equal(read(source, chip), patterns[pattern]) for chip in range(2)):
+                raise AssertionError('Captured projection changed caller-owned input')
             progress(f'trace_pattern_{pattern}_passed')
     finally:
         if mesh is not None:

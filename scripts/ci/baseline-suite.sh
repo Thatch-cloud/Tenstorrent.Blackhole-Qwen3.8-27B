@@ -313,6 +313,12 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-verifier-replay ]; then
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
+    if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
+        timeout -k 30 900 python3 -u /experiment-scripts/ci/tiny-mlp-hardware.py \
+            --simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json \
+            --output /experiment/results/tiny-mlp.json
+        exit 0
+    fi
     if [ "${QWEN_DFLASH_VERIFIER_PROFILE:-0}" = 1 ]; then
         timeout -k 30 4800 bash /experiment-scripts/ci/dflash-request-profile.sh
         exit 0
