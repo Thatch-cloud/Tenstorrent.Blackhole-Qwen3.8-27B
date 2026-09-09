@@ -399,6 +399,9 @@ still fail. The strict source gate and full integration matrix are unchanged.
 Serving and other experiment runtimes keep their existing slice implementation.
 The runtime cache key includes this restoration, so it cannot reuse a differently
 built library. Twelve targeted restoration/cache/compatibility checks pass.
+The source-aligned retry is
+[`34412639592`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34412639592),
+code `d1bd01191ff236994bf1bbc63ceeec1e819b828b`.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven
