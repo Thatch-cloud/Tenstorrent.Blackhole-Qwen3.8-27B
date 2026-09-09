@@ -377,7 +377,8 @@ published seven-proposal block, the boundary is:
 `dspark_inputs.py` encodes this convention with ID, shape and absolute-position
 checks. It rejects a full block without room inside262,144 positions; a shorter
 end-of-context fallback is not implemented. Do not copy DFlash2's eight-query-row,
-drop-row-zero convention. This helper is not integrated into target execution.
+drop-row-zero convention. This helper now passes the [CTX32 target-bound proposal
+integration](dspark-target-integration-2026-09-10.md), not a batched request or serving gate.
 
 Primary sources at SGLang commit`708f51e44bc64f546a60fa9631f0e7d99493d0a0`:
 [configuration](https://github.com/sgl-project/sglang/blob/708f51e44bc64f546a60fa9631f0e7d99493d0a0/python/sglang/srt/speculative/dspark_components/dspark_config.py)

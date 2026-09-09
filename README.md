@@ -112,11 +112,10 @@ higher.
 learned FC plus all five layers in one trace, using four fabric links.
 The warm replay mean is **10.19 ms/block at 32 history rows / seven query rows**.
 This excludes embeddings, target head, Markov selection and verification—**not TG**.
-Target integration and numerical differences remain open. Checks now run before
-compilation, and native builds are cached. [Evidence and next gates](docs/dspark-learned-layer-2026-09-10.md).
-The targeted embedding-layout simulator gate also passes (44 checks).
-[Real-target proposal integration](docs/dspark-target-integration-2026-09-10.md) is next;
-there is no new committed-TG result yet.
+[Real-target proposal integration now passes](docs/dspark-target-integration-2026-09-10.md),
+preserving target tokens/GDN/KV. Short-prefix acceptance is only **3/7 and 0/7**;
+full 4K history, wider blocks, numerical differences and committed TG remain open.
+Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

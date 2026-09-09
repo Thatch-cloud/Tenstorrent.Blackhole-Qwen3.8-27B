@@ -457,16 +457,19 @@ swap or OOM events. All 27 source and 1,517 native hashes remain unchanged.
 Report `scripts/ci/dspark-noise-simulator.json`, SHA-256
 `6215f1ee04d8928814ac79b56ae7fe63bd345ebf6aaa83995814c245bb5c1cc0`.
 
-The new [target-bound integration lane](dspark-target-integration-2026-09-10.md)
-connects real target features/embeddings/head to all five DSpark layers and the
-full-vocabulary Markov selector. It is not yet a hardware result or TG measurement.
+The [target-bound integration lane](dspark-target-integration-2026-09-10.md)
+now passes on hardware: actual target features/embeddings/head, all five DSpark
+layers and the full-vocabulary Markov selector. Native target tokens/state remain
+unchanged. Acceptance on the two short prompt prefixes is only 3/7 and 0/7;
+this is not a coding-quality or TG measurement. Cache reuse reduces native build
+setup from 262 seconds to 2 seconds.
 
 ## Next gates
 
-1. Connect actual target features/embeddings/LM head and the full-vocabulary
-   Markov selector, preserving target state and changing-input trace replay.
-2. Extend history to 4K and qualify useful wider proposals; retain mask,
+1. Extend history to 4K and qualify useful wider proposals; retain mask,
    ownership, numerical diagnostics and exact target-state gates.
+2. Connect batched verification and committed-feature publication, not just the
+   now-passing target-bound proposal and serial oracle.
 3. Measure coding acceptance and committed PP / CTX / TG through CI. Wider useful
    proposals and/or a faster verifier remain necessary for 200 TG; do not infer
    speed or coding quality from a component pass or change serving defaults.

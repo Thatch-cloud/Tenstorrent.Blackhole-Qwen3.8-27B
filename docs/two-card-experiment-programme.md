@@ -140,9 +140,12 @@ using four explicit links. Warm queued replay averages **10.19 ms/block** at
 feedback and verification: **not committed TG**. Separate CPU diagnostics pass
 6/72; the numerical gate stays open. Probe wall time is 44.36 seconds after a
 262-second first native build, now cached. The seven-row embedding layout gate
-now passes all 44 targeted simulator checks. Next: [actual target integration](dspark-target-integration-2026-09-10.md),
-then useful wider blocks and full 4K history. The target-bound lane is prepared;
-it has no hardware result yet and does not replace the committed-TG gate.
+now passes all 44 targeted simulator checks. [Actual target-bound proposals](dspark-target-integration-2026-09-10.md)
+also pass hardware run34417423120: exact A/B/A replay and unchanged native
+tokens/GDN/KV. Short-prefix acceptance is only3/7 and0/7, not a quality or TG
+result. Native setup falls262s to2s with a verified cache hit. Next: full4K
+history, fifteen useful proposals and batched verification/publication. The new
+chunked full-history attention composition awaits its targeted simulator gate.
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
