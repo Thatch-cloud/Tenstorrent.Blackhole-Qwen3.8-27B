@@ -12,8 +12,8 @@ The usual 32-row tile remains the storage format; this is not smaller MLP tiles.
 | Live QK and zeroed padding | Initial simulator: 4 eager /12 traced comparisons pass on two chips |
 | Captured learned operands through complete attention | Initial simulator: 12 eager /36 traced component comparisons pass |
 | Final source-pinned short gate | `20260909T034508Z-606`: 12 eager /36 traced component checks and4 stale controls pass |
-| Full2K draft history | Simulator run `20260909T034627Z-647` underway; not yet qualified |
-| Hardware ABBA | Gated on both complete-attention reports and unchanged source hashes |
+| Full2K draft history | `20260909T034627Z-647`: 12 eager /36 traced component checks and4 stale controls pass |
+| Hardware ABBA | Both source-pinned complete-attention gates pass; ready for the isolated hardware suite |
 | Learned stack / complete coding requests | Not integrated; existing lead and serving defaults unchanged |
 
 ## Why padding can be skipped
@@ -49,6 +49,9 @@ P150-pair descriptor and skips model-weight downloads and native runtime rebuild
 Both hardware artifacts are mandatory and independently validated on the host.
 895 CI host tests and55 simulator-harness tests pass. The final short report's
 12 experiment-source hashes and3 native header hashes validate independently.
+The long report passes the same independent gate. Both use the original native
+packer, with no simulator source or library graft. Long simulation takes1493.8s;
+that is simulator wall time, not measured device latency or hardware throughput.
 
 Initial evidence: `20260909T033107Z-414` (QK), `033234Z-553` (learned attention),
 and `033838Z-415` (padding initialized once). `034053Z-402` was stopped while
