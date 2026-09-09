@@ -115,7 +115,9 @@ comparisons. It does not emulate native matmul or clear the TT failures. Device-
 TP handoffs pass **144/144 simulator checks**. The complete learned layer now
 also passes **534/534 exact checks in one device trace**, including all 208
 changing-input replay comparisons against saved native tensors. All five learned
-TT layers are next; simulated one-link collectives do not qualify physical links.
+TT layers are now running in simulator matrix `20260909T205211Z-403`, with all
+56 backbone parameters and separate functional/numerical reporting; no terminal
+result yet. Simulated one-link collectives do not qualify physical links.
 Neither numerical limits nor serving
 defaults change. Numerical fixes are not assumed to be faster.
 This component fix does not change the measured 74.27 TG hardware result.

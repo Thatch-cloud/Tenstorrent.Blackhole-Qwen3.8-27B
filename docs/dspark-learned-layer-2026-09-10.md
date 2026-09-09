@@ -305,9 +305,20 @@ this component result alone.
 
 The next five-layer device chain is also wired, keeping projected context and
 rotary inputs shared while passing each layer's actual output into the next.
-All 1,190 host tests and 59 simulator-harness tests pass, but this chain has not
-executed five learned TT layers.
+The complete learned run `20260909T205211Z-403` is now active on code `e83cbdb`.
+It uploads and audits one tensor at a time rather than keeping duplicate CPU
+copies of all weights. Its matrix includes all 56 backbone parameters, all 131
+device stage tensors, three eager cases and four changing-input trace replays:
+**2,394 functional checks plus 72 separately reported CPU numerical diagnostics**.
+No terminal five-layer result is available yet. All 1,193 host tests and 59
+simulator-harness tests pass before this run; those are not device evidence.
+
 Feature projection and the full-vocabulary selector remain separate components.
+An unqualified target-head bridge is prepared: borrow the existing TP2 LM head,
+gather all 248,320 vocabulary scores on-device, and preserve query rows zero
+through six for Markov selection. It does not reuse DFlash2's top-16 shortlist
+or discard the anchor query row. Four bridge orchestration tests pass; its
+vocabulary collective still needs simulation before integration.
 
 ## Next gates
 
