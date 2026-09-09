@@ -118,7 +118,9 @@ We now use TTsim for changed kernels, not whole-model integration. Warm backbone
 time is reported separately from build/loading time and **is not committed TG**.
 [Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34410668392)
 failed before device execution on Python-version compatibility; the retry fixes
-that and checks compatibility before compilation. [Layer evidence](docs/dspark-learned-layer-2026-09-10.md).
+that and checks compatibility before compilation.
+[Retry run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34411942931)
+and [layer evidence](docs/dspark-learned-layer-2026-09-10.md).
 No DSpark TG result yet.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,

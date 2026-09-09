@@ -382,6 +382,10 @@ runtime; a new content-addressed cache preserves that isolated library for
 subsequent runs, keyed by the pinned image, build scripts and registration patch.
 Cache restores verify both library paths and reapply the audited CCL source
 patches. Cache hits and timing are recorded; savings are not yet measured.
+Retry [`34411942931`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34411942931)
+uses code `edf45b0f13638b5526533d5afa59e5748dea29e0`; 1,222 host tests pass
+before dispatch. It remains the same complete FC/five-layer scope, not a
+reduced matrix or a target-generation benchmark.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven
