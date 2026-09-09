@@ -386,6 +386,19 @@ Retry [`34411942931`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen
 uses code `edf45b0f13638b5526533d5afa59e5748dea29e0`; 1,222 host tests pass
 before dispatch. It remains the same complete FC/five-layer scope, not a
 reduced matrix or a target-generation benchmark.
+This retry also stopped before device execution, but **before rebuilding**:
+the container ran for about 4.36 seconds before the source gate rejected its
+modified `slice.cpp`. The image contains an additional tile-window narrowing
+optimization absent from the simulated runtime. The retained hardware source
+and local original share revision `9f9cd4f`; their exact diff is 39 added lines.
+
+For this disposable 32-row DSpark integration only, the launcher now restores
+the exact simulator-tested `slice.cpp` from the pinned Git object before build.
+Both the image source hash and restored hash are checked; unknown versions
+still fail. The strict source gate and full integration matrix are unchanged.
+Serving and other experiment runtimes keep their existing slice implementation.
+The runtime cache key includes this restoration, so it cannot reuse a differently
+built library. Twelve targeted restoration/cache/compatibility checks pass.
 
 The next target adapter is prepared separately in `dspark_target.py`: borrow
 the real target's `.embd`, gather its hidden shards, zero-pad after the seven

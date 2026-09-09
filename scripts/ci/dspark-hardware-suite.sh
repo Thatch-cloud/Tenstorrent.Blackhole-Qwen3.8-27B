@@ -10,6 +10,7 @@ test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
 export PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+python3 /experiment-scripts/ci/dspark_native_restore.py
 python3 /experiment-scripts/ci/dspark-pipeline-hardware.py --preflight \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json

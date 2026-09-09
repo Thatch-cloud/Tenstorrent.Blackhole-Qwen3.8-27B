@@ -120,7 +120,9 @@ time is reported separately from build/loading time and **is not committed TG**.
 failed before device execution on Python-version compatibility; the retry fixes
 that and checks compatibility before compilation.
 [Retry run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34411942931)
-and [layer evidence](docs/dspark-learned-layer-2026-09-10.md).
+then caught a slice-source mismatch before rebuilding. The disposable integration
+runtime now restores the exact simulator-tested source; serving stays unchanged.
+[Layer evidence](docs/dspark-learned-layer-2026-09-10.md).
 No DSpark TG result yet.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,

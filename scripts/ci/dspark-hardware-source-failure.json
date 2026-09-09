@@ -1,0 +1,16 @@
+{
+  "run_id": 34411942931,
+  "source_revision": "edf45b0f13638b5526533d5afa59e5748dea29e0",
+  "artifact_id": 10127592756,
+  "conclusion": "failure",
+  "container_exit_status": 1,
+  "container_started_at": "2026-09-09T22:23:53.67307657Z",
+  "container_finished_at": "2026-09-09T22:23:58.032642288Z",
+  "container_log_sha256": "c06054d80d159d91399c8b9f11f68bcd2216dcca20a052aaec35a2f272724cd5",
+  "failed_stage": "native source compatibility preflight",
+  "mismatched_source": "ttnn/cpp/ttnn/operations/data_movement/slice/slice.cpp",
+  "runtime_build_started": false,
+  "backbone_executed": false,
+  "committed_tg": null,
+  "scope": "Early source compatibility rejection; not a device or numerical test result"
+}

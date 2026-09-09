@@ -83,7 +83,7 @@ def main():
         'dspark_pipeline.py','dspark_backbone_mesh.py','dspark-pipeline-hardware.py','dspark_hardware_gate.py',
         'dspark_backend_reference.py','dspark_backend_attribution.py','dspark_upstream_backbone.py',
         'dspark_rope_reference.py','dspark-hardware-fixtures.py','run-dspark-hardware.sh','dspark-hardware-suite.sh'}
-    source_names.update(('dspark_runtime_cache.py','ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py'))
+    source_names.update(('dspark_runtime_cache.py','dspark_native_restore.py','ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py'))
 
     def source_hashes():
         return {name:digest(Path(__file__).parent/name) for name in sorted(source_names)}

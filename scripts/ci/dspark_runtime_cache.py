@@ -13,7 +13,8 @@ from dspark_hardware_gate import digest
 
 
 IMAGE = 'sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465'
-BUILDERS = ('ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py','dspark_runtime_cache.py','dspark_hardware_gate.py')
+BUILDERS = ('ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py','dspark_runtime_cache.py',
+    'dspark_hardware_gate.py','dspark_native_restore.py')
 
 
 def cache_key(inputs):
@@ -52,6 +53,10 @@ def main():
             or os.environ.get('TT_METAL_HOME')!='/opt/tt-metal'):
         raise ValueError('Allocated pinned hardware container required for native runtime cache')
     root,scripts = Path('/opt/tt-metal'),Path(__file__).parent
+    from dspark_native_restore import SOURCE, SIMULATED_SHA256
+
+    if digest(root/SOURCE)!=SIMULATED_SHA256:
+        raise ValueError('Exact simulated slice source required before build/cache restore')
     patch = Path('/tmp/ccl-graft-registration.patch')
     cache,output = Path('/experiment-cache/dspark-native-v1'),Path('/experiment/results')
     inputs = dict(image=IMAGE,builders={name:digest(scripts/name) for name in BUILDERS},registration_patch=digest(patch))
