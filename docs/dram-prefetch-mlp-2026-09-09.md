@@ -1,6 +1,6 @@
-# Next verifier experiment: DRAM-core weight prefetch
+# Next verifier experiment: streamed MLP weights
 
-**Not implemented or performance-qualified.** The current request verifier is
+**Transport prototype only; matmul and performance unqualified.** The current request verifier is
 about 62 ms; draft-only improvements cannot deliver the 200-TG target at the
 measured 4K acceptance rate. Projection execution and weight movement are next.
 
@@ -35,10 +35,55 @@ PCIe loading, QSFP weight loading or spare Tensix producer kernels.
   (at least 19.12.0.0) and either no harvested DRAM channels or a single device.
   Do not assume this is available on our pair or bypass its capability check.
 - Local simulator capability is false; no prefetch kernel has run there.
-  The next request CI run records the real pair's capability without starting it.
+  Hardware run34314276820 also reports false with the API present. No DRISC
+  kernel ran on the pair, and the specific firmware/harvesting cause is unproven.
 
-Next gates: verify hardware capability, simulate unchanged projection math and
-weight layout, then qualify the supported hardware producer/consumer protocol,
-changed-input replay and complete-MLP ABBA. Any simulator protocol limitation must
-remain explicit. No firmware, native source or serving-default change is authorized
+The programmable-DRAM route stops at its capability gate. The worker alternative
+below must separately qualify transport, unchanged projection math, complete-MLP
+ABBA and request throughput. No firmware or serving-default change is authorized
 by this experiment description.
+
+## Tensix alternative
+
+Do not spoof DRISC support. A new simulator-first transport experiment uses eight
+actual Tensix producer cores on the last worker row, with 68 gate/up or 80 down
+receivers on disjoint cores. Double-buffered staging and remote circular-buffer
+credits allow weight delivery to overlap consumption. The first sink copies raw
+compressed words back to DRAM; it is not a matmul or bandwidth result.
+
+The native mcast consumer uses the same remote-CB protocol but explicitly admits
+only DRAM senders today. Any later worker-sender extension needs a scoped source
+change, actual producer/consumer qualification and unchanged target math. No such
+native extension or complete-MLP integration is implemented yet.
+
+## First transport result
+
+`20260909T054848Z-409` passes the BF4 gate geometry with five K blocks
+(1,280 x 8,704 local weights, 6,266,880 compressed bytes per chip). This is only
+one quarter of the full gate matrix. Eight sender cores feed all 68 receivers,
+including unequal receiver counts per sender and repeated two-page FIFO wrap.
+
+- Eight eager comparisons, twelve changed-input trace comparisons and four
+  stale-input controls pass; two independent GCBs and traces remain live.
+- Both chips use different synthetic data, with two input patterns. Every raw
+  packed word matches an independent direct-DRAM copy; weights stay unchanged.
+- Trace input/output addresses remain stable. Trace release and mesh close pass.
+- The runtime is unmodified, including the original packer. No DRISC kernel runs.
+- 924 CI tests and 55 simulator-harness tests pass. These are host test counts,
+  not additional hardware or kernel correctness results.
+
+The checked-in report is `scripts/ci/tensix-stream-simulator-gate-5.json`, SHA256
+`0b321c801717777c63c33d36f3ee045f7b55242cbc1fa10d50b1200dfa8e9226`.
+`tensix_stream_gate.py` independently checks source hashes, geometry, every audit
+coordinate and clean termination. Logs and exit status are archived under
+`hardware-evidence.local/tensix-weight-stream/`.
+
+The BF8 five-block test also passes the same complete audit matrix and clean
+closure, using 80 receivers and 6,963,200 compressed bytes per chip. Report
+`scripts/ci/tensix-stream-simulator-down-5.json` has SHA256
+`6513206df406f181db8f1defde193040378c4d5cc5e47a40fc30a91f52f9f662`.
+This is still only 1,280 of the required 8,704 K rows.
+
+Full-size BF4/BF8 tests are running sequentially, stopping on failure.
+Transport alone does not qualify matmul, useful overlap,
+bandwidth, fabric weight loading or a new TG rate.

@@ -114,10 +114,22 @@ output rows on both chips, including changed inputs and both traces live.
 The hardware gate is a matched 4K complete-request ABBA: cached history, fused
 convolution, commit-only target verification and four links remain in both arms.
 It reports PP / CTX / committed TG, not the attention microkernel rate.
+Run34314276820 passes all complete-request correctness audits, but candidate
+TG54.21 is below control59.42. The stalled candidate sample remains included.
+Same-code run34315861448 also passes correctness: candidate61.53/control59.13 TG.
+Pooling all eight measured requests across both runs gives candidate57.64 versus
+control59.27 TG (-2.76%). No samples are removed; there is no TG promotion.
 [Scope, padding proof and gates](live-query-attention-2026-09-09.md).
 
-Next verifier work is [DRAM-core weight prefetch](dram-prefetch-mlp-2026-09-09.md),
-subject to the pair's actual firmware/harvesting capability. A separate
+The pair's programmable-DRAM prefetch capability is false, with the API present;
+the specific firmware/harvesting cause is not established. Next verifier work
+uses [real Tensix weight-stream producers](dram-prefetch-mlp-2026-09-09.md), without
+spoofing DRISC support. Eight sender cores feed 68 gate/up or 80 down receivers.
+The five-block BF4 and BF8 simulations each pass eight eager, twelve changed-input
+trace and four stale-input checks across both chips, with exact compressed words
+and clean closure. Full projection sizes and matmul integration are next; this
+is not a bandwidth or TG result. 924 CI and 55 simulator-harness host tests pass.
+A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must
 not turn failed native-attention numerical tests into passing exactness claims.

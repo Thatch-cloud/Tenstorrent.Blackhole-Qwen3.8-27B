@@ -82,7 +82,7 @@ Artifacts under `hardware-evidence.local/34310168821/artifacts/qwen-hardware-inv
 ## Request integration
 
 [Hardware run34314276820](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34314276820)
-is underway on `a1ccc70`; no request timing or correctness verdict is available yet.
+on `a1ccc70` passes exactness and independent artifact validation, but not speed.
 
 `full-dflash-live-query-request` compares the existing cached T8 lead against the
 same runtime with live-query attention enabled in all five draft layers.
@@ -116,3 +116,64 @@ Host tests: 915 CI and 55 simulator harness tests pass.
 
 Logs and exit statuses are retained in `hardware-evidence.local/live-query-integration-sim/`.
 No additional PP/TG claim or serving-default change.
+
+## Complete-request hardware result
+
+| Measured order | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Control | 1,721.91 | 4,096 | 58.65 |
+| Live query | 3,265.19 | 4,096 | 60.48 |
+| Live query | 3,333.88 | 4,096 | 49.12 |
+| Control | 3,332.89 | 4,096 | 60.21 |
+
+Pooled within each arm, control is PP 2,270.69 / TG 59.42 and candidate is
+PP 3,299.18 / TG 54.21: **8.77% lower committed throughput**. All four requests
+commit 121 decode tokens through EOS, with identical 17-block trajectories and
+105 accepted proposals out of 119. All token, state, cache and feature audits pass.
+
+The second candidate has draft calls of 165.73 and 141.25 ms; its largest commit
+call is 62.84 ms. The verifier remains about 62 ms in every request. These stalls
+are retained, not discarded. Prefill is unchanged by this candidate, so its PP
+difference is not an optimization claim. Total request means are 8.087 s control
+and 8.063 s candidate; that does not establish a reliable speed improvement.
+The same-code full ABBA repeat is recorded below. The exact integration remains
+opt-in and unpromoted.
+
+The pair reports `is_tensor_prefetcher_supported=false` with the API present.
+This establishes lack of support, not whether firmware or harvesting is the
+cause. No DRISC kernel ran. Investigate a real Tensix producer instead.
+
+Request artifact SHA256:
+`053812022be2caaf81934ce34248774670968c30199dc2468302754fb6cefc9b`.
+
+## Same-code repeat and combined result
+
+[Run34315861448](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34315861448)
+passes all correctness audits and independent artifact qualification. Same source
+`a1ccc70`, same 4K prompt, single stream and identical 121-token/17-block/105-of-119
+acceptance trajectories; no optimization change between runs.
+
+| Repeat measured order | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Control | 3,280.10 | 4,096 | 61.21 |
+| Live-query candidate | 3,241.61 | 4,096 | 62.38 |
+| Live-query candidate | 3,267.83 | 4,096 | 60.69 |
+| Control | 3,189.98 | 4,096 | 57.18 |
+
+Repeat pooled TG is **61.53 candidate versus 59.13 control (+4.06%)**. Mean
+complete request time is 7.431 s candidate versus 7.326 s control. The second
+candidate still has a 45.89-ms commit call; neither run is filtered for stalls.
+
+| Both runs, four measured requests per arm | PP tok/s | CTX | Committed TG tok/s | Mean complete request |
+| --- | ---: | ---: | ---: | ---: |
+| Control | 2,668.19 | 4,096 | 59.27 | 7.706 s |
+| Live-query candidate | 3,276.77 | 4,096 | 57.64 | 7.747 s |
+
+Combined TG is **2.76% lower**, using total committed tokens divided by total
+decode time, not an arithmetic average of rates. The repeat does not erase the
+earlier stalled request. PP variation cannot be credited to a decode-only change.
+Do not promote this as a reliable request-speed improvement. Prioritize the
+roughly 62-ms target verifier rather than running more attention-only repeats.
+
+Repeat artifact SHA256:
+`91f20605ecc4685289723b226920892c6f4328faf9e8bba0c5f62f2567c6c260`.

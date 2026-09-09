@@ -4,48 +4,25 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
-**Best measured: 78.06 committed tok/s at CTX 170, one stream**, using captured DFlash2, commit-only GDN
-and fused draft convolution. Two complete responses reach EOS at 77.96 / 78.17 TG, with exact native
-tokens, GDN state, valid KV and inactive slots. A separate request audits every
-committed feature row, captured proposal and pre-decision GDN state.
-All 880 learned-convolution comparisons match the composed implementation.
-The matched ABBA control reaches 72.21 TG: **8.10% improvement**.
-[Best short-context run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
+## Current position
 
-This is a single-task experiment, not held-out coding quality or a serving result.
-Earlier MTP reaches58.33 TG; ordinary decoding is about19.47 TG. These are not
-matched DFlash-versus-MTP comparisons.
+- **Best single stream: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
+  commit-only GDN and fused draft convolution improve the matched control by
+  8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
+- **Longer inputs:** cached 4K comparisons reach about 60-62 TG; the uncached
+  8K repeat reaches 53.48 TG. These are different workloads, not scaling guarantees.
+- **Main bottleneck:** the 4K target verifier takes about 62 ms/block, almost
+  entirely on device. [Attribution](docs/current-verifier-profile-2026-09-09.md).
+- **Attention result:** live-query attention is 7-10% faster in isolation, but
+  the two complete 4K runs pool to **57.64 TG versus 59.27 control**. Both pass
+  correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
+- **Next verifier experiment:** eight spare Tensix cores stream compressed
+  weights to 68/80 compute workers. BF4/BF8 short transport simulations pass; full
+  weights, matmul and hardware speed remain unqualified. [Gates](docs/dram-prefetch-mlp-2026-09-09.md).
 
-**4K caching reaches60.33 TG; the uncached 8K repeat reaches53.48 TG.**
-Caching improves matched4K decode by2.58%, but full requests worsen7.09->7.41 s.
-[Cache results and remaining overhead](docs/dflash-kv-cache-2026-09-09.md).
-The latest4K captured-update comparison is flat: **62.11 versus62.01 TG**.
-Current device profiling accounts for **61.54 ms of the roughly62 ms verifier**;
-matrix operations dominate. This is not primarily host-side scheduling latency.
-[Current verifier attribution](docs/current-verifier-profile-2026-09-09.md).
-**Latest kernel result: smaller MLP tiles are rejected for speed.**
-Real-weight hardware passes exact eager and changed-input trace checks, but
-native execution takes **0.33481 ms** versus **0.35055 ms** for the candidate:
-**4.70% slower**, including conversions and four-link communication.
-All nine ABBA blocks regress. This is a single-layer result, not a TG change.
-[Evidence and harness fixes](docs/tiny-tile-projections-2026-09-09.md).
-The 48-comparison simulator pass established correctness, not performance.
-**Next candidate:** skipping unused draft-query QK rows passes simulation and
-hardware exactness. Captured attention latency falls **7.3% at 31 draft-history
-rows and 9.5% at 2K**. The opt-in full-request comparison is being qualified;
-these component results do not establish a new TG rate.
-[Live-query experiment](docs/live-query-attention-2026-09-09.md).
-**Hardware test underway:** [matched 4K request ABBA](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34314276820).
-Both integration simulations pass. This run measures PP / CTX / committed TG for
-one coding stream, with cached draft history and four links retained in both arms.
-Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
-Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
-costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
-60.74 TG; T8 stays the lead. Longer-context DFlash initialization must be qualified
-before attributing this short-context rate to larger coding inputs. The 4K run
-measures drafting at 54.57 ms/block and verification at 61.87 ms/block.
-Native drafter SDPA remains disabled after its failed numerical gate.
-[Fused-convolution results and limits](docs/dflash-fused-convolution-2026-09-09.md).
+Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
+Native drafter SDPA remains disabled after its numerical gate failed. All rates
+below are offline coding-task experiments, not held-out quality or serving certification.
 
 ## Setup
 

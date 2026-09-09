@@ -1,0 +1,696 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator-only compressed-weight transport; no matmul, bandwidth or TG claim.",
+  "geometry": {
+    "projection": "down",
+    "blocks": 5,
+    "rows": 1280,
+    "width": 5120,
+    "dtype": "bfloat8_b",
+    "receivers": 80,
+    "tile_bytes": 1088,
+    "per_receiver": 2,
+    "key_block_tiles": 8,
+    "page_bytes": 17408,
+    "coordinates": [
+      [
+        0,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        4,
+        0
+      ],
+      [
+        5,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        7,
+        0
+      ],
+      [
+        8,
+        0
+      ],
+      [
+        9,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        1
+      ],
+      [
+        2,
+        1
+      ],
+      [
+        3,
+        1
+      ],
+      [
+        4,
+        1
+      ],
+      [
+        5,
+        1
+      ],
+      [
+        6,
+        1
+      ],
+      [
+        7,
+        1
+      ],
+      [
+        8,
+        1
+      ],
+      [
+        9,
+        1
+      ],
+      [
+        10,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        2
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        4,
+        2
+      ],
+      [
+        5,
+        2
+      ],
+      [
+        6,
+        2
+      ],
+      [
+        7,
+        2
+      ],
+      [
+        8,
+        2
+      ],
+      [
+        9,
+        2
+      ],
+      [
+        10,
+        2
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        3
+      ],
+      [
+        4,
+        3
+      ],
+      [
+        5,
+        3
+      ],
+      [
+        6,
+        3
+      ],
+      [
+        7,
+        3
+      ],
+      [
+        8,
+        3
+      ],
+      [
+        9,
+        3
+      ],
+      [
+        10,
+        3
+      ],
+      [
+        0,
+        4
+      ],
+      [
+        1,
+        4
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        5,
+        4
+      ],
+      [
+        6,
+        4
+      ],
+      [
+        7,
+        4
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        9,
+        4
+      ],
+      [
+        10,
+        4
+      ],
+      [
+        0,
+        5
+      ],
+      [
+        1,
+        5
+      ],
+      [
+        2,
+        5
+      ],
+      [
+        3,
+        5
+      ],
+      [
+        4,
+        5
+      ],
+      [
+        5,
+        5
+      ],
+      [
+        6,
+        5
+      ],
+      [
+        7,
+        5
+      ],
+      [
+        8,
+        5
+      ],
+      [
+        9,
+        5
+      ],
+      [
+        10,
+        5
+      ],
+      [
+        0,
+        6
+      ],
+      [
+        1,
+        6
+      ],
+      [
+        2,
+        6
+      ],
+      [
+        3,
+        6
+      ],
+      [
+        4,
+        6
+      ],
+      [
+        5,
+        6
+      ],
+      [
+        6,
+        6
+      ],
+      [
+        7,
+        6
+      ],
+      [
+        8,
+        6
+      ],
+      [
+        9,
+        6
+      ],
+      [
+        10,
+        6
+      ],
+      [
+        0,
+        7
+      ],
+      [
+        1,
+        7
+      ],
+      [
+        2,
+        7
+      ]
+    ],
+    "mapping": [
+      [
+        [
+          0,
+          9
+        ],
+        [
+          0,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56,
+          64,
+          72
+        ]
+      ],
+      [
+        [
+          1,
+          9
+        ],
+        [
+          1,
+          9,
+          17,
+          25,
+          33,
+          41,
+          49,
+          57,
+          65,
+          73
+        ]
+      ],
+      [
+        [
+          2,
+          9
+        ],
+        [
+          2,
+          10,
+          18,
+          26,
+          34,
+          42,
+          50,
+          58,
+          66,
+          74
+        ]
+      ],
+      [
+        [
+          3,
+          9
+        ],
+        [
+          3,
+          11,
+          19,
+          27,
+          35,
+          43,
+          51,
+          59,
+          67,
+          75
+        ]
+      ],
+      [
+        [
+          4,
+          9
+        ],
+        [
+          4,
+          12,
+          20,
+          28,
+          36,
+          44,
+          52,
+          60,
+          68,
+          76
+        ]
+      ],
+      [
+        [
+          5,
+          9
+        ],
+        [
+          5,
+          13,
+          21,
+          29,
+          37,
+          45,
+          53,
+          61,
+          69,
+          77
+        ]
+      ],
+      [
+        [
+          6,
+          9
+        ],
+        [
+          6,
+          14,
+          22,
+          30,
+          38,
+          46,
+          54,
+          62,
+          70,
+          78
+        ]
+      ],
+      [
+        [
+          7,
+          9
+        ],
+        [
+          7,
+          15,
+          23,
+          31,
+          39,
+          47,
+          55,
+          63,
+          71,
+          79
+        ]
+      ]
+    ],
+    "full_projection": false
+  },
+  "operand_scope": "Two synthetic compressed weight patterns, independent data on each chip",
+  "sources": {
+    "tensix-weight-stream-probe.py": "31f266f80b757e5ea89eccab05d2ba162030f6fba76a6faa39745849ca77621d",
+    "tensix_weight_stream.py": "709c2d0249336c6def87daf8f7908b3a7c9f7a2f00e3070f2d1ec539b331ec27",
+    "tensix_weight_stream_reader.cpp": "733e58d5ef414069d3b67ce1d0058225e008aff9b72e8b37ed2f5cb087a2233b",
+    "tensix_weight_stream_writer.cpp": "e0f811a6779a3be2bd5b6e240ab0a0111864269272e623cfd0db518516d90e06",
+    "tensix_weight_stream_sink.cpp": "46884e2838f65859b76bd188c4d1b64aef94b4483d33fb0087fbc61aa878a34a",
+    "tensix_weight_stream_raw.cpp": "5a1f387a487107a42c2913d9de7c621265652483ddb7fd9ddb95c78cd1bb5bfc",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources": {
+    "tt_metal/hw/inc/api/remote_circular_buffer.h": "b1654602508e59ae24a4b5db2aae91c862886b770b163ed28b7cfd20590a1f10",
+    "tt_metal/impl/buffers/global_circular_buffer.cpp": "a96e53bb1143e6c9fdb51e713afcc3e039c479a6338f58c1dc69af8ef19f2310",
+    "ttnn/core/global_circular_buffer.cpp": "38bc98ca0c32f37e8c694f47dced22a42fa2d503cb512d46e88fd42695ea3f0c",
+    "ttnn/cpp/ttnn-nanobind/program_descriptors.cpp": "43218ce7e48584373bef0fb8cc2706f8a0d0161e03de17ae7fa9f12b5cdb64a3"
+  },
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    }
+  ],
+  "negative_controls": [
+    {
+      "arm": 0,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 0,
+      "chip": 1,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 1,
+      "stale_detected": true
+    }
+  ]
+}
