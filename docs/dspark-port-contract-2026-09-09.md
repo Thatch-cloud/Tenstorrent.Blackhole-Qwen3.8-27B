@@ -1,6 +1,6 @@
 # DSpark v2: port contract, not a speed result
 
-**Status: native selector prototype passes its small simulator gate; learned full-vocabulary test running.**
+**Status: small simulator gate passes; learned FP32-score gate fails, with native matmul rounding isolated.**
 No integrated DSpark backbone, acceptance or hardware throughput result exists yet.
 The native-attention DFlash2 candidate now reaches74.27 committed TG at CTX4,096
 across two matched runs. Its roughly62ms T8 verifier exceeds the entire35.59ms
@@ -53,8 +53,8 @@ sequential feedback, batch isolation, full-vocabulary selection, ties, empty
 blocks, nonfinite/overflow rejection, input immutability and metadata mismatch.
 The width15 synthetic case tests indexing, not trained acceptance or TT support.
 It does not certify BF16 GPU/TT rounding or stochastic sampling.
-The expanded DSpark suite now has33 CPU tests; the complete CI host suite passes
-1,054 tests and the simulator harness passes57. No qualified DFlash2/target
+The expanded DSpark suite has36 CPU tests; the complete CI host suite passes
+1,057 tests and the simulator harness passes57. No qualified DFlash2/target
 runtime source is changed by this separate port work.
 
 ## Native Markov selector prototype
@@ -68,7 +68,7 @@ integration is not covered by this gate.
 | Simulator gate | Scope | Result |
 | --- | --- | --- |
 | `20260909T113815Z-406` | Synthetic64-token vocabulary;3 sequential proposals; both chips | Pass:80 checks, clean close, outer exit0 |
-| `20260909T113949Z-365` | Learned full248,320-token vocabulary;7 sequential proposals; both chips | Running; no result yet |
+| `20260909T113949Z-365` | Learned full248,320-token vocabulary;7 sequential proposals; both chips | Fails original FP32 score gate; clean close, outer exit1 |
 
 The small gate covers18 eager token/score checks,24 changed-input trace checks,
 28 input-immutability checks,8 weight checks and2 missing-update controls. Every
@@ -79,11 +79,48 @@ Its report SHA256 is
 `f3246494e332724490f5e85398c74c2674d7bc67a1e7d57e3add57ef767253fa`.
 The report and outer exit are preserved in `scripts/ci/dspark-markov-simulator-64.*`.
 
-The learned test must additionally pass100 checks with both complete learned
+The learned test was required to pass100 checks with both complete learned
 matrices, synthetic base logits, exact greedy IDs and stable device feedback.
 It compares FP32 prototype scores at1e-4 relative/absolute tolerance, not
 bitwise SGLang BF16 arithmetic. No backbone, target features, full model,
 accepted-token rate or hardware timing is established by either selector test.
+
+### Learned failure and arithmetic diagnostic
+
+The first learned score comparison fails:53,427/248,320 values (21.5%) exceed
+the original1e-4 relative/absolute threshold. Maximum absolute difference is
+0.0025434494 at vocabulary ID1340. Only the four initial matrix-immutability
+checks complete; no eager numerical, replay or device-feedback qualification
+is recorded. Native/source fingerprints remain unchanged and cleanup succeeds.
+The failed report remains rejected by the original gate. SHA256:
+`adefd2e09ab7f835fba635129db85ad82bad1ba19378c2b2a0eda468d757dcc9`.
+
+Diagnostic `20260909T120503Z-397` isolates the same learned anchor1596 and
+vocabulary columns1312:1376, keeping the full256-term reduction. On both chips:
+
+| Diagnostic comparison | Maximum absolute difference |
+| --- | ---: |
+| Native matmul versus ordinary CPU FP32 | 0.0025445223 |
+| Native matmul versus existing Blackhole grouped-product rounding reference | **0, bitwise exact** |
+| Default addition versus FP32 addition of the actual native bias | **0** |
+| Explicit FP32 output flag versus default addition | **0** |
+
+Independent recomputation from saved operands confirms these results. The
+isolated issue is native BF16 grouped-product arithmetic, not the bias-add
+operation. The narrow diagnostic is not a full-vocabulary pass and does not
+certify every proposal. No tolerance is widened or failed report relabeled.
+
+Diagnostic report SHA256:
+`9559e951228f2caaa2708df8471737744d39b2ee8c7d34327d29a11d9648966f`.
+Saved operand SHA256:
+`d050d3be174cf85dc3b87bbd0aa0323f6fbd308fa57b3ffd68eadbbd2d049d5c`.
+Both simulator processes terminate cleanly; no hardware job is dispatched.
+
+Next evaluate an explicitly separate native-arithmetic proposal policy using
+the validated grouped-product reference, while retaining raw FP32 differences
+and the original rejected gate. Full-vocabulary deterministic feedback and
+eventual unchanged-target token/state audits remain mandatory. This is not
+permission to substitute a different arithmetic reference for target correctness.
 
 ## Complete learned weights staged
 
@@ -113,8 +150,8 @@ The header SHA256 is
 `992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1`.
 All simulator/hardware/serving eligibility flags remain false.
 
-1. Complete the learned Markov gate; validate target-feature, YaRN and full-attention
-   primitives without reusing incompatible DFlash2 assumptions. Weights are staged.
+1. Qualify the separate native-arithmetic Markov policy without erasing the FP32
+   failure; validate target-feature, YaRN and full-attention primitives. Weights are staged.
 2. Port learned primitives to TTsim, including changed inputs, masks, trace
    ownership and exact target-verifier isolation. CPU tests are not that gate.
 3. Run a complete seven-proposal hardware correctness/acceptance baseline through

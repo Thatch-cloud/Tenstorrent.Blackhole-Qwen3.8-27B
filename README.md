@@ -105,6 +105,8 @@ requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
 higher. [DSpark work](docs/dspark-port-contract-2026-09-09.md) now includes a
 native selector simulator prototype and verified learned weights; it is not
 another integrated drafter or measured speed result.
+Its learned FP32-score gate fails; a focused diagnostic isolates native matmul
+rounding, not addition. No DSpark hardware promotion follows from the small test.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

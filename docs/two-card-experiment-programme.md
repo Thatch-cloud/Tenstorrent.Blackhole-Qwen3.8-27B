@@ -20,8 +20,8 @@ acceptance remain open. No candidate sample or stall is discarded.
 **Next wider-drafter prerequisite: pinned DSpark intake.** The published v2
 checkpoint is not DFlash2-compatible: full attention, YaRN rotary tables and a
 sequential full-vocabulary Markov head replace the sliding-window/convolution/
-top16 path. Bounded metadata intake and14 CPU contract/selector tests pass;
-no learned weights or TT kernel have run. Training16 does not qualify serving15
+top16 path. The initial metadata intake and14 CPU tests qualified compatibility
+only; subsequent native selector work is below. Training16 does not qualify serving15
 proposals: the published serving convention is7 proposals/8 target rows.
 [Port boundaries and next gates](dspark-port-contract-2026-09-09.md).
 
@@ -29,9 +29,15 @@ The DSpark native selector now has a simulator-only device-feedback composition:
 embedding -> HiFi4 full-vocabulary bias -> FP32 add -> argmax -> next embedding.
 Small gate20260909T113815Z-406 passes80 checks, both chips, exact toy scores and
 clean exit0, without native runtime changes. Learned gate20260909T113949Z-365
-is running seven chained proposals over all248,320 IDs; it has no result yet.
+fails the first FP32 score comparison across248,320 IDs:21.5% mismatch, maximum
+absolute difference0.0025434494. It closes cleanly with outer exit1; no learned
+selector qualification or hardware dispatch follows. Diagnostic120503Z-397
+isolates native BF16 grouped-product matmul rounding:64 learned columns match
+the existing Blackhole arithmetic reference bitwise, while addition is exact.
+The failed FP32 gate remains rejected; a separate native-arithmetic proposal
+policy needs full-vocabulary feedback and unchanged-target correctness gates.
 Both Markov matrices are hash-pinned and agree with the completely verified
-3.714GB checkpoint. All1,054 host and57 harness tests pass. No DSpark backbone,
+3.714GB checkpoint. All1,057 host and57 harness tests pass. No DSpark backbone,
 fabric integration, acceptance or hardware throughput is certified by this work.
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
