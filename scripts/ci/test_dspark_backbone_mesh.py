@@ -2,12 +2,46 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from dspark_backbone_mesh import execute
-from dspark_layer import SPECIFICATIONS
+from dspark_backbone_mesh import PARAMETERS, execute, flatten, pack_parameter
+from dspark_layer import PHASES, SPECIFICATIONS
 from dspark_layer_mesh import INPUTS
 
 
 class DSparkBackboneMeshTests(unittest.TestCase):
+    def test_complete_parameter_inventory_and_sharding_delegation(self):
+        self.assertEqual(len(PARAMETERS),56)
+        value,result = object(),object()
+        with patch('dspark_backbone_mesh.pack_weight',return_value=result) as pack:
+            self.assertIs(pack_parameter('layers.4.mlp.down_proj.weight',value),result)
+            pack.assert_called_once_with('mlp.down_proj.weight',value)
+            with self.assertRaises(ValueError):
+                pack_parameter('layers.5.mlp.down_proj.weight',value)
+
+    def test_final_normalization_is_owned_replicated_and_bounded(self):
+        import torch
+
+        value = torch.ones(5120,dtype=torch.bfloat16)
+        packed,sharded = pack_parameter('norm.weight',value)
+        self.assertEqual(tuple(packed.shape),(1,1,1,5120))
+        self.assertIs(sharded,False)
+        self.assertNotEqual(packed.data_ptr(),value.data_ptr())
+        for invalid in (value[:2560],value.float(),torch.full_like(value,float('nan'))):
+            with self.assertRaises(ValueError):
+                pack_parameter('norm.weight',invalid)
+
+    def test_all_131_stage_bindings_are_required(self):
+        result = dict(layers=tuple({phase:{stage:object() for stage in stages} for phase,stages in PHASES.items()}
+            for layer in range(5)),final_norm=object())
+        values = flatten(result)
+        self.assertEqual(len(values),131)
+        self.assertIs(values[4,'finish','output'],result['layers'][4]['finish']['output'])
+        self.assertIs(values[-1,'final','final_norm'],result['final_norm'])
+        with self.assertRaises(ValueError):
+            flatten(dict(result,layers=result['layers'][:4]))
+        del result['layers'][3]['mlp']['down_partial']
+        with self.assertRaises(ValueError):
+            flatten(result)
+
     def test_five_layers_chain_without_mutating_borrowed_inputs(self):
         runtime,collectives,retain = MagicMock(),MagicMock(),MagicMock()
         mesh = SimpleNamespace(shape=(1,2))
