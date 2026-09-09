@@ -4,6 +4,11 @@
 This follows the [device profile](tensix-mlp-device-profile-2026-09-09.md), which
 locates the eight-producer design's regression inside gate/up/down.
 
+The real-weight hardware comparison is dispatched as
+[CI34337968780](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34337968780)
+on immutable tag `ci-qwen-hardware-ca22384`. A completed artifact and independent
+validation are required before reporting a hardware result.
+
 | Setting | Eight-producer prototype | New candidate |
 | --- | --- | --- |
 | Weight-reading workers per card | 8 | 16 |

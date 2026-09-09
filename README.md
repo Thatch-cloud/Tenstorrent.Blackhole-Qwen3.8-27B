@@ -23,7 +23,8 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   [Device attribution](docs/tensix-mlp-device-profile-2026-09-09.md) locates the
   slowdown in gate/up/down, not the copy or collective.
   [Sixteen producers](docs/tensix-sixteen-producers-2026-09-09.md) pass all188
-  full-size simulator checks; the original runtime is restored. Hardware ABBA is next.
+  full-size simulator checks; the original runtime is restored.
+  [Hardware ABBA is dispatched](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34337968780); no result yet.
 - **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
   62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).

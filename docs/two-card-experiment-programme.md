@@ -175,8 +175,10 @@ simulator-qualified. Run20260909T092252Z-403 passes all188 complete-MLP checks,
 clean teardown and outer exit0;998 CI and57 simulator-harness tests pass.
 Its own source-bound sixteen-producer report and exit are checked in unchanged.
 The original packer and both native binaries are verified, and both independent
-simulator gates pass against the restored runtime. Hardware ABBA is next; no
-new performance result or serving-default change follows from simulation.
+simulator gates pass against the restored runtime. Hardware ABBA is dispatched
+as[34337968780](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34337968780)
+on immutable `ci-qwen-hardware-ca22384`; no result yet. No new performance result
+or serving-default change follows from simulation.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must
