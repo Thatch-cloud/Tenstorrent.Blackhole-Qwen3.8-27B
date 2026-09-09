@@ -25,6 +25,15 @@ no learned weights or TT kernel have run. Training16 does not qualify serving15
 proposals: the published serving convention is7 proposals/8 target rows.
 [Port boundaries and next gates](dspark-port-contract-2026-09-09.md).
 
+The DSpark native selector now has a simulator-only device-feedback composition:
+embedding -> HiFi4 full-vocabulary bias -> FP32 add -> argmax -> next embedding.
+Small gate20260909T113815Z-406 passes80 checks, both chips, exact toy scores and
+clean exit0, without native runtime changes. Learned gate20260909T113949Z-365
+is running seven chained proposals over all248,320 IDs; it has no result yet.
+Both Markov matrices are hash-pinned and agree with the completely verified
+3.714GB checkpoint. All1,054 host and57 harness tests pass. No DSpark backbone,
+fabric integration, acceptance or hardware throughput is certified by this work.
+
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness
