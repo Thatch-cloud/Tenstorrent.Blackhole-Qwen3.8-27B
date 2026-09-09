@@ -35,6 +35,9 @@ hardware exactness. Captured attention latency falls **7.3% at 31 draft-history
 rows and 9.5% at 2K**. The opt-in full-request comparison is being qualified;
 these component results do not establish a new TG rate.
 [Live-query experiment](docs/live-query-attention-2026-09-09.md).
+**Hardware test underway:** [matched 4K request ABBA](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34314276820).
+Both integration simulations pass. This run measures PP / CTX / committed TG for
+one coding stream, with cached draft history and four links retained in both arms.
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only

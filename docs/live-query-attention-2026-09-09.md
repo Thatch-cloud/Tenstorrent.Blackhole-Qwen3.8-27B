@@ -81,6 +81,9 @@ Artifacts under `hardware-evidence.local/34310168821/artifacts/qwen-hardware-inv
 
 ## Request integration
 
+[Hardware run34314276820](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34314276820)
+is underway on `a1ccc70`; no request timing or correctness verdict is available yet.
+
 `full-dflash-live-query-request` compares the existing cached T8 lead against the
 same runtime with live-query attention enabled in all five draft layers.
 Two instrumented correctness requests precede uninstrumented control / candidate /
