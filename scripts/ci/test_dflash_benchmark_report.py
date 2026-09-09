@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from dflash_benchmark_report import markdown, report_rows
-from full_dflash_request import summarize_dflash_convolution_requests, summarize_dflash_requests
+from full_dflash_request import summarize_dflash_convolution_requests, summarize_dflash_requests, summarize_dflash_projection_requests
 import test_full_dflash_request as fixtures
 
 
@@ -35,6 +35,15 @@ class DFlashBenchmarkReportTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['pp_tokens_per_second'], 200)
         self.assertEqual(rows[0]['tg_tokens_per_second'], 40)
+
+    def test_projection_capture_is_not_misclassified_as_enabling_the_cache(self):
+        requests = fixtures.FullDFlashRequestTests().projection_requests()
+        report = dict(passed=True, context_lengths=[2], request_checks=requests,
+            request_summary=summarize_dflash_projection_requests(requests))
+        rows = report_rows(report)
+        self.assertTrue(all('cached draft K/V' in row['path'] for row in rows))
+        self.assertNotIn('captured K/V update', rows[0]['path'])
+        self.assertIn('captured K/V update', rows[1]['path'])
 
     def test_failed_incomplete_or_inconsistent_artifacts_are_rejected(self):
         for mutation in ('failed', 'incomplete', 'context', 'recorded_context', 'streams', 'rate', 'audit', 'state'):

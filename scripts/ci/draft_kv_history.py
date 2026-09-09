@@ -9,18 +9,19 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class DraftKVHistory:
-    def __init__(self, operations, mesh, parameters, features, *, position, history_rows):
+    def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False):
         import torch
 
         parameters = tuple(parameters)
         if (type(position) is not int or not 1 <= position <= 262112
                 or type(history_rows) is not int or history_rows != min(position, 2048)
-                or not 1 <= len(parameters) <= 5):
+                or not 1 <= len(parameters) <= 5 or type(capture_projection) is not bool):
             raise ValueError('Bounded absolute draft frontier and explicit learned layers required')
         self.operations, self.mesh, self.parameters = operations, mesh, parameters
         self.position, self.history_rows = position, history_rows
         self.owned, self.active, self.spare = [], [], []
         self.checks = []
+        self.projection = None
         self.pending, self.closed = None, False
         try:
             self.query = self.upload(torch.zeros((1, 1, 32, 2048), dtype=torch.bfloat16))
@@ -39,6 +40,10 @@ class DraftKVHistory:
                     self.active.append(active)
                     self.spare.append(spare)
             operations.synchronize_device(mesh)
+            if capture_projection:
+                from draft_kv_projection_trace import PreparedDraftKVProjection
+
+                self.projection = PreparedDraftKVProjection(operations, mesh, parameters, self.query)
         except BaseException:
             self.close()
             raise
@@ -52,7 +57,8 @@ class DraftKVHistory:
     @contextmanager
     def temporaries(self, protected):
         owned = []
-        identities = [addresses(self.operations, value) for value in [*self.owned, *protected]]
+        projection_owned = self.projection.owned if self.projection is not None else []
+        identities = [addresses(self.operations, value) for value in [*self.owned, *projection_owned, *protected]]
         def retain(value):
             identity = addresses(self.operations, value)
             if identity not in identities:
@@ -89,8 +95,10 @@ class DraftKVHistory:
         rows = min(2048, self.history_rows + prefix)
         with self.temporaries([features]) as retain:
             inputs, tables = self.project_inputs(features, prefix, position, retain)
-            for parameter, active, spare in zip(self.parameters, self.active, self.spare, strict=True):
-                result = project_key_value(operations, inputs, self.query, tables, retain, parameters=parameter)
+            projected = self.projection.project(inputs, tables) if self.projection is not None else None
+            for layer, (parameter, active, spare) in enumerate(zip(self.parameters, self.active, self.spare, strict=True)):
+                result = projected[layer] if projected is not None else project_key_value(
+                    operations, inputs, self.query, tables, retain, parameters=parameter)
                 for name in ('k', 'v'):
                     historical = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, self.history_rows, 128)))
                     accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, prefix, 128)))
@@ -149,6 +157,8 @@ class DraftKVHistory:
         if self.pending is not None:
             self.discard(self.pending)
         self.operations.synchronize_device(self.mesh)
+        if self.projection is not None:
+            self.projection.close()
         release_owned(self.operations, self.owned)
         self.owned.clear()
         self.active.clear()

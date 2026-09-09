@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decodi
 from draft_selector import greedy_selector_reference, select_active_candidates
 from dflash_prefill_window import prefill_window, validate_prefill_chunks
 from full_dflash_request import (audit_prefill_assembly, load_dflash_fixtures, summarize_dflash_requests,
-    summarize_dflash_commit_requests, summarize_dflash_convolution_requests, summarize_dflash_cache_requests)
+    summarize_dflash_commit_requests, summarize_dflash_convolution_requests, summarize_dflash_cache_requests,
+    summarize_dflash_projection_requests)
 
 
 class FullDFlashRequestTests(unittest.TestCase):
@@ -169,6 +170,37 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertTrue(result['candidate']['cache_history'])
         self.assertFalse(result['control']['cache_history'])
         self.assertTrue(result['control']['fused_convolution'])
+
+    def projection_requests(self):
+        records = self.cache_requests()
+        for index, record in enumerate(records):
+            record.update(cache_history=True, cache_projection_capture=index in (1, 3, 4))
+            record['dflash']['cache_projection_replays'] = len(record['blocks']) if record['cache_projection_capture'] else 0
+        records[0]['dflash']['cache_checks'] = copy.deepcopy(records[1]['dflash']['cache_checks'])
+        records[0]['dflash']['history_checks'] = copy.deepcopy(records[1]['dflash']['history_checks'])
+        return records
+
+    def test_projection_abba_keeps_both_caches_and_requires_one_replay_per_block(self):
+        result = summarize_dflash_projection_requests(self.projection_requests())
+        self.assertTrue(result['control']['cache_history'])
+        self.assertTrue(result['candidate']['cache_history'])
+        self.assertFalse(result['control']['cache_projection_capture'])
+        self.assertTrue(result['candidate']['cache_projection_capture'])
+        self.assertEqual(result['candidate_over_control'], 2)
+        for mutation in ('missing', 'extra', 'control', 'cache', 'flag', 'audit'):
+            records = self.projection_requests()
+            if mutation in ('missing', 'extra'):
+                records[3]['dflash']['cache_projection_replays'] = 0 if mutation == 'missing' else 2
+            elif mutation == 'control':
+                records[2]['dflash']['cache_projection_replays'] = 1
+            elif mutation == 'cache':
+                records[2]['cache_history'] = False
+            elif mutation == 'flag':
+                records[3]['cache_projection_capture'] = 1
+            else:
+                records[0]['dflash']['history_checks'] = []
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                summarize_dflash_projection_requests(records)
         self.assertEqual(result['candidate_over_control'], 2)
 
     def test_cache_abba_rejects_missing_corrupt_or_timed_audits_and_mixed_arms(self):
@@ -322,6 +354,17 @@ class FullDFlashRequestTests(unittest.TestCase):
                 '--request-pilot', '--norm-batch'], env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Historical K/V cache ABBA requires', result.stderr)
+
+    def test_projection_experiment_rejects_unisolated_or_wrong_geometry_before_hardware(self):
+        base = dict(os.environ, QWEN_DFLASH_CONTEXT='4096', QWEN_DFLASH_CAPTURE='1', QWEN_DFLASH_DRAFTS='7',
+            QWEN_DFLASH_PROJECTION_ABBA='1', QWEN_DFLASH_CACHE_ABBA='0', QWEN_DFLASH_CONVOLUTION_ABBA='0',
+            QWEN_DFLASH_COMMIT_ABBA='0', QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        for key, value in (('QWEN_DFLASH_CONTEXT', '8192'), ('QWEN_DFLASH_CAPTURE', '0'), ('QWEN_DFLASH_DRAFTS', '31'),
+                ('QWEN_DFLASH_CACHE_ABBA', '1'), ('QWEN_DFLASH_CONVOLUTION_ABBA', '1'), ('QWEN_DFLASH_PROJECTION_ABBA', 'yes')):
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
+                '--request-pilot', '--norm-batch'], env={**base, key: value}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('K/V-projection ABBA requires', result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

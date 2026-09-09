@@ -110,6 +110,11 @@ def main():
     dflash_convolution_abba = os.environ.get('QWEN_DFLASH_CONVOLUTION_ABBA', '0')
     dflash_context = os.environ.get('QWEN_DFLASH_CONTEXT', '0')
     dflash_cache_abba = os.environ.get('QWEN_DFLASH_CACHE_ABBA', '0')
+    dflash_projection_abba = os.environ.get('QWEN_DFLASH_PROJECTION_ABBA', '0')
+    if dflash_projection_abba not in ('0', '1') or (dflash_projection_abba == '1' and
+            (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
+             or dflash_commit_abba != '0' or dflash_convolution_abba != '0' or dflash_cache_abba != '0')):
+        parser.error('K/V-projection ABBA requires the isolated cached 4K T8 lead')
     if dflash_cache_abba not in ('0', '1') or (dflash_cache_abba == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or dflash_commit_abba != '0' or dflash_convolution_abba != '0')):
@@ -804,6 +809,7 @@ def main():
                 if dflash_drafts != '0':
                     from full_dflash_request import measure_dflash_request, summarize_dflash_requests, summarize_dflash_commit_requests
                     from full_dflash_request import summarize_dflash_convolution_requests, summarize_dflash_cache_requests
+                    from full_dflash_request import summarize_dflash_projection_requests
                     output_path = root / 'full-dflash-request.json'
                     report.update(scope='Complete five-layer DFlash2 coding request; exact target verification, not held-out quality certification',
                         context_lengths=[len(prompt)], request_checks=[])
@@ -825,17 +831,23 @@ def main():
                         if dflash_cache_abba == '1':
                             arms = tuple((True, True, audit, cached) for cached, audit in
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
-                        for commit_only, fused_convolution, feature_audit, cache_history in arms:
+                        arms = tuple((*arm, False) for arm in arms)
+                        if dflash_projection_abba == '1':
+                            arms = tuple((True, True, audit, True, capture_projection) for capture_projection, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
                                 commit_only_gdn=commit_only, fused_convolution=fused_convolution,
                                 cache_history=cache_history,
+                                cache_projection_capture=cache_projection_capture,
                                 repetition=len(report['request_checks']))), flush=True)
                             result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
                                 kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
                                 proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only,
-                                fused_convolution=fused_convolution, cache_history=cache_history)
+                                fused_convolution=fused_convolution, cache_history=cache_history,
+                                cache_projection_capture=cache_projection_capture)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -847,6 +859,8 @@ def main():
                         summarize = summarize_dflash_convolution_requests
                     if dflash_cache_abba == '1':
                         summarize = summarize_dflash_cache_requests
+                    if dflash_projection_abba == '1':
+                        summarize = summarize_dflash_projection_requests
                     report['request_summary'] = summarize(report['request_checks'])
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)

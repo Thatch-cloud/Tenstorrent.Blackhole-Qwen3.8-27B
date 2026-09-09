@@ -17,6 +17,7 @@ from draft_attention_fixture import TENSORS as ATTENTION
 from draft_convolution_fixture import TENSORS as CONVOLUTION, verified_bytes, verified_tensor
 from draft_convolution_fused import checked_convolution
 from draft_kv_history import DraftKVHistory
+from draft_kv_projection import project_key_value
 from draft_remaining_layers_fixture import specifications, TENSOR_SHA256
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
@@ -27,15 +28,16 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--layer', type=int, choices=(1, 2, 3, 4), default=1)
+    parser.add_argument('--capture-projection', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     import torch
     import ttnn
 
     report = dict(passed=False, scope=__doc__, layer=options.layer, head_checks=[], replay_checks=[],
-        unchanged_checks=[], negative_controls=[], hashes={name:
+        unchanged_checks=[], negative_controls=[], projection_checks=[], capture_projection=options.capture_projection, hashes={name:
             hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in (
-                'draft-kv-history-probe.py', 'draft_kv_history.py', 'draft_kv_projection.py', 'draft_attention_branch.py',
+                'draft-kv-history-probe.py', 'draft_kv_history.py', 'draft_kv_projection.py', 'draft_kv_projection_trace.py', 'draft_attention_branch.py',
                 'dflash_device.py', 'dflash_proposal_trace.py', 'dflash_proposal_inputs.py', 'draft_head_layout.py',
                 'draft_convolution_fused.py', 'draft_convolution_fused_compute.cpp', 'draft_convolution_fused_io.cpp')})
     mesh = device = prepared = other_trace = None
@@ -84,7 +86,8 @@ def main():
             owned=[], progress=None, pending=None, closed=False, published_rows=0, proposal_capture=None, kv_history=None)
         for name in ('temporaries', 'prepare_publication', 'commit_publication', 'discard_publication', 'close'):
             setattr(device, name, MethodType(getattr(DFlashDevice, name), device))
-        device.kv_history = DraftKVHistory(ttnn, mesh, [parameters], history, position=4093, history_rows=2048)
+        device.kv_history = DraftKVHistory(ttnn, mesh, [parameters], history, position=4093, history_rows=2048,
+            capture_projection=options.capture_projection)
 
         def project_features(features, prefix):
             sliced = ttnn.slice(features[0], (0, 0, 0, 0), (1, 1, prefix, 5120))
@@ -156,15 +159,26 @@ def main():
             compare(snapshot((other_output,)), other_before, report['unchanged_checks'], stage=stage, target='other-trace')
 
         replay(17, 'initial')
+        def audit_projection():
+            projection = device.kv_history.projection
+            if projection is not None:
+                with device.kv_history.temporaries([]) as retain:
+                    expected = project_key_value(ttnn, projection.inputs[0], projection.query, projection.inputs[1:],
+                        retain, parameters=parameters)
+                    compare(snapshot(projection.outputs[0][name] for name in ('k', 'v')),
+                        snapshot(expected[name] for name in ('k', 'v')), report['projection_checks'],
+                        position=device.position, replay=projection.calls)
         before = snapshot([device.history, *device.kv_history.active[0].values()])
         rejected = upload(torch.randn((2, 1, 32, 5120), generator=generator).bfloat16(), sharded=True)
         publication = device.prepare_publication([rejected], 7, position=device.position)
+        audit_projection()
         compare(snapshot([device.history, *device.kv_history.active[0].values()]), before,
             report['unchanged_checks'], stage='prepared', target='active-banks')
         device.discard_publication(publication)
         replay(27, 'discarded')
         accepted = upload(torch.randn((2, 1, 32, 5120), generator=generator).bfloat16(), sharded=True)
         publication = device.prepare_publication([accepted], 7, position=device.position)
+        audit_projection()
         device.commit_publication(publication)
         if device.position != 4100 or device.kv_history.position != 4100:
             raise AssertionError('Feature and K/V banks must commit to the same absolute frontier')
@@ -172,14 +186,23 @@ def main():
         device.kv_history.audit(device.history)
         report['history_checks'] = list(device.kv_history.checks)
         replay(37, 'committed')
+        if options.capture_projection:
+            committed = snapshot([device.history, *device.kv_history.active[0].values()])
+            publication = device.prepare_publication([rejected], 1, position=device.position)
+            audit_projection()
+            compare(snapshot([device.history, *device.kv_history.active[0].values()]), committed,
+                report['unchanged_checks'], stage='changed-position-prepared', target='active-banks')
+            device.discard_publication(publication)
+            report['projection_replays'] = device.kv_history.projection.calls
         after = snapshot(device.kv_history.active[0].values())
         for index, (current, stale) in enumerate(zip(after, before[2:], strict=True)):
             if torch.equal(current.view(torch.int16), stale.view(torch.int16)):
                 raise AssertionError('Stale cache must be distinguishable after a committed update')
             report['negative_controls'].append(dict(tensor=index, detected=True))
         report['passed'] = (len(report['head_checks']) == 8 and len(report['replay_checks']) == 36
-            and len(report['unchanged_checks']) == 12 and len(report['history_checks']) == 4
-            and len(report['negative_controls']) == 4)
+            and len(report['unchanged_checks']) == (18 if options.capture_projection else 12) and len(report['history_checks']) == 4
+            and len(report['negative_controls']) == 4 and len(report['projection_checks']) == (12 if options.capture_projection else 0)
+            and (not options.capture_projection or report['projection_replays'] == 3))
         if not report['passed']:
             raise AssertionError('Complete operand, publication and replay evidence required')
     except BaseException as error:

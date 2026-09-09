@@ -20,7 +20,7 @@ from dflash_prefill_window import prefill_window
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
-                 cache_history=False):
+                 cache_history=False, cache_projection_capture=False):
         import torch
 
         window = prefill_window(position)
@@ -30,7 +30,8 @@ class DFlashDevice:
                 or len(features) != 5 or any(len(value.shape) != 4 or value.shape[2] != window['rows'] for value in features)
                 or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
                 or type(fused_convolution) is not bool or type(cache_history) is not bool
-                or (cache_history and (not proposal_capture or block_rows != 8))):
+                or (cache_history and (not proposal_capture or block_rows != 8))
+                or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
@@ -72,7 +73,7 @@ class DFlashDevice:
                 from draft_kv_history import DraftKVHistory
 
                 self.kv_history = DraftKVHistory(operations, self.mesh, [layer[0] for layer in self.layers], self.history,
-                    position=position, history_rows=self.history_rows)
+                    position=position, history_rows=self.history_rows, capture_projection=cache_projection_capture)
                 if self.progress is not None:
                     self.kv_history.audit(self.history)
             if proposal_capture:

@@ -98,7 +98,7 @@ The gate also checks a separately live trace and a stale-cache negative control.
 The integrated run exits0 and closes both devices cleanly after1,227.3 s:
 eight exact attention-operand comparisons,36 replay comparisons,12 unchanged
 state/live-trace checks, four committed-history comparisons and four detected
-stale-cache controls. All11 recorded source hashes match this integration.
+stale-cache controls. All11 recorded source hashes match the `20915fe` integration.
 Report SHA256: `1608bee81863e51127a20c9c26dbaa5b81a9acc1532548bc949361ef716ceba9`.
 Local validation passes846 CI tests,60 harness tests and shell syntax checks.
 
@@ -115,9 +115,30 @@ lead as the paired control and retain four-link communication.
 
 ## Next optimization
 
-The new K/V projections still dispatch eagerly during each publication.
-Next test a fixed32-row captured projection with updated accepted features and
-absolute rotary inputs, retaining the full-history audit and atomic bank swap.
-This is not implemented or measured yet. It targets the newly measured update
-cost, not a claim that cache work alone can reach200. The target verifier still
-needs a substantial independent reduction from61.69 ms/block.
+The measured K/V projections still dispatch eagerly during each publication.
+A new opt-in `PreparedDraftKVProjection` captures all learned layers' fixed32-row
+projection in one trace. Each update copies accepted features and absolute rotary
+tables into stable inputs, replays, then uses the unchanged eager bank-tail
+assembly. It does not claim to capture the whole publication or target verifier.
+
+| New gate | Status |
+| --- | --- |
+| Host validation | 851 CI tests and60 harness tests pass; historical artifact rates reproduce unchanged |
+| Learned simulator | Running `20260908T235318Z-417-draft-kv-history-probe --capture-projection` |
+| Hardware | `full-dflash-kv-projection-request` prepared, not dispatched; simulator pass required first |
+
+The simulator retains the earlier attention-operand, full-history, live-trace
+and atomic-publication checks. It adds eager-versus-captured projection checks
+on both chips for changed accepted features and absolute positions4093/4100,
+including a one-row update after a seven-row commit. Inputs outside the committed
+prefix stay zero padded. No new kernel math, precision or serving default changes.
+
+The planned hardware ABBA keeps **K/V caching enabled in both arms**; only update
+projection capture changes. Both audits must still compare complete historical
+K/V and full cached/uncached proposals. Each committed block must report exactly
+one projection replay in the candidate and none in the eager-update control.
+Report setup, publication and PP/CTX/TG separately; setup is not amortized.
+
+This targets the measured update cost, not a claim that cache work alone can
+reach200. The target verifier still needs a substantial independent reduction
+from61.69 ms/block.
