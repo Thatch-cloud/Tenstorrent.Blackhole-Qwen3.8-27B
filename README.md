@@ -23,13 +23,18 @@ The latest4K captured-update comparison is flat: **62.11 versus62.01 TG**.
 Current device profiling accounts for **61.54 ms of the roughly62 ms verifier**;
 matrix operations dominate. This is not primarily host-side scheduling latency.
 [Current verifier attribution](docs/current-verifier-profile-2026-09-09.md).
+**Now testing:** a 16-row-tile MLP with unchanged target weights and arithmetic.
+The complete simulator path passes 48 bitwise comparisons; hardware compares
+real weights against native execution, including conversions and communication.
+[Hardware ABBA in progress](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34303979499).
+No new PP/CTX/TG result or serving change is claimed.
 Removing redundant state writes cuts verification from 65.43 to 58.08 ms/block.
 Fused convolution cuts drafting from 31.05 to 24.81 ms/block. Verification still
 costs 58.17 ms; it is the main remaining bottleneck. Captured T32 reaches only
 60.74 TG; T8 stays the lead. Longer-context DFlash initialization must be qualified
 before attributing this short-context rate to larger coding inputs. The 4K run
 measures drafting at 54.57 ms/block and verification at 61.87 ms/block.
-Native SDPA remains disabled after its failed numerical gate.
+Native drafter SDPA remains disabled after its failed numerical gate.
 [Fused-convolution results and limits](docs/dflash-fused-convolution-2026-09-09.md).
 
 ## Setup

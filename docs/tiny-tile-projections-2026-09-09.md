@@ -49,6 +49,9 @@ and the same four-link native reduce-scatter; candidate timings include both DMA
 boundaries. Require bitwise native equality, then a greater-than2% win in every
 block before a full-model test. A single-layer win is not a PP/CTX/TG result.
 Hardware refuses incomplete or source-mismatched simulator evidence.
+Hardware run [34303979499](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34303979499)
+is in progress on `6457ec8`; no result is available yet. The original hardware
+packer remains unchanged; simulator compatibility is not hardware qualification.
 
 The existing audited patch is `optimisation/sim/blackhole-packer-zero-flags.patch`.
 The isolated graft header hash is
