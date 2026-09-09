@@ -47,4 +47,5 @@ the preserved older C++ CSV successfully; that is a format check, not new timing
 
 This changes instrumentation only: no new kernel math, trace contents or serving
 defaults. The underlying runtime already passed learned simulator and full-request
-hardware gates. Hardware attribution has not been dispatched yet.
+hardware gates. [Hardware run34296336943](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34296336943)
+is running on `8460b69`; it has not produced an attribution result yet.

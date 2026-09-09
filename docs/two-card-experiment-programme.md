@@ -61,7 +61,8 @@ actual cached T8 commit-only verifier calls, retains all native-reference audits
 and emits no PP/TG result. Runtime replay counts must match every marked request
 call on both chips; report per-chip envelopes, operation/core sums and host call
 costs separately. No new kernel math or trace contents;859 CI and60 harness tests
-pass. Hardware attribution is pending. [Scope and gates](current-verifier-profile-2026-09-09.md).
+pass. Hardware run34296336943 on `8460b69` is running, not a result yet.
+[Scope and gates](current-verifier-profile-2026-09-09.md).
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
