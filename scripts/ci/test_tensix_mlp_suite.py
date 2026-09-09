@@ -5,7 +5,7 @@ import unittest
 
 
 class TensixMlpSuiteTests(unittest.TestCase):
-    def run_route(self, enabled=True, failure='', profile=False):
+    def run_route(self, enabled=True, failure='', profile=False, producers=8):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
         start = source.index('if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then')
         end = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then', start)
@@ -27,6 +27,7 @@ timeout() {
 '''
         environment = dict(os.environ, QWEN_CCL_LAZY_BUILD='1', QWEN_TENSIX_MLP=str(int(enabled)),
             QWEN_TENSIX_MLP_PROFILE=str(int(profile)),
+            QWEN_TENSIX_MLP_PRODUCERS=str(producers),
             QWEN_TINY_MLP='0', QWEN_MTP_DRAFTS='0', QWEN_DFLASH_DRAFTS='0',
             QWEN_RUN_MODE='full-norm-engine', FAILURE=failure)
         return subprocess.run(['bash', '-c', stub + source[start:end] + source[model_start:model_end]],
@@ -61,6 +62,19 @@ timeout() {
         self.assertIn('tensix-mlp-profile.sh', lines[-1])
         self.assertNotIn('full-prefix.py', result.stdout)
         self.assertEqual(self.run_route(profile=True, failure='mlp_profile').returncode, 21)
+
+    def test_sixteen_producers_require_their_own_simulator_report_and_exit(self):
+        result = self.run_route(producers=16)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 5)
+        for line in (lines[0], lines[-1]):
+            self.assertIn('--producers 16', line)
+            self.assertIn('tensix-mlp-simulator-16.json', line)
+            self.assertIn('tensix-mlp-simulator-16.exit-status', line)
+        invalid = self.run_route(producers=12)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(invalid.stdout, '')
 
     def test_profile_requires_raw_metadata_and_independent_attribution(self):
         root = Path(__file__).parent

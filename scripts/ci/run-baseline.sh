@@ -16,6 +16,7 @@ dflash_context=0
 tiny_mlp=0
 tensix_mlp=0
 tensix_mlp_profile=0
+tensix_mlp_producers=8
 live_qk=0
 if [ "$mode" = live-qk ]; then
     live_qk=1
@@ -27,8 +28,9 @@ if [ "$mode" = tiny-mlp ]; then
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
 fi
-if [[ "$mode" = tensix-stream-mlp || "$mode" = tensix-stream-mlp-profile ]]; then
+if [[ "$mode" = tensix-stream-mlp || "$mode" = tensix-stream-mlp-profile || "$mode" = tensix-stream-mlp-16 ]]; then
     if [ "$mode" = tensix-stream-mlp-profile ]; then tensix_mlp_profile=1; fi
+    if [ "$mode" = tensix-stream-mlp-16 ]; then tensix_mlp_producers=16; fi
     tensix_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
@@ -220,6 +222,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
+    -e "QWEN_TENSIX_MLP_PRODUCERS=$tensix_mlp_producers" \
     -e "QWEN_LIVE_QK=$live_qk" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \

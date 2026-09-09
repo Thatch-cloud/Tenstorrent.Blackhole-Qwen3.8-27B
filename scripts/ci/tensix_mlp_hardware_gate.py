@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 
 from sampling_link_policy import SOURCES as FABRIC_SOURCES
-from tensix_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify
+from tensix_mlp_gate import NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers
 from tensix_stream_gate import matrix
 from tensix_mlp_view_gate import prerequisite as view_prerequisite
 from tensix_mlp_weight_views import qualify_views
@@ -40,6 +40,7 @@ def qualify_hardware(report):
                     ('pool_buffers', 2), ('repeats_per_sample', 50)))
             or report.get('seeds') != [1659, 2670, 3781]):
         raise ValueError('Clean real-weight T8 complete MLP comparison including copy and four-link CCL required')
+    qualify_producers(report)
     native_links = report.get('native_requested_links')
     if (not isinstance(native_links, dict) or set(native_links) != {'default', 'axis0', 'axis1'}
             or any(type(value) is not int or value not in (1, 2, 4) for value in native_links.values())
@@ -87,9 +88,12 @@ def qualify_hardware(report):
 
 
 def validate_sources(report, root):
-    simulator_path = root / 'tensix-mlp-simulator.json'
-    status_path = root / 'tensix-mlp-simulator.exit-status'
+    producers = qualify_producers(report)
+    suffix = '-16' if producers == 16 else ''
+    simulator_path = root / f'tensix-mlp-simulator{suffix}.json'
+    status_path = root / f'tensix-mlp-simulator{suffix}.exit-status'
     simulator = read_prerequisite(simulator_path, status_path)
+    qualify_producers(simulator, producers)
     sources = hashes(root, SOURCES)
     if (report.get('sources') != sources or report.get('hardware_sources') != hashes(root, HARDWARE_SOURCES)
             or report.get('model_sources') != MODEL_SOURCES or report.get('fabric_sources') != FABRIC_SOURCES

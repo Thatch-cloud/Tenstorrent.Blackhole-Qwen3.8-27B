@@ -11,6 +11,15 @@ from tensix_weight_stream import stream_geometry
 
 
 class TensixStreamProjectionTests(unittest.TestCase):
+    def test_more_producers_keep_identical_native_compute_arguments(self):
+        for name, blocks in (('gate', 20), ('up', 20), ('down', 34)):
+            self.assertEqual(compute_arguments(stream_geometry(name, blocks, 16)),
+                compute_arguments(stream_geometry(name, blocks, 8)))
+        geometry = stream_geometry('down', 34, 16)
+        geometry['mapping'][0][1].append(79)
+        with self.assertRaises(ValueError):
+            compute_arguments(geometry)
+
     def test_compute_arguments_keep_native_single_tile_k_loop(self):
         for projection, blocks, columns in (('gate', 5, 4), ('gate', 20, 4), ('up', 20, 4), ('down', 34, 2)):
             arguments = compute_arguments(stream_geometry(projection, blocks))

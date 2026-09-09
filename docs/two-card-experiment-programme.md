@@ -170,6 +170,10 @@ trace replays on both chips. Gate/up/down are roughly222/217/244us streamed
 versus96/88/122us native. Copy and collective do not explain the regression.
 Next: test16 rather than8 producers, keeping compute/maths/FIFOs/CCL unchanged;
 full-size simulator qualification precedes hardware. No instrumented-speed promotion.
+The [sixteen-producer variant](tensix-sixteen-producers-2026-09-09.md) is now
+implemented. Simulation20260909T092252Z-403 is running with all188 complete-MLP
+checks required;998 CI and57 simulator-harness tests pass. Hardware has not been
+dispatched and must use its own source-bound sixteen-producer report and exit.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

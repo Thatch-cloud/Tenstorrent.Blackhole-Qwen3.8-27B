@@ -6,28 +6,34 @@ from types import SimpleNamespace
 from tiny_tile_matmul import PROJECTIONS
 
 
-def stream_geometry(projection, blocks):
+def stream_geometry(projection, blocks, producers=8):
     if projection not in PROJECTIONS:
         raise ValueError('Explicit target MLP projection required')
     inner, width, unused_cores, dtype, unused_silu = PROJECTIONS[projection]
     if type(blocks) is not int or not 1 <= blocks <= inner // 256:
         raise ValueError('Positive bounded eight-tile K-block count required')
+    if type(producers) is not int or producers not in (8, 16):
+        raise ValueError('Only the explicit eight or sixteen producer mappings are supported')
     receivers = 80 if projection == 'down' else 68
     tile_bytes = 1088 if dtype == 'bfloat8_b' else 576
     per_receiver = width // 32 // receivers
     coordinates = [(index % 11, index // 11) for index in range(receivers)]
-    mapping = [((bank, 9), list(range(bank, receivers, 8))) for bank in range(8)]
-    return dict(projection=projection, blocks=blocks, rows=blocks * 256, width=width, dtype=dtype,
+    mapping = [((producer % 8, 9 - producer // 8), list(range(producer, receivers, producers)))
+        for producer in range(producers)]
+    geometry = dict(projection=projection, blocks=blocks, rows=blocks * 256, width=width, dtype=dtype,
         receivers=receivers, tile_bytes=tile_bytes, per_receiver=per_receiver, key_block_tiles=8,
         page_bytes=8 * per_receiver * tile_bytes, coordinates=coordinates, mapping=mapping,
         full_projection=blocks == inner // 256)
+    if producers == 16:
+        geometry['producers'] = producers
+    return geometry
 
 
 def prepare_stream(operations, mesh, source, output, geometry):
     grid = mesh.compute_with_storage_grid_size()
     if (grid.x, grid.y) != (11, 10):
         raise ValueError('Qualified 110-worker P150 geometry required')
-    expected = stream_geometry(geometry['projection'], geometry['blocks'])
+    expected = stream_geometry(geometry['projection'], geometry['blocks'], geometry.get('producers', 8))
     if geometry != expected:
         raise ValueError('Stream geometry changed')
     if (tuple(source.shape) != (1, 1, geometry['rows'], geometry['width'])

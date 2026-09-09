@@ -9,21 +9,34 @@ from unittest.mock import patch
 
 from sampling_link_policy import SOURCES as FABRIC_SOURCES
 from tensix_mlp_gate import ORIGINAL_PACKER, PACKER, qualify
-from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, qualify_hardware, validate_evidence
+from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, qualify_hardware, validate_evidence, validate_sources
 import test_tensix_mlp_gate
 from test_tensix_mlp_weight_views import simulator_fixture as view_fixture
 
 
 class TensixMlpHardwareGateTests(unittest.TestCase):
-    def fixture(self, faster=True):
+    def test_sixteen_producer_hardware_cannot_use_eight_producer_simulation(self):
+        report = self.fixture(producers=16)
+        self.assertTrue(qualify_hardware(report)['passed'])
+        simulator = test_tensix_mlp_gate.TensixMlpGateTests().fixture(8)
+        root = Path('/experiment')
+        with patch('tensix_mlp_hardware_gate.read_prerequisite', return_value=simulator) as read, \
+                self.assertRaisesRegex(ValueError, 'producer count'):
+            validate_sources(report, root)
+        read.assert_called_once_with(root / 'tensix-mlp-simulator-16.json',
+            root / 'tensix-mlp-simulator-16.exit-status')
+
+    def fixture(self, faster=True, producers=8):
         candidate = 0.3 if faster else 0.5
         views = view_fixture()['weight_views']
         native = {name: check['native'] for name, check in views.items()}
+        producer_fixture = test_tensix_mlp_gate.TensixMlpGateTests().fixture(producers)
         return dict(passed=True, closed_cleanly=True, backend='hardware', stage='complete', rows=8,
             streams=1, layer=0, collective_links=4, pool_buffers=2, repeats_per_sample=50,
             seeds=[1659, 2670, 3781], dram_boundary=True, native_collective=True, all_samples_retained=True,
             native_requested_links=dict(default=2, axis0=2, axis1=2),
             matched_requested_links=dict(default=4, axis0=4, axis1=4),
+            producers_per_card=producers, producer_mappings=producer_fixture['producer_mappings'],
             weight_views=views, native_weights=native, native_weights_after=deepcopy(native),
             eager_checks=[dict(pattern=pattern, chip=chip, exact=True) for pattern in range(3) for chip in range(2)],
             trace_checks=[dict(pattern=pattern, arm=arm, chip=chip, exact=True)

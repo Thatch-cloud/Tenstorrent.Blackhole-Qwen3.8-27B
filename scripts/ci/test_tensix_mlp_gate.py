@@ -6,15 +6,39 @@ import unittest
 from unittest.mock import patch
 
 from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SIMULATOR_PACKER, SOURCES
-from tensix_mlp_gate import main, qualify
+from tensix_mlp_gate import main, qualify, qualify_producers
+from tensix_weight_stream import stream_geometry
 from tiny_mlp_gate import HARDWARE_TP_COMMON, SIMULATOR_TP_COMMON, TP_COMMON
 
 
 class TensixMlpGateTests(unittest.TestCase):
-    def fixture(self):
+    def test_producer_count_mapping_and_runtime_must_match(self):
+        report = self.fixture(16)
+        self.assertEqual(qualify_producers(report, 16), 16)
+        self.assertTrue(qualify(report, report['sources'], report['native_sources'])['passed'])
+        with self.assertRaises(ValueError):
+            qualify_producers(report, 8)
+        for value in (None, True, 16.0, 8, 12):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                qualify_producers({**report, 'producers_per_card': value})
+        for failure in ('missing', 'coordinate', 'duplicate'):
+            changed = deepcopy(report)
+            mapping = changed['producer_mappings']['gate']
+            if failure == 'missing':
+                mapping.pop()
+            elif failure == 'coordinate':
+                mapping[0] = ((0, 0), mapping[0][1])
+            else:
+                mapping[0][1].append(1)
+            with self.subTest(failure=failure), self.assertRaises(ValueError):
+                qualify_producers(changed)
+
+    def fixture(self, producers=8):
         return dict(passed=True, closed_cleanly=True, backend='simulator', packer_zero_graft=True,
             shared_pool=True, shared_workspace=True, full_mlp=True, dram_boundary=True, rows=8, compared_rows=32,
             fixtures=2, pool_buffers=2, components=list(COMPONENTS),
+            producers_per_card=producers, producer_mappings={name: stream_geometry(name,
+                34 if name == 'down' else 20, producers)['mapping'] for name in ('gate', 'up', 'down')},
             sources={name: 'a' * 64 for name in SOURCES},
             native_sources={**{name: 'b' * 64 for name in NATIVE_SOURCES}, PACKER: SIMULATOR_PACKER,
                 TP_COMMON: SIMULATOR_TP_COMMON},

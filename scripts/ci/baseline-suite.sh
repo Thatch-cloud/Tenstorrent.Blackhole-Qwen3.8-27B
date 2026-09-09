@@ -44,9 +44,13 @@ fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     if [ "${QWEN_TENSIX_MLP:-0}" = 1 ]; then
         test "${QWEN_TINY_MLP:-0}" = 0
+        producers=${QWEN_TENSIX_MLP_PRODUCERS:-8}
+        suffix=''
+        if [ "$producers" = 16 ]; then suffix=-16; else test "$producers" = 8; fi
         python3 /experiment-scripts/ci/tensix-stream-mlp-hardware.py --preflight \
-            --simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json \
-            --simulator-exit-status /experiment-scripts/ci/tensix-mlp-simulator.exit-status \
+            --producers "$producers" \
+            --simulator-report "/experiment-scripts/ci/tensix-mlp-simulator$suffix.json" \
+            --simulator-exit-status "/experiment-scripts/ci/tensix-mlp-simulator$suffix.exit-status" \
             --output /experiment/results/tensix-mlp-preflight.json
     fi
     if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
@@ -350,9 +354,13 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
             timeout -k 30 1500 bash /experiment-scripts/ci/tensix-mlp-profile.sh
             exit 0
         fi
+        producers=${QWEN_TENSIX_MLP_PRODUCERS:-8}
+        suffix=''
+        if [ "$producers" = 16 ]; then suffix=-16; else test "$producers" = 8; fi
         timeout -k 30 1200 python3 -u /experiment-scripts/ci/tensix-stream-mlp-hardware.py \
-            --simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json \
-            --simulator-exit-status /experiment-scripts/ci/tensix-mlp-simulator.exit-status \
+            --producers "$producers" \
+            --simulator-report "/experiment-scripts/ci/tensix-mlp-simulator$suffix.json" \
+            --simulator-exit-status "/experiment-scripts/ci/tensix-mlp-simulator$suffix.exit-status" \
             --output /experiment/results/tensix-mlp.json
         exit 0
     fi

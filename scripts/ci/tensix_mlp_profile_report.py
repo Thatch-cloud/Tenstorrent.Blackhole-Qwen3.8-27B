@@ -11,6 +11,7 @@ import sys
 
 from request_verifier_profile_report import analyze_traces
 from tensix_mlp_hardware_gate import validate_sources
+from tensix_mlp_gate import qualify_producers
 from tensix_mlp_weight_views import qualify_views
 from tensix_stream_gate import matrix
 
@@ -27,6 +28,7 @@ def validate_profile(report, console):
             or report.get('seeds') != [1659, 2670, 3781]
             or report.get('matched_requested_links') != dict(default=4, axis0=4, axis1=4)):
         raise ValueError('Complete attribution-only real-weight T8 MLP result required; no promotion or TG')
+    qualify_producers(report)
     qualify_views(report.get('weight_views'))
     if (report.get('native_weights') != {name: check['native'] for name, check in report['weight_views'].items()}
             or report.get('native_weights_after') != report['native_weights']):

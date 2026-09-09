@@ -29,7 +29,7 @@ class TensixStreamMlpTests(unittest.TestCase):
                 execute_from_dram(operations, source, prepared)
             operations.copy.assert_not_called()
 
-    def fixture(self):
+    def fixture(self, producers=8):
         operations = SimpleNamespace(bfloat16='bf16', bfloat4_b='bf4', bfloat8_b='bf8', TILE_LAYOUT='tile',
             L1_MEMORY_CONFIG='l1', DRAM_MEMORY_CONFIG='dram', CoreCoord=lambda column, row: (column, row),
             CoreRange=lambda begin, end: (begin, end), CoreRangeSet=tuple,
@@ -49,7 +49,7 @@ class TensixStreamMlpTests(unittest.TestCase):
             'bf8' if name == 'down' else 'bf4', 'dram') for name in ('gate', 'up', 'down')}
         buffers = {name: tensor((1, 1, 8, 5120 if name == 'partial' else 8704))
             for name in ('gate', 'up', 'hidden', 'partial')}
-        pool = StreamBufferPool(operations, mesh)
+        pool = StreamBufferPool(operations, mesh, producers)
         operations.multiply.return_value = buffers['hidden']
         return operations, mesh, source, weights, buffers, pool
 
@@ -75,15 +75,29 @@ class TensixStreamMlpTests(unittest.TestCase):
                 pool.acquire(object() if mutation == 'mesh' else mesh, mapping, 1 if mutation == 'size' else 36864)
         operations.create_global_circular_buffer.assert_not_called()
 
-    def prepared(self):
-        operations, mesh, source, weights, buffers, pool = self.fixture()
+    def prepared(self, producers=8):
+        operations, mesh, source, weights, buffers, pool = self.fixture(producers)
         def projection(pooled, used_mesh, activation, weight, output, geometry, native):
             size = 2 * geometry['page_bytes']
-            return SimpleNamespace(name=geometry['projection'], output=output,
+            return SimpleNamespace(name=geometry['projection'], output=output, geometry=geometry,
                 gcb=pooled.create_global_circular_buffer(used_mesh, pool.expected_mapping(size), size))
         with patch('tensix_stream_mlp.prepare_projection', side_effect=projection):
             prepared = prepare_mlp(operations, mesh, source, weights, buffers, pool, 'native')
         return operations, prepared
+
+    def test_sixteen_producer_composition_uses_two_matched_fifos(self):
+        operations, prepared = self.prepared(16)
+        self.assertEqual(prepared.pool.producers, 16)
+        self.assertEqual(operations.create_global_circular_buffer.call_count, 2)
+        for projection in prepared.projections.values():
+            self.assertEqual(projection.geometry['producers'], 16)
+            self.assertEqual(len(projection.geometry['mapping']), 16)
+        for call in operations.create_global_circular_buffer.call_args_list:
+            self.assertEqual(len(call.args[1]), 16)
+        with self.assertRaises(AttributeError):
+            prepared.pool.producers = 8
+        with self.assertRaises(ValueError):
+            StreamBufferPool(operations, prepared.pool.mesh, 12)
 
     def test_composition_uses_native_multiply_and_preallocated_output(self):
         operations, prepared = self.prepared()

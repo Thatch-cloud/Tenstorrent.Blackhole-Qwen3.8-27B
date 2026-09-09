@@ -6,6 +6,25 @@ from tensix_weight_stream import prepare_stream, stream_geometry
 
 
 class TensixWeightStreamTests(unittest.TestCase):
+    def test_sixteen_producers_only_change_fanout_and_disjoint_sender_coordinates(self):
+        for projection, blocks in (('gate', 20), ('up', 20), ('down', 34)):
+            original = stream_geometry(projection, blocks)
+            expanded = stream_geometry(projection, blocks, 16)
+            self.assertEqual({name: value for name, value in expanded.items() if name not in ('producers', 'mapping')},
+                {name: value for name, value in original.items() if name != 'mapping'})
+            senders = {coordinate for coordinate, unused in expanded['mapping']}
+            self.assertEqual(senders, {(column, row) for column in range(8) for row in (8, 9)})
+            rows = (expanded['receivers'] + 10) // 11
+            activation = {(column, row) for column in range(11) for row in range(rows)}
+            self.assertFalse(senders & activation)
+            self.assertEqual(len(senders | activation), 104 if projection == 'down' else 93)
+            assigned = [index for unused, indices in expanded['mapping'] for index in indices]
+            self.assertEqual(sorted(assigned), list(range(expanded['receivers'])))
+            self.assertEqual(max(len(indices) for unused, indices in expanded['mapping']), 5)
+        for count in (True, 8.0, 0, 12, 24):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                stream_geometry('gate', 20, count)
+
     def test_receivers_and_senders_are_disjoint_complete_worker_sets(self):
         for projection, count in (('gate', 68), ('up', 68), ('down', 80)):
             geometry = stream_geometry(projection, 5)

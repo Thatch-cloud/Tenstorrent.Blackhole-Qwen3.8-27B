@@ -10,7 +10,7 @@ COMPUTE = 'ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_bloc
 
 
 def compute_arguments(geometry):
-    if geometry != stream_geometry(geometry['projection'], geometry['blocks']):
+    if geometry != stream_geometry(geometry['projection'], geometry['blocks'], geometry.get('producers', 8)):
         raise ValueError('Exact reviewed transport geometry required')
     columns = geometry['per_receiver']
     return [8, 1, 8, 8, 1, 8 * columns, columns, geometry['blocks'], 1, 1, 1, columns, columns, 1, columns, 0, 0, 0]

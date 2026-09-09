@@ -19,6 +19,7 @@ from tiny_tile_matmul import PROJECTIONS
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--producers', type=int, choices=(8, 16), default=8)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     if os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') != '1':
@@ -30,7 +31,7 @@ def main():
 
     report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__, rows=8, compared_rows=32,
         fixtures=2, components=list(COMPONENTS), packer_zero_graft=True, shared_pool=True, shared_workspace=True,
-        full_mlp=True, dram_boundary=True,
+        full_mlp=True, dram_boundary=True, producers_per_card=options.producers,
         sources=hashes(Path(__file__).parent, SOURCES), native_sources=hashes(native_root, NATIVE_SOURCES),
         control_checks=[], eager_checks=[], replay_checks=[], input_checks=[], negative_controls=[], fixture_checks=[])
     mesh, pool = None, None
@@ -66,9 +67,11 @@ def main():
             torch.zeros((1, 1, 8, 5120 if name == 'partial' else 8704), dtype=torch.bfloat16), device=mesh,
             dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG,
             mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))) for name in COMPONENTS}
-        pool = StreamBufferPool(ttnn, mesh)
+        pool = StreamBufferPool(ttnn, mesh, options.producers)
         for fixture in range(2):
             prepared_mlp.append(prepare_mlp(ttnn, mesh, local_input, weights[fixture], workspace, pool, native_root))
+        report['producer_mappings'] = {name: projection.geometry['mapping']
+            for name, projection in prepared_mlp[0].projections.items()}
         report['pool_buffers'] = len(pool.entries)
         borrowed = [source, *(local[name] for local in weights for name in ('gate', 'up', 'down'))]
         report['weight_bindings'] = [addresses(ttnn, value) for value in borrowed[1:]]

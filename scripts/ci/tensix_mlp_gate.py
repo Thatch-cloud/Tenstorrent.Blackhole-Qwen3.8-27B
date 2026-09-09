@@ -8,6 +8,7 @@ from tensix_projection_gate import NATIVE_SOURCES as PROJECTION_NATIVE, ORIGINAL
 from tensix_projection_gate import SOURCES as PROJECTION_SOURCES, hashes
 from tensix_stream_gate import matrix
 from tiny_mlp_gate import HARDWARE_TP_COMMON, SIMULATOR_TP_COMMON, TP_COMMON
+from tensix_weight_stream import stream_geometry
 
 
 COMPONENTS = ('gate', 'up', 'hidden', 'partial')
@@ -30,6 +31,18 @@ NATIVE_SOURCES = (*PROJECTION_NATIVE, 'ttnn/cpp/ttnn/operations/eltwise/binary/b
     'ttnn/cpp/ttnn/operations/data_movement/sharded/device/kernels/compute/eltwise_copy.cpp')
 
 
+def qualify_producers(report, expected=None):
+    count = report.get('producers_per_card')
+    if type(count) is not int or count not in (8, 16) or (expected is not None and count != expected):
+        raise ValueError('Simulator and runtime must match the explicit producer count')
+    mappings = {name: stream_geometry(name, 34 if name == 'down' else 20, count)['mapping']
+        for name in ('gate', 'up', 'down')}
+    encoded = json.dumps(mappings, sort_keys=True)
+    if json.dumps(report.get('producer_mappings'), sort_keys=True) != encoded:
+        raise ValueError('Complete exact producer coordinates and receiver assignments required')
+    return count
+
+
 def qualify(report, sources, native_sources):
     if (not isinstance(report, dict) or report.get('backend') != 'simulator' or report.get('error')
             or any(report.get(field) is not True for field in ('passed', 'closed_cleanly', 'packer_zero_graft',
@@ -38,6 +51,7 @@ def qualify(report, sources, native_sources):
                 ('rows', 8), ('compared_rows', 32), ('fixtures', 2), ('pool_buffers', 2)))
             or report.get('components') != list(COMPONENTS)):
         raise ValueError('Clean full-size T8 MLP simulation with two pooled FIFOs and shared workspace required')
+    qualify_producers(report)
     if not isinstance(sources, dict) or set(sources) != set(SOURCES) or report.get('sources') != sources:
         raise ValueError('Current complete MLP sources required')
     if (not isinstance(native_sources, dict) or not isinstance(report.get('native_sources'), dict)

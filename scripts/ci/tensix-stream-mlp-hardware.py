@@ -14,7 +14,7 @@ from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from sampling_link_policy import audit
 from tensix_mlp_collective import reduce_partial
-from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify
+from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER, SOURCES, hashes, qualify, qualify_producers
 from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, read_prerequisite
 from tensix_mlp_view_gate import NATIVE_SOURCES as VIEW_NATIVE_SOURCES, prerequisite as view_prerequisite
 from tensix_mlp_weight_views import tensor_spec, weight_views
@@ -30,12 +30,14 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--producers', type=int, choices=(8, 16), default=8)
     options = parser.parse_args()
     require_projection_environment(os.environ, True)
     require_profile_mode(os.environ, options.profile)
     native_root, root = Path(os.environ['TT_METAL_HOME']), Path(__file__).parent
     report = dict(passed=False, closed_cleanly=False, backend='hardware', scope=__doc__, rows=8, streams=1, layer=0,
         collective_links=4, repeats_per_sample=50, seeds=[1659, 2670, 3781], dram_boundary=True,
+        producers_per_card=options.producers,
         native_collective=True, all_samples_retained=True, eager_checks=[], trace_checks=[], negative_controls=[],
         input_checks=[], timed_checks=[], blocks=[], profile_checks=[],
         instrumented_timing=options.profile, correctness_only=options.profile,
@@ -60,6 +62,7 @@ def main():
                 or os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT')):
             raise ValueError('Original hardware packer and reviewed native MLP/CCL required; no simulator graft')
         report['simulator_gate'] = qualify(prerequisite, report['sources'], report['native_sources'])
+        qualify_producers(prerequisite, options.producers)
         report['view_prerequisite'] = view_prerequisite(root, hashes(native_root, VIEW_NATIVE_SOURCES))
         report['fabric_sources'] = audit(native_root, os.environ)
     except BaseException as error:
@@ -137,8 +140,11 @@ def main():
             torch.zeros((1, 1, 8, 5120 if name == 'partial' else 8704), dtype=torch.bfloat16), device=mesh,
             dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG,
             mesh_mapper=mapper)) for name in COMPONENTS}
-        pool = StreamBufferPool(ttnn, mesh)
+        pool = StreamBufferPool(ttnn, mesh, options.producers)
         prepared = prepare_mlp(ttnn, mesh, local_input, weights, workspace, pool, native_root)
+        report['producer_mappings'] = {name: projection.geometry['mapping']
+            for name, projection in prepared.projections.items()}
+        qualify_producers(report, options.producers)
         report['pool_buffers'] = len(pool.entries)
         borrowed = [source, *(weights[name] for name in ('gate', 'up', 'down'))]
         raw_buffers = {}

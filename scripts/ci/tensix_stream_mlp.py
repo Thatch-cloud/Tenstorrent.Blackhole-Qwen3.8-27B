@@ -9,16 +9,23 @@ from tensix_weight_stream import stream_geometry
 
 
 class StreamBufferPool:
-    def __init__(self, operations, mesh):
+    def __init__(self, operations, mesh, producers=8):
+        if type(producers) is not int or producers not in (8, 16):
+            raise ValueError('Explicit eight or sixteen producer pool required')
         self.operations = operations
         self.mesh = mesh
+        self._producers = producers
         self.entries = {}
+
+    @property
+    def producers(self):
+        return self._producers
 
     def expected_mapping(self, size):
         if type(size) is not int or size not in (36864, 34816):
             raise ValueError('Only the two reviewed full-MLP FIFO geometries are allowed')
         projection, blocks = ('gate', 20) if size == 36864 else ('down', 34)
-        geometry = stream_geometry(projection, blocks)
+        geometry = stream_geometry(projection, blocks, self.producers)
         operations = self.operations
         return [(operations.CoreCoord(*sender), operations.CoreRangeSet([
             operations.CoreRange(operations.CoreCoord(*geometry['coordinates'][index]),
@@ -41,7 +48,7 @@ def prepare_mlp(operations, mesh, source, weights, buffers, pool, native_root):
         raise ValueError('All three native weights and four caller-owned MLP buffers required')
     if not isinstance(pool, StreamBufferPool) or pool.mesh is not mesh or pool.operations is not operations:
         raise ValueError('Explicit same-mesh single-stream FIFO pool required')
-    geometries = {name: stream_geometry(name, 34 if name == 'down' else 20) for name in weights}
+    geometries = {name: stream_geometry(name, 34 if name == 'down' else 20, pool.producers) for name in weights}
     for name in ('gate', 'up', 'down'):
         validate_inputs(operations, mesh, buffers['hidden'] if name == 'down' else source, weights[name],
             buffers['partial'] if name == 'down' else buffers[name], geometries[name])
