@@ -125,7 +125,7 @@ assembly. It does not claim to capture the whole publication or target verifier.
 | --- | --- |
 | Host validation | 851 CI tests and60 harness tests pass; historical artifact rates reproduce unchanged |
 | Learned simulator | Passed `20260908T235318Z-417-draft-kv-history-probe --capture-projection` |
-| Hardware | `full-dflash-kv-projection-request` ready; no captured-update hardware result yet |
+| Hardware | [Run34294263149](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34294263149) dispatched on `7780527`; no result yet |
 
 The simulator retains the earlier attention-operand, full-history, live-trace
 and atomic-publication checks. It adds eager-versus-captured projection checks

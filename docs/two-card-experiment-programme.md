@@ -48,8 +48,8 @@ atomic publication remain unchanged. Simulator235318Z-417 passes12 exact
 projection comparisons with changed features/positions and all earlier cache,
 attention-operand and live-trace checks. All12 source hashes match `8a12962`;
 851 CI plus60 harness tests pass. The new4K hardware ABBA retains caching in
-both arms and isolates projection capture. No captured-update hardware rate
-exists yet. The original60.33-TG result remains eager-update.
+both arms and isolates projection capture: run34294263149 on `7780527` is
+dispatched, not a result yet. The original60.33-TG result remains eager-update.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,
