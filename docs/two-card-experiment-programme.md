@@ -135,8 +135,10 @@ The new zero-copy projection reuses native matmul compute without relaxing the
 DRISC-only native entry's validator. Its five-block BF4/BF8 simulations each pass
 all32 physical output rows, native lead/expanded controls, changed-input replay
 and raw input/weight immutability. Full gate/up/down tests now also pass, including
-clean outer wrapper exits. A complete MLP with two shared FIFOs and shared
-workspace is running in simulation before real-weight hardware ABBA. Its native
+clean outer wrapper exits. The complete MLP also passes simulation with two
+shared FIFOs, shared workspace, two weight fixtures and captured input copying.
+Its 188 control/eager/replay/input/negative checks pass, with clean teardown and
+outer exit zero; real-weight hardware ABBA is next. Its native
 collective adapter preserves the borrowed partial output instead of letting the
 native wrapper forcibly deallocate it. This is not a bandwidth or TG result.
 [Projection gates](tensix-streamed-projection-2026-09-09.md).

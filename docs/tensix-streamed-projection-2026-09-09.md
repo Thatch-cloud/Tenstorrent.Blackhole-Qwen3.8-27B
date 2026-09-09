@@ -41,7 +41,7 @@ change firmware, or pretend programmable DRAM cores are supported.
 | Full BF8 down transport, 8,704 x 5,120 per chip | Kernel/cleanup audits pass; outer wrapper fails, not a clean suite pass |
 | BF4/BF8 native projections, five K blocks | Pass: native controls, all physical rows and two live traces |
 | Full native gate/up/down projections | All pass: native controls, all physical rows, changed inputs and clean wrapper exits |
-| Complete MLP, shared FIFOs/workspace and DRAM input boundary | [Simulation running](tensix-pooled-mlp-2026-09-09.md) |
+| Complete MLP, shared FIFOs/workspace and DRAM input boundary | [Exact simulator pass](tensix-pooled-mlp-2026-09-09.md) |
 | Real-weight complete MLP and four-link reduction | Not qualified |
 | Complete request PP / CTX / committed TG | Not qualified |
 

@@ -1,6 +1,6 @@
 # Complete streamed MLP: shared buffers, real boundaries
 
-**All full-size projections pass simulation. Complete-MLP simulation is running.**
+**Full-size projections and the pooled complete MLP pass simulation.**
 There is no new hardware latency or PP / CTX / TG result yet. Serving is unchanged.
 
 ## What this adds
@@ -26,7 +26,7 @@ same FIFOs and output workspace. This is not yet a 64-layer model result.
 | Gate | Evidence or requirement | State |
 | --- | --- | --- |
 | Full gate/up/down separately | Both chips, exact native controls, all 32 physical rows, changed-input traces | Pass |
-| Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Running |
+| Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Pass |
 | Host safeguards | 974 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
 | Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Wired; not dispatched |
 | Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not qualified |
@@ -36,6 +36,13 @@ comparisons, 48 replay comparisons, 70 raw input/weight checks, four stale-input
 controls and two different-weight controls. Twenty experiment files and 29 native
 files bind the result. A successful JSON body without a zero outer wrapper exit
 is rejected. The explicit simulator packer graft is never used on hardware.
+
+Run `20260909T073101Z-390` passes all 188 checks and closes both devices cleanly;
+the outer wrapper exits zero. Report: `scripts/ci/tensix-mlp-simulator.json`,
+SHA256 `8dfa6e6b1f5a41cede8a8c0166319286971d359b94856ddfe9b8f7b8ee992c6c`.
+Its `.exit-status` companion is checked in too. The native simulator packer was
+restored to its original hash, both native Python binaries remain unchanged,
+and the owned graft lock is removed. Qualification passes again after restoration.
 
 ## Collective ownership matters
 

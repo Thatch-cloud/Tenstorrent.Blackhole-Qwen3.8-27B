@@ -17,9 +17,9 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   the two complete 4K runs pool to **57.64 TG versus 59.27 control**. Both pass
   correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
 - **Next verifier experiment:** eight spare Tensix cores stream compressed
-  weights to 68/80 compute workers. All full-size gate/up/down simulations match
-  native output exactly. Shared-buffer complete-MLP simulation is running;
-  hardware speed is not measured yet. [Next gate](docs/tensix-pooled-mlp-2026-09-09.md).
+  weights to 68/80 compute workers. Full projections **and the pooled complete MLP**
+  pass exact simulation. Real-weight hardware comparison is next; no hardware
+  speed result yet. [Qualification](docs/tensix-pooled-mlp-2026-09-09.md).
 - **Running in parallel:** [4K target-link ABBA](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34327029099)
   compares two versus four target-model links; sampler and drafter stay unchanged.
 
