@@ -1,6 +1,6 @@
 # DSpark v2: port contract, not a speed result
 
-**Status: small simulator gate passes; learned FP32-score gate fails, with native matmul rounding isolated.**
+**Status: learned native-selector and composed-rotary gates pass; full-attention accuracy remains open.**
 No integrated DSpark backbone, acceptance or hardware throughput result exists yet.
 The native-attention DFlash2 candidate now reaches74.27 committed TG at CTX4,096
 across two matched runs. Its roughly62ms T8 verifier exceeds the entire35.59ms
@@ -24,7 +24,7 @@ that step alone does not download or hash-verify any weight payload.
 | Target features | Taps5/19/33/47/61; concatenate, learned projection and normalization |
 | Draft selector | Rank256 vanilla Markov correction over the full vocabulary |
 | Confidence | Trained5376-input confidence projection; future policy needs separate qualification |
-| Published serving | Seven noise/proposal rows; anchor plus seven proposals gives eight target rows |
+| Published serving | Seven query rows: anchor plus six masks; sample all seven, then verify anchor plus seven proposals |
 | Training | Sixteen future positions; **not proof of qualified15-proposal serving** |
 
 These boundaries come from the pinned
@@ -229,6 +229,70 @@ Validation after the composed candidate:1,102 host tests and58 simulator-harness
 tests pass. `dspark_rotary_gate.py` independently rejects missing coordinates,
 failed controls, stale sources, unclean teardown and unsupported arithmetic policy.
 
+### Full-context attention: separate mask and numerical gates
+
+`dspark_attention.py` does not reuse DFlash2's sliding mask. Each of the seven
+live queries sees every historical key and all seven proposal keys. Padded query
+rows see only the anchor, avoiding all-masked softmax rows. Host tests cover mask
+geometry through the positional bound; that is not a262K device-attention run.
+
+The simulator matrix uses31 and4,096 historical rows, two distinct chip shards,
+five input patterns and six trace replays per shape. Controls poison masked K/V,
+change the oldest historical value (outside a2K window in the4K case), and change
+the final proposal value while checking the first query. Missing input updates
+must be distinguishable. All236 coordinates are required by the independent gate.
+
+| Attempt | Result |
+| --- | --- |
+| Original packer, `20260909T135328Z-399` | TTsim aborts on `Disable_pack_zero_flags`; no numerical report, no pass |
+| Compatibility packer, native exponential, `20260909T135618Z-418` | First short-context comparison fails:441/65,536 values, worst failing-value error0.0348141; clean exit1 |
+| Compatibility packer, precise exponential, `20260909T135936Z-400` | Six initial comparisons pass; oldest-value stress case fails one live value, error0.0756164; clean exit1 |
+
+The packer compatibility hunk is the existing reviewed
+[upstream PR53805](https://github.com/tenstorrent/tt-metal/pull/53805), not removal
+of packer accumulation. The precise exponential uses the existing owned,
+compile-signature-limited proposal graft. Both variants are explicit report/CLI
+scopes, not changes to serving or target attention. Original header/SDPA sources
+and runtime binaries are restored and verified between attempts.
+
+Failure reports in`scripts/ci/`:
+
+| Report | SHA256 |
+| --- | --- |
+| `dspark-attention-simulator-failed.json` | `b5a2492d964b7a9a1140363004cf4c26960d55ba005d9c799b78c9ed756877e0` |
+| `dspark-attention-precise-simulator-failed.json` | `ffca4f5f5c8653daa18f1265b80ef6d9cb2aa80acb9863c6ff32d465106806e8` |
+| `dspark-attention-precise-matrix-failed.json` | `3fce141c65e10bb4a4032875733ba3fb8850fdb727c8e41773dbeb3f1c6f5bc1` |
+
+Full precise matrix`20260909T140234Z-417` completes all236 coordinates. Independent
+source/runtime/coordinate reconciliation confirms216 passing structural checks,
+19 passing numerical comparisons and one numerical failure. All ten4K numerical
+comparisons pass; the single failure is context31, oldest-value pattern, chip0.
+All24 replays match their own padded eager outputs exactly. Both full-history and
+future-proposal dependency controls pass. This is still a **failed accuracy gate**.
+
+| Historical rows | Numerical comparisons | Largest full/live absolute error |
+| ---: | --- | --- |
+| 31 | 9/10 pass | 0.139591 /0.139591 |
+| 4,096 | 10/10 pass | 0.015625 /0.011263 |
+
+These raw maxima include passing values; the gate combines relative and absolute
+tolerances, so an absolute error above0.01 does not alone imply failure.
+Original packer, both SDPA compute files and both native binaries are verified
+restored after the final run; the temporary ownership locks are released.
+
+The probe continues after finite numerical mismatches to collect the remaining
+structural evidence. A mismatch still forces final exit1 and
+`passed=false`; successful mask/replay checks cannot override it. Tolerances and
+the stress inputs are unchanged. Nonfinite values still abort immediately.
+No learned attention, full backbone, coding-quality or hardware-speed pass follows.
+
+CPU diagnostic on the saved operands also compares live rows with the verified
+upstream BF16 eager policy, rather than FP32 SDPA: native exponential has523
+failing values (maximum0.0390625); the precise stress case has41 (maximum0.125).
+Changing the reference to upstream BF16 does not make these fixtures exact or
+pass the same0.01/0.01 tolerance. It is diagnostic only; no reference is replaced.
+After implementing this matrix,1,112 host tests and58 simulator-harness tests pass.
+
 ### Learned CPU backbone matches upstream
 
 All five learned layers now execute in the CPU reference. An independent control
@@ -316,8 +380,8 @@ The header SHA256 is
 `992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1`.
 All simulator/hardware/serving eligibility flags remain false.
 
-1. Retain the qualified native-arithmetic Markov policy and its failed FP32
-   comparison; resolve rotary and validate target-feature/full-attention primitives.
+1. Retain the qualified native-arithmetic Markov and composed-rotary policies,
+   preserve their original failures, and resolve the full-attention numerical gate.
 2. Port learned primitives to TTsim, including changed inputs, masks, trace
    ownership and exact target-verifier isolation. CPU tests are not that gate.
 3. Run a complete seven-proposal hardware correctness/acceptance baseline through

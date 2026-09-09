@@ -55,6 +55,13 @@ and58 harness tests pass. This establishes a CPU reference, not a TT backbone,
 real-target integration, coding acceptance or hardware throughput result.
 The serving input contract is now explicit: anchor plus six masks, sample all
 seven draft rows, then verify anchor plus seven proposals. No DFlash2 row-dropping.
+The separate full-context attention mask and236-check simulator matrix are now
+implemented. Native exponential fails the short-context numerical gate; the
+precise-exponential full matrix completes:216 structural checks and19/20 numerical
+comparisons pass. All4K comparisons and exact replays pass, but one short-context
+oldest-value stress element still fails the unchanged numerical gate. The run
+exits1 with clean teardown; all temporary native sources are restored and verified.
+This is not a DSpark hardware or coding-acceptance result.
 [Detailed boundaries](dspark-port-contract-2026-09-09.md).
 
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
