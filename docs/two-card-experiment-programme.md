@@ -127,8 +127,16 @@ uses [real Tensix weight-stream producers](dram-prefetch-mlp-2026-09-09.md), wit
 spoofing DRISC support. Eight sender cores feed 68 gate/up or 80 down receivers.
 The five-block BF4 and BF8 simulations each pass eight eager, twelve changed-input
 trace and four stale-input checks across both chips, with exact compressed words
-and clean closure. Full projection sizes and matmul integration are next; this
-is not a bandwidth or TG result. 924 CI and 55 simulator-harness host tests pass.
+and clean closure. Full BF4 gate transport also passes. Full BF8 kernel checks
+complete, but editing its running shell wrapper breaks final status recording;
+the failed launch is retained and a regression-tested compound terminal block
+fixes that race. It is not counted as a clean suite pass.
+The new zero-copy projection reuses native matmul compute without relaxing the
+DRISC-only native entry's validator. Its five-block BF4/BF8 simulations each pass
+all32 physical output rows, native lead/expanded controls, changed-input replay
+and raw input/weight immutability. Full gate/up/down tests are running before
+complete-MLP integration and hardware timing. This is not a bandwidth or TG result.
+[Projection gates](tensix-streamed-projection-2026-09-09.md).
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

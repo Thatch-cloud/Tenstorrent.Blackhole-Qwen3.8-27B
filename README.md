@@ -17,8 +17,9 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   the two complete 4K runs pool to **57.64 TG versus 59.27 control**. Both pass
   correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
 - **Next verifier experiment:** eight spare Tensix cores stream compressed
-  weights to 68/80 compute workers. BF4/BF8 short transport simulations pass; full
-  weights, matmul and hardware speed remain unqualified. [Gates](docs/dram-prefetch-mlp-2026-09-09.md).
+  weights to 68/80 compute workers. BF4/BF8 zero-copy matmul simulations match
+  native output exactly; full projections are being tested before hardware timing.
+  [Gates and retained failures](docs/tensix-streamed-projection-2026-09-09.md).
 
 Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
 Native drafter SDPA remains disabled after its numerical gate failed. All rates

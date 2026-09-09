@@ -32,10 +32,11 @@ fi
 mkdir -p "$SIM_ROOT/results" "$TT_METAL_CACHE"
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 PROBE=${QWEN_SIM_DISPATCH_PROBE:-dispatch-probe}
-[[ "$PROBE" = draft-live-attention-probe || "$PROBE" = tensix-weight-stream-probe ]] ||
+[[ "$PROBE" = draft-live-attention-probe || "$PROBE" = tensix-weight-stream-probe || "$PROBE" = tensix-stream-projection-probe ]] ||
 [[ "$PROBE" = tensor-prefetch-capability || "$PROBE" = draft-live-qk-probe || "$PROBE" = tiny-mlp-probe || "$PROBE" = tiny-tile-matmul-probe || "$PROBE" = draft-kv-history-probe || "$PROBE" = draft-kv-projection-probe || "$PROBE" = dflash-prefill-window-probe || "$PROBE" = draft-convolution-fused-probe || "$PROBE" = dflash-proposal-trace-probe || "$PROBE" = native-draft-operands-probe || "$PROBE" = draft-head-layout-probe || "$PROBE" = draft-key-concat-probe || "$PROBE" = dflash-history-probe ]] ||
 [[ "$PROBE" = mtp-feedback-probe || "$PROBE" = real-attention-probe || "$PROBE" = short-attention-replay-probe || "$PROBE" = sampling-native-rows-probe || "$PROBE" = mtp-hidden-row-probe || "$PROBE" = draft-attention-trace-probe || "$PROBE" = draft-mlp-trace-probe || "$PROBE" = draft-mlp-replay-probe || "$PROBE" = packed-weight-probe || "$PROBE" = fused-batch-probe || "$PROBE" = draft-head-probe ]] ||
 [[ "$PROBE" = learned-mlp-probe || "$PROBE" = draft-dot-probe || "$PROBE" = draft-row-sum-probe || "$PROBE" = learned-attention-probe || "$PROBE" = draft-attention-probe || "$PROBE" = learned-convolution-probe || "$PROBE" = draft-convolution-probe || "$PROBE" = dispatch-probe || "$PROBE" = feature-trace-probe || "$PROBE" = prefill-feature-probe || "$PROBE" = feature-projection-probe || "$PROBE" = feature-norm-probe ]]
+{
 REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$REPORT"
 cd "$SIM_ROOT"
@@ -44,3 +45,4 @@ timeout -k 10 "${KERNEL_TIMEOUT:-300}" "$SIM_ROOT/venv/bin/python" "$SCRIPT_DIR/
     --output "$REPORT" "$@" 2>&1 | tee "$SIM_ROOT/results/$RUN_ID-$PROBE.log" || status=$?
 printf '%s\n' "$status" > "$SIM_ROOT/results/$RUN_ID-$PROBE.exit-status"
 exit "$status"
+}

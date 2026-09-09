@@ -52,9 +52,10 @@ credits allow weight delivery to overlap consumption. The first sink copies raw
 compressed words back to DRAM; it is not a matmul or bandwidth result.
 
 The native mcast consumer uses the same remote-CB protocol but explicitly admits
-only DRAM senders today. Any later worker-sender extension needs a scoped source
-change, actual producer/consumer qualification and unchanged target math. No such
-native extension or complete-MLP integration is implemented yet.
+only DRAM senders today. The new [projection prototype](tensix-streamed-projection-2026-09-09.md)
+instead combines the worker producer with unchanged native matmul compute through
+`ttnn.generic_op`. It does not relax that native validator. Actual arithmetic,
+complete-MLP integration and hardware performance remain unqualified.
 
 ## First transport result
 
@@ -84,6 +85,14 @@ closure, using 80 receivers and 6,963,200 compressed bytes per chip. Report
 `6513206df406f181db8f1defde193040378c4d5cc5e47a40fc30a91f52f9f662`.
 This is still only 1,280 of the required 8,704 K rows.
 
-Full-size BF4/BF8 tests are running sequentially, stopping on failure.
+Full BF4 gate transport now passes as well: 5,120 x 8,704 local weights,
+25,067,520 bytes per chip, with the same complete audit matrix and clean closure.
+Report `scripts/ci/tensix-stream-simulator-gate-20.json` has SHA256
+`8e885087945452eca5726849b3a14d49692c74c4078680405ec00717f7ec3d05`.
+Full BF8 down transport completes its kernel and cleanup checks but the outer
+wrapper fails after being edited during execution. It is not recorded as a clean
+suite pass. The [failure and wrapper regression fix](tensix-streamed-projection-2026-09-09.md#wrapper-failure-is-retained)
+are retained. The new zero-copy projection passes its first BF4 arithmetic/trace
+gate, and full projection tests are running sequentially with the repaired wrapper.
 Transport alone does not qualify matmul, useful overlap,
 bandwidth, fabric weight loading or a new TG rate.
