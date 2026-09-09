@@ -346,6 +346,10 @@ fi
 if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
     timeout -k 15 180 python3 /experiment-scripts/ci/device-readback.py
     if [ "${QWEN_TENSIX_MLP:-0}" = 1 ]; then
+        if [ "${QWEN_TENSIX_MLP_PROFILE:-0}" = 1 ]; then
+            timeout -k 30 1500 bash /experiment-scripts/ci/tensix-mlp-profile.sh
+            exit 0
+        fi
         timeout -k 30 1200 python3 -u /experiment-scripts/ci/tensix-stream-mlp-hardware.py \
             --simulator-report /experiment-scripts/ci/tensix-mlp-simulator.json \
             --simulator-exit-status /experiment-scripts/ci/tensix-mlp-simulator.exit-status \

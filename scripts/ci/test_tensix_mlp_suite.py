@@ -5,7 +5,7 @@ import unittest
 
 
 class TensixMlpSuiteTests(unittest.TestCase):
-    def run_route(self, enabled=True, failure=''):
+    def run_route(self, enabled=True, failure='', profile=False):
         source = Path(__file__).with_name('baseline-suite.sh').read_text()
         start = source.index('if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then')
         end = source.index('if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then', start)
@@ -21,10 +21,12 @@ timeout() {
     if [[ "$*" == *ccl-link-probe.py* && "$FAILURE" == link ]]; then return 18; fi
     if [[ "$*" == *device-readback.py* && "$FAILURE" == readback ]]; then return 19; fi
     if [[ "$*" == *tensix-stream-mlp-hardware.py* && "$FAILURE" == mlp ]]; then return 20; fi
+    if [[ "$*" == *tensix-mlp-profile.sh* && "$FAILURE" == mlp_profile ]]; then return 21; fi
     return 0
 }
 '''
         environment = dict(os.environ, QWEN_CCL_LAZY_BUILD='1', QWEN_TENSIX_MLP=str(int(enabled)),
+            QWEN_TENSIX_MLP_PROFILE=str(int(profile)),
             QWEN_TINY_MLP='0', QWEN_MTP_DRAFTS='0', QWEN_DFLASH_DRAFTS='0',
             QWEN_RUN_MODE='full-norm-engine', FAILURE=failure)
         return subprocess.run(['bash', '-c', stub + source[start:end] + source[model_start:model_end]],
@@ -49,6 +51,28 @@ timeout() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.stdout.splitlines()), 2)
         self.assertNotIn('tensix-stream-mlp-hardware.py', result.stdout)
+
+    def test_profile_uses_same_preflight_and_device_checks_but_not_benchmark_route(self):
+        result = self.run_route(profile=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 5)
+        self.assertIn('--preflight', lines[0])
+        self.assertIn('tensix-mlp-profile.sh', lines[-1])
+        self.assertNotIn('full-prefix.py', result.stdout)
+        self.assertEqual(self.run_route(profile=True, failure='mlp_profile').returncode, 21)
+
+    def test_profile_requires_raw_metadata_and_independent_attribution(self):
+        root = Path(__file__).parent
+        script = (root / 'tensix-mlp-profile.sh').read_text()
+        self.assertIn('--check-exit-code', script)
+        self.assertIn('--dump-device-data-mid-run', script)
+        self.assertIn('cpp_device_perf_report.csv', script)
+        self.assertIn('tensix_mlp_profile_report.py', script)
+        source = (root / 'run-baseline.sh').read_text()
+        self.assertIn('tensix-stream-mlp-profile', source)
+        self.assertIn('QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile', source)
+        self.assertIn('python3 scripts/ci/tensix_mlp_profile_report.py', source)
 
     def test_each_failure_stops_before_the_next_stage(self):
         for failure, code, calls in (('preflight', 16, 1), ('build', 17, 2), ('link', 18, 3),

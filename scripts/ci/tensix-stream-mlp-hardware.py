@@ -18,6 +18,7 @@ from tensix_mlp_gate import COMPONENTS, NATIVE_SOURCES, ORIGINAL_PACKER, PACKER,
 from tensix_mlp_hardware_gate import HARDWARE_SOURCES, MODEL_SOURCES, read_prerequisite
 from tensix_mlp_view_gate import NATIVE_SOURCES as VIEW_NATIVE_SOURCES, prerequisite as view_prerequisite
 from tensix_mlp_weight_views import tensor_spec, weight_views
+from tensix_mlp_profile import MlpTraceProfile, require_profile_mode
 from tensix_projection_raw import copy_raw, raw_shape
 from tensix_stream_mlp import StreamBufferPool, execute_from_dram, prepare_mlp
 
@@ -28,14 +29,21 @@ def main():
     parser.add_argument('--simulator-exit-status', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--profile', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, True)
+    require_profile_mode(os.environ, options.profile)
     native_root, root = Path(os.environ['TT_METAL_HOME']), Path(__file__).parent
     report = dict(passed=False, closed_cleanly=False, backend='hardware', scope=__doc__, rows=8, streams=1, layer=0,
         collective_links=4, repeats_per_sample=50, seeds=[1659, 2670, 3781], dram_boundary=True,
         native_collective=True, all_samples_retained=True, eager_checks=[], trace_checks=[], negative_controls=[],
-        input_checks=[], timed_checks=[], blocks=[],
+        input_checks=[], timed_checks=[], blocks=[], profile_checks=[],
+        instrumented_timing=options.profile, correctness_only=options.profile,
         timing_scope='Captured DRAM-to-L1 copy, gate/up/product/down and native TP2 collective; upload and validation excluded')
+    if options.profile:
+        report.update(scope='Device attribution of qualified real-weight MLP traces; not a performance benchmark',
+            repeats_per_sample=1, all_samples_retained=False,
+            timing_scope='One instrumented complete MLP trace per marker; profiler dumps and validation outside markers')
     def progress(stage):
         report['stage'] = stage
         options.output.write_text(json.dumps(report, indent=2))
@@ -171,6 +179,7 @@ def main():
             trace, output = capture_operation(ttnn, mesh, lambda candidate=candidate: forward(candidate, captured))
             traces.append(trace)
             outputs.append(output)
+        profiler = MlpTraceProfile(ttnn, mesh, traces) if options.profile else None
         def timed(arm):
             ttnn.execute_trace(mesh, traces[arm], cq_id=0, blocking=False)
             ttnn.synchronize_device(mesh)
@@ -185,18 +194,30 @@ def main():
         for pattern, payload in enumerate(payloads):
             ttnn.copy_host_to_device_tensor(payload, source)
             for arm, trace in enumerate(traces):
-                ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+                if profiler is not None:
+                    profiler.replay(arm, pattern, 'audit')
+                else:
+                    ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                 compare(read(outputs[arm]), references[pattern])
                 report['trace_checks'].extend(dict(pattern=pattern, arm=arm, chip=chip, exact=True) for chip in range(2))
                 if pattern == 0:
-                    ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+                    if profiler is not None:
+                        profiler.replay(arm, pattern, 'stale')
+                    else:
+                        ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                     stale = read(outputs[arm])
                     compare(stale, references[0])
                     for chip in range(2):
                         if torch.equal(stale[chip], references[1][chip]):
                             raise AssertionError('Stale-input negative control failed')
                         report['negative_controls'].append(dict(arm=arm, chip=chip, stale_detected=True))
-            for block in range(3):
+            if profiler is not None:
+                for sample, arm in enumerate((0, 1, 1, 0)):
+                    profiler.replay(arm, pattern, 'measurement', sample)
+                    compare(read(outputs[arm]), references[pattern])
+                    report['profile_checks'].extend(dict(pattern=pattern, sample=sample, chip=chip, exact=True)
+                        for chip in range(2))
+            for block in range(0 if options.profile else 3):
                 samples = []
                 for sample, arm in enumerate((0, 1, 1, 0)):
                     samples.append(timed(arm))
@@ -217,9 +238,13 @@ def main():
                     report['input_checks'].append(dict(pattern=pattern, tensor=index, chip=chip,
                         packed_words_unchanged=True, bindings_stable=True, pool_reused=True))
             progress(f'pattern_{pattern}_passed')
-        report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
-        report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
-        report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
+        if profiler is not None:
+            report['profile'] = profiler.summary()
+            report['eligible_for_full_model_gate'] = False
+        else:
+            report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
+            report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
+            report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
         report['native_weights_after'] = {name: tensor_spec(ttnn, value) for name, value in native_weights.items()}
         if report['native_weights_after'] != report['native_weights']:
             raise AssertionError('Native control weight metadata or storage changed during the experiment')

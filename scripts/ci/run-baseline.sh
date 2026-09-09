@@ -15,6 +15,7 @@ dflash_target_links_abba=0
 dflash_context=0
 tiny_mlp=0
 tensix_mlp=0
+tensix_mlp_profile=0
 live_qk=0
 if [ "$mode" = live-qk ]; then
     live_qk=1
@@ -26,7 +27,8 @@ if [ "$mode" = tiny-mlp ]; then
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
 fi
-if [ "$mode" = tensix-stream-mlp ]; then
+if [[ "$mode" = tensix-stream-mlp || "$mode" = tensix-stream-mlp-profile ]]; then
+    if [ "$mode" = tensix-stream-mlp-profile ]; then tensix_mlp_profile=1; fi
     tensix_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
@@ -217,6 +219,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
+    -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
     -e "QWEN_LIVE_QK=$live_qk" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
@@ -271,6 +274,11 @@ if [ "$tiny_mlp" = 1 ]; then
     python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"
 fi
 if [ "$tensix_mlp" = 1 ]; then
-    docker cp "$test_id:/experiment/results/tensix-mlp.json" "$output/tensix-mlp.json"
-    python3 scripts/ci/tensix_mlp_hardware_gate.py --hardware-result "$output/tensix-mlp.json"
+    if [ "$tensix_mlp_profile" = 1 ]; then
+        docker cp "$test_id:/experiment/results/tensix-mlp-profile" "$output/tensix-mlp-profile"
+        python3 scripts/ci/tensix_mlp_profile_report.py "$output/tensix-mlp-profile"
+    else
+        docker cp "$test_id:/experiment/results/tensix-mlp.json" "$output/tensix-mlp.json"
+        python3 scripts/ci/tensix_mlp_hardware_gate.py --hardware-result "$output/tensix-mlp.json"
+    fi
 fi

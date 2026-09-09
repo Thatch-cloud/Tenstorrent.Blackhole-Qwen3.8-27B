@@ -15,7 +15,9 @@ from tensix_mlp_weight_views import qualify_views
 
 
 HARDWARE_SOURCES = ('tensix-stream-mlp-hardware.py', 'tensix_mlp_hardware_gate.py',
-    'tensix_mlp_collective.py', 'sampling_link_policy.py', 'tensix_mlp_weight_views.py', 'tensix_mlp_view_gate.py')
+    'tensix_mlp_collective.py', 'sampling_link_policy.py', 'tensix_mlp_weight_views.py', 'tensix_mlp_view_gate.py',
+    'tensix_mlp_profile.py', 'tensix_mlp_profile_report.py', 'tensix-mlp-profile.sh',
+    'request_verifier_profile.py', 'request_verifier_profile_report.py')
 MODEL_SOURCES = {
     'models/demos/blackhole/qwen36/tt/mlp.py': 'b9c8193ee4e9b0151646a58573641e3343b1ae9f51240c472cea78cd857a2257',
     'models/tt_transformers/tt/ccl.py': 'b901f03f960eeb552b1a3dca30e63f66abb4530144efe4a45cdb5edb55bc5a9d',
@@ -30,7 +32,8 @@ def read_prerequisite(report_path, status_path):
 
 def qualify_hardware(report):
     if (not isinstance(report, dict) or report.get('stage') != 'complete' or report.get('backend') != 'hardware'
-            or report.get('error') or any(report.get(field) is not True for field in
+            or report.get('error') or report.get('instrumented_timing') not in (None, False)
+            or report.get('correctness_only') not in (None, False) or any(report.get(field) is not True for field in
                 ('passed', 'closed_cleanly', 'dram_boundary', 'native_collective', 'all_samples_retained'))
             or any(type(report.get(field)) is not int or report[field] != value for field, value in
                 (('rows', 8), ('streams', 1), ('layer', 0), ('collective_links', 4),
@@ -83,7 +86,7 @@ def qualify_hardware(report):
         eligible_for_full_model_gate=eligible, scope='One real-weight MLP with TP2 CCL; not PP, CTX or TG')
 
 
-def validate_evidence(report, root):
+def validate_sources(report, root):
     simulator_path = root / 'tensix-mlp-simulator.json'
     status_path = root / 'tensix-mlp-simulator.exit-status'
     simulator = read_prerequisite(simulator_path, status_path)
@@ -101,6 +104,10 @@ def validate_evidence(report, root):
     if (not isinstance(view_evidence, dict)
             or view_evidence != view_prerequisite(root, view_evidence.get('native_sources'))):
         raise ValueError('Exact simulator-qualified metadata views required alongside unchanged MLP kernel evidence')
+
+
+def validate_evidence(report, root):
+    validate_sources(report, root)
     return qualify_hardware(report)
 
 
