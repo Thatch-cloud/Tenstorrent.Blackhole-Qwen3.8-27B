@@ -138,7 +138,9 @@ and raw input/weight immutability. Full gate/up/down tests now also pass, includ
 clean outer wrapper exits. The complete MLP also passes simulation with two
 shared FIFOs, shared workspace, two weight fixtures and captured input copying.
 Its 188 control/eager/replay/input/negative checks pass, with clean teardown and
-outer exit zero; real-weight hardware ABBA is next. Its native
+outer exit zero. Real-weight hardware ABBA now passes correctness but fails
+performance:0.743766ms streamed versus0.334683ms native, all nine blocks slower.
+No full-model promotion. Its native
 collective adapter preserves the borrowed partial output instead of letting the
 native wrapper forcibly deallocate it. This is not a bandwidth or TG result.
 [Projection gates](tensix-streamed-projection-2026-09-09.md).
@@ -159,6 +161,9 @@ simulation now passes exact borrowed-buffer/content/lifetime checks on both
 chips and the actual native shard axes, with clean teardown and zero exit.
 The unchanged full-MLP kernel gate still passes. Both hardware arms stay at
 four links for the metadata-only retry;983 CI and57 simulator-harness tests pass.
+Retry34330511791 passes all118 hardware checks and clean teardown, but takes
+2.22x native MLP latency. Preserve this negative result; profile the transport
+and consumer before another kernel change. It provides no new PP/CTX/TG result.
 A separate
 [approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
 allow different proposals while retaining exact target outputs/state; it must

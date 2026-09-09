@@ -1,6 +1,8 @@
 # Streamed target MLP projections
 
-**Prototype, not a speed result.** This targets the roughly 62-ms verifier,
+**Correct, but not faster.** Full projections and pooled MLP pass simulation;
+the [complete hardware MLP](tensix-pooled-mlp-2026-09-09.md) takes 0.744 ms versus
+0.335 ms native and fails promotion. This targets the roughly 62-ms verifier,
 not another drafter-only improvement. No serving defaults change.
 
 ## What changes

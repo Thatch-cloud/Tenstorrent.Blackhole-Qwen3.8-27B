@@ -1,7 +1,29 @@
 # Complete streamed MLP: shared buffers, real boundaries
 
-**Full-size projections and the pooled complete MLP pass simulation.**
-There is no new hardware latency or PP / CTX / TG result yet. Serving is unchanged.
+**Simulation and real-weight hardware correctness pass; performance fails.**
+The streamed MLP is 2.22 times as slow as native. No promotion or serving change.
+
+## Hardware result
+
+[CI 34330511791](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34330511791)
+completes on `b668f14`, after the metadata-only loader fix.
+
+| Complete Layer-0 MLP, T8, TP2 | Mean latency | Decision |
+| --- | ---: | --- |
+| Native control | **0.334683 ms** | Retain |
+| Pooled streamed weights | 0.743766 ms | Reject; 122.23% higher latency |
+
+Both arms include the captured DRAM input copy and native four-link collective.
+All nine ABBA blocks lose; all 36 samples remain included. The 118 eager,
+replay, stale-control, raw-input/weight and timed-output checks pass, as do
+native weight-view audits and clean teardown. The independent artifact gate
+passes correctness and explicitly returns `eligible_for_full_model_gate=false`.
+
+Report SHA256:
+`c755e250f37750d859caf94d9197014bbdecb2e559c79709b84251a654ae064d`.
+These are component milliseconds, **not PP or TG**. No full-model promotion run
+is justified. Next diagnostic: measure producer/forwarding/consumer costs before
+changing the streaming pipeline; contention and credit waits remain hypotheses.
 
 ## What this adds
 
@@ -29,8 +51,8 @@ same FIFOs and output workspace. This is not yet a 64-layer model result.
 | Pooled complete MLP | Two weight sets, shared buffers, captured input copy, native product, changed-input replay | Pass |
 | Native weight views | Full 2D native shards, exact 4D aliases on both chips, original packer | Pass |
 | Host safeguards | 983 CI tests plus 57 simulator-harness tests | Pass; not device evidence |
-| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Retry34330511791 running on the simulator-qualified metadata fix |
-| Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not qualified |
+| Real-weight complete MLP | Layer 0, three input patterns, native four-link reduction, nine ABBA blocks | Correctness pass; 2.22x latency regression |
+| Complete request | Exact target verification/state, committed tokens, PP / CTX / TG | Not dispatched: component performance gate fails |
 
 The complete-MLP simulator gate requires 32 native-control comparisons, 32 eager
 comparisons, 48 replay comparisons, 70 raw input/weight checks, four stale-input
@@ -70,10 +92,10 @@ gates pass again against current sources and the original native runtime.
 
 The retry keeps both arms at four links, isolating the shape fix. Four links
 showed no whole-request TG gain; changing link policy during this retry would
-mix two changes. No new kernel speed or model-throughput claim is made yet.
+mix two changes. The retry establishes the latency regression, not a throughput gain.
 
 [Retry 34330511791](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34330511791)
-runs the immutable `ci-qwen-hardware-b668f14` tag. Native view-source hashes and
+passes on the immutable `ci-qwen-hardware-b668f14` tag. Native view-source hashes and
 the new simulator report/exit are checked before any hardware device is opened.
 
 ## Collective ownership matters
