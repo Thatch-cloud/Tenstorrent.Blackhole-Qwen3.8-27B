@@ -102,11 +102,15 @@ The captured-input residual follow-up passes **48/48 exact checks** after
 explicitly widening both operands. Both layer residuals now use that candidate.
 Captured learned attention also passes **66/66 simulator checks** using the
 existing FP32 SFPU composition, without loading weights or modifying the native
-runtime. That path is now integrated behind an explicit simulator-only layer
-option, with full replay validation next. All 48 sampled down-projection coordinates
+runtime. The integrated layer now passes all **208 exact replay checks**, all
+input/weight/ownership checks and all 42 exact eager comparisons, but still fails
+78/192 numerical comparisons. The full gate rejects it; clean exit 1 and failed
+evidence are retained. All 48 sampled historical down-projection coordinates
 match native grouped arithmetic exactly (not full-output qualification).
-The complete 664-check layer gate remains open; all 1,165 host and 59 harness
-tests pass. Numerical fixes are not assumed to be faster on hardware.
+The complete 664-check layer gate remains open. A controlled CPU comparison
+identifies an eager-BF16 versus FP32 attention/rotary mismatch as part of the
+remaining error; backend-matched upstream validation is next. Neither numerical
+limits nor serving defaults change. Numerical fixes are not assumed to be faster.
 This component fix does not change the measured 74.27 TG hardware result.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 

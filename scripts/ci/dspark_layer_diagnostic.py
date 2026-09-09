@@ -14,12 +14,21 @@ from dspark_weights import VerifiedWeights
 
 REPORT_SHA256 = 'f81fbb9aaab4eaae9ddadaddb4bbd59f8be0ebab6769eb67f038f192232f965c'
 OPERANDS_SHA256 = 'e65c254e3197d28a888ddc5be194fdccc321a9afc29dd9a08d1d2f11bff31c2d'
+COMPOSED_REPORT_SHA256 = '59ab89b185696643ce7422975128a16069fe05093ad09349c1a56258e1c171a6'
+COMPOSED_OPERANDS_SHA256 = 'f064c5ba2edaacbd23d6bb11beba10da5d0bf2e409e4add6ad0e14157cbccb0a'
+SOURCES = ('dspark_layer_diagnostic.py','dspark_layer_reference.py','dspark_layer.py',
+    'dspark_projection.py','dspark_backbone_reference.py','dspark_weights.py',
+    'dspark_checkpoint.py','dspark_intake.py','dspark_markov_fixture.py')
 
 
-def load_capture(report_path, operands_path):
+def load_capture(report_path, operands_path, *, composed_layer=False):
     import torch
 
-    if digest(report_path) != REPORT_SHA256 or digest(operands_path) != OPERANDS_SHA256:
+    if type(composed_layer) is not bool:
+        raise ValueError('Explicit retained layer arithmetic selection required')
+    report_sha = COMPOSED_REPORT_SHA256 if composed_layer else REPORT_SHA256
+    operands_sha = COMPOSED_OPERANDS_SHA256 if composed_layer else OPERANDS_SHA256
+    if digest(report_path) != report_sha or digest(operands_path) != operands_sha:
         raise ValueError('Exact retained complete-layer failure and observed tensors required')
     report = json.loads(report_path.read_text())
     payload = torch.load(operands_path,weights_only=True,map_location='cpu')
@@ -79,10 +88,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('report','operands','checkpoint','output'):
         parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--composed-layer',action='store_true')
     options = parser.parse_args()
     if options.output.exists():
         raise ValueError('Refusing to replace diagnostic evidence')
-    report,payload = load_capture(options.report,options.operands)
+    sources = {name:digest(Path(__file__).with_name(name)) for name in SOURCES}
+    report,payload = load_capture(options.report,options.operands,composed_layer=options.composed_layer)
     reader = VerifiedWeights(options.checkpoint)
     try:
         weights = {name:reader.tensor('layers.0.'+name) for name in SPECIFICATIONS}
@@ -91,9 +102,11 @@ def main():
         cases = analyse(payload,weights)
     finally:
         reader.__exit__(None,None,None)
-    result = dict(scope=__doc__,report_sha256=REPORT_SHA256,operands_sha256=OPERANDS_SHA256,
-        sources={name:digest(Path(__file__).with_name(name)) for name in ('dspark_layer_diagnostic.py',
-            'dspark_layer_reference.py','dspark_layer.py','dspark_projection.py','dspark_backbone_reference.py','dspark_weights.py')},
+    sources_after = {name:digest(Path(__file__).with_name(name)) for name in SOURCES}
+    if sources_after != sources:
+        raise ValueError('Layer attribution sources changed during analysis')
+    result = dict(scope=__doc__,report_sha256=digest(options.report),operands_sha256=digest(options.operands),
+        composed_layer=options.composed_layer,sources=sources,sources_after=sources_after,
         checkpoint_sha256=CHECKPOINT_SHA256,checkpoint_closed=True,tolerance=TOLERANCE,cases=cases,
         eligible_for_hardware=False,target_integrated=False)
     with options.output.open('x') as stream:

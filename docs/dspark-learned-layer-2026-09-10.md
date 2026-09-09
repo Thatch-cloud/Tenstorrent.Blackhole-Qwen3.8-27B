@@ -151,9 +151,69 @@ replays of attention, MLP and final reduction. An isolated attention pass or
 native arithmetic sample cannot substitute for that matrix.
 
 Full-matrix run `20260909T183658Z-393` uses code `779ae7f` and the original
-runtime. At launch, all 1,169 host tests and 59 harness tests pass. This run has
-no hardware allocation and must retain any numerical failures alongside replay
-and ownership results; a replay pass cannot turn a numerical failure green.
+runtime. It completes the entire matrix, then exits 1 for **78/192 failed eager
+comparisons**, down from 102 in the original eager-only diagnostic.
+
+| Complete integrated layer checks | Result |
+| --- | ---: |
+| Frozen CPU checkpoints | 6/6 pass |
+| Eager arithmetic comparisons | 114/192 pass |
+| Exact changed-input replay and bindings | 208/208 pass |
+| Borrowed inputs | 196/196 pass |
+| Complete learned parameters before/after | 44/44 pass |
+| Stale-input controls | 6/6 pass |
+| Inactive-row zeros | 12/12 pass |
+
+All 42 mandatory exact eager comparisons pass, including both residual
+boundaries. MLP gate/up comparisons also pass now. All three phases execute and
+replay on both simulated chips, but **the full 664-check qualification rejects
+the run**. All 472 non-eager checks pass; that does not overrule the 78 failures.
+Mesh/checkpoint close cleanly, sources/native binaries are unchanged, and the
+independent reconciliation preserves the failed result. Simulator wall time is
+1,620.9 seconds, not hardware latency. No hardware allocation or serving change.
+
+Report `scripts/ci/dspark-layer-composed-simulator-failed.json`, SHA256
+`59ab89b185696643ce7422975128a16069fe05093ad09349c1a56258e1c171a6`.
+Observed tensors remain local, SHA256
+`f064c5ba2edaacbd23d6bb11beba10da5d0bf2e409e4add6ad0e14157cbccb0a`.
+
+Own-input attribution confirms the integrated attention passes all six numerical
+comparisons and both residual additions are bitwise exact in all six case/chip
+pairs. The final output still differs from the frozen CPU backbone: relative L2
+is 1.292%, 1.215% and 1.521% for the three cases. These are numerical diagnostics,
+not coding-quality measurements. Attribution SHA256:
+`79a7cdeed5b34f1994a30eb321fe0ec07cde2ae9d0b1e895d29b763da9e9f795`.
+
+### Reference-backend mismatch
+
+The reviewed upstream CPU control explicitly selects `_attn_implementation='eager'`.
+It rounds QK scores, their scaling and probabilities through BF16; its rotary
+also rounds each product before addition. The device candidate instead uses
+FP32 attention and FP32 rotary intermediates. Comparing these different
+arithmetic policies is not a clean test of kernel implementation error.
+
+A controlled CPU attribution keeps the **same observed context**, all eleven
+learned weights and input noise, changing only attention/rotary arithmetic:
+
+| Case | Device versus eager CPU | Versus FP32 attention | Versus FP32 attention + rotary |
+| --- | ---: | ---: | ---: |
+| Pattern 0, position 0 | 1.187% | 0.832% | 0.711% |
+| Pattern 0, position 8,190 | 1.219% | 0.884% | 0.654% |
+| Pattern 1, position 8,190 | 1.443% | 0.978% | 0.755% |
+
+Values are final-output relative L2, not an alternative passing threshold.
+Matching policies reduces this discrepancy by about 40-48%, but thousands of
+elements still fail the original pointwise comparison. It explains part of the
+gap, not all of it. The original six frozen CPU checkpoints remain exact.
+
+`scripts/ci/dspark-backend-attribution.json`, SHA256
+`8faee2d8b23b14de0ab32b0a2edd7e070422953c47e3f31462286f4072abe662`,
+retains both device-versus-variant and variant-versus-frozen comparisons. Source
+stability and whole-checkpoint closure pass. **No reference is requalified and
+no numerical limit is relaxed by this diagnostic.** A backend-matched upstream
+reference is the next step, before another full-layer kernel rewrite.
+After these changes, all 1,176 host tests and 59 simulator-harness tests pass;
+the simulator wrapper also passes shell syntax validation.
 
 ### Long-context preparation
 
@@ -184,7 +244,8 @@ required before connecting this candidate to a 4K request.
 
 ## Next gates
 
-1. Reconcile the full learned eager chain; retain failures and captured tensors.
+1. Validate a backend-matched upstream CPU reference and reconcile the remaining
+   native arithmetic differences; retain the original failures and tensors.
 2. Qualify all 664 checks, restore the original native runtime, then independently
    reconcile the source-bound report.
 3. Connect all five learned layers and selector, then the real TP collective and

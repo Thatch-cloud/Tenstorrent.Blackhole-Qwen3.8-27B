@@ -1,10 +1,11 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
-from dspark_layer_diagnostic import error_summary, load_capture
+from dspark_layer_diagnostic import COMPOSED_REPORT_SHA256, OPERANDS_SHA256, error_summary, load_capture
 
 
 class DSparkLayerDiagnosticTests(unittest.TestCase):
@@ -27,8 +28,18 @@ class DSparkLayerDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory)/'report.json'
             report.write_text('{}')
+            for composed in (False,True):
+                with self.assertRaises(ValueError):
+                    load_capture(report,Path(directory)/'not-opened',composed_layer=composed)
+
+    def test_composed_capture_does_not_accept_historical_operand_pair(self):
+        with patch('dspark_layer_diagnostic.digest',side_effect=[COMPOSED_REPORT_SHA256,OPERANDS_SHA256]), \
+                patch('torch.load') as load:
             with self.assertRaises(ValueError):
-                load_capture(report,Path(directory)/'not-opened')
+                load_capture(Path('report'),Path('operands'),composed_layer=True)
+        load.assert_not_called()
+        with self.assertRaises(ValueError):
+            load_capture(Path('not-opened'),Path('not-opened'),composed_layer=1)
 
 
 if __name__ == '__main__':

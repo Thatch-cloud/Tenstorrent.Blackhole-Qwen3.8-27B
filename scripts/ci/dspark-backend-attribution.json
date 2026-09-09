@@ -1,0 +1,841 @@
+{
+  "scope": "Isolate CPU eager versus FP32 attention/rotary policy differences; not a replacement qualification reference.",
+  "backend": "cpu_attribution",
+  "report_sha256": "59ab89b185696643ce7422975128a16069fe05093ad09349c1a56258e1c171a6",
+  "operands_sha256": "f064c5ba2edaacbd23d6bb11beba10da5d0bf2e409e4add6ad0e14157cbccb0a",
+  "checkpoint_sha256": "2aff025f45823b40ebe726b9dfa40302f3512bd9a11c3a7347de32a567acd9a7",
+  "tolerance": {
+    "rtol": 0.01,
+    "atol": 0.01
+  },
+  "sources": {
+    "dspark_backend_attribution.py": "5ca61d446f56b148a5b5d397f2c5d650fae50e134118a0f6be58e2c952416ac7",
+    "dspark_layer_diagnostic.py": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649",
+    "dspark_layer_reference.py": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8",
+    "dspark_backbone_reference.py": "a62f5e108c3bbcf4df8428eb85afe6218d42e3687fdf167100819f219366fe71",
+    "dspark_layer.py": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d",
+    "dspark_projection.py": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+    "dspark_weights.py": "10593cc2d2e6f55283dac0924debbb0f310e875e10896c591a552ae19f4573bf",
+    "dspark_checkpoint.py": "7606b99c083e4997c5e1de78f4332f89c0a4e476178f1642b10933925d2aff98",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5"
+  },
+  "eligible_for_hardware": false,
+  "target_integrated": false,
+  "reference_requalified": false,
+  "frozen_cpu_checks": [
+    {
+      "case": 0,
+      "stage": "attention_residual",
+      "exact": true
+    },
+    {
+      "case": 0,
+      "stage": "output",
+      "exact": true
+    },
+    {
+      "case": 1,
+      "stage": "attention_residual",
+      "exact": true
+    },
+    {
+      "case": 1,
+      "stage": "output",
+      "exact": true
+    },
+    {
+      "case": 2,
+      "stage": "attention_residual",
+      "exact": true
+    },
+    {
+      "case": 2,
+      "stage": "output",
+      "exact": true
+    }
+  ],
+  "cases": [
+    {
+      "case": 0,
+      "chip": 0,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13590,
+            "different_bits": 28477,
+            "relative_l2": 0.010108529402546768
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21475,
+            "different_bits": 31161,
+            "relative_l2": 0.01186878677778283
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 6704,
+            "different_bits": 23630,
+            "relative_l2": 0.005770070798450347
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 16096,
+            "different_bits": 28396,
+            "relative_l2": 0.00831959267939648
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 4335,
+            "different_bits": 21094,
+            "relative_l2": 0.0048351919903346285
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 14096,
+            "different_bits": 27007,
+            "relative_l2": 0.007111852355332854
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 11214,
+            "different_bits": 26846,
+            "relative_l2": 0.008748985680129535
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 19543,
+            "different_bits": 30273,
+            "relative_l2": 0.011108277630415303
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13717,
+            "different_bits": 28600,
+            "relative_l2": 0.009983658290978713
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21525,
+            "different_bits": 31242,
+            "relative_l2": 0.011867159052402565
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.5,
+            "failed_elements": 14132,
+            "different_bits": 28665,
+            "relative_l2": 0.010360124038236369
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21797,
+            "different_bits": 31311,
+            "relative_l2": 0.01227048179539255
+          }
+        }
+      }
+    },
+    {
+      "case": 0,
+      "chip": 1,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13590,
+            "different_bits": 28477,
+            "relative_l2": 0.010108529402546768
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21475,
+            "different_bits": 31161,
+            "relative_l2": 0.01186878677778283
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 6704,
+            "different_bits": 23630,
+            "relative_l2": 0.005770070798450347
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 16096,
+            "different_bits": 28396,
+            "relative_l2": 0.00831959267939648
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 4335,
+            "different_bits": 21094,
+            "relative_l2": 0.0048351919903346285
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 14096,
+            "different_bits": 27007,
+            "relative_l2": 0.007111852355332854
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 11214,
+            "different_bits": 26846,
+            "relative_l2": 0.008748985680129535
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 19543,
+            "different_bits": 30273,
+            "relative_l2": 0.011108277630415303
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13717,
+            "different_bits": 28600,
+            "relative_l2": 0.009983658290978713
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21525,
+            "different_bits": 31242,
+            "relative_l2": 0.011867159052402565
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.5,
+            "failed_elements": 14132,
+            "different_bits": 28665,
+            "relative_l2": 0.010360124038236369
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21797,
+            "different_bits": 31311,
+            "relative_l2": 0.01227048179539255
+          }
+        }
+      }
+    },
+    {
+      "case": 1,
+      "chip": 0,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 14204,
+            "different_bits": 28723,
+            "relative_l2": 0.01023400877228381
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21926,
+            "different_bits": 31307,
+            "relative_l2": 0.012192664146929362
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 8267,
+            "different_bits": 25047,
+            "relative_l2": 0.0065932724226597265
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 17240,
+            "different_bits": 29034,
+            "relative_l2": 0.008844149738631507
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 4568,
+            "different_bits": 21371,
+            "relative_l2": 0.004775373264910647
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 14345,
+            "different_bits": 27301,
+            "relative_l2": 0.006542910367998032
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 9642,
+            "different_bits": 25912,
+            "relative_l2": 0.007475904896148262
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 18788,
+            "different_bits": 29923,
+            "relative_l2": 0.009483602169968498
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 12494,
+            "different_bits": 27801,
+            "relative_l2": 0.009084465317921292
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 20515,
+            "different_bits": 30690,
+            "relative_l2": 0.01100423910948195
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13536,
+            "different_bits": 28424,
+            "relative_l2": 0.009826959527744013
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 21063,
+            "different_bits": 30953,
+            "relative_l2": 0.011335167649024641
+          }
+        }
+      }
+    },
+    {
+      "case": 1,
+      "chip": 1,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 14204,
+            "different_bits": 28723,
+            "relative_l2": 0.01023400877228381
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 21926,
+            "different_bits": 31307,
+            "relative_l2": 0.012192664146929362
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 8267,
+            "different_bits": 25047,
+            "relative_l2": 0.0065932724226597265
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 17240,
+            "different_bits": 29034,
+            "relative_l2": 0.008844149738631507
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 4568,
+            "different_bits": 21371,
+            "relative_l2": 0.004775373264910647
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 14345,
+            "different_bits": 27301,
+            "relative_l2": 0.006542910367998032
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 9642,
+            "different_bits": 25912,
+            "relative_l2": 0.007475904896148262
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 18788,
+            "different_bits": 29923,
+            "relative_l2": 0.009483602169968498
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 12494,
+            "different_bits": 27801,
+            "relative_l2": 0.009084465317921292
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 32.0,
+            "failed_elements": 20515,
+            "different_bits": 30690,
+            "relative_l2": 0.01100423910948195
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 13536,
+            "different_bits": 28424,
+            "relative_l2": 0.009826959527744013
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 21063,
+            "different_bits": 30953,
+            "relative_l2": 0.011335167649024641
+          }
+        }
+      }
+    },
+    {
+      "case": 2,
+      "chip": 0,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.5,
+            "failed_elements": 15195,
+            "different_bits": 29280,
+            "relative_l2": 0.01167318343707804
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 23361,
+            "different_bits": 31919,
+            "relative_l2": 0.01443478640751882
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 8856,
+            "different_bits": 25790,
+            "relative_l2": 0.007081650338152802
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 18506,
+            "different_bits": 29876,
+            "relative_l2": 0.009782741003483147
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 5717,
+            "different_bits": 23106,
+            "relative_l2": 0.005397604704605261
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 15698,
+            "different_bits": 28145,
+            "relative_l2": 0.007549058334701466
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 11088,
+            "different_bits": 26760,
+            "relative_l2": 0.008870380824893675
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 19939,
+            "different_bits": 30428,
+            "relative_l2": 0.01152068554640955
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.25,
+            "failed_elements": 14082,
+            "different_bits": 28710,
+            "relative_l2": 0.010793907802718328
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 22558,
+            "different_bits": 31599,
+            "relative_l2": 0.013920429353474041
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.25,
+            "failed_elements": 15478,
+            "different_bits": 29377,
+            "relative_l2": 0.011837548806148129
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 23731,
+            "different_bits": 32021,
+            "relative_l2": 0.015320714647477637
+          }
+        }
+      }
+    },
+    {
+      "case": 2,
+      "chip": 1,
+      "device_against_variant": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.5,
+            "failed_elements": 15195,
+            "different_bits": 29280,
+            "relative_l2": 0.01167318343707804
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 23361,
+            "different_bits": 31919,
+            "relative_l2": 0.01443478640751882
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 8856,
+            "different_bits": 25790,
+            "relative_l2": 0.007081650338152802
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 18506,
+            "different_bits": 29876,
+            "relative_l2": 0.009782741003483147
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 0.5,
+            "failed_elements": 5717,
+            "different_bits": 23106,
+            "relative_l2": 0.005397604704605261
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 8.0,
+            "failed_elements": 15698,
+            "different_bits": 28145,
+            "relative_l2": 0.007549058334701466
+          }
+        }
+      },
+      "variant_against_frozen": {
+        "own_context_eager": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.0,
+            "failed_elements": 11088,
+            "different_bits": 26760,
+            "relative_l2": 0.008870380824893675
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 19939,
+            "different_bits": 30428,
+            "relative_l2": 0.01152068554640955
+          }
+        },
+        "own_context_fp32_attention": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.25,
+            "failed_elements": 14082,
+            "different_bits": 28710,
+            "relative_l2": 0.010793907802718328
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 22558,
+            "different_bits": 31599,
+            "relative_l2": 0.013920429353474041
+          }
+        },
+        "own_context_fp32_attention_rotary": {
+          "attention_residual": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 1.25,
+            "failed_elements": 15478,
+            "different_bits": 29377,
+            "relative_l2": 0.011837548806148129
+          },
+          "output": {
+            "passed": false,
+            "exact_required": false,
+            "bitwise_exact": false,
+            "max_abs": 16.0,
+            "failed_elements": 23731,
+            "different_bits": 32021,
+            "relative_l2": 0.015320714647477637
+          }
+        }
+      }
+    }
+  ],
+  "checkpoint_closed": true,
+  "sources_after": {
+    "dspark_backend_attribution.py": "5ca61d446f56b148a5b5d397f2c5d650fae50e134118a0f6be58e2c952416ac7",
+    "dspark_layer_diagnostic.py": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649",
+    "dspark_layer_reference.py": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8",
+    "dspark_backbone_reference.py": "a62f5e108c3bbcf4df8428eb85afe6218d42e3687fdf167100819f219366fe71",
+    "dspark_layer.py": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d",
+    "dspark_projection.py": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+    "dspark_weights.py": "10593cc2d2e6f55283dac0924debbb0f310e875e10896c591a552ae19f4573bf",
+    "dspark_checkpoint.py": "7606b99c083e4997c5e1de78f4332f89c0a4e476178f1642b10933925d2aff98",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5"
+  }
+}
