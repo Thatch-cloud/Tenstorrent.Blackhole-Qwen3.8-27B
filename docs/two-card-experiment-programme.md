@@ -64,7 +64,8 @@ costs separately. No new kernel math or trace contents;860 CI and60 harness test
 pass. Hardware run34296336943 on `8460b69` passed its complete request audit but
 hit the96 GiB host limit during profiler finalization (`oom_kill=1`); no device
 CSV survived. The collection fix requires incremental profiler dumps, keeping
-all17 actual verifier calls and every correctness audit. Hardware retry pending;
+all17 actual verifier calls and every correctness audit. Hardware retry34298049648
+on `da69ef8` is pending;
 no new performance result.
 [Scope and gates](current-verifier-profile-2026-09-09.md).
 

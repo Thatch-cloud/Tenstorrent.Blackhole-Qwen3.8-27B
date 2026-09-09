@@ -77,5 +77,8 @@ limit or reduce correctness coverage.
 The tests also reject missing incremental-dump configuration before opening
 hardware or observing a request. This is a source-grounded collection fix, not
 yet a successful hardware profile.
+The incremental-dump retry is
+[run34298049648](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34298049648)
+on `da69ef8`; its final device attribution is pending.
 Mid-run dumping weakens cross-device clock alignment; attribution remains
 per-chip, and no cross-chip critical-path claim is permitted.
