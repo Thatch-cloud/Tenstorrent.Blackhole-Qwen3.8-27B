@@ -20,7 +20,7 @@ from dflash_prefill_window import prefill_window
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
-                 cache_history=False, cache_projection_capture=False):
+                 cache_history=False, cache_projection_capture=False, live_query_qk=False):
         import torch
 
         window = prefill_window(position)
@@ -31,7 +31,8 @@ class DFlashDevice:
                 or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
                 or type(fused_convolution) is not bool or type(cache_history) is not bool
                 or (cache_history and (not proposal_capture or block_rows != 8))
-                or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)):
+                or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
+                or type(live_query_qk) is not bool or (live_query_qk and (not proposal_capture or block_rows != 8))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
@@ -42,6 +43,7 @@ class DFlashDevice:
         self.proposal_capture = None
         self.kv_history = None
         self.cache_history = cache_history
+        self.live_query_qk, self.validated_live_masks = live_query_qk, set()
         self.fused_convolution, self.convolution_checks = fused_convolution, []
         self.closed = False
         self.proposal_calls = self.published_rows = 0
@@ -53,7 +55,7 @@ class DFlashDevice:
         try:
             for attention, convolution, mlp in layers:
                 self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain,
-                    native_head_layout=True, block_rows=block_rows),
+                    native_head_layout=True, block_rows=block_rows, live_query_qk=live_query_qk),
                     prepare_mlp_branch(operations, self.mesh, mlp, convolution, self.retain), mlp, convolution))
             shards = projection_shards(projection['fc.weight'])
             self.projection = self.upload(torch.cat(shards, dim=0), sharded=True)
@@ -205,6 +207,9 @@ class DFlashDevice:
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
                          audit_convolution=False, cached_history=None):
         operations = self.operations
+        live_query_qk = getattr(self, 'live_query_qk', False)
+        if live_query_qk and addresses(operations, mask) not in self.validated_live_masks:
+            raise ValueError('Live-query proposal mask was not validated before upload/capture')
         if cached_history is not None and (self.kv_history is None or len(cached_history) != len(self.layers)):
             raise ValueError('Every prepared learned layer requires a committed K/V cache')
         if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
@@ -234,6 +239,7 @@ class DFlashDevice:
             with operation_audit:
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
                     retain, parameters=attention, context=context, **convolution_options,
+                    **(dict(live_query_mask_validated=True) if live_query_qk else {}),
                     **(dict(cached_history=cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,

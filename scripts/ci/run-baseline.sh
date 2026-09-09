@@ -10,6 +10,7 @@ dflash_convolution_abba=0
 dflash_cache_abba=0
 dflash_projection_abba=0
 dflash_profile=0
+dflash_live_query_abba=0
 dflash_context=0
 tiny_mlp=0
 live_qk=0
@@ -22,6 +23,11 @@ if [ "$mode" = tiny-mlp ]; then
     tiny_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
+fi
+if [ "$mode" = full-dflash-live-query-request ]; then
+    dflash_context=4096
+    dflash_live_query_abba=1
+    mode=full-dflash-trace-request
 fi
 if [ "$mode" = full-dflash-verifier-profile ]; then
     dflash_context=4096
@@ -193,6 +199,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_CONVOLUTION_ABBA=$dflash_convolution_abba" \
     -e "QWEN_DFLASH_CACHE_ABBA=$dflash_cache_abba" \
     -e "QWEN_DFLASH_PROJECTION_ABBA=$dflash_projection_abba" \
+    -e "QWEN_DFLASH_LIVE_QUERY_ABBA=$dflash_live_query_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_LIVE_QK=$live_qk" \
@@ -230,6 +237,10 @@ docker cp optimisation "$test_id:/experiment-optimisation"
 docker cp speculative-decoding/harness "$test_id:/experiment-speculative"
 docker start -a "$test_id" | tee "$output/baseline-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
+if [ "$dflash_live_query_abba" = 1 ]; then
+    docker cp "$test_id:/experiment/results/full-dflash-request.json" "$output/full-dflash-request.json"
+    python3 scripts/ci/live_attention_request_gate.py --hardware-result "$output/full-dflash-request.json"
+fi
 if [ "$live_qk" = 1 ]; then
     for context in 31 2048; do
         docker cp "$test_id:/experiment/results/live-qk-$context.json" "$output/live-qk-$context.json"

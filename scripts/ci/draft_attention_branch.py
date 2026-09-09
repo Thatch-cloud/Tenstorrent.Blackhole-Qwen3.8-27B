@@ -6,13 +6,15 @@ from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
 
 
-def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8):
+def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8, live_query_qk=False):
     import torch
 
     if type(native_head_layout) is not bool:
         raise ValueError('Explicit boolean native head-layout selection required')
     if type(block_rows) is not int or block_rows not in (8, 32):
         raise ValueError('Explicit eight-row control or 32-row draft extrapolation required')
+    if type(live_query_qk) is not bool or (live_query_qk and (block_rows != 8 or precise_native)):
+        raise ValueError('Live-query QK requires the eight-row composed-attention path')
 
     native_kernel = None
     if precise_native:
@@ -36,7 +38,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
     base = convolution['layers.0.attention_conv.base_kernel']
     return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
         kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout, block_rows=block_rows,
-        norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
+        live_query_qk=live_query_qk, norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
         convolution=upload(convolution['layers.0.attention_conv.kernel_projection.weight'].T.contiguous()),
         bases=[upload(base[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
         projections={name: projection(name, 0) for name in ('q', 'k', 'v')},
@@ -45,12 +47,16 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
-                             parameters, context, wide_dot_placement=False, convolution_operation=None, cached_history=None):
+                             parameters, context, wide_dot_placement=False, convolution_operation=None, cached_history=None,
+                             live_query_mask_validated=False):
     convolve = convolution_operation or grouped_causal_convolution
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
     if parameters.get('native_kernel') and wide_dot_placement:
         raise ValueError('Native SDPA replaces the composed dot placement control')
+    if parameters.get('live_query_qk') and (live_query_mask_validated is not True or wide_dot_placement
+            or parameters.get('native_kernel') or parameters.get('block_rows', 8) != 8):
+        raise ValueError('Live-query QK requires a validated T8 mask and the qualified64-worker path')
     if type(context) is not int or context < 1 or context > 2048:
         raise ValueError('Explicit bounded committed feature context required')
     block_rows = parameters.get('block_rows', 8)
@@ -130,6 +136,11 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         if parameters.get('native_kernel'):
             attention = draft_sdpa(operations, heads['q'], heads['k'], heads['v'], mask)
             attention_owned.append(attention)
+        elif parameters.get('live_query_qk'):
+            from draft_live_attention import live_attention
+
+            attention = live_attention(operations, mesh, heads['q'], heads['k'], heads['v'], mask,
+                trace_owned=attention_owned, mask_validated=live_query_mask_validated)
         else:
             attention = composed_draft_attention(operations, mesh, heads['q'], heads['k'], heads['v'], mask,
                 explicit_softmax=True, fused_row_sum=True, fused_dots=True, cache_dot_tiles=True,

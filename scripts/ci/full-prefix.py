@@ -113,6 +113,12 @@ def main():
     dflash_cache_abba = os.environ.get('QWEN_DFLASH_CACHE_ABBA', '0')
     dflash_projection_abba = os.environ.get('QWEN_DFLASH_PROJECTION_ABBA', '0')
     dflash_profile = os.environ.get('QWEN_DFLASH_VERIFIER_PROFILE', '0')
+    dflash_live_query_abba = os.environ.get('QWEN_DFLASH_LIVE_QUERY_ABBA', '0')
+    if dflash_live_query_abba not in ('0', '1') or (dflash_live_query_abba == '1' and
+            (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
+             or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba,
+                 dflash_cache_abba, dflash_projection_abba, dflash_profile)))):
+        parser.error('Live-query ABBA requires the isolated cached 4K T8 lead')
     if dflash_profile not in ('0', '1') or (dflash_profile == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba, dflash_cache_abba, dflash_projection_abba))
@@ -408,6 +414,10 @@ def main():
     if options.attribution:
         output_path = root / "full-batch-attribution.json"
     report.update(context_lengths=lengths, rollback_prefixes=prefixes, eligible_for_serving_gate=False)
+    if dflash_live_query_abba == '1':
+        from live_attention_request_gate import qualify_inputs
+
+        report['live_attention_simulator_reports'] = qualify_inputs(os.environ['TT_METAL_HOME'])
     if options.batch:
         report["scope"] = "64-layer batched target with static positions, per-layer GDN prefix snapshots and serial shared-page KV writes; no drafter or speed claim"
     if options.coding_cost:
@@ -479,6 +489,11 @@ def main():
             dflash_fixtures = load_dflash_fixtures('/experiment-dflash-fixture')
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=1073741824)
         mesh.enable_program_cache()
+        if dflash_live_query_abba == '1':
+            predicate = getattr(ttnn.experimental, 'is_tensor_prefetcher_supported', None)
+            report['tensor_prefetcher_capability'] = dict(api_available=predicate is not None,
+                supported=bool(predicate(mesh)) if predicate is not None else None, kernel_correctness_qualified=False)
+            print(json.dumps(dict(tensor_prefetcher_capability=report['tensor_prefetcher_capability'])), flush=True)
         if options.target_feature_prefix:
             from feature_prefix import allocate_prefix_pool
             feature_prefix_pool = allocate_prefix_pool(ttnn, lambda prefix: ttnn.from_torch(
@@ -817,6 +832,7 @@ def main():
                     from full_dflash_request import measure_dflash_request, summarize_dflash_requests, summarize_dflash_commit_requests
                     from full_dflash_request import summarize_dflash_convolution_requests, summarize_dflash_cache_requests
                     from full_dflash_request import summarize_dflash_projection_requests
+                    from full_dflash_request import summarize_dflash_live_query_requests
                     output_path = root / 'full-dflash-request.json'
                     report.update(scope='Complete five-layer DFlash2 coding request; exact target verification, not held-out quality certification',
                         context_lengths=[len(prompt)], request_checks=[])
@@ -844,11 +860,16 @@ def main():
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
                         if dflash_profile == '1':
                             arms = ((True, True, True, True, False),)
-                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture in arms:
+                        arms = tuple((*arm, False) for arm in arms)
+                        if dflash_live_query_abba == '1':
+                            arms = tuple((True, True, audit, True, False, candidate) for candidate, audit in
+                                ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture, live_query_qk in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
                                 commit_only_gdn=commit_only, fused_convolution=fused_convolution,
                                 cache_history=cache_history,
                                 cache_projection_capture=cache_projection_capture,
+                                live_query_qk=live_query_qk,
                                 repetition=len(report['request_checks']))), flush=True)
                             result = measure_dflash_request(ttnn, model, sampler, prompt, page_table, helpers,
                                 fixtures=dflash_fixtures, prefill=prefill, decode=decode, live_digest=live_digest,
@@ -856,7 +877,8 @@ def main():
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
                                 proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only,
                                 fused_convolution=fused_convolution, cache_history=cache_history,
-                                cache_projection_capture=cache_projection_capture, profile_verifier=dflash_profile == '1')
+                                cache_projection_capture=cache_projection_capture, profile_verifier=dflash_profile == '1',
+                                live_query_qk=live_query_qk)
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -870,6 +892,8 @@ def main():
                         summarize = summarize_dflash_cache_requests
                     if dflash_projection_abba == '1':
                         summarize = summarize_dflash_projection_requests
+                    if dflash_live_query_abba == '1':
+                        summarize = summarize_dflash_live_query_requests
                     if dflash_profile == '1':
                         report['request_summary'] = summarize_dflash_requests(report['request_checks'], audit_only=True)
                         report.update(instrumented_timing=True, correctness_only=True,

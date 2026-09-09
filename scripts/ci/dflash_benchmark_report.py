@@ -7,7 +7,8 @@ import math
 from pathlib import Path
 
 from full_dflash_request import (summarize_dflash_requests, summarize_dflash_commit_requests,
-    summarize_dflash_convolution_requests, summarize_dflash_cache_requests, summarize_dflash_projection_requests)
+    summarize_dflash_convolution_requests, summarize_dflash_cache_requests, summarize_dflash_projection_requests,
+    summarize_dflash_live_query_requests)
 
 
 def report_rows(report):
@@ -23,6 +24,8 @@ def report_rows(report):
             summarize = summarize_dflash_cache_requests
         if any(entry.get('cache_projection_capture') is True for entry in requests):
             summarize = summarize_dflash_projection_requests
+        if any(entry.get('live_query_qk') is True for entry in requests):
+            summarize = summarize_dflash_live_query_requests
         combined = summarize(requests)
         summaries = [(arm, combined[arm], report['request_summary'][arm]) for arm in ('control', 'candidate')]
     else:
@@ -44,6 +47,8 @@ def report_rows(report):
             path.append('cached draft K/V')
         if summary.get('cache_projection_capture'):
             path.append('captured K/V update')
+        if summary.get('live_query_qk'):
+            path.append('live-query QK')
         output.append(dict(arm=arm, path=' + '.join(path), **summary['benchmark']))
     return output
 

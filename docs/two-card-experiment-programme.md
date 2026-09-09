@@ -100,15 +100,27 @@ child zones must not be summed. Transfer the measurement method: named semantic
 zones, worst-chip comparisons, and separate uninstrumented application timing.
 Do not transplant its MoE timing or infer two-card B1 decode speed from it.
 
-**Next kernel: skip padded draft-query QK work.** T8 has8 live query rows but
+**Qualified attention kernel: skip padded draft-query QK work.** T8 has8 live query rows but
 the cached SFPU dot evaluates32. The opt-in kernel retains live FP32 arithmetic
 and zeros only raw padded scores; the single-allowed-key padding mask preserves
-all final attention rows. Initial learned-operand simulation passes12 eager and
-36 replay component checks plus four stale controls. Final source qualification
-and2K-history simulation precede hardware ABBA; no new TG result. The hardware
-route tests complete attention without downloading model weights or rebuilding
-the native runtime, and requires both source-pinned reports before device access.
+all final attention rows. Both short learned-operand and 2K synthetic component
+simulations pass exactness and changed-input replay. Hardware run34310168821
+passes both contexts: complete attention latency falls 7.29% and 9.50%, with
+every ABBA block winning. This is not whole-drafter or request throughput.
+Integration now routes the opt-in candidate through the actual cached T8 drafter,
+with host mask validation before capture/replay and unchanged native arithmetic.
+Both short learned-operand and 2K synthetic integration simulations pass all32
+output rows on both chips, including changed inputs and both traces live.
+The hardware gate is a matched 4K complete-request ABBA: cached history, fused
+convolution, commit-only target verification and four links remain in both arms.
+It reports PP / CTX / committed TG, not the attention microkernel rate.
 [Scope, padding proof and gates](live-query-attention-2026-09-09.md).
+
+Next verifier work is [DRAM-core weight prefetch](dram-prefetch-mlp-2026-09-09.md),
+subject to the pair's actual firmware/harvesting capability. A separate
+[approximate-drafter experiment](drafter-numerics-experiment-2026-09-09.md) can
+allow different proposals while retaining exact target outputs/state; it must
+not turn failed native-attention numerical tests into passing exactness claims.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

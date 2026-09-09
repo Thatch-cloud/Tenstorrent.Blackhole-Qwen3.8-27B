@@ -63,10 +63,16 @@ class PreparedDFlashProposal:
 
     def update(self, bucket, seed):
         operations, device = self.operations, self.device
+        if getattr(device, 'live_query_qk', False):
+            device.validated_live_masks.discard(addresses(operations, bucket.mask))
         if self.kv_history is not None and (self.kv_history.pending is not None
                 or self.kv_history.position != device.position or self.kv_history.history_rows != device.history_rows):
             raise ValueError('Proposal replay requires a fully committed matching K/V frontier')
         host = proposal_inputs(seed, device.position, device.history_rows, device.block_rows, bucket.context)
+        if getattr(device, 'live_query_qk', False):
+            from draft_live_qk import validate_live_qk_mask
+
+            validate_live_qk_mask(host['mask'])
         sources = [host['identifiers'], host['mask'], *host['rope']['q'], *host['rope']['k']]
         destinations = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k']]
         for value, destination in zip(sources, destinations, strict=True):
@@ -88,6 +94,8 @@ class PreparedDFlashProposal:
             operations.synchronize_device(self.mesh)
             if [addresses(operations, value) for value in bucket.inputs] != bucket.addresses:
                 raise AssertionError('Prepared proposal input addresses moved')
+            if getattr(device, 'live_query_qk', False):
+                device.validated_live_masks.add(addresses(operations, bucket.mask))
         finally:
             release_owned(operations, owned)
 
@@ -136,6 +144,8 @@ class PreparedDFlashProposal:
                 self.operations.release_trace(self.mesh, bucket.trace)
                 bucket.trace = None
         for bucket in self.buckets.values():
+            if getattr(self.device, 'live_query_qk', False):
+                self.device.validated_live_masks.discard(addresses(self.operations, bucket.mask))
             release_owned(self.operations, bucket.owned)
             bucket.owned.clear()
         release_owned(self.operations, self.owned)
