@@ -127,7 +127,7 @@ The original FP32 gate rejects this policy. No tolerance is widened.
 | Gate | Current result |
 | --- | --- |
 | Small native-policy simulator, 64 IDs / 3 proposals | **80 checks pass**, both chips, exact scores, changed-input replay and clean exit |
-| Learned native-policy simulator, 248,320 IDs / 7 proposals | First eager trajectory passes on both chips; `20260909T123008Z-401` continues, not qualified yet |
+| Learned native-policy simulator, 248,320 IDs / 7 proposals | Both eager trajectories and all three changed-input replays pass; `20260909T123008Z-401` continues through final controls/cleanup, not qualified yet |
 | Unchanged target tokens/GDN/KV with DSpark | Not integrated or measured |
 
 The small run is `20260909T122916Z-419`; report SHA256:
@@ -195,6 +195,42 @@ quality gates are unchanged and still outstanding.
 Validation:1,085 host tests and58 simulator-harness tests pass, including64 DSpark
 CPU tests. `dspark_rotary_gate.py` independently rejects missing coordinates,
 failed controls, stale sources, unclean teardown and unsupported arithmetic policy.
+
+### Learned CPU backbone matches upstream
+
+All five learned layers now execute in the CPU reference. An independent control
+uses the checkpoint's reviewed, hash-pinned forward methods plus the pinned
+Transformers eager attention, RMSNorm, MLP and YaRN methods.
+
+| Coverage | Verified result |
+| --- | --- |
+| Learned feature projection and normalization | Full5120 outputs; taps5/19/33/47/61 in checkpoint order |
+| Five complete layers | Q/K/V projections, head norms, YaRN, full noncausal GQA, output projection, SwiGLU and residuals |
+| Four CPU cases | Two feature/noise patterns, absolute starts0/8190 and a repeated first case |
+| Stage comparison | **48/48 bitwise-exact BF16 matches** against the reviewed upstream control |
+| Inputs and weights | Borrowed inputs unchanged; checkpoint hashes checked before/after, every loaded tensor rehashed |
+
+Each case uses32 synthetic feature rows and seven synthetic noise embeddings.
+These are not tokenized coding prompts or PP/CTX/TG measurements. The reference
+does not include the target embedding/LM head, Markov selection, confidence policy,
+target verifier or serving path. It does not establish GPU/TT arithmetic equality.
+
+The control executes only reviewed function bodies, with training, dynamic
+decorators and alternative attention backends disabled; it does not import
+checkpoint modules or install Transformers. Earlier intake/loader checks executed
+no checkpoint code. This separate upstream comparison explicitly does.
+
+| Evidence | SHA256 |
+| --- | --- |
+| `dspark-backbone-cpu-reference.json` | `2dcaf7f4e5d1052da206dcead5ccc54b15b0a5d9d81dc3f8605e2a5fd349b912` |
+| `dspark-backbone-upstream-reference.json` | `eb79532aeee5121b184f24121b9d2012aa9905f0a202100c98093b3657f9ed16` |
+| Saved CPU stage tensors,4,769,305 bytes | `ede89f463be2df136298444e092c9bffaa272bb1968e2cc8336cf0ae0aef02fc` |
+
+The reports are in `scripts/ci/`; tensor data stays under `/opt/ttsim/results/`.
+Independent report/tensor reconciliation also passes. All1,096 host tests and58
+harness tests pass, including75 DSpark tests. Next port the learned operations
+and full-context mask to TT without substituting DFlash2's2K window or eight-row
+proposal convention. CPU correctness is not permission to skip the target audits.
 
 ## Complete learned weights staged
 
