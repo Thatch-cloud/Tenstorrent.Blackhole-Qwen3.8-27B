@@ -11,7 +11,15 @@ export PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHO
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
-python3 /experiment-scripts/ci/dspark-pipeline-hardware.py --preflight \
+mode=${QWEN_DSPARK_MODE:-backbone}
+[[ "$mode" = backbone || "$mode" = target ]]
+probe=dspark-pipeline-hardware
+if [ "$mode" = target ]; then
+    probe=dspark-target-hardware
+    export MODEL_WEIGHTS_DIR=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    export HF_MODEL="$MODEL_WEIGHTS_DIR"
+fi
+python3 "/experiment-scripts/ci/$probe.py" --preflight \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
@@ -19,14 +27,14 @@ python3 /experiment-scripts/ci/dspark_runtime_cache.py
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e
-timeout -k 20 3000 python3 -u /experiment-scripts/ci/dspark-pipeline-hardware.py \
+timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
-    --output /experiment/results/dspark-pipeline-hardware.json 2>&1 | tee /experiment/results/dspark-pipeline-hardware.log
+    --output "/experiment/results/$probe.json" 2>&1 | tee "/experiment/results/$probe.log"
 status=${PIPESTATUS[0]}
 set -e
-printf '%s\n' "$status" > /experiment/results/dspark-pipeline-hardware.exit-status
+printf '%s\n' "$status" > "/experiment/results/$probe.exit-status"
 test "$status" = 0
-if grep -q 'Failed to discover available ethernet links' /experiment/results/dspark-pipeline-hardware.log; then
+if grep -q 'Failed to discover available ethernet links' "/experiment/results/$probe.log"; then
     echo 'Explicit four-link integration unexpectedly invoked fallback discovery' >&2
     exit 1
 fi

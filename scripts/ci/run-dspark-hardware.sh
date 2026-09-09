@@ -3,6 +3,14 @@ set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
+mode=${QWEN_DSPARK_MODE:-backbone}
+[[ "$mode" = backbone || "$mode" = target ]]
+target_mount=()
+if [ "$mode" = target ]; then
+    target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+    test -d "$target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    target_mount=(--mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly")
+fi
 output=experiment-results
 mkdir -p "$output"
 PYTHONPATH=scripts/ci python3 -c \
@@ -40,11 +48,13 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
     --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
     --mount "type=bind,src=$fixture,dst=/dspark,readonly" \
+    "${target_mount[@]}" \
     --mount "type=volume,src=$volume,dst=/experiment-cache" \
     --label thatch.qwen.baseline=true --workdir /opt/vllm-tt-plugin \
     --label "thatch.qwen.workflow-run=${GITHUB_RUN_ID:-untracked}" \
     --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
+    -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \
     -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e TT_METAL_HOME=/opt/tt-metal \
     -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels -e MESH_DEVICE=P300 \

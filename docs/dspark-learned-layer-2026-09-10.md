@@ -448,10 +448,18 @@ Final-normalization relative L2 differences versus the declared CPU backend are
 open. This is neither coding-acceptance evidence nor a comparison against the
 complete DFlash2 proposal time.
 
-The next targeted simulator check covers **seven-row embedding lookup, hidden
-gather and zero padding only**, using a small synthetic table. It does not rerun
-the full model. Real target features/embeddings/head and Markov feedback are
-the next hardware integration step.
+The targeted **seven-row embedding lookup, hidden gather and zero-padding**
+simulator gate passes all 44 checks, including changing-input replay. It uses
+a synthetic 64-row lookup table, not real target weights. Run
+`20260909T230225Z-411` closes cleanly, exit 0; simulator execution is 22.7 seconds,
+not hardware latency. Peak process-cgroup memory is 1,051,586,560 bytes with no
+swap or OOM events. All 27 source and 1,517 native hashes remain unchanged.
+Report `scripts/ci/dspark-noise-simulator.json`, SHA-256
+`6215f1ee04d8928814ac79b56ae7fe63bd345ebf6aaa83995814c245bb5c1cc0`.
+
+The new [target-bound integration lane](dspark-target-integration-2026-09-10.md)
+connects real target features/embeddings/head to all five DSpark layers and the
+full-vocabulary Markov selector. It is not yet a hardware result or TG measurement.
 
 ## Next gates
 
