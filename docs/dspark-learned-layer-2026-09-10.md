@@ -90,6 +90,25 @@ the original 102/192 failure and all qualification thresholds are retained.
 The integrated helper passes all 1,160 host tests and 59 simulator-harness tests;
 the simulator wrapper also passes shell syntax validation.
 
+### Targeted arithmetic follow-up
+
+The retained down projection matches the existing Blackhole grouped-product /
+FP32-destination reference **bitwise at all 48 sampled coordinates** when the
+fidelity span is 32. The sample includes four failing and four passing CPU-FP32
+coordinates from each case/chip, with the entire 8,704-term reduction retained.
+Span 16 matches only 3/48. This points to native arithmetic in these samples,
+not a demonstrated sharding/layout defect; it is not full-output qualification.
+All original per-element failures remain recorded. CPU attribution report
+`scripts/ci/dspark-layer-rounding-attribution.json`, SHA256
+`a33c11d4de5c524ba6c1284d84e2031e67fc951f5990376e1918b4d4ad482b87`.
+
+Using the native BF16 scale in the CPU attention reference leaves 36 of the
+original 37 own-input element failures across the six case/chip pairs. Scale
+rounding alone is therefore not a fix. The next eager-only simulator diagnostic
+uses the existing cached FP32 SFPU dot/row-sum composition on the saved learned
+Q/K/V. It loads no checkpoint weights, changes no native runtime files and has
+no hardware, trace, full-layer or performance qualification authority.
+
 | Full-matrix requirement | Checks |
 | --- | ---: |
 | Frozen CPU layer checkpoints | 6 |
