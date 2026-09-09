@@ -37,7 +37,8 @@ below are offline coding-task experiments, not held-out quality or serving certi
 attention used only for approximate proposals. Mask/replay simulation passes at
 31/2,048 history rows, but learned numerical differences remain. Exact target
 verification stays mandatory. The separate full-request ABBA is implemented
-and passes1,021 host tests; hardware timing is next.
+and passes1,021 host tests.
+[Hardware comparison dispatched](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182); no new TG result yet.
 
 ## Setup
 

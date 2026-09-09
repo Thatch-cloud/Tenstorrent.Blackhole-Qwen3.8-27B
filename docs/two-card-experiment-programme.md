@@ -194,7 +194,9 @@ original numerical comparison. The separate six-request policy comparison is
 now implemented with exact native target token/GDN/KV audits, independently
 reconciled proposal counts, per-policy deterministic trajectories and clean
 teardown/source gates. All1,021 CI and57 simulator-harness tests pass. Hardware
-suite `full-dflash-native-proposal-request` is next; no new TG result exists yet.
+suite `full-dflash-native-proposal-request` is dispatched as
+[34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182)
+on immutable `ci-qwen-hardware-f1c1b69`; no new TG result exists yet.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

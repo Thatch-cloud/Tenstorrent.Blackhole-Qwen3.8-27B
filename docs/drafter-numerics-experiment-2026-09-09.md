@@ -1,7 +1,7 @@
 # Separate experiment: faster approximate drafting
 
 **Both proposal-only native-attention simulator gates pass.**
-The complete-request comparison is implemented; no hardware result yet. Keep the exact
+The complete-request comparison is dispatched; no hardware result yet. Keep the exact
 live-query candidate separate. The failed native-SDPA numerical tests remain
 failed; their tolerances and results are unchanged.
 
@@ -60,6 +60,10 @@ Reports and exit files are checked in byte-identically under
 ## Complete-request comparison
 
 Suite: `full-dflash-native-proposal-request`, opt-in only.
+
+[CI34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182)
+uses immutable tag `ci-qwen-hardware-f1c1b69`. The complete artifact and independent
+policy validation are required before recording a hardware result.
 
 | Setting | Control and candidate |
 | --- | --- |
