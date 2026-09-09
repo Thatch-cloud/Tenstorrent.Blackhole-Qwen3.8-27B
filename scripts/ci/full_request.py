@@ -1,6 +1,7 @@
 """Actual lookup drafting pilot, not a representative coding-quality benchmark."""
 
 import hashlib
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import time
@@ -37,10 +38,14 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     attention_replay=False, family_routing=False, attention_mask_once=False, replay_group_rows=4,
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
-                    attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False):
+                    attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False,
+                    verifier_observer=None):
     if (type(commit_only_gdn) is not bool or type(audit_commit_only_gdn) is not bool
             or (audit_commit_only_gdn and not commit_only_gdn)):
         raise ValueError('Explicit commit-only GDN selection required before auditing deferred state')
+    if verifier_observer is not None and (not callable(verifier_observer) or not audit_commit_only_gdn
+            or feature_factory is None or not norm_batch or not native_sampling_rows or attention_replay):
+        raise ValueError('Verifier observation requires a separate audited feature-drafter request')
     if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
         raise ValueError('Attention diagnostics require explicit short-context parallel attention')
     if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
@@ -158,7 +163,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 ticket = session.propose(session.request_id, max_rows=maximum, selected=selected_drafter)
                 drafted = time.perf_counter()
                 before_verify = live_digest() if audit_commit_only_gdn and len(ticket.tokens) > 1 else None
-                predictions, components = engine.verify(ticket)
+                with verifier_observer(engine, ticket) if verifier_observer is not None else nullcontext():
+                    predictions, components = engine.verify(ticket)
                 if before_verify is not None:
                     if live_digest() != before_verify:
                         raise AssertionError('Commit-only verification modified native GDN state before the decision')

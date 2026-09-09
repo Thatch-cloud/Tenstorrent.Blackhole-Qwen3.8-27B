@@ -111,6 +111,13 @@ def main():
     dflash_context = os.environ.get('QWEN_DFLASH_CONTEXT', '0')
     dflash_cache_abba = os.environ.get('QWEN_DFLASH_CACHE_ABBA', '0')
     dflash_projection_abba = os.environ.get('QWEN_DFLASH_PROJECTION_ABBA', '0')
+    dflash_profile = os.environ.get('QWEN_DFLASH_VERIFIER_PROFILE', '0')
+    if dflash_profile not in ('0', '1') or (dflash_profile == '1' and
+            (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
+             or any(value != '0' for value in (dflash_commit_abba, dflash_convolution_abba, dflash_cache_abba, dflash_projection_abba))
+             or not all(os.environ.get(name) == '1' for name in ('TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER',
+                 'TT_METAL_PROFILER_TRACE_TRACKING', 'TT_METAL_PROFILER_CPP_POST_PROCESS')))):
+        parser.error('Request verifier profiling requires the isolated cached 4K T8 audit and all profiler flags')
     if dflash_projection_abba not in ('0', '1') or (dflash_projection_abba == '1' and
             (dflash_context != '4096' or dflash_capture != '1' or dflash_drafts != '7'
              or dflash_commit_abba != '0' or dflash_convolution_abba != '0' or dflash_cache_abba != '0')):
@@ -835,6 +842,8 @@ def main():
                         if dflash_projection_abba == '1':
                             arms = tuple((True, True, audit, True, capture_projection) for capture_projection, audit in
                                 ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False)))
+                        if dflash_profile == '1':
+                            arms = ((True, True, True, True, False),)
                         for commit_only, fused_convolution, feature_audit, cache_history, cache_projection_capture in arms:
                             print(json.dumps(dict(dflash_stage='complete-request', audit_features=feature_audit,
                                 commit_only_gdn=commit_only, fused_convolution=fused_convolution,
@@ -847,7 +856,7 @@ def main():
                                 audit_features=feature_audit, block_rows=int(dflash_drafts) + 1,
                                 proposal_capture=dflash_capture == '1', commit_only_gdn=commit_only,
                                 fused_convolution=fused_convolution, cache_history=cache_history,
-                                cache_projection_capture=cache_projection_capture)
+                                cache_projection_capture=cache_projection_capture, profile_verifier=dflash_profile == '1')
                             result.update(kind=report['scope'], coding_task=report['coding_task'],
                                 output_text=tokenizer.decode(result['emitted'], skip_special_tokens=False),
                                 ended_with_eos=result['emitted'][-1] in eos_ids, sampler_num_links=4,
@@ -861,7 +870,12 @@ def main():
                         summarize = summarize_dflash_cache_requests
                     if dflash_projection_abba == '1':
                         summarize = summarize_dflash_projection_requests
-                    report['request_summary'] = summarize(report['request_checks'])
+                    if dflash_profile == '1':
+                        report['request_summary'] = summarize_dflash_requests(report['request_checks'], audit_only=True)
+                        report.update(instrumented_timing=True, correctness_only=True,
+                            scope='Instrumented current cached DFlash2 request verifier attribution; not PP or TG')
+                    else:
+                        report['request_summary'] = summarize(report['request_checks'])
                     report['passed'] = True
                     print(json.dumps(report['request_summary']), flush=True)
                     return

@@ -171,6 +171,17 @@ class FullDFlashRequestTests(unittest.TestCase):
         self.assertFalse(result['control']['cache_history'])
         self.assertTrue(result['control']['fused_convolution'])
 
+    def test_single_instrumented_audit_has_no_pp_tg_or_manufactured_repetitions(self):
+        record = self.cache_requests()[1]
+        result = summarize_dflash_requests([record], audit_only=True)
+        self.assertTrue(result['audit_only'])
+        self.assertEqual(result['committed_tokens'], 2)
+        self.assertNotIn('benchmark', result)
+        self.assertNotIn('committed_tokens_per_second', result)
+        record['state_exact'] = False
+        with self.assertRaises(ValueError):
+            summarize_dflash_requests([record], audit_only=True)
+
     def projection_requests(self):
         records = self.cache_requests()
         for index, record in enumerate(records):
@@ -365,6 +376,19 @@ class FullDFlashRequestTests(unittest.TestCase):
                 '--request-pilot', '--norm-batch'], env={**base, key: value}, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('K/V-projection ABBA requires', result.stderr)
+
+    def test_request_profiler_rejects_missing_flags_and_mixed_experiments_before_hardware(self):
+        base = dict(os.environ, QWEN_DFLASH_CONTEXT='4096', QWEN_DFLASH_CAPTURE='1', QWEN_DFLASH_DRAFTS='7',
+            QWEN_DFLASH_VERIFIER_PROFILE='1', QWEN_DFLASH_PROJECTION_ABBA='0', QWEN_DFLASH_CACHE_ABBA='0',
+            QWEN_DFLASH_CONVOLUTION_ABBA='0', QWEN_DFLASH_COMMIT_ABBA='0', QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1',
+            TTNN_OP_PROFILER='1', TT_METAL_DEVICE_PROFILER='1', TT_METAL_PROFILER_TRACE_TRACKING='1', TT_METAL_PROFILER_CPP_POST_PROCESS='1')
+        for key, value in (('QWEN_DFLASH_CONTEXT', '8192'), ('QWEN_DFLASH_CAPTURE', '0'), ('QWEN_DFLASH_DRAFTS', '31'),
+                ('QWEN_DFLASH_CACHE_ABBA', '1'), ('QWEN_DFLASH_PROJECTION_ABBA', '1'), ('TTNN_OP_PROFILER', '0'),
+                ('TT_METAL_DEVICE_PROFILER', '0'), ('TT_METAL_PROFILER_TRACE_TRACKING', '0'), ('TT_METAL_PROFILER_CPP_POST_PROCESS', '0')):
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('full-prefix.py')),
+                '--request-pilot', '--norm-batch'], env={**base, key: value}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Request verifier profiling requires', result.stderr)
 
     def test_wide_selector_preserves_predecessors_across_oracle_chunk_boundaries(self):
         generator = torch.Generator().manual_seed(29)

@@ -55,8 +55,9 @@ def audit_prefill_assembly(operations, captured):
     return checks
 
 
-def summarize_dflash_requests(requests):
-    if len(requests) != 3 or [entry.get('instrumented_timing') for entry in requests] != [True, False, False]:
+def summarize_dflash_requests(requests, *, audit_only=False):
+    if (type(audit_only) is not bool or len(requests) != (1 if audit_only else 3)
+            or [entry.get('instrumented_timing') for entry in requests] != ([True] if audit_only else [True, False, False])):
         raise ValueError('One complete feature audit followed by two uninstrumented requests required')
     reference = requests[0]
     commit_only = reference.get('commit_only_gdn', False)
@@ -149,6 +150,9 @@ def summarize_dflash_requests(requests):
             for block in reference['blocks'] if block['rows'] > 1]
         if not expected or reference.get('gdn_verify_checks') != expected:
             raise ValueError('Every multirow verification must leave native GDN unchanged before the decision')
+    if audit_only:
+        return dict(context=len(reference['prompt_tokens']), streams=1, committed_tokens=reference['committed_decode_tokens'],
+            scope='Single complete instrumented request audit; not PP or TG', audit_only=True)
     measured = requests[1:]
     tokens = sum(entry['committed_decode_tokens'] for entry in measured)
     decode_ms = sum(entry['decode_ms'] for entry in measured)
@@ -260,7 +264,8 @@ def summarize_dflash_projection_requests(requests):
 def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *, fixtures,
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
                           audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False,
-                          commit_only_gdn=False, fused_convolution=False, cache_history=False, cache_projection_capture=False):
+                          commit_only_gdn=False, fused_convolution=False, cache_history=False, cache_projection_capture=False,
+                          profile_verifier=False):
     import torch
     from full_request import measure_request
     from models.tt_transformers.tt.ccl import TT_CCL
@@ -269,6 +274,9 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             or type(fused_convolution) is not bool or (fused_convolution and not proposal_capture)
             or type(cache_history) is not bool or (cache_history and (not proposal_capture or block_rows != 8))
             or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
+            or type(profile_verifier) is not bool or (profile_verifier and (not audit_features or not commit_only_gdn
+                or not proposal_capture or not fused_convolution or not cache_history or cache_projection_capture
+                or block_rows != 8 or len(prompt) != 4096))
             or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 65536 - len(prompt) - 32
             or type(block_rows) is not int or block_rows not in (8, 32)):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
@@ -348,13 +356,21 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         faulthandler.dump_traceback_later(180, exit=True)
         return runtime
 
+    observer = None
     try:
+        if profile_verifier:
+            from request_verifier_profile import RequestVerifierProfile
+
+            observer = RequestVerifierProfile(operations, model.mesh_device)
         result = measure_request(model, sampler, prompt, pages, helpers,
             prefill=captured_prefill, decode=gold_decode, live_digest=live_digest, kv_digest=kv_digest,
             inactive_digest=inactive_digest, eos_ids=eos_ids, max_new_tokens=max_new_tokens,
             norm_batch=True, lookup_max_rows=block_rows, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=commit_only_gdn and audit_features,
-            feature_factory=factory, progress=lambda block: status('committed-block', **block))
+            feature_factory=factory, progress=lambda block: status('committed-block', **block),
+            **(dict(verifier_observer=observer) if observer is not None else {}))
+        if observer is not None:
+            result['verifier_profile'] = observer.summary()
         result['fused_convolution'] = fused_convolution
         result['cache_history'] = cache_history
         result['cache_projection_capture'] = cache_projection_capture
@@ -392,7 +408,7 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             for name in ('full_dflash_request.py', 'dflash_device.py', 'dflash_request_runtime.py', 'prepared_target_features.py',
                          'draft_head_layout.py', 'draft_attention_branch.py', 'draft_mlp_branch.py', 'draft_shared_head.py',
                          'draft_selector.py', 'dflash_proposal_inputs.py', 'dflash_proposal_trace.py',
-                         'draft_kv_projection.py', 'draft_kv_projection_trace.py', 'draft_kv_history.py',
+                         'draft_kv_projection.py', 'draft_kv_projection_trace.py', 'draft_kv_history.py', 'request_verifier_profile.py',
                          'dflash_prefill_window.py', 'coding_context_request.py',
                          'gdn_device_loop_state.py', 'model_batch.py', 'verifier_engine.py', 'full_request.py',
                          'draft_convolution.py', 'draft_convolution_fused.py',

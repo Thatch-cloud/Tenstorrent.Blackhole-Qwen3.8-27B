@@ -9,7 +9,13 @@ dflash_commit_abba=0
 dflash_convolution_abba=0
 dflash_cache_abba=0
 dflash_projection_abba=0
+dflash_profile=0
 dflash_context=0
+if [ "$mode" = full-dflash-verifier-profile ]; then
+    dflash_context=4096
+    dflash_profile=1
+    mode=full-dflash-trace-request
+fi
 if [ "$mode" = full-dflash-kv-projection-request ]; then
     dflash_context=4096
     dflash_projection_abba=1
@@ -173,6 +179,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_CONVOLUTION_ABBA=$dflash_convolution_abba" \
     -e "QWEN_DFLASH_CACHE_ABBA=$dflash_cache_abba" \
     -e "QWEN_DFLASH_PROJECTION_ABBA=$dflash_projection_abba" \
+    -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_DFLASH_CONTEXT=$dflash_context" \
     -e QWEN36_BATCHED_DECODE_MODE=host -e QWEN36_SHARD_GREEDY=0 \
     -e QWEN_PREFILL_CONTINUATION=0 -e TT_PREFILL_DECODE_INTERLEAVE=0 \
