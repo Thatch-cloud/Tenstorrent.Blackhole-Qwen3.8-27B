@@ -426,7 +426,8 @@ Its CPU layer matches all six frozen upstream checkpoints exactly. A separate
 664-check simulator matrix covers the complete layer; the first eager run fails
 102/192 comparisons and is retained. Follow-up residual arithmetic passes 48
 exact simulator checks and is integrated. Captured-input FP32 attention passes
-66 checks but is not integrated; sampled down-projection errors match native
+66 checks and is integrated as an explicit layer candidate awaiting full replay;
+sampled down-projection errors match native
 arithmetic. The complete layer remains unqualified, not silently reclassified
 as passing. [Layer scope](dspark-learned-layer-2026-09-10.md).
 

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from dspark_layer import PHASES, SPECIFICATIONS, attention_partial, linear, mlp_partial, norm, pack_weight, reduce_residual
+from dspark_layer import PHASES, SPECIFICATIONS, attention_partial, linear, mlp_partial, norm, pack_weight, reduce_residual, wide_attention
 from dspark_layer_reference import CASES, finish_reference, wide_rotate
 from test_dspark_projection import operations, tensor
 
@@ -83,6 +83,56 @@ class DSparkLayerTests(unittest.TestCase):
         self.assertEqual(result['activation'].dtype,'bf16')
         self.assertEqual(result['down_partial'].shape,(1,1,32,5120))
         self.assertEqual(result['down_partial'].dtype,'fp32')
+
+    def test_wide_attention_retains_every_capture_allocation_and_narrows_once(self):
+        runtime = self.shape_runtime()
+        mesh = object()
+        values = [tensor(shape) for shape in ((1,16,32,128),(1,4,64,128),(1,4,64,128),(1,1,32,64))]
+        allocations = [tensor((1,16,32,64),'fp32'),tensor((1,16,32,128),'fp32')]
+        owned = []
+        def compose(*args,**kwargs):
+            kwargs['trace_owned'].extend(allocations)
+            return allocations[-1]
+        with patch('dspark_layer.composed_draft_attention',side_effect=compose) as composed:
+            result = wide_attention(runtime,mesh,*values,lambda value:owned.append(value) or value)
+        self.assertEqual(owned,[*allocations,result])
+        self.assertEqual(composed.call_args.args,(runtime,mesh,*values))
+        self.assertEqual({name:value for name,value in composed.call_args.kwargs.items() if name!='trace_owned'},
+            dict(explicit_softmax=True,fused_dots=True,cache_dot_tiles=True,fused_row_sum=True))
+        runtime.typecast.assert_called_once_with(allocations[-1],'bf16')
+        self.assertEqual(result.dtype,'bf16')
+
+    def test_wide_attention_returns_partial_ownership_on_error(self):
+        runtime = self.shape_runtime()
+        allocated = object()
+        owned = []
+        def fail(*args,**kwargs):
+            kwargs['trace_owned'].append(allocated)
+            raise RuntimeError('injected kernel failure')
+        with patch('dspark_layer.composed_draft_attention',side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError,'injected'):
+                wide_attention(runtime,object(),None,None,None,None,owned.append)
+        self.assertEqual(owned,[allocated])
+        runtime.typecast.assert_not_called()
+
+    def test_complete_attention_selects_composed_path_only_explicitly(self):
+        runtime = self.shape_runtime()
+        tables = {name:[tensor((1,1,rows,128)),tensor((1,1,rows,128))] for name,rows in (('q',32),('k',64))}
+        mesh = object()
+        def project(ops,value,weight,retain,*,rounded=True):
+            return retain(tensor((1,1,value.shape[2],weight.shape[-1]),'bf16' if rounded else 'fp32'))
+        with patch('dspark_layer.linear',side_effect=project), \
+                patch('dspark_layer.norm',side_effect=lambda ops,value,gamma,retain:value), \
+                patch('dspark_layer.rotate',side_effect=lambda ops,value,*args,**kwargs:value), \
+                patch('dspark_layer.wide_attention',return_value=tensor((1,16,32,128))) as wide, \
+                patch('dspark_layer.attend') as native:
+            result = attention_partial(runtime,tensor((1,1,32,5120)),tensor((1,1,32,5120)),self.local_parameters(),
+                tables,tensor((1,1,32,64)),tensor((1,1,32,1),'fp32'),lambda value:value,
+                mask_validated=True,composed_attention=True,mesh=mesh)
+        self.assertEqual(set(result),set(PHASES['attention']))
+        self.assertIs(wide.call_args.args[1],mesh)
+        self.assertIs(result['attended'],wide.return_value)
+        native.assert_not_called()
 
     def test_inventory_is_complete_and_cpu_norm_parameters_replicate(self):
         self.assertEqual(len(SPECIFICATIONS),11)

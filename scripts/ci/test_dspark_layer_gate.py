@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from dspark_checkpoint import CHECKPOINT_SHA256
-from dspark_layer import ADDITIONAL, EXACT, INPUT_COUNTS, PHASES, POLICY, REPLAY_CASES, SPECIFICATIONS
+from dspark_layer import ADDITIONAL, EXACT, INPUT_COUNTS, PHASES, POLICY, WIDE_POLICY, REPLAY_CASES, SPECIFICATIONS
 from dspark_layer_gate import qualify
 from dspark_layer_reference import CASES, PROJECTION_OPERANDS_SHA256, PROJECTION_REPORT_SHA256
 from dspark_projection import TOLERANCE
@@ -19,7 +19,7 @@ REFERENCE = dict(tensor_sha256={'layers.0.'+name:name+'-sha' for name in SPECIFI
 def fixture():
     return dict(passed=True,closed_cleanly=True,checkpoint_closed=True,stage='complete',backend='simulator',mode='matrix',
         checkpoint_sha256=CHECKPOINT_SHA256,layer=0,context_rows=32,proposal_rows=7,cases=[list(value) for value in CASES],
-        policy=POLICY,tolerance=TOLERANCE,reference=REFERENCE,precise_native=True,packer_compat=True,
+        policy=POLICY,tolerance=TOLERANCE,reference=REFERENCE,precise_native=True,packer_compat=True,composed_attention=False,
         projection_report_sha256=PROJECTION_REPORT_SHA256,projection_operands_sha256=PROJECTION_OPERANDS_SHA256,
         sources={'probe':'sha'},sources_after={'probe':'sha'},native_sources={'runtime':'sha'},native_sources_after={'runtime':'sha'},
         parameter_sha256={name:REFERENCE['tensor_sha256']['layers.0.'+name] for name in SPECIFICATIONS},
@@ -62,6 +62,20 @@ class DSparkLayerGateTests(unittest.TestCase):
                     report[name].pop()
                 with self.assertRaises(ValueError):
                     check(report)
+
+    def test_composed_attention_preserves_all_664_gates_and_requires_explicit_policy(self):
+        report = {**fixture(),'policy':WIDE_POLICY,'composed_attention':True,'precise_native':False,'packer_compat':False}
+        arguments = dict(sources=report['sources'],native=report['native_sources'],reference=REFERENCE,
+            exit_status='0',composed_attention=True)
+        self.assertEqual(qualify(report,**arguments)['checks'],664)
+        with self.assertRaises(ValueError):
+            check(report)
+        for key,value in (('composed_attention',False),('policy',POLICY),('precise_native',True),('packer_compat',True)):
+            with self.assertRaises(ValueError):
+                qualify({**report,key:value},**arguments)
+        report['eager_checks'][0]['failed_elements'] = 1
+        with self.assertRaises(ValueError):
+            qualify(report,**arguments)
 
     def test_eager_only_missing_weights_and_changed_precision_cannot_qualify(self):
         for key,value in (('mode','eager_diagnostic'),('parameter_sha256',{}),('projection_report_sha256','wrong'),

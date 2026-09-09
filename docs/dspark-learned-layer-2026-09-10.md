@@ -128,12 +128,27 @@ clean closure, stable source/native hashes and independent numerical
 recalculation from the saved tensors all pass. The 38.9-second simulator wall
 time is **not hardware latency**. All 1,165 host tests and 59 harness tests pass.
 There is no trace, full-layer, fabric, coding-quality or performance qualification;
-the FP32 composition is not integrated into the layer or promoted for serving.
+the component pass alone does not qualify the integrated layer or serving.
 
 Report `scripts/ci/dspark-attention-captured-simulator.json`, SHA256
 `b9f4dae5fa04425143bc8a3a009497adbb605b4a10f567e60e28689d84aad641`.
 Saved output tensors remain local, SHA256
 `cfe3f2d084c8ed7fe58052e4a8b2986911dd3fb3ae4aab622fe9c86661226f0e`.
+
+### Integrated candidate
+
+`dspark-layer-probe.py --composed-attention` now connects this FP32 attention
+composition to the full learned layer and both widened residual boundaries.
+Every intermediate allocation is retained through the caller's trace lifetime,
+including allocations made before an operation throws. The ordinary native
+attention path remains available; no serving defaults change.
+
+The integrated mode requires the **original** packer, SDPA sources and native
+binaries, with no active graft. The independent gate requires the same explicit
+mode and source closure. All 664 checks and numerical thresholds are unchanged;
+the next full matrix includes all three cases, both chips and changed-input
+replays of attention, MLP and final reduction. An isolated attention pass or
+native arithmetic sample cannot substitute for that matrix.
 
 | Full-matrix requirement | Checks |
 | --- | ---: |

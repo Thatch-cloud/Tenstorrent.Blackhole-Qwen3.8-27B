@@ -7,22 +7,27 @@ import math
 from pathlib import Path
 
 from dspark_checkpoint import CHECKPOINT_SHA256
-from dspark_layer import ADDITIONAL, EXACT, INPUT_COUNTS, PHASES, POLICY, REPLAY_CASES, SPECIFICATIONS
+from dspark_layer import ADDITIONAL, EXACT, INPUT_COUNTS, PHASES, POLICY, WIDE_POLICY, REPLAY_CASES, SPECIFICATIONS
 from dspark_layer_reference import CASES, PROJECTION_OPERANDS_SHA256, PROJECTION_REPORT_SHA256
 from dspark_markov_gate import coordinates
 from dspark_projection import TOLERANCE, reference_metadata
 
 
-def qualify(report, *, sources, native, reference, exit_status):
+def qualify(report, *, sources, native, reference, exit_status, composed_attention=False):
+    if type(composed_attention) is not bool:
+        raise ValueError('Explicit layer attention arithmetic policy required')
     if (exit_status.strip() != '0' or report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('checkpoint_closed') is not True or report.get('stage') != 'complete'
             or report.get('error') or report.get('cleanup_error') or report.get('backend') != 'simulator'
             or report.get('mode') != 'matrix' or report.get('checkpoint_sha256') != CHECKPOINT_SHA256
             or any(type(report.get(key)) is not int or report[key] != value for key,value in
                 (('layer',0),('context_rows',32),('proposal_rows',7)))
-            or report.get('cases') != [list(value) for value in CASES] or report.get('policy') != POLICY
+            or report.get('cases') != [list(value) for value in CASES]
+            or report.get('policy') != (WIDE_POLICY if composed_attention else POLICY)
+            or report.get('composed_attention') is not composed_attention
             or report.get('tolerance') != TOLERANCE or report.get('reference') != reference
-            or report.get('precise_native') is not True or report.get('packer_compat') is not True
+            or report.get('precise_native') is not (not composed_attention)
+            or report.get('packer_compat') is not (not composed_attention)
             or report.get('projection_report_sha256') != PROJECTION_REPORT_SHA256
             or report.get('projection_operands_sha256') != PROJECTION_OPERANDS_SHA256
             or not sources or not native or report.get('sources') != sources or report.get('sources_after') != sources
@@ -68,13 +73,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('report','exit-status','metal-root'):
         parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--composed-attention',action='store_true')
     options = parser.parse_args()
     spec = importlib.util.spec_from_file_location('dspark_layer_probe',Path(__file__).with_name('dspark-layer-probe.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     print(json.dumps(qualify(json.loads(options.report.read_text()),sources=module.source_hashes(),
-        native=module.fingerprints(options.metal_root,active=False),reference=reference_metadata(),
-        exit_status=options.exit_status.read_text())))
+        native=module.fingerprints(options.metal_root,active=False,composed_attention=options.composed_attention),
+        reference=reference_metadata(),exit_status=options.exit_status.read_text(),composed_attention=options.composed_attention)))
 
 
 if __name__ == '__main__':

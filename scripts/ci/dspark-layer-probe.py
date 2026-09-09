@@ -9,7 +9,7 @@ from pathlib import Path
 from attention_batch import capture_operation
 from dspark_attention import validate_mask
 from dspark_checkpoint import CHECKPOINT_SHA256
-from dspark_layer import EXACT, PHASES, POLICY, REPLAY_CASES, SPECIFICATIONS, attention_partial, finish, mlp_partial, pack_weight
+from dspark_layer import EXACT, PHASES, POLICY, WIDE_POLICY, REPLAY_CASES, SPECIFICATIONS, attention_partial, finish, mlp_partial, pack_weight
 from dspark_layer_reference import CASES, PROJECTION_OPERANDS_SHA256, PROJECTION_REPORT_SHA256
 from dspark_layer_reference import attention_reference, cpu_layer, finish_reference, load_fixtures, mlp_reference
 from dspark_projection import TOLERANCE, difference, digest, tensor_digest
@@ -25,6 +25,7 @@ SOURCES = ('dspark-layer-probe.py','dspark_layer.py','dspark_layer_reference.py'
     'dspark_backbone_reference.py','dspark-backbone-cpu.py','dspark_intake.py','dspark_checkpoint.py',
     'dspark_weights.py','dspark_markov_fixture.py','dspark_markov_gate.py','feature_projection.py',
     'attention_batch.py','gdn_multitoken_conv.py','native_draft_sdpa.py',
+    'draft_dot.py','draft_dot_compute.cpp','draft_dot_io.cpp','draft_row_sum.py','draft_row_sum_compute.cpp','draft_row_sum_io.cpp',
     'dspark-backbone-cpu-reference.json','dspark-backbone-upstream-reference.json',
     '../../optimisation/sim/run-dispatch-probe.sh')
 
@@ -33,8 +34,8 @@ def source_hashes():
     return {name:digest(Path(__file__).parent/name) for name in SOURCES}
 
 
-def fingerprints(root, *, active):
-    if type(active) is not bool:
+def fingerprints(root, *, active, composed_attention=False):
+    if type(active) is not bool or type(composed_attention) is not bool or (active and composed_attention):
         raise ValueError('Explicit active or restored native runtime required')
     spec = importlib.util.spec_from_file_location('dspark_layer_native_base',Path(__file__).with_name('dspark-projection-probe.py'))
     module = importlib.util.module_from_spec(spec)
@@ -53,6 +54,10 @@ def fingerprints(root, *, active):
         directory = root/KERNEL_DIRECTORY
         if (directory/'.qwen-precise-draft.lock').exists():
             raise ValueError('Restore and release the native SDPA graft before independent qualification')
+        if composed_attention:
+            if any(digest(directory/name)!=sha for name,sha in SOURCE_HASHES.items()):
+                raise ValueError('Composed attention requires the original unmodified SDPA sources')
+            return result
         result[module.PACKER] = module.COMPAT_PACKER
         for name,data in patched_sources({name:(directory/name).read_bytes() for name in SOURCE_HASHES}).items():
             import hashlib
@@ -66,13 +71,16 @@ def main():
     for name in ('output','checkpoint','projection-report','projection-operands','cpu-outputs','config'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--eager-only',action='store_true')
+    parser.add_argument('--composed-attention',action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ,False)
-    if (os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1' or os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') != '1'
-            or os.environ.get('QWEN_HARDWARE_TESTS') == '1' or os.environ.get('QWEN_CARDS_ALLOCATED') == '1'):
-        raise ValueError('Owned simulator precise-attention/packer compatibility required; hardware is prohibited')
+    if os.environ.get('QWEN_HARDWARE_TESTS') == '1' or os.environ.get('QWEN_CARDS_ALLOCATED') == '1':
+        raise ValueError('Complete layer probe prohibits hardware allocation')
+    graft_flags = [os.environ.get(name)=='1' for name in ('QWEN_PRECISE_DRAFT_ACTIVE','QWEN_SIM_PACKER_ZERO_GRAFT')]
+    if (options.composed_attention and any(graft_flags)) or (not options.composed_attention and not all(graft_flags)):
+        raise ValueError('Composed attention requires original runtime; native attention requires both owned grafts')
     outputs_path = options.output.with_suffix('.operands.pt')
-    if outputs_path.exists():
+    if options.output.exists() or outputs_path.exists():
         raise ValueError('Refusing to overwrite observed layer outputs')
     import torch
     import ttnn
@@ -81,9 +89,12 @@ def main():
     report = dict(passed=False,closed_cleanly=False,checkpoint_closed=False,backend='simulator',scope=__doc__,
         mode='eager_diagnostic' if options.eager_only else 'matrix',layer=0,context_rows=32,proposal_rows=7,
         checkpoint_sha256=CHECKPOINT_SHA256,
-        cases=[list(value) for value in CASES],policy=POLICY,tolerance=TOLERANCE,precise_native=True,packer_compat=True,
+        cases=[list(value) for value in CASES],policy=WIDE_POLICY if options.composed_attention else POLICY,
+        tolerance=TOLERANCE,composed_attention=options.composed_attention,
+        precise_native=not options.composed_attention,packer_compat=not options.composed_attention,
         projection_report_sha256=PROJECTION_REPORT_SHA256,projection_operands_sha256=PROJECTION_OPERANDS_SHA256,
-        sources=source_hashes(),native_sources=fingerprints(root,active=True),
+        sources=source_hashes(),native_sources=fingerprints(root,active=not options.composed_attention,
+            composed_attention=options.composed_attention),
         fabric_tested=False,full_pipeline_captured=False,target_integrated=False,eligible_for_hardware=False,
         cpu_checks=[],eager_checks=[],replay_checks=[],input_checks=[],parameter_checks=[],stale_controls=[],padding_checks=[])
     mesh = trace = reader = None
@@ -188,7 +199,8 @@ def main():
                 if phase == 'attention':
                     return attention_partial(ttnn,inputs['context'],inputs['noise'],device_weights,
                         {name:(inputs[name+'_cos'],inputs[name+'_sin']) for name in ('q','k')},
-                        inputs['mask'],inputs['live'],retain,mask_validated=True)
+                        inputs['mask'],inputs['live'],retain,mask_validated=True,
+                        composed_attention=options.composed_attention,mesh=mesh)
                 if phase == 'mlp':
                     return mlp_partial(ttnn,inputs['first'],inputs['second'],inputs['noise'],device_weights,retain)
                 return finish(ttnn,inputs['first'],inputs['second'],inputs['residual'],retain)
@@ -269,7 +281,7 @@ def main():
         progress('audit_all_eleven_parameters_after')
         audit_parameters('after')
         with outputs_path.open('xb') as stream:
-            torch.save(dict(sources=report['sources'],native_sources=report['native_sources'],policy=POLICY,
+            torch.save(dict(sources=report['sources'],native_sources=report['native_sources'],policy=report['policy'],
                 fixtures=fixtures,eager=eager,parameter_sha256=report['parameter_sha256']),stream)
         report['operands'] = dict(path=str(outputs_path),sha256=digest(outputs_path))
         failed = sum(not entry['passed'] for entry in report['eager_checks'])
@@ -291,7 +303,8 @@ def main():
             if reader is not None:
                 reader.__exit__(None,None,None)
             report['checkpoint_closed'] = reader is not None and reader.source is None
-            report['sources_after'],report['native_sources_after'] = source_hashes(),fingerprints(root,active=True)
+            report['sources_after'],report['native_sources_after'] = source_hashes(),fingerprints(root,
+                active=not options.composed_attention,composed_attention=options.composed_attention)
             if report['sources_after'] != report['sources'] or report['native_sources_after'] != report['native_sources']:
                 raise ValueError('Layer source or native runtime changed during execution')
             report['closed_cleanly'] = True

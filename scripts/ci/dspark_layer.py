@@ -1,12 +1,14 @@
 """Complete learned DSpark layer arithmetic, with explicit caller-owned TP reduction boundaries."""
 
 from dspark_attention import execute as attend
+from draft_attention import composed_draft_attention
 from dspark_projection import compute_config, require_tensor
 from dspark_residual import add as add_residual
 from dspark_rotary_device import execute as rotate
 
 
 POLICY = 'TP2 BF16 learned weights; HiFi4 FP32 projections; explicit BF16 casts; composed FP32 RMS/rotary/SiLU; precise chunk64 attention; FP32 TP sums; explicitly widened residual operands'
+WIDE_POLICY = POLICY.replace('precise chunk64 attention','cached FP32 SFPU dot/row-sum attention')
 CONTEXT_ROWS = 32
 PROPOSAL_ROWS = 7
 PADDED_ROWS = 32
@@ -88,7 +90,23 @@ def linear(operations, value, weight, retain, *, rounded=True):
     return retain(operations.typecast(output,operations.bfloat16)) if rounded else output
 
 
-def attention_partial(operations, context, noise, weights, tables, mask, live_rows, retain, *, mask_validated=False):
+def wide_attention(operations, mesh, query, key, value, mask, retain):
+    if mesh is None or not callable(retain):
+        raise ValueError('Explicit mesh and caller-owned attention tensors required')
+    owned = []
+    try:
+        output = composed_draft_attention(operations,mesh,query,key,value,mask,explicit_softmax=True,
+            fused_dots=True,cache_dot_tiles=True,fused_row_sum=True,trace_owned=owned)
+    finally:
+        for tensor in owned:
+            retain(tensor)
+    return retain(operations.typecast(output,operations.bfloat16))
+
+
+def attention_partial(operations, context, noise, weights, tables, mask, live_rows, retain, *,
+        mask_validated=False, composed_attention=False, mesh=None):
+    if type(composed_attention) is not bool or (composed_attention and mesh is None):
+        raise ValueError('Explicit attention arithmetic and mesh for composed attention required')
     if set(weights) != set(SPECIFICATIONS) or not callable(retain) or mask_validated is not True:
         raise ValueError('All eleven learned parameters, ownership and validated full-context mask required')
     for value in (context,noise):
@@ -115,8 +133,11 @@ def attention_partial(operations, context, noise, weights, tables, mask, live_ro
             finally:
                 for value in rotary_owned:
                     retain(value)
-    result['attended'] = retain(attend(operations,result['q_rotary'],result['k_rotary'],result['v_heads'],mask,
-        context_rows=32,mask_validated=True,key_chunk_size=64))
+    if composed_attention:
+        result['attended'] = wide_attention(operations,mesh,result['q_rotary'],result['k_rotary'],result['v_heads'],mask,retain)
+    else:
+        result['attended'] = retain(attend(operations,result['q_rotary'],result['k_rotary'],result['v_heads'],mask,
+            context_rows=32,mask_validated=True,key_chunk_size=64))
     transposed = retain(operations.transpose(result['attended'],1,2))
     result['merged'] = retain(operations.reshape(transposed,(1,1,32,2048)))
     partial = linear(operations,result['merged'],weights['self_attn.o_proj.weight'],retain,rounded=False)

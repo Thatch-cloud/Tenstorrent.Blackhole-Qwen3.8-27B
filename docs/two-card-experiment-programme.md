@@ -102,7 +102,8 @@ The captured-input residual follow-up passes **48/48 exact checks** after
 explicitly widening both operands. Both layer residuals now use that candidate.
 Captured learned attention also passes **66/66 simulator checks** using the
 existing FP32 SFPU composition, without loading weights or modifying the native
-runtime; it is not yet integrated. All 48 sampled down-projection coordinates
+runtime. That path is now integrated behind an explicit simulator-only layer
+option, with full replay validation next. All 48 sampled down-projection coordinates
 match native grouped arithmetic exactly (not full-output qualification).
 The complete 664-check layer gate remains open; all 1,165 host and 59 harness
 tests pass. Numerical fixes are not assumed to be faster on hardware.
