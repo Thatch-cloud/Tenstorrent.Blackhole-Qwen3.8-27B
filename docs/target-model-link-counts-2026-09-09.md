@@ -1,6 +1,7 @@
 # Target-model link counts: separate from the sampler
 
-**New request-level experiment; no speed result yet.** This is separate from
+**[CI 34327029099](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34327029099)
+is running on `1c72ef3`; no speed result yet.** This is separate from
 the streamed-MLP kernel work and does not change serving defaults.
 
 ## Why test this?
