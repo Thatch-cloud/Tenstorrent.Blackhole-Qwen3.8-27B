@@ -2,6 +2,18 @@
 
 ## Current programme position - 2026-09-09
 
+**Latest matched 4K gain: PP3,322.74 / CTX4,096 / TG75.42, B1.** Native
+approximate draft attention improves control61.47TG by22.68% in
+[34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182).
+All six requests retain exact target tokens/GDN/valid KV/inactive state; each
+policy reproduces its own audited proposals. Drafting falls40.32 to20.35ms/block;
+acceptance stays105/119 per request. The unchanged verifier remains61.72ms/block,
+above the entire35.59ms cycle budget for200TG at this acceptance rate.
+Independent artifact/source/teardown validation passes. Same-tag repeat
+[34343945544](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34343945544)
+is underway; held-out coding and serving acceptance remain open.
+[Full PP / CTX / TG and acceptance table](drafter-numerics-experiment-2026-09-09.md).
+
 **Reporting and next measurement: PP / CTX / TG.** The 78.06 TG result is at
 CTX170, B1, up to T8, with PP510.65; it is not a 4K/32K/64K result.
 Request summaries now expose these metrics together, excluding correctness
@@ -194,9 +206,11 @@ original numerical comparison. The separate six-request policy comparison is
 now implemented with exact native target token/GDN/KV audits, independently
 reconciled proposal counts, per-policy deterministic trajectories and clean
 teardown/source gates. All1,021 CI and57 simulator-harness tests pass. Hardware
-suite `full-dflash-native-proposal-request` is dispatched as
+suite `full-dflash-native-proposal-request` passes as
 [34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182)
-on immutable `ci-qwen-hardware-f1c1b69`; no new TG result exists yet.
+on immutable `ci-qwen-hardware-f1c1b69`: candidate75.42TG versus control61.47,
+CTX4,096, independently validated. The exact attention numerical gate remains
+failed; this separate approximate-proposal policy preserves target correctness.
 
 **New best: captured DFlash2 T8, commit-only GDN and fused convolution: 78.06 TG.**
 Run34246322267 (`1948a21`) passes matched ABBA: control72.213017,

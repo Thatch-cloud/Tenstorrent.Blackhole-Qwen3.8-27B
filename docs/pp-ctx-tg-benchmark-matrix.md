@@ -13,6 +13,8 @@
 | 4K cache ABBA, cached candidate | **3,307.88** | **4,096** | **60.33** | **1** | Up to 8 | 121, 121 | **7.41 s** |
 | 4K update ABBA, cached eager-update control | **3,297.43** | **4,096** | **62.01** | **1** | Up to 8 | 121, 121 | **7.47 s** |
 | 4K update ABBA, captured-update candidate | **3,292.61** | **4,096** | **62.11** | **1** | Up to 8 | 121, 121 | **7.14 s** |
+| 4K proposal ABBA, composed-attention control | **3,338.37** | **4,096** | **61.47** | **1** | Up to 8 | 121, 121 | **7.41 s** |
+| 4K proposal ABBA, native approximate draft attention | **3,322.74** | **4,096** | **75.42** | **1** | Up to 8 | 121, 121 | **6.62 s** |
 
 CTX170 uses matched ABBA, separate correctness audits, both responses reach EOS. Candidate
 TG samples are 77.96 / 78.17; mean prefill is 332.91 ms. These are offline
@@ -39,6 +41,13 @@ Update-capture run34294263149 retains caching in both arms. Its0.15% decode
 difference is smaller than the timing spread; the62.11 row is not evidence of
 a meaningful capture speedup, nor a matched improvement over the prior60.33 row.
 
+Native approximate draft-attention run34342721182 improves its matched control
+by22.68%. All six requests preserve exact native target tokens/state; proposal
+trajectories differ, while total acceptance is105/119 for each policy/request.
+Candidate samples77.37/73.56TG and control59.69/63.37 remain included. Same-code
+repeat34343945544 is pending; this is not held-out coding-quality certification.
+[Source-pinned evidence and block costs](drafter-numerics-experiment-2026-09-09.md).
+
 | Metric | Definition |
 | --- | --- |
 | PP | Prompt processing: actual input tokens / timed prefill seconds. Includes target feature capture and first-token selection; excludes draft setup. |
@@ -57,7 +66,7 @@ visible; do not present component rates or aggregate B8 throughput as B1 TG.
 | CTX target | B | Lead PP / TG | Next action |
 | ---: | ---: | --- | --- |
 | 170 | 1 | 510.65 / 78.06 measured | Retain regression anchor |
-| 4,096 | 1 | Latest cached3,297.43 /62.01; update-capture3,292.61 /62.11 | Capture is flat; prioritize current target-verifier attribution |
+| 4,096 | 1 | Native draft attention3,322.74 /75.42; matched control3,338.37 /61.47 | Repeat gain; target verifier remains61.72ms/block |
 | 8,192 | 1 | Repeat3,298.59 /53.48; first3,149.33 /46.20 | Retain both runs; original stall remains unexplained |
 | 16,384 | 1 | Not measured | Same runtime and timing boundaries |
 | 32,768 | 1 | Not measured | Same runtime and timing boundaries |

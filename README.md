@@ -9,8 +9,12 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 - **Best single stream: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
   commit-only GDN and fused draft convolution improve the matched control by
   8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
-- **Longer inputs:** cached 4K comparisons reach about 60-62 TG; the uncached
-  8K repeat reaches 53.48 TG. These are different workloads, not scaling guarantees.
+- **New 4K result: PP 3,322.74 / CTX 4,096 / TG 75.42**, versus 61.47 TG
+  in the matched control (**+22.68%**). Native attention changes draft proposals
+  only; all six requests retain exact target tokens and state. Same-code repeat
+  is underway. [Results](docs/drafter-numerics-experiment-2026-09-09.md).
+- **8K:** the uncached repeat reaches 53.48 TG. This uses the older draft path,
+  not the new 4K candidate; these are not scaling guarantees.
 - **Main bottleneck:** the 4K target verifier takes about 62 ms/block, almost
   entirely on device. [Attribution](docs/current-verifier-profile-2026-09-09.md).
 - **Attention result:** live-query attention is 7-10% faster in isolation, but
@@ -30,15 +34,14 @@ Experimental paths are opt-in; serving defaults remain unchanged.
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
 
 Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
-Native drafter SDPA remains disabled after its numerical gate failed. All rates
+Native drafter SDPA remains disabled by default; its exact numerical gate failed. All rates
 below are offline coding-task experiments, not held-out quality or serving certification.
 
-[Next drafter experiment](docs/drafter-numerics-experiment-2026-09-09.md): native
-attention used only for approximate proposals. Mask/replay simulation passes at
-31/2,048 history rows, but learned numerical differences remain. Exact target
-verification stays mandatory. The separate full-request ABBA is implemented
-and passes1,021 host tests.
-[Hardware comparison dispatched](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182); no new TG result yet.
+[Approximate draft attention](docs/drafter-numerics-experiment-2026-09-09.md)
+cuts drafting from **40.32 to 20.35 ms/block** in the complete 4K comparison.
+Acceptance stays **88.24%**, despite different proposals. The unchanged target
+verifier still costs **61.72 ms/block**: this remains the main obstacle to 200 TG.
+This is one coding prompt, not held-out quality or serving certification.
 
 ## Setup
 
@@ -77,6 +80,7 @@ These are offline complete requests, not endpoint streaming measurements.
 | 3,355.04 | 4,096 | **58.18** | Measured: two 121-token decode samples through EOS |
 | 3,149.33 | 8,192 | **46.20** | First run: publication stall included; TG41.94 / 51.43 |
 | 3,298.59 | 8,192 | **53.48** | Same-code repeat: two 121-token EOS samples; TG53.40 / 53.57 |
+| 3,322.74 | 4,096 | **75.42** | New approximate-drafter candidate: two 121-token EOS samples; matched control61.47 |
 | — | 16,384 | — | Planned |
 | — | 32,768 | — | Planned |
 | — | 64,504 | — | Planned; reserves generation space below 65,536 |

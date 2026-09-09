@@ -44,8 +44,8 @@ the owned compatibility lock is released.
 The learned case has mean absolute error0.048489 and RMS0.064525. Both cases
 replicate the same operands onto two chips; these are not learned rank-one or
 full-model tests. Changed-input and fully masked K/V perturbations also pass.
-These history lengths are not model CTX benchmark rows. No hardware latency,
-proposal acceptance, coding-quality result or TG gain is established.
+These history lengths are not model CTX benchmark rows. Simulation alone
+establishes no hardware latency, acceptance, coding quality or TG gain.
 
 | Completed run | Report SHA256 |
 | --- | --- |
@@ -62,8 +62,9 @@ Reports and exit files are checked in byte-identically under
 Suite: `full-dflash-native-proposal-request`, opt-in only.
 
 [CI34342721182](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34342721182)
-uses immutable tag `ci-qwen-hardware-f1c1b69`. The complete artifact and independent
-policy validation are required before recording a hardware result.
+uses immutable tag `ci-qwen-hardware-f1c1b69`. The dedicated hardware step and
+post-container validator pass; independent validation of the downloaded artifact
+also passes, including clean teardown and both source-pinned simulator gates.
 
 | Setting | Control and candidate |
 | --- | --- |
@@ -87,8 +88,49 @@ original native packer is required. The final artifact must record clean device
 teardown and pass the host-side policy validator after the container exits0.
 Existing exact-arithmetic ABBAs still reject this different-proposal policy.
 
-No request result exists yet. The hardware comparison does not itself replace
-the held-out executable coding gate or authorize serving changes.
+## Hardware result: 22.68% higher committed TG at 4K
+
+One coding prompt, B1, two uninstrumented requests per arm, each committing
+121 decode tokens through EOS. Audit requests are excluded from rates.
+
+| Arm | PP tok/s | CTX | TG tok/s | Individual TG | Mean total request |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Composed attention control | 3,338.37 | 4,096 | 61.47 | 59.69 / 63.37 | 7.41 s |
+| Native approximate draft attention | 3,322.74 | 4,096 | **75.42** | 77.37 / 73.56 | 6.62 s |
+
+TG includes draft, verification/readback and publication after the prefill seed;
+it excludes prefill and fresh setup. Total includes prefill, fresh setup and
+decode, excluding model loading. Rates are summed tokens divided by summed time;
+all stalls remain included. This is offline request timing, not endpoint streaming.
+
+| Mean per-block cost | Control | Candidate |
+| --- | ---: | ---: |
+| Draft | 40.32 ms | 20.35 ms |
+| Input staging | 2.15 ms | 1.86 ms |
+| Target verification/readback | 61.71 ms | 61.72 ms |
+| Selection/publication | 11.16 ms | 10.06 ms |
+| Complete cycle | 115.68 ms | 94.27 ms |
+
+Both policies accept 105/119 proposals per request (**88.24%**), committing121
+tokens in17 blocks. Their trajectories differ: the control has12 fully accepted
+and5 mixed blocks; the candidate has13 fully accepted,3 mixed and1 zero-acceptance
+block. Each reproduces its own audited trajectory. All six requests match native
+target tokens, active GDN, valid KV and inactive state, with feature/cache/
+convolution/trace audits retained. Different draft arithmetic is not an exact
+attention replacement; the failed original numerical comparison remains failed.
+
+Report SHA256:
+`dcf0b1a00fc7d0439412093b073d8b96adec0ab03b54b3a4c49a29cd918f9b26`.
+Artifact10100693555 is220,927 bytes, archive SHA256:
+`6357e83d308be6c855bdf6003b0e65e4500c2305759d3767bd26072be5ad206e`.
+
+Same-code [repeat34343945544](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34343945544)
+uses the same immutable tag; its result is pending. The measured gain is not
+yet a cross-run or held-out coding-quality claim. Serving defaults stay unchanged.
+
+At7.12 committed tokens/block, 200 TG requires a complete cycle of35.59 ms.
+The unchanged verifier alone takes61.72 ms, before drafting and publication.
+Draft attention is a measured improvement, not a complete route to200 at T8.
 
 ## Different acceptance question
 
@@ -119,6 +161,6 @@ drafter before measuring whether it actually improves committed throughput.
 6. Run the held-out executable coding gate before adoption. This proposal does
    not certify stochastic sampling, serving behavior or coding quality.
 
-Native attention has no qualified hardware speed figure here. This route is
-worth measuring, not assumed faster. Target-verifier optimization is still
-required for 200 committed TG at the current T8 acceptance rate.
+Target-verifier optimization is still required for 200 committed TG at the
+current T8 acceptance rate. The hardware comparison does not replace held-out
+executable coding acceptance or authorize serving changes.
