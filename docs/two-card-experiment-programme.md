@@ -99,8 +99,13 @@ the failed evidence is retained, and no hardware promotion follows. Own-input
 attribution separates accumulated error from attention/down-projection and
 residual-rounding differences. All 1,154 host and 59 harness tests pass at this checkpoint.
 The captured-input residual follow-up passes **48/48 exact checks** after
-explicitly widening both operands. Both layer residuals now use that candidate;
-attention/down-projection diagnostics and the full 664-check gate remain open.
+explicitly widening both operands. Both layer residuals now use that candidate.
+Captured learned attention also passes **66/66 simulator checks** using the
+existing FP32 SFPU composition, without loading weights or modifying the native
+runtime; it is not yet integrated. All 48 sampled down-projection coordinates
+match native grouped arithmetic exactly (not full-output qualification).
+The complete 664-check layer gate remains open; all 1,165 host and 59 harness
+tests pass. Numerical fixes are not assumed to be faster on hardware.
 This component fix does not change the measured 74.27 TG hardware result.
 [Layer bring-up](dspark-learned-layer-2026-09-10.md).
 

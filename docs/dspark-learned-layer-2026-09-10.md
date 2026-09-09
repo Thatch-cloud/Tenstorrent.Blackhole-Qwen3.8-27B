@@ -104,10 +104,36 @@ All original per-element failures remain recorded. CPU attribution report
 
 Using the native BF16 scale in the CPU attention reference leaves 36 of the
 original 37 own-input element failures across the six case/chip pairs. Scale
-rounding alone is therefore not a fix. The next eager-only simulator diagnostic
-uses the existing cached FP32 SFPU dot/row-sum composition on the saved learned
-Q/K/V. It loads no checkpoint weights, changes no native runtime files and has
-no hardware, trace, full-layer or performance qualification authority.
+rounding alone is therefore not a fix.
+
+The existing cached FP32 SFPU dot/row-sum composition now passes the eager-only
+learned-attention diagnostic `20260909T182723Z-406`, code `7cd6b20`:
+
+| Saved-input attention checks | Passing |
+| --- | ---: |
+| Final BF16 output against FP32 CPU attention | 6/6 |
+| Scores, probabilities and FP32 outputs | 18/18 |
+| Exact borrowed inputs | 24/24 |
+| Exact chip-local Q/K/V widening and GQA expansion | 18/18 |
+| **Total** | **66/66** |
+
+All final comparisons have zero out-of-threshold elements, versus 37 total in
+the retained precise-native output. The final output is not bitwise identical
+to CPU: 5-8 BF16 elements differ per case/chip, max absolute difference 0.015625.
+The original 0.01/0.01 combined threshold is unchanged. The six retained native
+comparisons are diagnostic baselines, not controls rerun in this experiment.
+
+No checkpoint weights are loaded and no native files are changed. Outer exit 0,
+clean closure, stable source/native hashes and independent numerical
+recalculation from the saved tensors all pass. The 38.9-second simulator wall
+time is **not hardware latency**. All 1,165 host tests and 59 harness tests pass.
+There is no trace, full-layer, fabric, coding-quality or performance qualification;
+the FP32 composition is not integrated into the layer or promoted for serving.
+
+Report `scripts/ci/dspark-attention-captured-simulator.json`, SHA256
+`b9f4dae5fa04425143bc8a3a009497adbb605b4a10f567e60e28689d84aad641`.
+Saved output tensors remain local, SHA256
+`cfe3f2d084c8ed7fe58052e4a8b2986911dd3fb3ae4aab622fe9c86661226f0e`.
 
 | Full-matrix requirement | Checks |
 | --- | ---: |
