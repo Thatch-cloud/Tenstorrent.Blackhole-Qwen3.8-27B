@@ -111,8 +111,13 @@ learned TT layer in **one device trace, without host TP handoffs**. All **534
 same-arithmetic simulator checks** pass, including changing-input replays.
 The backend-matched five-layer CPU reference passes 96 exact checks, but the
 earlier **78/192 CPU numerical failures remain open**; the transport pass does
-not clear them. All five TT layers and target integration remain pending:
-**no DSpark hardware TG claim**. [Layer evidence](docs/dspark-learned-layer-2026-09-10.md).
+not clear them. Full-vocabulary transport also passes **50/50 checks**.
+The next hardware integration joins learned FC and all five layers in one trace,
+with four fabric links; target embedding/head/Markov integration remains pending.
+We now use TTsim for changed kernels, not whole-model integration. Warm backbone
+time is reported separately from build/loading time and **is not committed TG**.
+[Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34410668392)
+and [layer evidence](docs/dspark-learned-layer-2026-09-10.md). No DSpark TG result yet.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

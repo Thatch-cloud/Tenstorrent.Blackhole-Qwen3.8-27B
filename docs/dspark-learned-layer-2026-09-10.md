@@ -368,6 +368,17 @@ is separate from warm backbone time; **neither is committed TG**.
 Its input features and noise are still synthetic. Target embedding/head/Markov
 integration, 4K history and committed-token acceptance remain subsequent gates.
 All 1,213 host tests and 59 simulator-harness tests pass before dispatch.
+Hardware run [`34410668392`](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34410668392)
+uses immutable code `b8acf391414efe0a5fab03daaf39255f6d89327c`.
+
+The next target adapter is prepared separately in `dspark_target.py`: borrow
+the real target's `.embd`, gather its hidden shards, zero-pad after the seven
+query embeddings, execute FC/backbone, borrow the target LM head, then apply
+the full-vocabulary Markov feedback. Four host orchestration checks pass.
+This adapter is **not in the active hardware run and is not device-qualified**.
+It does not discard query row zero or feed mask-token embeddings into inactive
+padding rows. Caller validation, actual device execution and target-state
+verification are still required before request measurements.
 
 ## Next gates
 
