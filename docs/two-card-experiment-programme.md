@@ -31,10 +31,11 @@ Completed prerequisites and repairs:
   remains incomplete, not a pass. Full-request hardware target correctness
   passes independently. [Scope](dspark-conversion-fusion-2026-09-10.md).
 
-Next: confirm repeatability, then reduce the76ms target verifier. Existing device
-attribution is T8/DFlash2, not a current T16 profile: use its matmul-dominated
-breakdown as a lead, not as a measured T16 breakdown. Verify current T16 operation
-costs before another grid or reader sweep. Target attention still loops over
+Repeatability and current T16 profiling now pass. The observed device envelope
+is76.17ms, including32.06ms summed matmul time and11.65ms for256 native decode
+SDPA calls. These operation sums can overlap and are not a critical-path proof.
+[Current attribution](dspark-t16-verifier-profile-2026-09-10.md).
+Next reduce device work, not host scheduling. Target attention still loops over
 singleton query rows; any grouped replacement must preserve native target
 numerics, cache semantics and committed-prefix state. Prior losing MLP readers
 and approximate target-attention candidates are not promoted.
