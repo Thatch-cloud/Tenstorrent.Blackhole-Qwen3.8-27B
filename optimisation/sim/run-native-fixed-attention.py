@@ -52,9 +52,12 @@ def main():
     parser.add_argument('--sharded-mlp', action='store_true')
     parser.add_argument('--down-mlp', action='store_true')
     parser.add_argument('--score-layout', action='store_true')
+    parser.add_argument('--score-feedback', action='store_true')
     parser.add_argument('--score-vocabulary', type=int, choices=(64, 248320))
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.score_feedback and not options.score_layout:
+        raise ValueError('Score feedback requires the isolated score-layout route')
     if options.score_vocabulary is not None and not options.score_layout:
         raise ValueError('Score vocabulary requires the score-layout probe')
     if options.score_layout and (options.down_mlp or options.sharded_mlp or options.dram_mlp
@@ -142,6 +145,9 @@ def main():
         if options.score_layout:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-score-layout-probe'
+            if options.score_feedback:
+                environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-markov-score-layout-probe'
+                environment['KERNEL_TIMEOUT'] = '7200'
             arguments = ['--vocabulary', str(options.score_vocabulary or 64)]
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode

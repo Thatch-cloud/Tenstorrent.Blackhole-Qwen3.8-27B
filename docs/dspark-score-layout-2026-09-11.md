@@ -12,7 +12,8 @@ Tensix, and writes compact row-major FP32 scores.
 | Host geometry tests | Pass | Exact tile coverage and invalid-input rejection |
 | Small TTsim screen | Pass | 24 eager and 18 replay comparisons on both chips |
 | Full vocabulary TTsim | Pass | 12 eager and 18 replay comparisons; 248,320 scores on both chips |
-| Complete Markov chain / hardware | Pending | Opt-in feedback backend implemented; device-chain validation next |
+| Small complete Markov chain | Pass | 90 eager and 120 replay score/token comparisons |
+| Full Markov chain / hardware | Pending | Full-vocabulary chain next; no throughput qualification |
 
 Small run `20260910T122211Z-378` exits zero and closes cleanly in 16 simulated
 wall-clock seconds. Scores match both native operations and CPU FP32 addition
@@ -30,6 +31,24 @@ hashes and process exit status. The opt-in Markov backend replaces only score
 layout and keeps native rank-256 matmul, argmax and token feedback. Seven host
 tests pass; they are not device-chain qualification. No speedup or complete-drafter
 qualification is claimed yet.
+
+## Complete feedback-chain test
+
+`dspark-markov-score-layout-probe.py` compares all 15 sequential score vectors
+and selected tokens against the unchanged native Markov path on both chips.
+The first run uses a 64-token synthetic vocabulary; this is a functional screen,
+not evidence for full-vocabulary speed or coding quality.
+
+It exercises two different anchor/logit patterns, an all-zero first-index tie,
+and four captured replays including return to the original inputs. Every replay
+poisons score and token outputs first, checks fixed buffer addresses, and verifies
+caller inputs and weights remain intact. Full-vocabulary and learned-weight
+validation still remain before hardware request qualification.
+
+Small chain run `20260910T123844Z-402` exits zero with clean shutdown and
+unchanged source hashes: 90 eager, 120 replay, 28 input-integrity and eight
+weight-integrity checks pass. The original packer is restored. Evidence is in
+`scripts/ci/dspark-markov-score-layout-small-simulator.json`.
 
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
