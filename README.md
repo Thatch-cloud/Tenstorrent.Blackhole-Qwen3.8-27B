@@ -15,13 +15,13 @@ tokens or aggregate concurrent throughput. Results are offline, not endpoint tes
 | --- | ---: | ---: | ---: | --- |
 | DFlash2, repeat-confirmed | 3,324.52 | 4,096 | **74.27** | Four timed requests across two runs |
 | DSpark, repaired full-history cache | 3,350.93 | 4,096 | **65.16** | One audited + two timed requests |
-| DSpark captured proposals / commit-only GDN | Pending | 4,096 | Pending | Three-arm hardware comparison underway |
+| DSpark captured proposals / commit-only GDN | Unqualified | 4,096 | Unqualified | Captured arm fails target-feature correctness |
 
 DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
-The next comparison isolates proposal capture and commit-only state publication;
+The comparison isolates proposal capture and commit-only state publication;
 its T16 simulator prerequisite passed all17 prefix/continuation cases.
 [Baseline run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694)
-and [current hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34438631295).
+and [capture failure diagnosis](docs/dspark-capture-failure-2026-09-10.md).
 The first dispatch stopped before measurement on a container source-path error;
 the retry fixes staging without changing kernels or the simulator gate.
 Neither result certifies held-out coding quality or long-context scaling.
