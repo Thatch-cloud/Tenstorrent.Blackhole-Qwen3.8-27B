@@ -18,7 +18,14 @@ hardware qualification.
 | `20260910T093507Z-403` | Gate projection also passes all four eager comparisons exactly, including fused SiLU; clean closure and unchanged source hashes | Screen down, then replay and integrity checks |
 | `20260910T093831Z-405` | Down matches the first pattern, then retained intermediates clash with native circular buffers | Release completed eager intermediates between patterns |
 | `20260910T094223Z-404` | Down passes all four eager comparisons exactly; clean closure and unchanged source hashes | Changed-input trace qualification |
-| `20260910T094621Z-402` | Down replay qualification launched | Require poisoned-output replacement, all physical rows, stable bindings and packed-weight integrity |
+| `20260910T094621Z-402` | Down passes six changed-input replay checks; exact 32 physical rows, poisoned logical outputs replaced, input and packed-weight integrity, stable bindings, clean closure | Apply the same replay screen to gate/up; then complete-MLP testing |
+| `20260910T095600Z-411` | Gate passes the same six replay and integrity checks, including fused SiLU | Up replay, then complete-MLP testing |
+
+The composed T16 local MLP probe is implemented but not yet executed. It compares
+gate/up/product/down together against the native control, then replays changed
+inputs with poisoned outputs. It does not include the TP2 collective or measure
+token throughput. Intermediates are released between projections rather than
+retained across the whole composition; ten focused host tests pass.
 
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
