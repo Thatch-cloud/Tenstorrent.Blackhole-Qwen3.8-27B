@@ -3,6 +3,19 @@
 Status: isolated simulator comparison passed; full-request integration and
 hardware performance remain unqualified. Serving defaults are unchanged.
 
+Hardware comparison dispatched as
+[34453904831](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34453904831),
+source `583c1fd`. Both arms use native DSpark drafting, captured proposals,
+commit-only GDN and the unchanged norm reader. Only target attention differs.
+Two audited requests precede four timed A/B/B/A requests; all samples count.
+1,399 host tests pass before dispatch.
+
+Both arms use a 256-token generation cap so every prepared T16 attention bucket
+stays within the simulator-tested 4096..4352 family. This does not extend the
+qualification to arbitrary contexts. The repository-derived coding prompt can
+change when verifier source changes: compare within this run, not against an
+older absolute TG value as though prompts were matched.
+
 The existing folded four-query groups process T16 at capacity 4352. Native B1
 attention supplies exact references at positions 4096, 4113, 4336 and rollback
 to 4096. Query patterns change between replays; the page table is reversed.
