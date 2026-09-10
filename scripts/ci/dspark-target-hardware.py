@@ -133,6 +133,12 @@ def main():
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
     options = parser.parse_args()
+    coding_task = os.environ.get('QWEN_DSPARK_CODING_TASK', 'merge_intervals')
+    if coding_task != 'merge_intervals':
+        from coding_holdout_tasks import messages
+        messages(coding_task)
+        if not options.request or not options.target_attention_variants:
+            raise ValueError('Untuned coding tasks require the matched target-attention request suite')
     if options.combined_variants and (not options.request or options.request_variants
             or options.native_attention_variants or options.profile_verifier
             or options.norm_scatter_variants or options.target_attention_variants):
@@ -190,6 +196,11 @@ def main():
         from coding_context_request import make_context_prompt
 
         prompt, context = make_context_prompt(tokenizer, context_tokens=4096)
+        if coding_task != 'merge_intervals':
+            from coding_holdout_tasks import make_context_prompt as make_holdout
+            prompt, context = make_holdout(tokenizer, coding_task, context_tokens=4096)
+            if len(prompt) != 4096:
+                raise ValueError('Untuned folded-attention request requires exactly qualified CTX4096')
         prompts = [prompt]
     if options.preflight:
         options.output.write_text(json.dumps(dict(passed=True, scope='Target imports/config/tokenizer and component gates; no device execution',
@@ -320,6 +331,16 @@ def main():
                 norm_scatter_variants=options.norm_scatter_variants,
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants)
+            if coding_task != 'merge_intervals':
+                checks = report['request_checks']
+                emitted = checks[0]['emitted']
+                if any(value['emitted'] != emitted for value in checks):
+                    raise AssertionError('Untuned task outputs must match across every request')
+                report['coding_output'] = dict(task=coding_task,
+                    task_sha256=context['task_sha256'],
+                    text=tokenizer.decode(emitted, skip_special_tokens=True),
+                    terminated=bool(emitted and emitted[-1] in checks[0]['eos_ids']),
+                    functional_tests_executed=False, functional_quality_qualified=False)
             progress('audit_parameters_after_full_requests')
             check_parameters('after')
             report['passed'] = True

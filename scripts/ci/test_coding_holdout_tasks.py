@@ -24,6 +24,24 @@ class CodingHoldoutTaskTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'definitions changed'):
                 messages('stable_unique_v1')
 
+    def test_ci_task_selection_retains_original_default(self):
+        from pathlib import Path
+        import yaml
+
+        root = Path(__file__).resolve().parents[2]
+        workflow = yaml.safe_load((root / '.github/workflows/qwen-experiments.yml').read_text())
+        dispatch = workflow.get('on', workflow.get(True))['workflow_dispatch']
+        selection = dispatch['inputs']['dspark_coding_task']
+        self.assertEqual(selection['default'], 'merge_intervals')
+        self.assertEqual(set(selection['options']), {'merge_intervals', *EXPECTED})
+        steps = [step for job in workflow['jobs'].values() for step in job.get('steps', [])
+            if step.get('run', '').endswith('bash scripts/ci/run-dspark-hardware.sh')]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]['env']['QWEN_DSPARK_CODING_TASK'], '${{ inputs.dspark_coding_task }}')
+        runner = (root / 'scripts/ci/run-dspark-hardware.sh').read_text()
+        self.assertIn('test "$mode" = request-target-attention', runner)
+        self.assertIn('-e "QWEN_DSPARK_CODING_TASK=$task"', runner)
+
     def test_complete_task_survives_context_fitting(self):
         for task in TASKS:
             tokenizer = Mock()

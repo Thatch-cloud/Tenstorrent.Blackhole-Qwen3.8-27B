@@ -12,6 +12,11 @@ on:
         description: Inventory only; recover exact pinned image by verified registry digest, without card access
         type: boolean
         default: false
+      dspark_coding_task:
+        description: Untuned coding task for the matched target-attention request suite only
+        type: choice
+        options: [merge_intervals, stable_unique_v1, run_length_encode_v1, rotate_right_v1]
+        default: merge_intervals
       weight_packets:
         description: Fixed single-packet weight reads; sixteen-producer MLP suite only, requires its own simulator evidence
         type: boolean
@@ -122,6 +127,7 @@ jobs:
         if: inputs.suite == 'dspark-combined-request' || inputs.suite == 'dspark-target-attention-request' || inputs.suite == 'dspark-norm-scatter-request' || inputs.suite == 'dspark-verifier-profile' || inputs.suite == 'dspark-native-attention-request' || inputs.suite == 'dspark-backbone' || inputs.suite == 'dspark-target' || inputs.suite == 'dspark-request' || inputs.suite == 'dspark-request-variants'
         shell: bash
         env:
+          QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_DSPARK_MODE: ${{ inputs.suite == 'dspark-combined-request' && 'request-combined' || inputs.suite == 'dspark-target-attention-request' && 'request-target-attention' || inputs.suite == 'dspark-norm-scatter-request' && 'request-norm-scatter' || inputs.suite == 'dspark-verifier-profile' && 'request-verifier-profile' || inputs.suite == 'dspark-native-attention-request' && 'request-native-attention' || inputs.suite == 'dspark-request-variants' && 'request-variants' || inputs.suite == 'dspark-request' && 'request' || inputs.suite == 'dspark-target' && 'target' || 'backbone' }}
         run: timeout -k 30 5100 bash scripts/ci/run-dspark-hardware.sh
