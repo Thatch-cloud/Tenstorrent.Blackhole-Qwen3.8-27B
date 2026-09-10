@@ -117,6 +117,21 @@ def warm_native_control(generator, kv_cache, report, progress):
         trace_count=len(traces), before_fresh_prefill=True, charged_to_candidate_decode=False)
 
 
+def cache_formats(operations, caches, recurrent):
+    def describe(values):
+        records = []
+        for index, value in enumerate(values):
+            shards = operations.get_device_tensors(value)
+            if len(shards) != 2:
+                raise ValueError('Cache format inventory requires both physical chips')
+            records.append(dict(index=index, shards=[dict(dtype=str(shard.dtype),
+                shape=list(shard.shape)) for shard in shards]))
+        return records
+
+    return dict(sdpa_bf8_environment=os.environ.get('QWEN_SDPA_BF8', '0'),
+        attention_kv=describe(caches), gdn_state=describe(recurrent))
+
+
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False):
     import torch
@@ -135,6 +150,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     caches = [value for pair in model._paged_kv_caches for value in pair]
     if len(helpers) != 48 or len(recurrent) != 240 or len(caches) != 32:
         raise ValueError('Complete native hybrid target state required')
+    report['target_cache_formats'] = cache_formats(operations, caches, recurrent)
     bindings = [addresses(operations, value) for value in (*recurrent, *caches)]
 
     def host(value):

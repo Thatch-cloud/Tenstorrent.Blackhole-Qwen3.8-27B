@@ -5,10 +5,26 @@ from unittest.mock import Mock, patch
 
 import yaml
 
-from dspark_request_experiment import PREREQUISITES, request_preflight, summarize, warm_native_control
+from dspark_request_experiment import PREREQUISITES, cache_formats, request_preflight, summarize, warm_native_control
 
 
 class DSparkRequestExperimentTests(unittest.TestCase):
+    def test_cache_inventory_records_actual_shards_not_requested_precision(self):
+        operations = SimpleNamespace(get_device_tensors=lambda value: value)
+        pair = [SimpleNamespace(dtype=dtype, shape=(1, 4, 64, 128))
+            for dtype in ('bfloat8_b', 'bfloat16')]
+        with patch.dict('os.environ', QWEN_SDPA_BF8='1'):
+            result = cache_formats(operations, [pair], [pair])
+        self.assertEqual(result['sdpa_bf8_environment'], '1')
+        self.assertEqual([value['dtype'] for value in result['attention_kv'][0]['shards']],
+            ['bfloat8_b', 'bfloat16'])
+        self.assertEqual(result['gdn_state'][0]['shards'][0]['shape'], [1, 4, 64, 128])
+
+    def test_cache_inventory_rejects_missing_chip(self):
+        operations = SimpleNamespace(get_device_tensors=lambda value: value)
+        with self.assertRaisesRegex(ValueError, 'both physical chips'):
+            cache_formats(operations, [[SimpleNamespace(dtype='bfloat16', shape=(1,))]], [])
+
     def test_native_trace_is_captured_before_the_gold_prefill_resets_recurrent_state(self):
         events, report = [], {}
         generator = SimpleNamespace(trace_ids_decode={False: None})
