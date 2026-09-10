@@ -110,6 +110,10 @@ target verifier changes layer 0 K on chip 0 at position 4,109. It passes the
 checks before and after drafting, then fails immediately after verifier replay.
 The warm-native-control correction is not reached in this run and remains to be
 validated; this failure is independent of that reference-harness bug.
+The retained corruption report is `scripts/ci/dspark-history-corruption-hardware.json`,
+SHA-256 `ccfb08ce46377b4126997342e29d21ce1ee63520fe70577bd7c28ad7bd4dc17f`.
+Independent reconciliation verifies all 570 tagged source files, unchanged sets
+of 1,517 native fingerprints, the exact failure boundary and clean teardown.
 
 The fix preallocates two complete K/V banks before verifier capture. Publication
 copies the new full history into the spare bank and releases every temporary
@@ -118,3 +122,5 @@ Only the valid prefix enters proposal attention. Full history and learned math
 are unchanged. A dedicated TTsim probe checks all five K/V pairs on both chips,
 ragged publication, discard, changing-input scratch-writer traces, fixed addresses
 and preservation of every old row before another hardware run. No serving changes.
+All 1,292 host tests pass. The native bank-layout and replay-lifetime gate is still
+pending; the host tests do not substitute for that simulator result or hardware TG.

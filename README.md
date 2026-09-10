@@ -122,8 +122,10 @@ Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
 **Full-request screen failed:** [DSpark on both cards](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652).
 The audited request preserves all 121 committed tokens and target state, but
 accepts only **24/1,455 drafts (1.65%)**. The first timed request diverges at token
-index 121, so there is **no valid new TG result**. Native trace warmup and draft
-cache lifetime checks are the next corrections, not another throughput claim.
+index 121, so there is **no valid new TG result**. A diagnostic now confirms
+verifier replay corrupts the newly published draft K cache. The fixed-buffer
+repair is in TTsim; the separate native-reference warmup fix still needs hardware
+validation. This candidate is being repaired, not abandoned.
 
 | Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: | ---: |
