@@ -110,6 +110,9 @@ def main():
                   native_hashes=HASHES,
                   generated_hashes={name: hashlib.sha256(source.encode()).hexdigest() for name, source in kernels.items()},
                   scope='Slow-dispatch functional liveness/exactness against serial T1 of same kernel; not native oracle certification or performance')
+    if args.commit_only_gdn:
+        from gdn_commit_provenance import source_hashes
+        report['commit_sources'] = source_hashes(Path(__file__).resolve().parents[2] / 'scripts/ci')
 
     def stage(name, **details):
         report['last_stage'] = dict(stage=name, **details)
@@ -478,6 +481,10 @@ def main():
             stage('mesh-close')
             ttnn.close_mesh_device(mesh)
             mesh = None
+            if args.commit_only_gdn:
+                report['commit_sources_after'] = source_hashes(Path(__file__).resolve().parents[2] / 'scripts/ci')
+                if report['commit_sources'] != report['commit_sources_after']:
+                    raise ValueError('Commit-only adapter or publication source changed during simulation')
             report['passed'] = True
             stage('complete')
         except BaseException as error:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dspark_hardware_gate import digest
 from gdn_multitoken import HASHES, HANDOFF_HASHES
+from gdn_commit_provenance import source_hashes
 
 
 REPORT = 'dspark-commit16-simulator.json'
@@ -24,6 +25,9 @@ def qualify(directory):
     if digest(path) != SHA256 or path.with_suffix('.exit-status').read_text().strip() != '0':
         raise ValueError('Pinned clean T16 commit-only simulator report required')
     report = json.loads(path.read_text())
+    current_sources = source_hashes(directory)
+    if report.get('commit_sources') != current_sources or report.get('commit_sources_after') != current_sources:
+        raise ValueError('Complete unchanged commit-only adapter and actual publication kernel sources required')
     flags = ('passed', 'norm_gate', 'convolution', 'batched_convolution', 'dma_windows', 'packed_checkpoints',
         'continuation_enabled', 'compact_prologue', 'norm_batch_layer', 'deferred_conv_publication', 'commit_only_gdn')
     if (any(report.get(name) is not True for name in flags) or report.get('backend') != 'ttsim'
