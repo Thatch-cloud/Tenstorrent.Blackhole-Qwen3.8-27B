@@ -86,7 +86,20 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 actual = operations.to_torch(shard)[..., :prefix, :]
                 if not torch.equal(actual, expected):
                     from dspark_feature_mismatch import FeatureMismatch
-                    raise FeatureMismatch(actual, expected, tap=tap, chip=chip, position=position)
+                    error = FeatureMismatch(actual, expected, tap=tap, chip=chip, position=position)
+                    if runtime is not None and runtime.engine is not None:
+                        engine = runtime.engine
+                        ticket = engine.pending
+                        fixture = engine.buckets[engine.pending_key]['fixture']
+                        error.evidence['ticket_tokens'] = list(ticket.tokens)
+                        error.evidence['ticket_position'] = ticket.position
+                        error.evidence['verifier_inputs'] = {
+                            name: [dict(address=part.buffer_address(),
+                                values=operations.to_torch(part).reshape(-1).tolist())
+                                for part in operations.get_device_tensors(getattr(fixture, name))]
+                            for name in ('tokens', 'positions')}
+                        error.evidence['proposal_checks'] = list(proposal_device.prepared.checks) if proposal_trace else []
+                    raise error
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
     def factory():

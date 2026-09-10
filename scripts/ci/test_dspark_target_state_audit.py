@@ -6,6 +6,16 @@ from dspark_target_state_audit import TargetStateAuditedDrafter, TargetStateChan
 
 
 class TargetStateAuditTests(unittest.TestCase):
+    def test_verifier_setup_corruption_is_detected_before_replay(self):
+        draft = SimpleNamespace(position=4096, prepare_trace=Mock(), propose=Mock())
+        wrapper = TargetStateAuditedDrafter(draft,
+            Mock(side_effect=[['initial'], ['initial'], ['initial'], ['changed']]))
+        wrapper.prepare_trace(3, audit=True)
+        with self.assertRaises(TargetStateChanged) as failure:
+            wrapper.propose(3, 15)
+        self.assertEqual(failure.exception.evidence['phase'], 'before_proposal_at_initial_frontier')
+        draft.propose.assert_not_called()
+
     def test_unchanged_state_preserves_result(self):
         draft = SimpleNamespace(propose=Mock(return_value=(1, 2)))
         snapshot = Mock(side_effect=[['same'], ['same']])
