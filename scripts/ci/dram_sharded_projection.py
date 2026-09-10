@@ -7,8 +7,8 @@ def geometry(name, banks):
     if name not in PROJECTIONS or type(banks) is not int or banks not in (7, 8):
         raise ValueError('Known TP2 projection and measured seven/eight-bank geometry required')
     inner, width, unused, dtype, activation = PROJECTIONS[name]
-    workers = 8
-    block = 4 if name in ('gate', 'up') else 2
+    workers = 4 if name in ('gate', 'up') else 2
+    block = 8
     if inner % (workers * 32 * block) or width % (workers * 32):
         raise ValueError('Native width shards must have complete K blocks and output tiles')
     shard_width = ((width + banks * 32 - 1) // (banks * 32)) * 32
@@ -30,7 +30,7 @@ def configurations(operations, mesh, name):
     weights = operations.MemoryConfig(operations.TensorMemoryLayout.WIDTH_SHARDED,
         operations.BufferType.DRAM, spec)
     inputs = operations.create_sharded_memory_config((1, 1, 32, plan['inner']),
-        core_grid=operations.CoreGrid(x=8, y=1), strategy=operations.ShardStrategy.WIDTH,
+        core_grid=operations.CoreGrid(x=plan['workers'], y=1), strategy=operations.ShardStrategy.WIDTH,
         orientation=operations.ShardOrientation.ROW_MAJOR)
     outputs = operations.MemoryConfig(operations.TensorMemoryLayout.WIDTH_SHARDED, operations.BufferType.L1)
     program = operations.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(

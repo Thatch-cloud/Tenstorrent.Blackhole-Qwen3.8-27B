@@ -9,8 +9,9 @@ class DramShardedProjectionTests(unittest.TestCase):
             for name in ('gate', 'up', 'down'):
                 plan = geometry(name, banks)
                 self.assertEqual(plan['dtype'], 'bfloat8_b' if name == 'down' else 'bfloat4_b')
-                self.assertEqual(plan['input_shard'][1] * 8, plan['inner'])
-                self.assertEqual(plan['output_shard'][1] * 8, plan['width'])
+                self.assertEqual(plan['in0_block_w'], 8)
+                self.assertEqual(plan['input_shard'][1] * plan['workers'], plan['inner'])
+                self.assertEqual(plan['output_shard'][1] * plan['workers'], plan['width'])
                 self.assertEqual(plan['input_shard'][1] % (plan['in0_block_w'] * 32), 0)
                 self.assertGreaterEqual(plan['weight_shard'][1] * banks, plan['width'])
                 self.assertLess(plan['weight_shard'][1] * banks - plan['width'], banks * 32)

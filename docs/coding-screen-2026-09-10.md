@@ -36,9 +36,29 @@ reject wrong output, input mutation and an infinite loop. Workspace, accelerator
 devices and the TT runtime are not mounted into the evaluator. This is a bounded
 functional screen, not a proof against adversarial generated-code deception.
 
+## Run-length encoding: completed
+
+Run `34459087621` on the same `348c61b` source passes all six requests with
+exact target outputs/state, matched proposals, unchanged fingerprints and clean
+closure. Independent recomputation reproduces its summary.
+
+| Path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native target attention | 1 | 3346.55 | 4096 | 104.33 |
+| Folded T16 target attention | 1 | 3320.98 | 4096 | 107.18 |
+
+Two timed requests per arm commit 210 tokens total and accept 196/240 proposals.
+TG improves 2.73%; setup-inclusive latency is 5916.93 versus 5933.83 ms.
+The EOS-terminated generated function passes all four isolated functional cases,
+including Unicode code points and separated runs of the same character.
+Generated-source SHA256:
+`ae28580a32a815ea53bd50863be9d91a00490334438937d4c21a9c92db8f3529`.
+Hardware report SHA256:
+`9913eefe60a905a6163dc0bee2386bab830724d58a90971fc1df2ace6494bdc6`.
+
 ## Remaining work
 
-Run-length encoding is running in hardware `34459087621` using the same immutable
-source. Rotate-right has not run. Functional results and PP/CTX/TG must be
+Rotate-right is dispatched as `34459661914` using the same immutable source.
+Functional results and PP/CTX/TG must be
 recorded separately for each task; do not pool different-task rates as a matched
 speedup. Broader coding quality, long contexts and the 200 TG target remain open.
