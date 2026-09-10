@@ -1,7 +1,11 @@
 # DRAM-sharded projection: partial-reload investigation
 
-Status: simulator qualification passed; hardware run `34466116546` submitted
-from immutable candidate `a109569`. No hardware speed result or serving change.
+Status: simulator qualification passed. Hardware run `34466116546` on `a109569`
+matched the first real-weight output on both cards, then failed cleanup before
+timing. The native TP2 collective consumes its input partial; the harness also
+retained that freed tensor, causing `Both chips required` during address lookup.
+The retry transfers ownership to the collective instead. No speed result or
+serving change.
 
 The native DRAM-sharded matmul factory uses Float32 intermediate partials when
 FP32 destination accumulation is enabled, but does not set the CB5 FP32 unpack

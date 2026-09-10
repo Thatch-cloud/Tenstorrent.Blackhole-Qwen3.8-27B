@@ -36,6 +36,23 @@ class DramMlpTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dram_mlp.execute(None, None, {}, {}, None, None)
 
+    def test_collective_can_take_ownership_without_retaining_partial(self):
+        source = SimpleNamespace(shape=(1, 1, 16, 5120), dtype='bf16')
+        operations = SimpleNamespace(bfloat16='bf16', L1_MEMORY_CONFIG='l1',
+            mul=lambda *args, **kwargs: object())
+        outputs = {name: object() for name in ('gate', 'up', 'down')}
+        released = []
+        def project(ops, value, weight, config, compute, retain, **kwargs):
+            return retain(outputs[weight])
+        with patch.object(dram_mlp, 'project', side_effect=project), patch.object(
+                dram_mlp, 'release_owned', side_effect=lambda ops, values: released.extend(values)):
+            partial = dram_mlp.execute(operations, source, {name: name for name in outputs},
+                {name: {} for name in outputs}, None, lambda value: value)
+        self.assertIs(partial, outputs['down'])
+        self.assertFalse(any(value is partial for value in released))
+        released.append(partial)
+        self.assertEqual(sum(value is partial for value in released), 1)
+
     def test_failed_projection_releases_existing_outputs_and_scratch(self):
         source = SimpleNamespace(shape=(1, 1, 16, 5120), dtype='bf16')
         operations = SimpleNamespace(bfloat16='bf16')

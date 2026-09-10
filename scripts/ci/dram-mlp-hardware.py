@@ -121,7 +121,7 @@ def main():
                 return retain(storage, mlp.forward(source))
             interleaved = retain(storage, ttnn.to_memory_config(source, ttnn.L1_MEMORY_CONFIG))
             partial = execute(ttnn, interleaved, sharded, configs, compute,
-                lambda value: retain(storage, value))
+                lambda value: value)
             return retain(storage, tt_all_reduce(partial, mesh, collectives, cluster_axis=0, dim=3,
                 topology=args.ccl_topology(), memory_config=ttnn.DRAM_MEMORY_CONFIG))
         references = []
@@ -185,12 +185,15 @@ def main():
         raise
     finally:
         if mesh is not None:
-            ttnn.synchronize_device(mesh)
-            for trace in traces:
-                ttnn.release_trace(mesh, trace)
-            release_owned(ttnn, transient + captured + persistent)
-            ttnn.close_mesh_device(mesh)
-            report['closed_cleanly'] = True
+            try:
+                ttnn.synchronize_device(mesh)
+                for trace in traces:
+                    ttnn.release_trace(mesh, trace)
+                release_owned(ttnn, transient + captured + persistent)
+            finally:
+                ttnn.close_mesh_device(mesh)
+                report['closed_cleanly'] = True
+                progress('failed' if report.get('error') else 'closed')
     report['sources_after'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in SOURCES}
     report['native_sources_after'] = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
     if report['sources_after'] != sources or report['native_sources_after'] != native_sources:
