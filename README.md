@@ -35,6 +35,22 @@ These results do not certify held-out coding quality or long-context scaling.
 
 ### Current experiment
 
+**Native DRAM-sharded MLP with corrected FP32 partial reload.** Gate, up and down
+pass exact simulator replay checks. The complete T16 local MLP also passes:
+four eager and six replay comparisons, including poisoned-output replacement.
+
+| Test | State | What it establishes |
+| --- | --- | --- |
+| Individual projections | Simulator pass | Exact outputs, input/packed-weight integrity |
+| Complete local MLP | Simulator pass | Exact composition and changed-input replay |
+| Real weights + four-link collective | Hardware comparison submitted | Latency result pending; no new TG claim |
+
+[Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34466116546)
+compares both paths with input transfer included. This is not yet a full-model
+improvement. [Details](docs/dram-projection-reload-2026-09-10.md).
+
+### Recent request experiments
+
 The direct-scatter GDN norm reader passes 12 eager and 24 trace-replay simulator
 comparisons, including poisoned outputs and padding checks. Its full-request
 [A/B hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973)

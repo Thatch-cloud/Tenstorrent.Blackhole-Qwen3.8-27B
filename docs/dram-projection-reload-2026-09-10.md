@@ -1,6 +1,7 @@
 # DRAM-sharded projection: partial-reload investigation
 
-Status: simulator experiment only. No hardware speed result or serving change.
+Status: simulator qualification passed; hardware run `34466116546` submitted
+from immutable candidate `a109569`. No hardware speed result or serving change.
 
 The native DRAM-sharded matmul factory uses Float32 intermediate partials when
 FP32 destination accumulation is enabled, but does not set the CB5 FP32 unpack
