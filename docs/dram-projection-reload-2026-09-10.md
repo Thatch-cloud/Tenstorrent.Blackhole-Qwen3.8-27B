@@ -77,6 +77,31 @@ output checks. Instrumented results cannot qualify performance. The candidate
 kernel is unchanged from its successful simulator pass; this adds observation,
 not a new arithmetic implementation or serving default.
 
+### Operation attribution: measured, not inferred
+
+Run `34470085030`, commit `247d2d1`, passed all eighteen instrumented replays,
+exact-output/input checks and independent local artifact validation. Both chips
+agree closely. Approximate medians below are microseconds, not throughput:
+
+| Operation | Native | Reduced-conversion candidate |
+| --- | ---: | ---: |
+| Gate projection including SiLU | 95.2 | 127.0 |
+| Up projection | 88.3 | 87.2 |
+| Elementwise product | 4.0 | 39.8 |
+| Down projection | 122.3 | 100.3 |
+| Additional staging / reshard / output conversion | — | 1.9 / 5.2 / 3.7 |
+
+The complete device envelope is about 327 versus 382 microseconds, consistent
+with the separate uninstrumented regression. Operation durations include waits;
+their sums are not an end-to-end critical path or model TG. The profiler reports
+110 cores for both multiply operations, so attributing the regression simply to
+"too few multiply cores" would not be supported by this evidence.
+
+The next candidate keeps native gate, up and interleaved multiplication, using
+only the faster DRAM-sharded down projection. Its extra boundary conversions
+must be included, and the complete hybrid must pass simulator replay before
+hardware testing. No gain is claimed before those measurements.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
