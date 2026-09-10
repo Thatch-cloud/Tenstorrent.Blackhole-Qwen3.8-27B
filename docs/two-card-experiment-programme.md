@@ -2,34 +2,44 @@
 
 ## Current programme position - 2026-09-10
 
-**DSpark full-request repair passes on hardware.** Run
-[34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694),
-code `547bc2b`, preserves all native tokens/state in one audited and two timed
-requests. Fixed history banks repair confirmed verifier-induced cache corruption;
-the native-reference warmup correction also passes. Acceptance rises to 74.67%.
+**Current single-stream candidate: precise-native DSpark attention, captured
+proposals and commit-only GDN.** All six full requests in
+[34446713555](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34446713555)
+retain exact target outputs/state. Two audited arms precede A/B/B/A timing.
 
-| Streams | Draft / verify | PP tok/s | CTX tokens | Committed TG tok/s |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 15 / 16 | 3,350.93 | 4,096 | **65.16** |
+| Path | Streams | Draft / verify | PP tok/s | CTX | Committed TG tok/s |
+|---|---:|---:|---:|---:|---:|
+| Matched composed attention | 1 | 15 / 16 | 3303.51 | 4096 | 60.15 |
+| Precise-native attention | 1 | 15 / 16 | 3310.11 | 4096 | **86.69** |
 
-All 372 new fixed-bank simulator checks pass; the earlier 58 attention and 126
-layout checks remain required. Independent hardware reconciliation verifies 573
-source files, 1,517 native fingerprints, 120 parameter records, 100 feature checks
-and 1,240 cache-tensor lifetime checks. This is one coding task, not held-out quality.
+The gain is44.12% within this matched run. Native drafting takes37.78ms/block,
+verification76.17ms and select/publication11.70ms. At11 committed tokens/block,
+200TG requires a55ms **whole cycle**, versus126.84ms measured. The target is
+not achieved. The same-tag independent repeat is running as34447570149.
+[Results and scope](dspark-native-attention-results-2026-09-10.md).
 
-Next: capture the 86.49-ms eager proposal, investigate wider useful proposal
-windows, and reduce target verification/publication. Current verification alone
-costs 83.44 ms/block; 12.1 committed tokens/block requires a **60.5-ms total cycle**
-for 200 TG. Capture alone cannot meet the target. Wider drafting is an acceptance
-experiment, not an assumed gain. Best repeat-confirmed B1 TG remains **74.27 at
-CTX4,096**. [Evidence and next tests](dspark-full-history-2026-09-10.md).
+Completed prerequisites and repairs:
+- Fixed history banks preserve the drafter cache across target verification.
+- Verifier persistent allocation now precedes proposal capture, fixing the
+  confirmed overwrite of138 saved state shards; all nine allocation-order
+  requests pass. [Evidence](dspark-allocation-order-results-2026-09-10.md).
+- T16 commit-only GDN passes all17 prefix/continuation cases.
+- Native fifteen-query fixed-history attention passes82 simulator checks.
+- The full learned-layer simulator timed out before candidate execution; it
+  remains incomplete, not a pass. Full-request hardware target correctness
+  passes independently. [Scope](dspark-conversion-fusion-2026-09-10.md).
 
-The [captured-proposal comparison](dspark-captured-proposal-2026-09-10.md) is
-implemented with three opt-in arms: eager, captured, and captured plus commit-only
-GDN. All 1,317 host and 61 simulator-harness tests pass. Fixed-capacity attention
-simulation passes all 82 checks and independent audit. T16 commit-only simulation
-`20260910T031906Z-400` is running. Hardware remains blocked until both new gates
-pass; no new TG or serving promotion is claimed.
+Next: confirm repeatability, then reduce the76ms target verifier. Existing device
+attribution is T8/DFlash2, not a current T16 profile: use its matmul-dominated
+breakdown as a lead, not as a measured T16 breakdown. Verify current T16 operation
+costs before another grid or reader sweep. Target attention still loops over
+singleton query rows; any grouped replacement must preserve native target
+numerics, cache semantics and committed-prefix state. Prior losing MLP readers
+and approximate target-attention candidates are not promoted.
+
+Historical DFlash2 reaches repeat-confirmed74.27TG at4K on its earlier prompt.
+Held-out coding quality, endpoint serving and long-context scaling remain open.
+Serving defaults are unchanged.
 
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
