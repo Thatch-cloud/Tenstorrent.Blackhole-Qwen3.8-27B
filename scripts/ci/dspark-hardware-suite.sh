@@ -12,8 +12,8 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
-if [[ "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
+if [[ "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
     test -f /experiment-optimisation/sim/gdn-multitoken.py
     ln -s /experiment-optimisation /optimisation
     test -f /experiment-scripts/ci/../../optimisation/sim/gdn-multitoken.py
@@ -26,7 +26,7 @@ if [ "$mode" != backbone ]; then
     export HF_MODEL="$MODEL_WEIGHTS_DIR"
 fi
 report_name=$probe
-if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
+if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
     report_name=dspark-request-hardware
     request_options=(--request)
 fi
@@ -41,6 +41,10 @@ fi
 if [ "$mode" = request-target-attention ]; then
     report_name=dspark-target-attention-request-hardware
     request_options+=(--target-attention-variants)
+fi
+if [ "$mode" = request-combined ]; then
+    report_name=dspark-combined-request-hardware
+    request_options+=(--combined-variants)
 fi
 if [ "$mode" = request-norm-scatter ]; then
     report_name=dspark-norm-scatter-request-hardware

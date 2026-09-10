@@ -131,7 +131,12 @@ def main():
     parser.add_argument('--profile-verifier', action='store_true')
     parser.add_argument('--norm-scatter-variants', action='store_true')
     parser.add_argument('--target-attention-variants', action='store_true')
+    parser.add_argument('--combined-variants', action='store_true')
     options = parser.parse_args()
+    if options.combined_variants and (not options.request or options.request_variants
+            or options.native_attention_variants or options.profile_verifier
+            or options.norm_scatter_variants or options.target_attention_variants):
+        raise ValueError('Combined variants require their own complete request comparison')
     if options.target_attention_variants and (not options.request or options.request_variants
             or options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants):
         raise ValueError('Target attention requires its own complete request comparison')
@@ -155,15 +160,15 @@ def main():
         from sampling_link_policy import audit as sampling_link_audit
 
         request_gate = request_preflight(Path(__file__).parent,
-            prepared_proposals=options.request_variants or options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants or options.target_attention_variants)
-        if options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants or options.target_attention_variants:
+            prepared_proposals=options.request_variants or options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants or options.target_attention_variants or options.combined_variants)
+        if options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants or options.target_attention_variants or options.combined_variants:
             from dspark_native_fixed_gate import qualify
             request_gate['request_prerequisites'].update(qualify(Path(__file__).parent))
-        if options.norm_scatter_variants:
+        if options.norm_scatter_variants or options.combined_variants:
             from gdn_norm_scatter_report import validate as validate_norm
             request_gate['request_prerequisites']['norm_scatter'] = validate_norm(
                 json.loads(Path(__file__).with_name('gdn-norm-scatter-simulator.json').read_text()), Path(__file__).parent)
-        if options.target_attention_variants:
+        if options.target_attention_variants or options.combined_variants:
             from target_t16_attention_gate import qualify as qualify_target
             request_gate['request_prerequisites']['target_t16_attention'] = qualify_target(Path(__file__).parent)
         gate['sources'].update(request_gate['sources'])
@@ -213,6 +218,8 @@ def main():
             report['scope'] = 'Matched native-attention DSpark norm reader screen; two audits and four timed requests'
         if options.target_attention_variants:
             report['scope'] = 'Matched native versus folded T16 target attention; two audits and four timed requests'
+        if options.combined_variants:
+            report['scope'] = 'Matched folded T16 attention with versus without scatter norm; two audits and four timed requests'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -311,7 +318,8 @@ def main():
                 prompt=prompts[0], context=context, variants=options.request_variants,
                 native_attention_variants=options.native_attention_variants, profile_verifier=options.profile_verifier,
                 norm_scatter_variants=options.norm_scatter_variants,
-                target_attention_variants=options.target_attention_variants)
+                target_attention_variants=options.target_attention_variants,
+                combined_variants=options.combined_variants)
             progress('audit_parameters_after_full_requests')
             check_parameters('after')
             report['passed'] = True
