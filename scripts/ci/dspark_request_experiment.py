@@ -136,7 +136,7 @@ def cache_formats(operations, caches, recurrent):
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
-        target_attention_variants=False, combined_variants=False):
+        target_attention_variants=False, combined_variants=False, mlp_down=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -203,6 +203,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return (output[0] if isinstance(output, tuple) else output).clone()
 
     from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
+    if type(mlp_down) is not bool or (mlp_down and not target_attention_variants):
+        raise ValueError('Down-only MLP requires the matched folded-attention experiment')
     if (type(native_attention_variants) is not bool or type(profile_verifier) is not bool
             or type(norm_scatter_variants) is not bool
             or type(target_attention_variants) is not bool
@@ -222,6 +224,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         qualify_target(Path(__file__).parent)
     if combined_variants:
         from dspark_combined_variants import SCHEDULE, POLICIES, summarize_variants
+    if mlp_down:
+        from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
+        from dram_mlp_down_scope import scoped_down
+        from models.tt_transformers.tt.ccl import tt_all_reduce
 
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
@@ -240,7 +246,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             from native_draft_sdpa import precise_draft_kernel
             native = POLICIES[arm].get('native_attention', False)
             with (precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext()) as kernel_audit, \
-                    (scoped_reader() if (norm_scatter_variants or combined_variants) and arm == 'scatter' else nullcontext()) as norm_audit:
+                    (scoped_reader() if (norm_scatter_variants or combined_variants) and arm == 'scatter' else nullcontext()) as norm_audit, \
+                    (scoped_down(operations, model, tt_all_reduce) if mlp_down and arm == 'down' else nullcontext()) as down_audit:
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
@@ -248,11 +255,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     **(dict(profile_verifier=True) if profile_verifier else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
+            if mlp_down:
+                result['down_mlp'] = down_audit
+                if down_audit is not None:
+                    result['prefill_setup_decode_ms'] += down_audit['setup_ms']
             if norm_scatter_variants or combined_variants:
                 result['norm_scatter_kernel'] = norm_audit
             if target_attention_variants or combined_variants:
                 from dspark_target_attention_variants import validate_route
-                validate_route(result, 'parallel' if combined_variants else arm)
+                validate_route(result, 'parallel' if combined_variants or mlp_down else arm)
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
@@ -263,7 +274,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms'][
-            'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
+            'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

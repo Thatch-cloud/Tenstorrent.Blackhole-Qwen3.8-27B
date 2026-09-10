@@ -41,6 +41,10 @@ fi
 if [ "$mode" = request-target-attention ]; then
     report_name=dspark-target-attention-request-hardware
     request_options+=(--target-attention-variants)
+    if [ "${QWEN_DSPARK_MLP_DOWN:-0}" = 1 ]; then
+        report_name=dspark-mlp-down-request-hardware
+        request_options+=(--mlp-down)
+    fi
 fi
 if [ "$mode" = request-combined ]; then
     report_name=dspark-combined-request-hardware

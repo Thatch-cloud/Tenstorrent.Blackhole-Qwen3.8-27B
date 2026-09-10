@@ -132,7 +132,10 @@ def main():
     parser.add_argument('--norm-scatter-variants', action='store_true')
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
+    parser.add_argument('--mlp-down', action='store_true')
     options = parser.parse_args()
+    if options.mlp_down and (not options.request or not options.target_attention_variants):
+        raise ValueError('Down-only MLP requires the matched target-attention request suite')
     coding_task = os.environ.get('QWEN_DSPARK_CODING_TASK', 'merge_intervals')
     if coding_task != 'merge_intervals':
         from coding_holdout_tasks import messages
@@ -177,6 +180,9 @@ def main():
         if options.target_attention_variants or options.combined_variants:
             from target_t16_attention_gate import qualify as qualify_target
             request_gate['request_prerequisites']['target_t16_attention'] = qualify_target(Path(__file__).parent)
+        if options.mlp_down:
+            from dram_mlp_down_gate import qualify_repeated
+            request_gate['request_prerequisites']['down_mlp'] = qualify_repeated(Path(__file__).parent, root)
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
@@ -231,6 +237,8 @@ def main():
             report['scope'] = 'Matched native versus folded T16 target attention; two audits and four timed requests'
         if options.combined_variants:
             report['scope'] = 'Matched folded T16 attention with versus without scatter norm; two audits and four timed requests'
+        if options.mlp_down:
+            report['scope'] = 'Matched folded T16 attention with native versus down-only DRAM MLP; two audits and four timed requests'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -330,7 +338,7 @@ def main():
                 native_attention_variants=options.native_attention_variants, profile_verifier=options.profile_verifier,
                 norm_scatter_variants=options.norm_scatter_variants,
                 target_attention_variants=options.target_attention_variants,
-                combined_variants=options.combined_variants)
+                combined_variants=options.combined_variants, mlp_down=options.mlp_down)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']

@@ -25,6 +25,10 @@ on:
         type: choice
         options: [merge_intervals, stable_unique_v1, run_length_encode_v1, rotate_right_v1]
         default: merge_intervals
+      dspark_mlp_down:
+        description: Qualified down-only MLP versus native with folded target attention; target-attention request suite only
+        type: boolean
+        default: false
       weight_packets:
         description: Fixed single-packet weight reads; sixteen-producer MLP suite only, requires its own simulator evidence
         type: boolean
@@ -136,6 +140,7 @@ jobs:
         shell: bash
         env:
           QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
+          QWEN_DSPARK_MLP_DOWN: ${{ inputs.dspark_mlp_down && '1' || '0' }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_DSPARK_MODE: ${{ inputs.suite == 'dspark-combined-request' && 'request-combined' || inputs.suite == 'dspark-target-attention-request' && 'request-target-attention' || inputs.suite == 'dspark-norm-scatter-request' && 'request-norm-scatter' || inputs.suite == 'dspark-verifier-profile' && 'request-verifier-profile' || inputs.suite == 'dspark-native-attention-request' && 'request-native-attention' || inputs.suite == 'dspark-request-variants' && 'request-variants' || inputs.suite == 'dspark-request' && 'request' || inputs.suite == 'dspark-target' && 'target' || 'backbone' }}
         run: timeout -k 30 5100 bash scripts/ci/run-dspark-hardware.sh
