@@ -18,6 +18,7 @@ dflash_target_links_abba=0
 dflash_native_proposal_abba=0
 dflash_context=0
 tiny_mlp=0
+dram_mlp=0
 tensix_mlp=0
 tensix_mlp_profile=0
 tensix_mlp_producers=8
@@ -26,6 +27,11 @@ if [ "$mode" = live-qk ]; then
     live_qk=1
     mode=baseline
     [[ "${QWEN_CODING_REQUEST:-0}" = 0 && "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
+fi
+if [ "$mode" = dram-mlp ]; then
+    dram_mlp=1
+    mode=full-norm-engine
+    export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
 fi
 if [ "$mode" = tiny-mlp ]; then
     tiny_mlp=1
@@ -113,6 +119,7 @@ if [[ "$mode" = learned-attention && "${QWEN_FABRIC_LINK_PROBE:-0}" = 1 ]]; then
 if [ "$mtp_drafts" != 0 ]; then ccl_build=1; fi
 if [ "$dflash_drafts" != 0 ]; then ccl_build=1; projection_links=4; fi
 if [ "$tiny_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
+if [ "$dram_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
 if [ "$tensix_mlp" = 1 ]; then ccl_build=1; projection_links=4; fi
 if [[ "$mode" = learned-attention || "$mode" = learned-mlp || "$mode" = feature-projection || "$mode" = feature-projection-full ]]; then
     descriptor=p150_x2_mesh_graph_descriptor.textproto
@@ -230,6 +237,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_TARGET_LINKS_ABBA=$dflash_target_links_abba" \
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
+    -e "QWEN_DRAM_MLP=$dram_mlp" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
     -e "QWEN_TENSIX_MLP_PRODUCERS=$tensix_mlp_producers" \
@@ -290,6 +298,10 @@ fi
 if [ "$tiny_mlp" = 1 ]; then
     docker cp "$test_id:/experiment/results/tiny-mlp.json" "$output/tiny-mlp.json"
     python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"
+fi
+if [ "$dram_mlp" = 1 ]; then
+    docker cp "$test_id:/experiment/results/dram-mlp.json" "$output/dram-mlp.json"
+    python3 scripts/ci/dram_mlp_gate.py --hardware-result "$output/dram-mlp.json"
 fi
 if [ "$tensix_mlp" = 1 ]; then
     if [ "$tensix_mlp_profile" = 1 ]; then

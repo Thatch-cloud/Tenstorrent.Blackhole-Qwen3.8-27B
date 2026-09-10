@@ -72,6 +72,12 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             --simulator-report /experiment-scripts/ci/tiny-mlp-simulator.json \
             --output /experiment/results/tiny-mlp-preflight.json
     fi
+    if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
+        python3 /experiment-scripts/ci/dram-mlp-hardware.py --preflight \
+            --simulator-report /experiment-scripts/ci/dram-mlp-simulator.json \
+            --simulator-exit-status /experiment-scripts/ci/dram-mlp-simulator.exit-status \
+            --output /experiment/results/dram-mlp-preflight.json
+    fi
     bash /experiment-scripts/ci/ccl-links-build.sh
     if [[ "${QWEN_MTP_DRAFTS:-0}" = 0 && "${QWEN_DFLASH_DRAFTS:-0}" = 0 ]]; then
         OMP_NUM_THREADS=1 timeout -k 15 900 python3 -u /experiment-scripts/ci/ccl-link-probe.py \
@@ -80,7 +86,7 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             echo 'Explicit-link hardware collective still invoked fallback discovery' >&2
             exit 1
         fi
-        if [[ "${QWEN_TINY_MLP:-0}" != 1 && "${QWEN_TENSIX_MLP:-0}" != 1 ]]; then exit 0; fi
+        if [[ "${QWEN_TINY_MLP:-0}" != 1 && "${QWEN_TENSIX_MLP:-0}" != 1 && "${QWEN_DRAM_MLP:-0}" != 1 ]]; then exit 0; fi
     fi
 fi
 if [ "${QWEN_RUN_MODE:-baseline}" = learned-mlp ]; then
@@ -385,6 +391,13 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
             --simulator-report "/experiment-scripts/ci/tensix-mlp-simulator$suffix.json" \
             --simulator-exit-status "/experiment-scripts/ci/tensix-mlp-simulator$suffix.exit-status" \
             --output /experiment/results/tensix-mlp.json
+        exit 0
+    fi
+    if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
+        timeout -k 30 900 python3 -u /experiment-scripts/ci/dram-mlp-hardware.py \
+            --simulator-report /experiment-scripts/ci/dram-mlp-simulator.json \
+            --simulator-exit-status /experiment-scripts/ci/dram-mlp-simulator.exit-status \
+            --output /experiment/results/dram-mlp.json
         exit 0
     fi
     if [ "${QWEN_TINY_MLP:-0}" = 1 ]; then
