@@ -388,6 +388,10 @@ def main():
                 stage('mesh-close')
                 ttnn.close_mesh_device(mesh)
                 mesh = None
+                if args.commit_only_gdn:
+                    report['commit_sources_after'] = source_hashes(Path(__file__).resolve().parents[2] / 'scripts/ci')
+                    if report['commit_sources'] != report['commit_sources_after']:
+                        raise ValueError('Commit-only adapter or publication source changed during simulation')
                 report['passed'] = True
                 stage('complete')
                 return
