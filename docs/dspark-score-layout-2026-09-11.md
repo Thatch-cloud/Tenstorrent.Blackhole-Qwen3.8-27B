@@ -160,6 +160,23 @@ Hardware audit canonical digest:
 
 Unchanged confirmation run:
 [34536767330](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34536767330).
-Repeat confirmation remains pending. These short offline requests do not certify
+The confirmation passed, with independent revision-bound source-hash validation,
+hardware-audit validation and exact reconstruction of the request summary.
+
+| Repeat arm | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Native score layout | 3314.52 | 4096 | 88.35 |
+| Fused score layout | 3350.74 | 4096 | 96.82 |
+
+The repeat gain is **9.58%**, with the same 234 timed committed tokens per arm and
+214/330 accepted proposals. Pooling committed tokens divided by total decode time
+across both matched runs gives **96.08 candidate versus 88.43 control TG** (four
+timed requests per arm). These are not arithmetic averages of throughput values.
+The repeat report SHA-256 is
+`91c0433ee9386df21259be415e0c84b74d29ae8b6bf25f38f9f36580262d8655`;
+its canonical hardware-audit digest matches the first run. Source validation uses
+the tested immutable revision, not the subsequently updated profiler worktree.
+
+These short offline requests do not certify
 held-out coding quality, long-context scaling or serving readiness. The full-size
 synthetic feedback simulator remains a separate unfinished check, not a claimed pass.
