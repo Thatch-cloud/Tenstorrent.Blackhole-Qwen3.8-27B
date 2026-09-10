@@ -20,8 +20,12 @@ hardware qualification.
 | `20260910T094223Z-404` | Down passes all four eager comparisons exactly; clean closure and unchanged source hashes | Changed-input trace qualification |
 | `20260910T094621Z-402` | Down passes six changed-input replay checks; exact 32 physical rows, poisoned logical outputs replaced, input and packed-weight integrity, stable bindings, clean closure | Apply the same replay screen to gate/up; then complete-MLP testing |
 | `20260910T095600Z-411` | Gate passes the same six replay and integrity checks, including fused SiLU | Up replay, then complete-MLP testing |
+| `20260910T100422Z-402` | Up passes the same six replay and integrity checks; all three component projections now pass | Complete-MLP testing |
 
-The composed T16 local MLP probe is implemented but not yet executed. It compares
+The composed T16 local MLP probe passed as `20260910T101303Z-400`: four exact eager
+comparisons and six exact changed-input replay comparisons, including all 32
+physical rows and poisoned-output replacement. It closed cleanly, retained
+unchanged experiment/native fingerprints and exited zero. It compares
 gate/up/product/down together against the native control, then replays changed
 inputs with poisoned outputs. It does not include the TP2 collective or measure
 token throughput. Intermediates are released between projections rather than
