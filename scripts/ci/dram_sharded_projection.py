@@ -39,7 +39,9 @@ def configurations(operations, mesh, name):
     return dict(plan=plan, weights=weights, inputs=inputs, outputs=outputs, program=program)
 
 
-def execute(operations, source, weight, config, compute, retain):
+def execute(operations, source, weight, config, compute, retain, *, preserve_partials=False):
+    if type(preserve_partials) is not bool:
+        raise ValueError('Explicit FP32 reload correction selection required')
     plan = config['plan']
     if (tuple(source.shape) != (1, 1, 16, plan['inner']) or source.dtype != operations.bfloat16
             or tuple(weight.shape)[-2:] != (plan['inner'], plan['width'])
@@ -47,6 +49,10 @@ def execute(operations, source, weight, config, compute, retain):
             or weight.memory_config() != config['weights']):
         raise ValueError('T16 BF16 input and unchanged-precision DRAM-sharded weights required')
     staged = retain(operations.to_memory_config(source, config['inputs']))
-    partial = retain(operations.linear(staged, weight, program_config=config['program'],
-        compute_kernel_config=compute, memory_config=config['outputs']))
+    if preserve_partials:
+        from dram_projection_reload import execute as corrected
+        partial = corrected(operations, staged, weight, config, compute, retain)
+    else:
+        partial = retain(operations.linear(staged, weight, program_config=config['program'],
+            compute_kernel_config=compute, memory_config=config['outputs']))
     return retain(operations.to_memory_config(partial, operations.L1_MEMORY_CONFIG))

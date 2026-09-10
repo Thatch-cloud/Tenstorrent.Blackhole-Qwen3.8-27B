@@ -46,9 +46,12 @@ def main():
     parser.add_argument('--norm-scatter', action='store_true')
     parser.add_argument('--target-attention', action='store_true')
     parser.add_argument('--approx-draft', action='store_true')
-    parser.add_argument('--dram-projection', action='store_true')
+    parser.add_argument('--dram-projection', choices=('gate', 'up', 'down'))
+    parser.add_argument('--dram-replay', action='store_true')
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.dram_replay and not options.dram_projection:
+        raise ValueError('DRAM replay requires an explicit projection')
     if options.dram_projection and (options.approx_draft or options.target_attention
             or options.norm_scatter or options.learned_layer or options.checkpoint is not None):
         raise ValueError('DRAM projection is an isolated probe')
@@ -102,6 +105,9 @@ def main():
         if options.dram_projection:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'dram-sharded-projection-probe'
+            arguments = ['--projection', options.dram_projection]
+            if options.dram_replay:
+                arguments.append('--replay')
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:

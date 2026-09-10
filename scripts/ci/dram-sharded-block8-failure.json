@@ -1,0 +1,50 @@
+{
+  "passed": false,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator-only native DRAM-sharded T16 gate projection screen; no speed claim.",
+  "sources": {
+    "dram-sharded-projection-probe.py": "727c2bd6041d3afcf91549be7b5c213118b4431618a5c8c4debf4216ff1ff0c3",
+    "dram_sharded_projection.py": "56a74ce3565f0a27837cb9373b9181ea72aee121fa2564c82ced4d6934df9812"
+  },
+  "checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact": false,
+      "failed_elements": 10959,
+      "max_abs": 0.03125
+    }
+  ],
+  "timing_qualified": false,
+  "replay_qualified": false,
+  "stage": "failed",
+  "geometry": {
+    "inner": 5120,
+    "width": 8704,
+    "banks": 8,
+    "workers": 4,
+    "weight_shard": [
+      5120,
+      1088
+    ],
+    "input_shard": [
+      32,
+      1280
+    ],
+    "output_shard": [
+      32,
+      2176
+    ],
+    "in0_block_w": 8,
+    "per_core_M": 1,
+    "per_core_N": 68,
+    "dtype": "bfloat4_b",
+    "activation": true
+  },
+  "weight_roundtrip_exact": true,
+  "sources_after": {
+    "dram-sharded-projection-probe.py": "727c2bd6041d3afcf91549be7b5c213118b4431618a5c8c4debf4216ff1ff0c3",
+    "dram_sharded_projection.py": "56a74ce3565f0a27837cb9373b9181ea72aee121fa2564c82ced4d6934df9812"
+  }
+}
