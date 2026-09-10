@@ -17,6 +17,7 @@ from sampling_link_policy import audit
 from dram_mlp import execute
 from dram_sharded_projection import configurations
 from dram_mlp_gate import NATIVE_SOURCES, variant_sources, qualify
+from tensix_mlp_weight_views import tensor_spec, weight_views
 
 
 def main():
@@ -110,6 +111,9 @@ def main():
                 or not compute.fp32_dest_acc_en or not compute.packer_l1_acc):
             raise ValueError('Unchanged native LoFi FP32 and packer L1 accumulation required')
         weights = dict(gate=mlp.weights.w1, up=mlp.weights.w3, down=mlp.weights.w2)
+        candidate_weights = weights
+        if options.sharded_product:
+            candidate_weights, report['weight_views'] = weight_views(ttnn, weights)
         mapper = ttnn.ReplicateTensorToMesh(mesh)
         patterns = [torch.randn((1, 1, 16, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
             for seed in report['seeds']]
@@ -119,7 +123,7 @@ def main():
             layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
         configs = {name: configurations(ttnn, mesh, name) for name in weights}
         sharded = {name: retain(persistent, ttnn.to_memory_config(value, configs[name]['weights']))
-            for name, value in weights.items()}
+            for name, value in candidate_weights.items()}
         bindings = [addresses(ttnn, value) for value in persistent + list(weights.values())]
         def forward(candidate, storage):
             if not candidate:
@@ -184,6 +188,10 @@ def main():
         report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
         report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
         report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
+        if options.sharded_product:
+            report['native_weights_after'] = {name: tensor_spec(ttnn, value) for name, value in weights.items()}
+            if report['native_weights_after'] != {name: check['native'] for name, check in report['weight_views'].items()}:
+                raise AssertionError('Native weight metadata or buffers changed')
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
         progress('failed')

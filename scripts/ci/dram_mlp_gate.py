@@ -60,6 +60,11 @@ def qualify(report, sources, native_sources, exit_status, *, hardware=False, sha
 
 
 def qualify_hardware(report):
+    if report.get('sharded_product', False):
+        from tensix_mlp_weight_views import qualify_views
+        qualify_views(report.get('weight_views'))
+        if report.get('native_weights_after') != {name: check['native'] for name, check in report['weight_views'].items()}:
+            raise ValueError('Native weights must retain original metadata and storage')
     if (report.get('closed_cleanly') is not True or report.get('backend') != 'hardware'
             or report.get('error') or report.get('sources_after') != report.get('sources')
             or report.get('native_sources_after') != report.get('native_sources')):

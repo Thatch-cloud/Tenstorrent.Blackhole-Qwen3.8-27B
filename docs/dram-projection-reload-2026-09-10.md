@@ -17,6 +17,13 @@ The next candidate should remove redundant layout conversions: stage the shared
 gate/up input once, keep their product sharded, and reshard directly for down.
 It needs fresh complete-MLP simulation and a matched hardware comparison.
 
+That reduced-conversion candidate passes complete-MLP simulation in
+`20260910T104357Z-402`. Hardware run `34468231173` stopped at its 4D weight guard:
+the native loader retains 2D matrices. The retry uses the existing audited
+zero-copy 4D views before sharding, preserving native control tensors and buffers.
+No candidate arithmetic ran in the failed attempt. The new build cache was
+populated in 260.52 seconds; reuse has not yet been measured.
+
 Earlier hardware run `34466116546` on `a109569`
 matched the first real-weight output on both cards, then failed cleanup before
 timing. The native TP2 collective consumes its input partial; the harness also
