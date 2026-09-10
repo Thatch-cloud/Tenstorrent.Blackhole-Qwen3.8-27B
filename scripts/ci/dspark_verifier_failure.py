@@ -6,7 +6,7 @@ from verifier_inputs import stage_inputs
 from dspark_projection import tensor_digest
 
 
-def compare_first_block(engine, decode, snapshot, initial_state, traced_feature, *, tap, chip):
+def compare_first_block(engine, decode, snapshot, initial_state, traced_feature, *, tap, chip, fresh_prefill=None):
     import torch
 
     ticket = engine.pending
@@ -14,12 +14,30 @@ def compare_first_block(engine, decode, snapshot, initial_state, traced_feature,
         raise ValueError('Failure comparison requires the initial request frontier')
     operations, model = engine.operations, engine.model
     layers = tuple(range(tap + 1))
+    restoration_checks = []
 
     def restore():
         engine.restore_initial()
         operations.synchronize_device(engine.mesh)
-        if snapshot() != initial_state:
-            raise AssertionError('Diagnostic restore does not match independently saved prefilled state')
+        current = snapshot()
+        if current != initial_state:
+            differences = {}
+            for name, expected in initial_state.items():
+                actual = current[name]
+                indices = [index for index, pair in enumerate(zip(expected, actual)) if pair[0] != pair[1]]
+                differences[name] = dict(expected_count=len(expected), actual_count=len(actual),
+                    mismatched_indices=indices, first_expected=expected[indices[0]] if indices else None,
+                    first_actual=actual[indices[0]] if indices else None)
+            restoration_checks.append(dict(saved_restore_exact=False, differences=differences))
+            if fresh_prefill is None:
+                raise AssertionError(f'Diagnostic restore differs from independently saved prefilled state: {differences}')
+            fresh_prefill()
+            operations.synchronize_device(engine.mesh)
+            if snapshot() != initial_state:
+                raise AssertionError('Fresh diagnostic prefill also differs from independently saved initial state')
+            restoration_checks[-1]['fresh_prefill_exact'] = True
+        else:
+            restoration_checks.append(dict(saved_restore_exact=True))
 
     def capture(operation):
         observer = LayerOutputCapture(model, layers,
@@ -60,6 +78,7 @@ def compare_first_block(engine, decode, snapshot, initial_state, traced_feature,
                     native_sha256=tensor_digest(reference), eager_batch_sha256=tensor_digest(value),
                     max_abs=str(float((reference.float() - value.float()).abs().max()))))
         return dict(scope='Failure-only native T1 versus identical-anchor eager batch; no throughput qualification',
+            restoration_checks=restoration_checks,
             layers=records, traced_equals_eager_batch=torch.equal(traced_feature, batched[tap][chip][..., :1, :]),
             traced_equals_native=torch.equal(traced_feature, native[tap][chip][..., :1, :]))
     finally:

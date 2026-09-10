@@ -103,7 +103,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                             from dspark_verifier_failure import compare_first_block
                             try:
                                 error.evidence['first_block_comparison'] = compare_first_block(engine, decode,
-                                    drafter.snapshot, drafter.initial_state, actual[..., :1, :].clone(), tap=tap, chip=chip)
+                                    drafter.snapshot, drafter.initial_state, actual[..., :1, :].clone(), tap=tap, chip=chip,
+                                    fresh_prefill=lambda: prefill(prompt))
                             except BaseException as diagnostic_error:
                                 error.evidence['first_block_diagnostic_error'] = f'{type(diagnostic_error).__name__}: {diagnostic_error}'
                     raise error
