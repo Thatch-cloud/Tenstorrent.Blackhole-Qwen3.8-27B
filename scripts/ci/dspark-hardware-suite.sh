@@ -13,6 +13,11 @@ python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /e
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
 [[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants ]]
+if [[ "$mode" = request-variants ]]; then
+    test -f /experiment-optimisation/sim/gdn-multitoken.py
+    ln -s /experiment-optimisation /optimisation
+    test -f /experiment-scripts/ci/../../optimisation/sim/gdn-multitoken.py
+fi
 probe=dspark-pipeline-hardware
 request_options=()
 if [ "$mode" != backbone ]; then
