@@ -13,7 +13,15 @@ including physical tile padding. Readback expands the host tensor to its padded
 shape, requiring checkpoint padding to become zero while source/native padding
 canaries remain NaN. The host-only TTNN tiling/readback mechanism passed a local
 check without opening a device; device execution is still unproven.
-Execution is pending the existing simulator owner.
+The previous full-chain simulator was deliberately stopped as incomplete and its
+runtime restoration verified. One-layer execution is now running as
+`qwen-batched-publication-1-20260911.service`, report
+`20260910T224336Z-417-gdn-batched-publication-probe.json`. No pass is claimed yet.
+
+`gdn_batched_publication_gate.py` independently requires the complete ordered
+matrices for both layer counts, exact source hashes before/after, clean closure,
+exit zero and all padding/poison checks. Its rejection tests pass; this does not
+substitute for executing the simulator or the later hardware continuation gates.
 
 After the existing owner exits and restores its runtime, use the bounded launcher:
 

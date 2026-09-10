@@ -180,3 +180,18 @@ the tested immutable revision, not the subsequently updated profiler worktree.
 These short offline requests do not certify
 held-out coding quality, long-context scaling or serving readiness. The full-size
 synthetic feedback simulator remains a separate unfinished check, not a claimed pass.
+
+### Deliberate simulator reprioritization
+
+Run `20260910T210526Z-378` was deliberately stopped at `candidate_0` to release
+the simulator for the new publication kernel. Its exit status is 143; its report
+remains `passed=false`, `closed_cleanly=false`, with no completed eager/replay
+check matrix. It is not a full-chain simulator pass. This was a scheduling decision,
+not a diagnosis of a frozen process or a failed numerical comparison.
+
+The exact probe process was terminated while its launcher remained alive to
+restore owned runtime sources. The original packer SHA-256 `87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181`
+and released owner lock were verified; the service then became terminal with
+status 143 and no remaining probe/launcher processes. Existing full-size changed-
+kernel simulation, small-chain simulation and both exact learned hardware audits
+remain the score-layout evidence. No evidence was upgraded because of cancellation.
