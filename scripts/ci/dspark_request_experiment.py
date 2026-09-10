@@ -137,7 +137,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
-        profile_drafter=False):
+        profile_drafter=False, score_layout=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -209,6 +209,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         raise ValueError('Drafter attribution requires its own audited request')
     if type(mlp_equal_footprint) is not bool or (mlp_equal_footprint and not mlp_down):
         raise ValueError('Equal-footprint diagnostic requires the down-only MLP experiment')
+    if type(score_layout) is not bool or (score_layout and (
+            not target_attention_variants or mlp_down or mlp_equal_footprint or profile_drafter)):
+        raise ValueError('Score layout requires an isolated matched folded-attention request experiment')
     if type(mlp_down) is not bool or (mlp_down and not target_attention_variants):
         raise ValueError('Down-only MLP requires the matched folded-attention experiment')
     if (type(native_attention_variants) is not bool or type(profile_verifier) is not bool
@@ -230,6 +233,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         qualify_target(Path(__file__).parent)
     if combined_variants:
         from dspark_combined_variants import SCHEDULE, POLICIES, summarize_variants
+    if score_layout:
+        from dspark_score_layout_variants import SCHEDULE, POLICIES, summarize_variants
+        from dspark_markov_score_layout_gate import qualify as qualify_scores
+        qualify_scores(Path(__file__).parent)
     if mlp_down:
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down
@@ -280,7 +287,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result['norm_scatter_kernel'] = norm_audit
             if target_attention_variants or combined_variants:
                 from dspark_target_attention_variants import validate_route
-                validate_route(result, 'parallel' if combined_variants or mlp_down else arm)
+                validate_route(result, 'parallel' if combined_variants or mlp_down or score_layout else arm)
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
@@ -292,7 +299,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms'][
-            'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
+            'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

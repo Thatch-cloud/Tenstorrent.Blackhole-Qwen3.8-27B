@@ -50,6 +50,19 @@ unchanged source hashes: 90 eager, 120 replay, 28 input-integrity and eight
 weight-integrity checks pass. The original packer is restored. Evidence is in
 `scripts/ci/dspark-markov-score-layout-small-simulator.json`.
 
+## Hardware request wiring
+
+The existing `dspark-target-attention-request` CI suite now accepts
+`dspark_score_layout=true`. Both arms use precise native DSpark attention and
+folded T16 target attention; only the candidate changes Markov score layout.
+Two audited requests precede four timed requests in A/B/B/A order. Comparison
+requires identical target tokens, state, proposal tokens and acceptance.
+
+This route remains gated by both full-vocabulary simulator reports. The complete
+chain run `20260910T124104Z-619` is still pending; hardware has not been dispatched.
+Shell syntax, workflow YAML parsing and 31 relevant host tests pass. Learned-weight
+request audits and end-to-end timing remain unqualified.
+
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.

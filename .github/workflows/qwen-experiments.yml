@@ -29,6 +29,10 @@ on:
         description: Qualified down-only MLP versus native with folded target attention; target-attention request suite only
         type: boolean
         default: false
+      dspark_score_layout:
+        description: Native versus fused Markov score layout; target-attention request suite only
+        type: boolean
+        default: false
       dspark_mlp_footprint:
         description: Give both MLP request arms resident sharded down weights; requires dspark_mlp_down
         type: boolean
@@ -149,6 +153,7 @@ jobs:
         env:
           QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
           QWEN_DSPARK_MLP_DOWN: ${{ inputs.dspark_mlp_down && '1' || '0' }}
+          QWEN_DSPARK_SCORE_LAYOUT: ${{ inputs.dspark_score_layout && '1' || '0' }}
           QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
           QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}

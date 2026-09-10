@@ -41,6 +41,11 @@ fi
 if [ "$mode" = request-target-attention ]; then
     report_name=dspark-target-attention-request-hardware
     request_options+=(--target-attention-variants)
+    if [ "${QWEN_DSPARK_SCORE_LAYOUT:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_MLP_DOWN:-0}" = 0
+        report_name=dspark-score-layout-request-hardware
+        request_options+=(--score-layout)
+    fi
     if [ "${QWEN_DSPARK_MLP_DOWN:-0}" = 1 ]; then
         report_name=dspark-mlp-down-request-hardware
         request_options+=(--mlp-down)

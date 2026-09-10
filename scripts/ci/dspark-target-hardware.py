@@ -135,7 +135,11 @@ def main():
     parser.add_argument('--combined-variants', action='store_true')
     parser.add_argument('--mlp-down', action='store_true')
     parser.add_argument('--mlp-equal-footprint', action='store_true')
+    parser.add_argument('--score-layout', action='store_true')
     options = parser.parse_args()
+    if options.score_layout and (not options.request or not options.target_attention_variants
+            or options.mlp_down or options.mlp_equal_footprint or options.profile_drafter):
+        raise ValueError('Score layout requires an isolated matched target-attention request suite')
     if options.profile_drafter and (not options.request or any((options.request_variants,
             options.native_attention_variants, options.profile_verifier, options.norm_scatter_variants,
             options.target_attention_variants, options.combined_variants, options.mlp_down))):
@@ -191,6 +195,9 @@ def main():
         if options.mlp_down:
             from dram_mlp_down_gate import qualify_repeated
             request_gate['request_prerequisites']['down_mlp'] = qualify_repeated(Path(__file__).parent, root)
+        if options.score_layout:
+            from dspark_markov_score_layout_gate import qualify as qualify_scores
+            request_gate['request_prerequisites']['score_layout'] = qualify_scores(Path(__file__).parent)
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
@@ -251,6 +258,8 @@ def main():
             report['scope'] = 'Matched folded T16 attention with native versus down-only DRAM MLP; two audits and four timed requests'
         if options.mlp_equal_footprint:
             report['scope'] += '; equal resident down-weight footprint diagnostic, not native-footprint performance'
+        if options.score_layout:
+            report['scope'] = 'Matched native versus fused Markov score layout; two audits and four timed full requests'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -351,7 +360,8 @@ def main():
                 norm_scatter_variants=options.norm_scatter_variants,
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants, mlp_down=options.mlp_down,
-                mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter)
+                mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
+                score_layout=options.score_layout)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']

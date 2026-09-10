@@ -8,6 +8,13 @@ draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
 [[ "$draft_profile" = 0 || "$draft_profile" = 1 ]]
 if [ "$draft_profile" = 1 ]; then test "$mode" = request-verifier-profile; fi
 mlp_down=${QWEN_DSPARK_MLP_DOWN:-0}
+score_layout=${QWEN_DSPARK_SCORE_LAYOUT:-0}
+[[ "$score_layout" = 0 || "$score_layout" = 1 ]]
+if [ "$score_layout" = 1 ]; then
+    test "$mode" = request-target-attention
+    test "$mlp_down" = 0
+    test "$draft_profile" = 0
+fi
 mlp_footprint=${QWEN_DSPARK_MLP_FOOTPRINT:-0}
 [[ "$mlp_footprint" = 0 || "$mlp_footprint" = 1 ]]
 if [ "$mlp_footprint" = 1 ]; then test "$mlp_down" = 1; fi
@@ -72,6 +79,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \
+    -e "QWEN_DSPARK_SCORE_LAYOUT=$score_layout" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \
