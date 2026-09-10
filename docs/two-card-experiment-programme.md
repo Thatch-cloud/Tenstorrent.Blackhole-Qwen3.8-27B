@@ -2,14 +2,28 @@
 
 ## Current programme position - 2026-09-10
 
-**Latest completed:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
+**Latest completed:** folded T16 target attention passes two matched hardware
+runs, `34454698201` and `34455470051`, after its exact simulator gate. All twelve
+requests preserve target outputs/state, inactive slots and cross-arm proposals.
+Pooling four timed requests per arm gives **PP3312.91 / CTX4096 / TG89.86**
+versus **83.88 TG** native target-attention control. Setup-inclusive latency
+remains worse; held-out coding quality and long-context scaling remain open.
+[Detailed evidence](target-t16-attention-2026-09-10.md).
+
+**In flight:** `34456312393`, source `a0884c0`, compares folded target attention
+with versus without the scatter norm reader. Both arms retain captured native
+DSpark drafting and commit-only GDN. Two audits precede A/B/B/A timing;
+1408 host tests pass and both kernel simulator gates remain mandatory.
+This measures combined gains rather than assuming they add. No serving change.
+
+**Previous norm experiment:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
 source `8e315d6`, compares the direct-scatter norm reader against the current
 native-attention DSpark control. Two audits and four A/B/B/A timed requests pass.
 The isolated simulator passes 12 eager, 24 replay and 30 output-poison checks;
 1,382 host tests pass. Hardware gives PP3331.87 / CTX4096 / TG87.04 versus
 85.85 control: +1.39%, not repeat-confirmed and not a new overall best.
-All target outputs/state and cross-arm proposals remain exact. Next investigate
-the serial attention component with a separate T16/4K replay simulator gate.
+All target outputs/state and cross-arm proposals remain exact. The subsequent
+T16 attention experiment and current combined comparison are described above.
 [Kernel experiment](gdn-norm-scatter-experiment-2026-09-10.md).
 
 **Current single-stream candidate: precise-native DSpark attention, captured
