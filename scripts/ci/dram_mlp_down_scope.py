@@ -9,14 +9,16 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 class DownOnlyArm:
-    def __init__(self, operations, model, collective):
+    def __init__(self, operations, model, collective, *, enabled=True):
+        if type(enabled) is not bool:
+            raise ValueError('Explicit target MLP route required')
         if len(model.layers) != 64 or model.args.num_devices != 2:
             raise ValueError('Complete 64-layer TP2 target required')
         self.operations, self.mesh, self.collective = operations, model.mesh_device, collective
         self.originals, self.weights, self.installed = [], [], []
         self.hits, self.fallbacks = [0] * 64, [0] * 64
         self.closed = False
-        self.audit = dict(restored=False, layers=64, rows=16, setup_ms=None,
+        self.audit = dict(restored=False, layers=64, rows=16, setup_ms=None, enabled=enabled,
             scope='Target T16 only; native prefill/T1 and drafter untouched')
         started = time.perf_counter()
         try:
@@ -40,6 +42,7 @@ class DownOnlyArm:
                 (mlp.weights.w1, mlp.weights.w3, mlp.weights.w2)] for mlp, unused in self.originals]
             for mlp, unused in self.originals:
                 self.weights.append(operations.to_memory_config(mlp.weights.w2, config['weights']))
+            self.audit['prepared_bindings'] = [addresses(operations, weight) for weight in self.weights]
             for index, (mlp, original) in enumerate(self.originals):
                 weights = dict(gate=mlp.weights.w1, up=mlp.weights.w3, down=self.weights[index])
                 configs = dict(gate=dict(program=mlp.args.mlp_w1_decode_1d_progcfg),
@@ -47,7 +50,7 @@ class DownOnlyArm:
                 def forward(value, mlp=mlp, original=original, index=index, weights=weights, configs=configs):
                     if self.closed:
                         raise RuntimeError('Closed target MLP experiment cannot execute')
-                    if tuple(value.shape) != (1, 1, 16, 5120):
+                    if not enabled or tuple(value.shape) != (1, 1, 16, 5120):
                         self.fallbacks[index] += 1
                         return original(value)
                     self.hits[index] += 1
@@ -79,6 +82,11 @@ class DownOnlyArm:
             restored=all(mlp.forward is original for mlp, original in self.installed))
         try:
             self.operations.synchronize_device(self.mesh)
+            if 'prepared_bindings' in self.audit:
+                self.audit['prepared_bindings_unchanged'] = self.audit['prepared_bindings'] == [
+                    addresses(self.operations, weight) for weight in self.weights]
+                if not self.audit['prepared_bindings_unchanged']:
+                    raise AssertionError('Prepared down weight bindings changed')
             if hasattr(self, 'native_bindings'):
                 current = [[addresses(self.operations, weight) for weight in
                     (mlp.weights.w1, mlp.weights.w3, mlp.weights.w2)] for mlp, unused in self.originals]
@@ -90,8 +98,8 @@ class DownOnlyArm:
 
 
 @contextmanager
-def scoped_down(operations, model, collective):
-    arm = DownOnlyArm(operations, model, collective)
+def scoped_down(operations, model, collective, *, enabled=True):
+    arm = DownOnlyArm(operations, model, collective, enabled=enabled)
     try:
         yield arm.audit
     finally:

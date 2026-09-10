@@ -18,20 +18,30 @@ def validate_route(value, arm):
 
     attention_route(value, 'parallel')
     audit = value.get('down_mlp')
-    if arm == 'control':
+    equal = value.get('down_mlp_equal_footprint', False)
+    if type(equal) is not bool:
+        raise ValueError('Explicit equal-footprint diagnostic selection required')
+    if arm == 'control' and not equal:
         if audit is not None:
             raise ValueError('Native MLP control cannot contain candidate execution')
         return
-    if arm != 'down' or not isinstance(audit, dict):
+    if arm not in ('control', 'down') or not isinstance(audit, dict):
         raise ValueError('Explicit down-only candidate audit required')
     if (audit.get('restored') is not True or audit.get('native_bindings_unchanged') is not True
             or audit.get('layers') != 64 or audit.get('rows') != 16
             or not isinstance(audit.get('hits'), list) or len(audit['hits']) != 64
-            or any(type(count) is not int or count < 1 for count in audit['hits'])):
+            or any(type(count) is not int or (count < 1 if arm == 'down' else count != 0) for count in audit['hits'])):
         raise ValueError('Every target layer must execute and restore the qualified T16 MLP')
     setup = audit.get('setup_ms')
     if type(setup) not in (int, float) or not math.isfinite(setup) or setup <= 0:
         raise ValueError('Actual candidate weight preparation cost required')
+    if equal:
+        bindings = audit.get('prepared_bindings')
+        if (audit.get('enabled') is not (arm == 'down') or audit.get('prepared_bindings_unchanged') is not True
+                or not isinstance(bindings, list) or len(bindings) != 64
+                or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
+                    or any(type(address) is not int or address < 0 for address in pair) for pair in bindings)):
+            raise ValueError('Both arms require stable prepared weight bindings and explicit execution routes')
 
 
 def summarize_variants(requests):
@@ -39,6 +49,9 @@ def summarize_variants(requests):
 
     if [(value.get('arm'), value.get('instrumented_timing')) for value in requests] != list(SCHEDULE):
         raise ValueError('Two audits followed by complete A/B/B/A timed requests required')
+    footprint = requests[0].get('down_mlp_equal_footprint', False)
+    if any(value.get('down_mlp_equal_footprint', False) is not footprint for value in requests):
+        raise ValueError('One memory-footprint policy required throughout the comparison')
     signatures = {}
     for value in requests:
         arm = value['arm']
@@ -66,7 +79,13 @@ def summarize_variants(requests):
     if signatures['control'] != signatures['down']:
         raise ValueError('MLP change must preserve proposals and acceptance across arms')
     arms = {arm: summarize([value for value in requests if value['arm'] == arm]) for arm in POLICIES}
-    return dict(arms=arms, order=[arm for arm, audit in SCHEDULE],
+    result = dict(arms=arms, order=[arm for arm, audit in SCHEDULE],
         committed_tg_change_percent=100 * (arms['down']['committed_tg'] / arms['control']['committed_tg'] - 1),
         timing_boundary='Complete decode loops including copies, verification, publication, readback and stalls',
         held_out_coding_quality=False, serving_qualified=False)
+    if footprint:
+        bindings = [value['down_mlp']['prepared_bindings'] for value in requests if not value['instrumented_timing']]
+        result.update(equal_resident_weight_footprint=True,
+            timed_weight_addresses_match=all(value == bindings[0] for value in bindings),
+            scope='Memory-footprint diagnostic; retains extra weights in both arms, not native-footprint promotion')
+    return result

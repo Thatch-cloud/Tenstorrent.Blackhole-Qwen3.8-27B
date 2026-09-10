@@ -5,6 +5,42 @@ from test_dspark_target_attention_variants import TargetAttentionVariantTests
 
 
 class DownVariantsTests(unittest.TestCase):
+    def footprint_requests(self):
+        records = self.requests()
+        for value in records:
+            enabled = value['arm'] == 'down'
+            value['down_mlp_equal_footprint'] = True
+            value['down_mlp'] = dict(restored=True, native_bindings_unchanged=True, layers=64, rows=16,
+                hits=[3 if enabled else 0] * 64, setup_ms=100, enabled=enabled,
+                prepared_bindings_unchanged=True, prepared_bindings=[[index * 1024] * 2 for index in range(64)])
+        return records
+
+    def test_equal_footprint_is_labelled_and_addresses_reported(self):
+        records = self.footprint_requests()
+        result = summarize_variants(records)
+        self.assertTrue(result['equal_resident_weight_footprint'])
+        self.assertTrue(result['timed_weight_addresses_match'])
+        self.assertFalse(result['serving_qualified'])
+        records[3]['down_mlp']['prepared_bindings'][0][0] += 32
+        self.assertFalse(summarize_variants(records)['timed_weight_addresses_match'])
+
+    def test_footprint_control_cannot_execute_candidate_or_skip_preparation(self):
+        for failure in ('hit', 'enabled', 'bindings', 'policy', 'stable'):
+            records = self.footprint_requests()
+            audit = records[0]['down_mlp']
+            if failure == 'hit':
+                audit['hits'][0] = 1
+            elif failure == 'enabled':
+                audit['enabled'] = True
+            elif failure == 'bindings':
+                audit['prepared_bindings'].pop()
+            elif failure == 'policy':
+                records[0]['down_mlp_equal_footprint'] = False
+            else:
+                audit['prepared_bindings_unchanged'] = False
+            with self.subTest(failure=failure), self.assertRaises(ValueError):
+                summarize_variants(records)
+
     def requests(self):
         records = TargetAttentionVariantTests().requests()
         for value in records:

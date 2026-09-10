@@ -133,7 +133,10 @@ def main():
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
     parser.add_argument('--mlp-down', action='store_true')
+    parser.add_argument('--mlp-equal-footprint', action='store_true')
     options = parser.parse_args()
+    if options.mlp_equal_footprint and not options.mlp_down:
+        raise ValueError('Equal footprint requires the down-only MLP experiment')
     if options.mlp_down and (not options.request or not options.target_attention_variants):
         raise ValueError('Down-only MLP requires the matched target-attention request suite')
     coding_task = os.environ.get('QWEN_DSPARK_CODING_TASK', 'merge_intervals')
@@ -239,6 +242,8 @@ def main():
             report['scope'] = 'Matched folded T16 attention with versus without scatter norm; two audits and four timed requests'
         if options.mlp_down:
             report['scope'] = 'Matched folded T16 attention with native versus down-only DRAM MLP; two audits and four timed requests'
+        if options.mlp_equal_footprint:
+            report['scope'] += '; equal resident down-weight footprint diagnostic, not native-footprint performance'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -338,7 +343,8 @@ def main():
                 native_attention_variants=options.native_attention_variants, profile_verifier=options.profile_verifier,
                 norm_scatter_variants=options.norm_scatter_variants,
                 target_attention_variants=options.target_attention_variants,
-                combined_variants=options.combined_variants, mlp_down=options.mlp_down)
+                combined_variants=options.combined_variants, mlp_down=options.mlp_down,
+                mlp_equal_footprint=options.mlp_equal_footprint)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']

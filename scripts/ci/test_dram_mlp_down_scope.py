@@ -7,6 +7,23 @@ from test_dram_mlp_sharded import Tensor
 
 
 class DownScopeTests(unittest.TestCase):
+    def test_disabled_arm_prepares_same_weights_but_executes_only_native(self):
+        operations, model = self.fixture()
+        with patch.object(scope, 'configurations', return_value=dict(weights='sharded')), patch.object(
+                scope, 'addresses', side_effect=lambda ops, value: id(value)), patch.object(
+                scope, 'execute') as execute, patch.object(scope, 'release_owned') as release:
+            with scope.scoped_down(operations, model, Mock(), enabled=False) as audit:
+                self.assertEqual(operations.to_memory_config.call_count, 64)
+                for layer in model.layers:
+                    self.assertEqual(layer.feed_forward.forward(Tensor((1, 1, 16, 5120), 'bf16', 'l1')), 'native')
+            execute.assert_not_called()
+            self.assertEqual(audit['hits'], [0] * 64)
+            self.assertEqual(audit['fallbacks'], [1] * 64)
+            self.assertFalse(audit['enabled'])
+            self.assertTrue(audit['restored'])
+            self.assertTrue(audit['prepared_bindings_unchanged'])
+            self.assertEqual(len(release.call_args.args[1]), 64)
+
     def fixture(self):
         operations = SimpleNamespace(bfloat4_b='bf4', bfloat8_b='bf8', DRAM_MEMORY_CONFIG='dram',
             L1_MEMORY_CONFIG='l1', MathFidelity=SimpleNamespace(LoFi='lofi'),

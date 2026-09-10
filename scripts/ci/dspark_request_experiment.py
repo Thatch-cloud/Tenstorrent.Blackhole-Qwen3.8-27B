@@ -136,7 +136,7 @@ def cache_formats(operations, caches, recurrent):
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
-        target_attention_variants=False, combined_variants=False, mlp_down=False):
+        target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -203,6 +203,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return (output[0] if isinstance(output, tuple) else output).clone()
 
     from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
+    if type(mlp_equal_footprint) is not bool or (mlp_equal_footprint and not mlp_down):
+        raise ValueError('Equal-footprint diagnostic requires the down-only MLP experiment')
     if type(mlp_down) is not bool or (mlp_down and not target_attention_variants):
         raise ValueError('Down-only MLP requires the matched folded-attention experiment')
     if (type(native_attention_variants) is not bool or type(profile_verifier) is not bool
@@ -247,7 +249,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             native = POLICIES[arm].get('native_attention', False)
             with (precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext()) as kernel_audit, \
                     (scoped_reader() if (norm_scatter_variants or combined_variants) and arm == 'scatter' else nullcontext()) as norm_audit, \
-                    (scoped_down(operations, model, tt_all_reduce) if mlp_down and arm == 'down' else nullcontext()) as down_audit:
+                    (scoped_down(operations, model, tt_all_reduce, enabled=arm == 'down')
+                     if mlp_down and (arm == 'down' or mlp_equal_footprint) else nullcontext()) as down_audit:
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
@@ -257,6 +260,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     result['native_attention_kernel'] = kernel_audit
             if mlp_down:
                 result['down_mlp'] = down_audit
+                result['down_mlp_equal_footprint'] = mlp_equal_footprint
                 if down_audit is not None:
                     result['prefill_setup_decode_ms'] += down_audit['setup_ms']
             if norm_scatter_variants or combined_variants:

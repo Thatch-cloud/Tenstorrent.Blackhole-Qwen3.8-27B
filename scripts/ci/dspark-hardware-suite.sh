@@ -44,6 +44,10 @@ if [ "$mode" = request-target-attention ]; then
     if [ "${QWEN_DSPARK_MLP_DOWN:-0}" = 1 ]; then
         report_name=dspark-mlp-down-request-hardware
         request_options+=(--mlp-down)
+        if [ "${QWEN_DSPARK_MLP_FOOTPRINT:-0}" = 1 ]; then
+            report_name=dspark-mlp-footprint-request-hardware
+            request_options+=(--mlp-equal-footprint)
+        fi
     fi
 fi
 if [ "$mode" = request-combined ]; then
