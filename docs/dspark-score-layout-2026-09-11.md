@@ -71,6 +71,12 @@ file. This is partial evidence only, retained as
 process was found after the session interruption. The simulator packer remained
 patched, so its owned runtime state must be recovered before another launch.
 
+Recovery verified no matching simulator/launcher process and no owner PID 618.
+Both SDPA sources already matched their original hashes. The exact packer patch
+was reversed, its original SHA-256 `87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181`
+verified, and the abandoned owner lock removed. This restores runtime state only;
+it does not turn the interrupted report into a pass.
+
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.
