@@ -85,7 +85,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 expected = torch.cat([golden_features[position + row][index][chip] for row in range(prefix)], dim=2)
                 actual = operations.to_torch(shard)[..., :prefix, :]
                 if not torch.equal(actual, expected):
-                    raise AssertionError(f'DSpark committed feature mismatch: tap={tap}, chip={chip}, position={position}')
+                    from dspark_feature_mismatch import FeatureMismatch
+                    raise FeatureMismatch(actual, expected, tap=tap, chip=chip, position=position)
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
     def factory():
@@ -103,6 +104,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             from dspark_history_audit import AuditedHistoryDrafter
             drafter = AuditedHistoryDrafter(operations, drafter, history_checks)
         if proposal_trace:
+            if audit_features:
+                from dspark_target_state_audit import TargetStateAuditedDrafter
+                drafter = TargetStateAuditedDrafter(drafter,
+                    lambda: dict(gdn=live_digest(), kv=kv_digest(drafter.position)))
             status('prepare_fixed_history_proposal_trace_before_verifier_capture')
             drafter.prepare_trace(seed, audit=audit_features)
         status('warm_fifteen_query_proposal_before_verifier_capture')
