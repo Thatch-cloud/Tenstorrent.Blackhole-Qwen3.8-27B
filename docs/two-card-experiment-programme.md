@@ -31,6 +31,28 @@ baseline or establish the 200 TG target.
 | Memory-format tuning | Account for weights, KV, recurrent state, retained speculative histories, traces and scratch | Use actual TT allocation/format evidence; no TPU HBM calculator or arbitrary 0.98 utilization assumption |
 | Compilation reuse | Reuse exact source/runtime/shape-keyed caches and separate cold setup from warmed execution | Report cold setup independently; never count capture/compile artifacts as steady decode gains |
 
+### Next combined-runtime candidate: bank-bound proposal traces
+
+Source inspection of `PreparedDSparkProposal.update` finds ten complete history
+copies before every proposal replay. For the 4096-context / 256-output-capacity
+case, ten BF16 tensors of shape `[1,4,4352,128]` represent **42.5 MiB per chip**
+of destination payload each step, before counting source reads. This is a byte
+count, not a measured latency saving. `StableHistoryKV` already owns two stable
+banks and swaps their roles on commit.
+
+Experiment: capture one proposal trace per bank and select the trace bound to the
+currently committed bank, instead of copying the entire bank into a third bank.
+Retain identical kernels, complete two-chip token comparisons and host inputs.
+No runtime change is enabled yet. Allocation must still finish before capture;
+double trace/output storage and setup costs must be measured, not ignored.
+
+Required before combined A/B timing: changed-input execution on both banks,
+commit/discard transitions, immutable input and target-state audits, no rebinding,
+no freed borrowed buffers, exact proposals/features and all accepted-prefix
+continuations. An unknown bank must fail rather than select a stale trace.
+Compare full PP/CTX/TG and setup-inclusive latency on the same frozen task; do not
+assume all drafter time or the separate history-publication cost disappears.
+
 Execution order: the same-revision repeat is complete; use request-boundary
 CPU/memory-pressure diagnostics to investigate instability, then compare combined
 candidates against the matched control. Changed kernels stay simulator-first.
