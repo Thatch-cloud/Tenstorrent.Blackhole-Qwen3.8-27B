@@ -62,7 +62,7 @@ are unchanged by design; simulator evidence must verify that claim.
    compare committed TG and the complete selection/publication boundary, not
    kernel timing alone. Reject any token, state, acceptance or quality regression.
 
-The current verifier profiler is independent and still needed: even removing
+The current verifier profile is independent: even removing
 publication completely would not make the existing request reach 200 TG.
 
 ## Simulator readback bottleneck
@@ -97,3 +97,23 @@ Evidence is retained as `scripts/ci/tensor-bit-compare-simulator.json` with its
 exit status. `tensor_bit_compare_gate.py` verifies the exact matrix and source
 hashes. This qualifies only the comparator controls, not the publication kernel,
 model correctness, hardware performance or serving.
+
+## Comparator-backed full matrix
+
+The publication probe now requires the qualified comparator and retains the same
+238 one-layer checks / 2688 48-layer checks, full physical padding checks and
+poisoned-checkpoint checks. Each comparison covers every physical word against
+an independently generated host reference; only the 32 mismatch counters return
+through the simulator command queue. Counter poisoning also prevents stale zero
+results from passing. No tensor regions or accepted prefixes were dropped.
+
+Host fixtures are regenerated deterministically per pattern/layer rather than
+retaining both complete 48-layer host copies. A single 20-tensor reference set is
+shared across sequential comparisons; all device buffers and programs are
+prepared before trace capture. The host reference tests cover both chip offsets,
+all 17 accepted prefixes and inactive native slots. Seven host/gate tests pass.
+
+Revised one-layer run `20260910T230103Z-389` is active under
+`qwen-publication-compared-1-20260911.service`. It remains unqualified until
+complete independent validation and clean exit. The 48-layer run follows only
+after that succeeds.

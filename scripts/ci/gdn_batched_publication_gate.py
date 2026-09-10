@@ -7,7 +7,8 @@ from pathlib import Path
 
 SOURCES = ('gdn-batched-publication-probe.py', 'gdn_commit_dma.py', 'gdn_commit_dma.cpp',
     'gdn_commit_batched_dma.py', 'gdn_commit_batched_dma.cpp', 'attention_batch.py',
-    'feature_projection.py', 'gdn_multitoken_conv.py')
+    'feature_projection.py', 'gdn_multitoken_conv.py', 'gdn_publication_fixture.py',
+    'tensor_bit_compare.py', 'tensor_bit_compare.cpp', 'tensor_bit_compare_gate.py')
 PADDED = (1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19)
 
 
@@ -22,6 +23,9 @@ def validate(report, directory, layers, exit_status):
     current = {name: hashlib.sha256((Path(directory) / name).read_bytes()).hexdigest() for name in SOURCES}
     if report.get('sources') != current or report.get('sources_after') != current:
         raise ValueError('All tested kernel, adapter and probe sources must remain unchanged')
+    from tensor_bit_compare_gate import qualify as qualify_compare
+    if report.get('comparator') != qualify_compare(directory):
+        raise ValueError('Independently qualified exact comparator required')
     prefixes = tuple(range(17)) if layers == 1 else (0, 1, 8, 16)
     schedule = [(arm, pattern, prefix, None) for prefix in prefixes for pattern in range(2)
         for arm in ('native', 'candidate')]

@@ -15,7 +15,8 @@ from gdn_multitoken_conv import addresses, release_owned
 
 SOURCES = ('gdn-batched-publication-probe.py', 'gdn_commit_dma.py', 'gdn_commit_dma.cpp',
     'gdn_commit_batched_dma.py', 'gdn_commit_batched_dma.cpp', 'attention_batch.py',
-    'feature_projection.py', 'gdn_multitoken_conv.py')
+    'feature_projection.py', 'gdn_multitoken_conv.py', 'gdn_publication_fixture.py',
+    'tensor_bit_compare.py', 'tensor_bit_compare.cpp', 'tensor_bit_compare_gate.py')
 
 
 def main():
@@ -43,74 +44,62 @@ def main():
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=134217728)
         mesh.enable_program_cache()
         mapper = ttnn.ShardTensorToMesh(mesh, dim=0)
-        compact = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
-        shapes = compact + [(16, 24, 128, 128)] + [(1, 16, 5120)] * 4
-        shapes += [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4 + compact
-        generator = torch.Generator().manual_seed(389113)
-        patterns, uploads = [], []
+        from gdn_publication_fixture import host_layer, expected
+        from tensor_bit_compare import prepare as compare_prepare
+        from tensor_bit_compare_gate import qualify as qualify_compare
+        report['comparator'] = qualify_compare(root)
         save('fixtures')
-        for pattern in range(2):
-            host_layers, staged_layers = [], []
-            for layer in range(options.layers):
-                values = [torch.randn((shape[0] * 2, *shape[1:]), generator=generator).bfloat16()
-                    for shape in shapes]
-                for value in values[15:]:
-                    value.fill_(float('nan'))
-                host_layers.append(values)
-                staged_layers.append([ttnn.from_torch(value, dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT, pad_value=float('nan'), mesh_mapper=mapper) for value in values])
-            patterns.append(host_layers)
-            uploads.append(staged_layers)
+        def upload(value, *, device=False, padding=float('nan')):
+            return ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                pad_value=padding, mesh_mapper=mapper,
+                **(dict(device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG) if device else {}))
         layers = []
-        for values in patterns[0]:
-            local = []
+        for layer in range(options.layers):
+            local = [upload(value, device=True) for value in host_layer(0, layer)]
             layers.append(local)
-            for value in values:
-                tensor = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT, pad_value=float('nan'),
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)
-                tensors.append(tensor)
-                local.append(tensor)
+            tensors.extend(local)
+        references = [upload(value, device=True) for value in host_layer(0, 0)]
+        tensors.extend(references)
+        counter = ttnn.from_torch(torch.zeros((1, 1, 32), dtype=torch.uint32), device=mesh,
+            dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+        tensors.append(counter)
+        poison = ttnn.from_torch(torch.full((1, 1, 32), 0xffffffff, dtype=torch.uint32),
+            dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+        comparisons = [[compare_prepare(ttnn, mesh, tensor, reference, counter)
+            for tensor, reference in zip(local, references, strict=True)] for local in layers]
         bindings = [addresses(ttnn, value) for value in tensors]
-        def physical(tensor, chip):
-            host = ttnn.from_device(ttnn.get_device_tensors(tensor)[chip])
-            return ttnn.to_torch(host.reshape(host.padded_shape))
+        def compare(layer, operand, value, padding):
+            staged = upload(value, padding=padding)
+            ttnn.copy_host_to_device_tensor(staged, references[operand])
+            ttnn.copy_host_to_device_tensor(poison, counter)
+            comparisons[layer][operand]()
+            for chip, shard in enumerate(ttnn.get_device_tensors(counter)):
+                if torch.count_nonzero(ttnn.to_torch(shard).to(torch.int64)):
+                    raise AssertionError(f'Physical bit comparison failed: {layer=} {operand=} {chip=}')
         def update(pattern):
-            for layer, (staged, local) in enumerate(zip(uploads[pattern], layers, strict=True)):
+            for layer, local in enumerate(layers):
+                values = host_layer(pattern, layer)
+                staged = [upload(value) for value in values]
                 for source, destination in zip(staged, local, strict=True):
                     ttnn.copy_host_to_device_tensor(source, destination)
+                for operand in range(15, 20):
+                    compare(layer, operand, values[operand], float('nan'))
                 for chip in range(2):
-                    if any(not torch.isnan(physical(tensor, chip)).all() for tensor in local[15:]):
-                        raise AssertionError('Complete checkpoint poison including padding required')
                     report['poison_checks'].append(dict(pattern=pattern, layer=layer, chip=chip, exact=True))
         def check(pattern, prefix, arm, repetition):
             for layer, local in enumerate(layers):
+                values = expected(host_layer(pattern, layer), prefix)
+                for operand, value in enumerate(values):
+                    compare(layer, operand, value, 0 if operand >= 15 else float('nan'))
                 for chip in range(2):
-                    values = [value.chunk(2, dim=0)[chip] for value in patterns[pattern][layer]]
-                    selected = values[:5] if prefix == 0 else [values[5][prefix - 1:prefix]] + [
-                        value[:, prefix - 1:prefix] for value in values[6:10]]
-                    expected = values[:10] + [value.clone() for value in values[10:15]] + selected
-                    expected[10][0:1] = selected[0]
-                    for slot in range(1, 5):
-                        expected[10 + slot][:, 0:1] = selected[slot]
-                    for operand, (tensor, reference) in enumerate(zip(local, expected, strict=True)):
-                        raw = physical(tensor, chip)
-                        slices = tuple(slice(0, size) for size in reference.shape)
-                        actual = raw[slices].contiguous()
-                        if not torch.equal(actual.view(torch.int16), reference.contiguous().view(torch.int16)):
-                            raise AssertionError(f'{arm=} {pattern=} {prefix=} {layer=} {chip=} {operand=}')
-                        mask = torch.ones(raw.shape, dtype=torch.bool)
-                        mask[slices] = False
-                        if mask.any():
-                            padding = raw[mask]
-                            if not (torch.all(padding == 0) if operand >= 15 else torch.isnan(padding).all()):
-                                raise AssertionError(f'Physical padding changed: {arm=} {prefix=} {operand=}')
-                            report['padding_checks'].append(dict(arm=arm, pattern=pattern, prefix=prefix,
-                                repetition=repetition, layer=layer, chip=chip, operand=operand, exact=True))
-                    report['checks'].append(dict(arm=arm, pattern=pattern, prefix=prefix,
-                        repetition=repetition, layer=layer, chip=chip, exact=True))
+                    entry = dict(arm=arm, pattern=pattern, prefix=prefix,
+                        repetition=repetition, layer=layer, chip=chip, exact=True)
+                    report['checks'].append(entry)
+                    report['padding_checks'].extend(dict(entry, operand=operand)
+                        for operand in range(20) if operand % 5)
             if bindings != [addresses(ttnn, value) for value in tensors]:
-                raise AssertionError('Publication bindings changed')
+                raise AssertionError('Publication/comparator bindings changed')
         prefixes = tuple(range(17)) if options.layers == 1 else (0, 1, 8, 16)
         native = {prefix: native_prepare(mesh, layers, prefix) for prefix in prefixes}
         candidate = {prefix: candidate_prepare(mesh, layers, prefix) for prefix in prefixes}

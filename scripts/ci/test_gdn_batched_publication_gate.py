@@ -10,9 +10,10 @@ class BatchedPublicationGateTests(unittest.TestCase):
     def fixture(self, layers):
         root = Path(__file__).parent
         hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in SOURCES}
+        from tensor_bit_compare_gate import qualify
         report = dict(passed=True, closed_cleanly=True, padding_audited=True, backend='simulator',
             stage='complete', rows=16, layers=layers, sources=hashes, sources_after=dict(hashes),
-            checks=[], padding_checks=[], poison_checks=[])
+            checks=[], padding_checks=[], poison_checks=[], comparator=qualify(root))
         prefixes = range(17) if layers == 1 else (0, 1, 8, 16)
         executions = []
         for prefix in prefixes:
@@ -54,7 +55,7 @@ class BatchedPublicationGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate(report, Path(__file__).parent, 1, '0')
         for field, value in (('padding_audited', False), ('closed_cleanly', False), ('stage', 'replay_0'),
-                ('sources_after', {}), ('error', 'interrupted'), ('backend', 'hardware')):
+                ('sources_after', {}), ('error', 'interrupted'), ('backend', 'hardware'), ('comparator', {})):
             report = copy.deepcopy(original)
             report[field] = value
             with self.assertRaises(ValueError):
