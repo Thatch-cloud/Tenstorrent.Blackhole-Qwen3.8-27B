@@ -24,8 +24,32 @@ SHA256: `e0129e13e8877eb867ddca1ca3deadb9583bc7c1cff8153f68b9c0114ea94dc1`.
 
 ## Development and simulator evidence
 
-The isolated simulator comparison and corrected hardware request comparison
-pass. Repeatability and broader contexts remain open; serving defaults are unchanged.
+The isolated simulator comparison and two corrected hardware request comparisons
+pass. Broader contexts remain open; serving defaults are unchanged.
+
+Repeat run `34455470051` on the same `7a1e6bd` source passes all six requests,
+with unchanged source/native fingerprints and clean closure. Independent
+recomputation reproduces its saved comparison, including exact target tokens,
+state, inactive slots, proposal audits and actual attention-route engagement.
+
+| Repeat arm | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Native target attention | 3306.56 | 4096 | 83.92 |
+| Folded T16 target attention | 3363.26 | 4096 | 89.83 |
+
+Pooling tokens and elapsed time across both runs gives **89.86 TG versus
+83.88 control**, four timed requests and 468 committed tokens per arm.
+Candidate pooled PP is **3312.91**. Repeat setup-inclusive request latency is
+6382.39 ms versus 6188.47 ms control, still worse. These are one-stream offline
+results, not held-out coding-quality or endpoint certification.
+
+Repeat artifact SHA256:
+`15f7f6cf80a4c0278df901707272588a0c017a795de58439bb8eb4b55cb60f26`.
+Combined attention/scatter-norm experiment `34456312393`, source `a0884c0`,
+is dispatched separately after 1408 host tests pass. Both arms keep folded
+attention enabled; only the scatter arm changes the norm reader. Existing
+simulator gates remain mandatory, and hardware must independently prove the
+combination's correctness and complete-request performance.
 
 Hardware comparison dispatched as
 [34453904831](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34453904831),

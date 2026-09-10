@@ -19,6 +19,7 @@ tokens or aggregate concurrent throughput. Results are offline, not endpoint tes
 | DSpark captured proposals | 3,355.78 | 4,096 | 56.92 | One audited + two timed requests |
 | DSpark captured proposals + commit-only GDN | 3,319.26 | 4,096 | **59.81** | Exact tokens/state; +8.89% over matched eager |
 | DSpark precise-native attention + capture + commit-only GDN | 3,337.21 | 4,096 | **87.10** | Repeat-confirmed; four timed requests across two runs |
+| DSpark above + folded T16 target attention | 3,312.91 | 4,096 | **89.86** | Repeat-confirmed; four timed requests across two matched runs |
 
 DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
 The precise-native attention candidate reaches repeat-confirmed **87.10 TG**,
@@ -40,7 +41,12 @@ comparisons, including poisoned outputs and padding checks. Its full-request
 passes all six requests: **PP 3331.87 / CTX 4096 / TG 87.04**, versus 85.85 TG
 control (**+1.39%**, not repeat-confirmed). Both arms use the same native-attention
 DSpark path with one stream and T16 verification. This is not a new overall best.
-The next simulator experiment targets serial attention work in the T16 verifier.
+Folded T16 target attention now passes simulator and two hardware comparisons:
+**89.86 pooled TG versus 83.88 matched control**. Setup-inclusive latency is
+still worse, and long-context scaling and held-out coding quality remain open.
+[Attention results](docs/target-t16-attention-2026-09-10.md).
+The next hardware comparison combines folded attention with the scatter norm
+reader; it measures whether the gains actually combine rather than adding them.
 [Experiment details](docs/gdn-norm-scatter-experiment-2026-09-10.md).
 
 ### Other measured results
