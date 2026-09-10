@@ -24,6 +24,12 @@ for 200 TG. Capture alone cannot meet the target. Wider drafting is an acceptanc
 experiment, not an assumed gain. Best repeat-confirmed B1 TG remains **74.27 at
 CTX4,096**. [Evidence and next tests](dspark-full-history-2026-09-10.md).
 
+The [captured-proposal comparison](dspark-captured-proposal-2026-09-10.md) is
+implemented with three opt-in arms: eager, captured, and captured plus commit-only
+GDN. All 1,316 host tests pass. Fixed-capacity attention simulation is running;
+T16 commit-only simulation follows. Hardware remains blocked until both new gates
+pass; no new TG or serving promotion is claimed.
+
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
 changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency

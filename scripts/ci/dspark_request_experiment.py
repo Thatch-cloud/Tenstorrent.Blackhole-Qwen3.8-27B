@@ -16,9 +16,12 @@ PREREQUISITES = {
     'dspark-wide-layout-simulator.json': '3746601ab4c6b45b5287b1e41e2bc99d6a74cc25cd9764c92c24d710510dc6ef',
     'dspark-history-bank-simulator.json': '72870b5018ab69fdbc5f86f4ceed6fa334a98bd76931d41536a0379b757523e0',
 }
+METADATA_ONLY = {'dspark-history-bank-simulator.json': frozenset(('full_dspark_request.py',))}
 
 
-def request_preflight(directory):
+def request_preflight(directory, *, prepared_proposals=False):
+    if type(prepared_proposals) is not bool:
+        raise ValueError('Explicit prepared-proposal qualification policy required')
     directory = Path(directory)
     specifications = {
         'dspark-full-attention-simulator.json': dict(eager_checks=4, replay_checks=6, input_checks=40,
@@ -27,7 +30,7 @@ def request_preflight(directory):
         'dspark-history-bank-simulator.json': dict(bank_checks=260, view_checks=80, trace_checks=8,
             binding_checks=4, stale_controls=20),
     }
-    prerequisites = {}
+    prerequisites, metadata_only = {}, {}
     for name, counts in specifications.items():
         path = directory / name
         if digest(path) != PREREQUISITES[name]:
@@ -45,16 +48,24 @@ def request_preflight(directory):
             if any(record.get(flag) is not True for record in report[field]):
                 raise ValueError('Every full-history/wider-layout comparison must pass')
         for source, checksum in report['sources'].items():
-            if source != '../../optimisation/sim/run-dispatch-probe.sh' and digest(directory / source) != checksum:
+            if source in METADATA_ONLY.get(name, ()):
+                metadata_only[source] = dict(recorded_sha256=checksum, current_sha256=digest(directory / source),
+                    scope='Recorded by bank probe but not imported or executed; integration requires hardware request audits')
+            elif source != '../../optimisation/sim/run-dispatch-probe.sh' and digest(directory / source) != checksum:
                 raise ValueError('Qualified full-history/wider-layout source changed: ' + source)
         prerequisites[name] = digest(path)
+    if prepared_proposals:
+        from dspark_proposal_gate import qualify
+        from dspark_commit_gate import qualify as qualify_commit
+        prerequisites.update(qualify(directory))
+        prerequisites.update(qualify_commit(directory))
     files = [path for path in directory.iterdir() if path.is_file() and path.suffix in ('.py', '.cpp', '.hpp', '.h')]
     harness = directory.parents[1] / 'speculative-decoding/harness'
     if not (harness / 'greedy_session.py').is_file():
         raise ValueError('Complete request harness must be mounted before hardware preflight')
     sources = {path.name: digest(path) for path in sorted(files)}
     sources.update({'../../speculative-decoding/harness/' + path.name: digest(path) for path in sorted(harness.glob('*.py'))})
-    return dict(request_prerequisites=prerequisites, sources=sources)
+    return dict(request_prerequisites=prerequisites, sources=sources, simulator_metadata_only_sources=metadata_only)
 
 
 def summarize(requests):
@@ -63,6 +74,10 @@ def summarize(requests):
                 or value.get('inactive_exact') is not True for value in requests)):
         raise ValueError('One feature-audited and two exact timed full requests required')
     first = requests[0]
+    policies = [(value.get('dspark', {}).get('proposal_trace', False), value.get('commit_only_gdn', False))
+        for value in requests]
+    if any(any(type(flag) is not bool for flag in policy) or policy != policies[0] for policy in policies):
+        raise ValueError('One unchanged proposal and target-state policy per measured arm required')
     if any(value['prompt_tokens'] != first['prompt_tokens'] or value['emitted'] != first['emitted']
             or type(value['length']) is not int or value['length'] != len(value['prompt_tokens'])
             or value['committed_decode_tokens'] != len(value['emitted']) - 1 for value in requests):
@@ -86,7 +101,8 @@ def summarize(requests):
         measured_requests=2, audit_requests=1, mean_setup_inclusive_ms=sum(value['prefill_setup_decode_ms'] for value in timed) / 2,
         mean_feature_setup_ms=sum(value['feature_setup_ms'] for value in timed) / 2,
         mean_verifier_setup_ms=sum(value['engine_setup_ms'] for value in timed) / 2,
-        proposal_trace=False, held_out_coding_quality=False, serving_qualified=False)
+        proposal_trace=policies[0][0], commit_only_gdn=policies[0][1],
+        held_out_coding_quality=False, serving_qualified=False)
 
 
 def warm_native_control(generator, kv_cache, report, progress):
@@ -102,7 +118,7 @@ def warm_native_control(generator, kv_cache, report, progress):
 
 
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
-        layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context):
+        layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -167,19 +183,31 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             enable_trace=traced, read_from_device=True)
         return (output[0] if isinstance(output, tuple) else output).clone()
 
+    from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
+
+    if type(variants) is not bool:
+        raise ValueError('Explicit matched proposal experiment selection required')
+    schedule = SCHEDULE if variants else tuple(('eager', audit) for audit in (True, False, False))
     report['coding_context'], report['request_checks'] = context, []
     report['sampler_links'] = 4
+    control_warmed = False
     with sampler_links(sampler.tt_sampling, 4):
-        for ordinal, audit in enumerate((True, False, False)):
-            if ordinal == 1:
+        for ordinal, (arm, audit) in enumerate(schedule):
+            if not audit and not control_warmed:
                 warm_native_control(generator, kv_cache, report, progress)
-            progress(f'full_request_{ordinal}_' + ('feature_audit' if audit else 'timed'))
+                control_warmed = True
+            progress(f'full_request_{ordinal}_{arm}_' + ('feature_audit' if audit else 'timed'))
             result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                 parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                 prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                eos_ids=eos, audit_features=audit, max_new_tokens=257)
+                eos_ids=eos, audit_features=audit, max_new_tokens=257, **POLICIES[arm])
+            result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
-    report['request_summary'] = summarize(report['request_checks'])
+    if variants:
+        report['request_comparison'] = summarize_variants(report['request_checks'])
+        report['request_summary'] = report['request_comparison']['arms']['trace_commit']
+    else:
+        report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,
         pp=report['request_summary']['pp'], committed_tg=report['request_summary']['committed_tg'])

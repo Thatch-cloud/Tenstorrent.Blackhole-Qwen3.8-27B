@@ -12,7 +12,7 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request ]]
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants ]]
 probe=dspark-pipeline-hardware
 request_options=()
 if [ "$mode" != backbone ]; then
@@ -21,9 +21,13 @@ if [ "$mode" != backbone ]; then
     export HF_MODEL="$MODEL_WEIGHTS_DIR"
 fi
 report_name=$probe
-if [ "$mode" = request ]; then
+if [[ "$mode" = request || "$mode" = request-variants ]]; then
     report_name=dspark-request-hardware
     request_options=(--request)
+fi
+if [ "$mode" = request-variants ]; then
+    report_name=dspark-request-variants-hardware
+    request_options+=(--request-variants)
 fi
 python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \

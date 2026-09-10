@@ -13,16 +13,18 @@ from target_features import LayerOutputCapture
 
 def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *, collectives,
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
-        live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257):
+        live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
+        proposal_trace=False, commit_only_gdn=False):
     import torch
     from full_request import measure_request
 
-    if (type(audit_features) is not bool or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
+    if (any(type(value) is not bool for value in (audit_features, proposal_trace, commit_only_gdn))
+            or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
             or not 1 <= len(prompt) <= 8192 - max_new_tokens):
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
     capture = drafter = runtime = None
     golden_features, prefill_hashes = {}, None
-    prefill_records, feature_checks, history_checks = [], [], []
+    prefill_records, feature_checks, history_checks, proposal_checks = [], [], [], []
     seed = None
 
     def status(stage, **values):
@@ -89,13 +91,20 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     def factory():
         nonlocal drafter, runtime
         status('project_full_prefill_history', context=len(prompt))
-        drafter = DSparkDevice(operations, model, collectives, parameters, layer_weights, predecessor, successor,
+        implementation = DSparkDevice
+        if proposal_trace:
+            from dspark_prepared_proposal import TracedDSparkDevice
+            implementation = TracedDSparkDevice
+        drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15,
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         capture.close()
         if audit_features:
             from dspark_history_audit import AuditedHistoryDrafter
             drafter = AuditedHistoryDrafter(operations, drafter, history_checks)
+        if proposal_trace:
+            status('prepare_fixed_history_proposal_trace_before_verifier_capture')
+            drafter.prepare_trace(seed, audit=audit_features)
         status('warm_fifteen_query_proposal_before_verifier_capture')
         drafter.propose(seed, 15)
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
@@ -105,6 +114,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result = measure_request(model, sampler, prompt, pages, helpers, prefill=captured_prefill, decode=gold_decode,
             live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,
+            commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=audit_features and commit_only_gdn,
             lookup_max_rows=16, feature_factory=factory, feature_drafter_name='dspark',
             progress=lambda block: status('committed-block', **block))
         expected_checks = len(result['blocks']) * len(TAPS) * 2 if audit_features else 0
@@ -112,13 +122,20 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 or runtime.committed_feature_rows != result['committed_decode_tokens']
                 or drafter.position != len(prompt) + result['committed_decode_tokens']):
             raise AssertionError('Complete target-feature publication and exact full-history frontier required')
+        if proposal_trace:
+            proposal_checks = list(drafter.prepared.checks)
+            replay_count = 1 + sum(block['rows'] > 1 for block in result['blocks'])
+            if len(proposal_checks) != (replay_count if audit_features else 0):
+                raise AssertionError('Every changing-input proposal replay and warmup must pass its eager audit')
         result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
             history_checks=history_checks,
             fixed_history_capacity=drafter.history.capacity, persistent_history_allocated_before_verifier=True,
             committed_feature_rows=runtime.committed_feature_rows, final_position=drafter.position,
-            execution='Eager full-history proposal; batched captured target verifier; all request-loop costs retained',
-            proposal_trace=False, packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
+            execution=('Captured fixed-capacity' if proposal_trace else 'Eager')
+                + ' full-history proposal; batched captured target verifier; all request-loop costs retained',
+            proposal_trace=proposal_trace, proposal_checks=proposal_checks,
+            packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
         result['instrumented_timing'] = audit_features
         if audit_features:

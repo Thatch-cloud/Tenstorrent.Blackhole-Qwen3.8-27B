@@ -69,6 +69,26 @@ class DSparkRequestExperimentTests(unittest.TestCase):
         with patch('dspark_request_experiment.digest', return_value='0' * 64), self.assertRaisesRegex(ValueError, 'audited'):
             request_preflight(Path(__file__).parent)
 
+    def test_bank_metadata_does_not_misrepresent_request_adapter_as_simulated(self):
+        from dspark_hardware_gate import digest
+
+        with patch('dspark_request_experiment.digest', side_effect=lambda path: 'changed-host-integration'
+                if Path(path).name == 'full_dspark_request.py' else digest(path)):
+            report = request_preflight(Path(__file__).parent)
+        metadata = report['simulator_metadata_only_sources']['full_dspark_request.py']
+        self.assertEqual(metadata['current_sha256'], 'changed-host-integration')
+        self.assertNotEqual(metadata['recorded_sha256'], metadata['current_sha256'])
+        self.assertEqual(report['sources']['full_dspark_request.py'], 'changed-host-integration')
+        with patch('dspark_request_experiment.digest', side_effect=lambda path: 'changed-executed-bank-helper'
+                if Path(path).name == 'dspark_stable_history.py' else digest(path)):
+            with self.assertRaisesRegex(ValueError, 'source changed: dspark_stable_history.py'):
+                request_preflight(Path(__file__).parent)
+
+    def test_captured_requests_require_a_separate_qualified_simulator_gate(self):
+        with patch('dspark_proposal_gate.qualify', side_effect=ValueError('new layout is unqualified')):
+            with self.assertRaisesRegex(ValueError, 'new layout is unqualified'):
+                request_preflight(Path(__file__).parent, prepared_proposals=True)
+
     def test_explicit_request_ci_route_is_not_a_serving_or_runner_access_change(self):
         root = Path(__file__).resolve().parents[2]
         workflow = yaml.safe_load((root / '.github/workflows/qwen-experiments.yml').read_text())
