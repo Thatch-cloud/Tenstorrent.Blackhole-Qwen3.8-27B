@@ -36,15 +36,21 @@ checks remain required. Numerical tolerances are not widened.
 
 | Gate | Current status |
 | --- | --- |
-| Host tests | 1,316 pass; Python 3.10 and shell syntax pass |
-| Fixed-capacity attention | TTsim `20260910T024802Z-399` running; first eager case passes |
-| T16 commit-only GDN | Next simulator check: every prefix 0–16 and a real T2 continuation |
+| Host tests | 1,317 pass; Python 3.10 and shell syntax pass; 61 simulator-harness tests pass |
+| Fixed-capacity attention | TTsim `20260910T024802Z-399` passes all 82 checks; independent audit passes |
+| T16 commit-only GDN | TTsim `20260910T031906Z-400` running: every prefix 0–16 and a real T2 continuation |
 | Matched full requests | Blocked until both new simulator reports pass independent audit |
 | Held-out coding / serving | Not qualified; defaults unchanged |
 
 The fixed-attention probe checks real native append/pad/attention operations,
 changing frontiers 4,096/4,109, both simulated chips, exact replay and poisoned
 unused storage. It is a correctness test, not a hardware timing estimate.
+
+The independent audit regenerates full FP32 reference and physical-layout hashes,
+checks every matrix coordinate, and reconciles 38 sources against revision
+`62082ec` plus 1,517 unchanged native fingerprints. Peak memory is 1.79 GB, no
+swap or OOM, clean exit 0. The 0.01 relative/absolute tolerance is unchanged.
+Report SHA256: `5fbabcecf3eb6988bb451ca0387a58861e0a0710bac47e998c1e885cff29c63a`.
 
 The old bank probe recorded `full_dspark_request.py` as metadata but did not
 import or execute it. Preflight now states that boundary explicitly: the bank

@@ -7,7 +7,7 @@ from dspark_hardware_gate import digest
 
 
 REPORT = 'dspark-fixed-attention-simulator.json'
-SHA256 = None
+SHA256 = '5fbabcecf3eb6988bb451ca0387a58861e0a0710bac47e998c1e885cff29c63a'
 COUNTS = dict(eager_checks=4, replay_checks=4, input_checks=48, layout_checks=16, fixture_controls=8, stale_controls=2)
 
 

@@ -26,8 +26,9 @@ CTX4,096**. [Evidence and next tests](dspark-full-history-2026-09-10.md).
 
 The [captured-proposal comparison](dspark-captured-proposal-2026-09-10.md) is
 implemented with three opt-in arms: eager, captured, and captured plus commit-only
-GDN. All 1,316 host tests pass. Fixed-capacity attention simulation is running;
-T16 commit-only simulation follows. Hardware remains blocked until both new gates
+GDN. All 1,317 host and 61 simulator-harness tests pass. Fixed-capacity attention
+simulation passes all 82 checks and independent audit. T16 commit-only simulation
+`20260910T031906Z-400` is running. Hardware remains blocked until both new gates
 pass; no new TG or serving promotion is claimed.
 
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
