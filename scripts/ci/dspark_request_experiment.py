@@ -14,6 +14,7 @@ from gdn_multitoken_conv import addresses
 PREREQUISITES = {
     'dspark-full-attention-simulator.json': '7fa3290673df7b77aaed954ab55d683caedbcc51e32da4eb10df8eb292829499',
     'dspark-wide-layout-simulator.json': '3746601ab4c6b45b5287b1e41e2bc99d6a74cc25cd9764c92c24d710510dc6ef',
+    'dspark-history-bank-simulator.json': '72870b5018ab69fdbc5f86f4ceed6fa334a98bd76931d41536a0379b757523e0',
 }
 
 
@@ -23,6 +24,8 @@ def request_preflight(directory):
         'dspark-full-attention-simulator.json': dict(eager_checks=4, replay_checks=6, input_checks=40,
             fixture_controls=6, stale_controls=2),
         'dspark-wide-layout-simulator.json': dict(eager_checks=28, replay_checks=28, input_checks=56, stale_controls=14),
+        'dspark-history-bank-simulator.json': dict(bank_checks=260, view_checks=80, trace_checks=8,
+            binding_checks=4, stale_controls=20),
     }
     prerequisites = {}
     for name, counts in specifications.items():

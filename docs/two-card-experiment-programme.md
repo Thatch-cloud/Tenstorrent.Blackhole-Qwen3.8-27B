@@ -17,7 +17,9 @@ boundaries locates the acceptance collapse: run
 [34425893520](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34425893520)
 detects layer 0 K corruption on chip 0 immediately after target verifier replay at
 position 4,109. Fixed double-buffered full-history banks now retain their allocations
-across replay; the dedicated simulator lifetime gate is running before hardware.
+across replay; all 372 dedicated simulator lifetime checks now pass with clean exit
+and independent full-reference/source verification. The next hardware preflight
+requires the exact fixed-bank report before running any target request.
 The diagnostic fails before timed controls, so native warmup remains unvalidated.
 Best repeat-confirmed B1
 TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).

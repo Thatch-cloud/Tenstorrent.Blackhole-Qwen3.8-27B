@@ -122,5 +122,26 @@ Only the valid prefix enters proposal attention. Full history and learned math
 are unchanged. A dedicated TTsim probe checks all five K/V pairs on both chips,
 ragged publication, discard, changing-input scratch-writer traces, fixed addresses
 and preservation of every old row before another hardware run. No serving changes.
-All 1,292 host tests pass. The native bank-layout and replay-lifetime gate is still
-pending; the host tests do not substitute for that simulator result or hardware TG.
+All 1,292 host tests pass. Simulator run `20260910T014520Z-382` now passes all
+372 bank-layout and replay-lifetime checks and exits cleanly with status 0.
+
+| Fixed-bank simulator check | Passed |
+| --- | ---: |
+| Entire active/prepared banks against CPU references | 260 |
+| Complete logical prefix views, excluding capacity padding | 80 |
+| Changing-input scratch-writer trace output | 8 |
+| Unchanged physical bank addresses | 4 |
+| Missing-publication controls | 20 |
+
+All five layers' K/V and both chips are checked at capacity 4,384, with frontiers
+4,093 / 4,096 / 4,111 / 4,112. A discarded publication does not advance history.
+Independent verification regenerates every full-bank and logical-view hash,
+checks all matrix coordinates, and reconciles 41 source and 1,517 native files
+before/after/current. Peak memory is 2,524,934,144 bytes; no swap or OOM.
+The 1,102.7-second simulator duration is not hardware latency.
+
+Retained report: `scripts/ci/dspark-history-bank-simulator.json`, SHA-256
+`72870b5018ab69fdbc5f86f4ceed6fa334a98bd76931d41536a0379b757523e0`.
+Hardware preflight now requires this exact report and unchanged qualified source.
+The repair must still pass full target token/state/cache audits and two timed
+requests before any PP/TG result is accepted.

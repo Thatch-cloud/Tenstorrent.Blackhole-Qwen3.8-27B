@@ -124,7 +124,7 @@ The audited request preserves all 121 committed tokens and target state, but
 accepts only **24/1,455 drafts (1.65%)**. The first timed request diverges at token
 index 121, so there is **no valid new TG result**. A diagnostic now confirms
 verifier replay corrupts the newly published draft K cache. The fixed-buffer
-repair is in TTsim; the separate native-reference warmup fix still needs hardware
+repair passes all 372 TTsim lifetime checks; it and the native-reference warmup fix still need hardware
 validation. This candidate is being repaired, not abandoned.
 
 | Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
