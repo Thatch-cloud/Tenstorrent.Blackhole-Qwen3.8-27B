@@ -63,6 +63,13 @@ class DispatchWrapperTests(unittest.TestCase):
         self.assertIn('dspark-full-attention-probe.json', output)
         self.assertEqual(statuses, ['0'])
 
+    def test_wider_dspark_layout_route_preserves_terminal_status(self):
+        source = Path(__file__).with_name('run-dispatch-probe.sh').read_text()
+        code, output, statuses = self.run_edit_race(source, 'dspark-wide-layout-probe')
+        self.assertEqual(code, 0, output)
+        self.assertIn('dspark-wide-layout-probe.json', output)
+        self.assertEqual(statuses, ['0'])
+
     def test_old_unparsed_tail_reproduces_the_recorded_failure(self):
         source = Path(__file__).with_name('run-dispatch-probe.sh').read_text()
         source = source.replace('{\nREPORT=', 'REPORT=').replace('\n}\n', '\n')

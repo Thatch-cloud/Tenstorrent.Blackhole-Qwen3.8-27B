@@ -7,9 +7,20 @@ from dspark_projection import require_tensor
 from dspark_rotary_device import execute as rotate
 
 
+def append_queries(operations, history, queries, retain, *, position, proposals):
+    padded_keys = geometry(position, proposals)[-1][1]
+    require_tensor(operations, history, (1, 4, position, 128), operations.bfloat16)
+    require_tensor(operations, queries, (1, 4, 32, 128), operations.bfloat16)
+    valid = retain(operations.slice(queries, (0, 0, 0, 0), (1, 4, proposals, 128)))
+    joined = retain(operations.concat([history, valid], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+    if padded_keys > position + proposals:
+        joined = retain(operations.pad(joined, [(0, 0), (0, 0), (0, padded_keys - position - proposals), (0, 0)], 0.0))
+    return joined
+
+
 def execute(operations, mesh, collectives, noise, history, weights, tables, mask, live, retain, *,
         position, proposals, mask_validated=False):
-    padded_keys = geometry(position, proposals)[-1][1]
+    geometry(position, proposals)
     if (list(mesh.shape) != [1, 2] or mask_validated is not True or not callable(retain)
             or set(weights) != set(SPECIFICATIONS) or len(history) != 2 or len(tables) != 2):
         raise ValueError('Complete learned TP2 layer, cached history, absolute tables and prevalidated mask required')
@@ -33,10 +44,8 @@ def execute(operations, mesh, collectives, noise, history, weights, tables, mask
                 for tensor in owned:
                     retain(tensor)
         if name != 'q':
-            valid = retain(operations.slice(value, (0, 0, 0, 0), (1, 4, proposals, 128)))
-            value = retain(operations.concat([history[0 if name == 'k' else 1], valid], dim=2, memory_config=memory))
-            if padded_keys > position + proposals:
-                value = retain(operations.pad(value, [(0, 0), (0, 0), (0, padded_keys - position - proposals), (0, 0)], 0.0))
+            value = append_queries(operations, history[0 if name == 'k' else 1], value, retain,
+                position=position, proposals=proposals)
         heads[name] = value
     owned = []
     try:

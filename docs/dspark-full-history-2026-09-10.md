@@ -13,6 +13,7 @@ Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 | Cache publication | Prepare only the verified input prefix; commit after target publication | Host tests cover rejection, discard, failure and ragged tails |
 | Cached layer | Seven or 15 query rows attend to all cached history | Host tests; no historical re-projection inside the layer |
 | Request bridge | Explicit `dspark` route with 15 proposals and a T16 target verifier | Host request-loop test; DFlash2 defaults unchanged |
+| Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Host tests; complete native execution pending |
 
 The cache uses existing 32-row learned projection, normalization and rotary
 operations. Host tests do **not** qualify their new native composition. Initial
@@ -39,13 +40,16 @@ and it does not clear earlier learned-backbone numerical failures.
 
 Retained report: `scripts/ci/dspark-full-attention-simulator.json`.
 SHA-256: `7fa3290673df7b77aaed954ab55d683caedbcc51e32da4eb10df8eb292829499`.
-All **1,256 CI host tests** pass after the cache and request-bridge changes.
+All **1,265 CI host tests** pass after the cache, request-bridge and wider-device changes.
 
 ## Next hardware path
 
-1. Connect actual target embeddings/head and Markov feedback at 15 queries.
-2. Run a focused layout simulation for ragged history append and the widened
-   target boundaries, not another whole learned-model simulation.
+1. Qualify the new fifteen-query boundaries with the focused
+   `dspark-wide-layout-probe`: full-vocabulary gather/slice, embedding padding,
+   packed scalar tokens, wide prefill snapshots and ragged history append.
+2. Run the complete `DSparkDevice` through the request bridge. Its initial eager
+   implementation performs one packed token read per chip, not fifteen separate
+   scalar readbacks. It has not yet been measured or captured as a proposal trace.
 3. Run full 4K coding requests through the batched verifier and committed-feature
    cache. Compare every committed token and target state against native controls.
 4. Report PP / CTX / committed TG, acceptance, setup and complete cycle timings.
