@@ -51,8 +51,16 @@ def main():
     parser.add_argument('--dram-mlp', action='store_true')
     parser.add_argument('--sharded-mlp', action='store_true')
     parser.add_argument('--down-mlp', action='store_true')
+    parser.add_argument('--score-layout', action='store_true')
+    parser.add_argument('--score-vocabulary', type=int, choices=(64, 248320))
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.score_vocabulary is not None and not options.score_layout:
+        raise ValueError('Score vocabulary requires the score-layout probe')
+    if options.score_layout and (options.down_mlp or options.sharded_mlp or options.dram_mlp
+            or options.dram_projection or options.dram_replay or options.approx_draft or options.target_attention
+            or options.norm_scatter or options.learned_layer or options.checkpoint):
+        raise ValueError('Score layout is an isolated probe')
     if options.down_mlp and (options.sharded_mlp or options.dram_mlp or options.dram_projection
             or options.dram_replay or options.approx_draft or options.target_attention
             or options.norm_scatter or options.learned_layer or options.checkpoint):
@@ -131,6 +139,10 @@ def main():
         if options.down_mlp:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'dram-mlp-down-probe'
+        if options.score_layout:
+            wrapper = 'run-native-layer-dispatch-probe.sh'
+            environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-score-layout-probe'
+            arguments = ['--vocabulary', str(options.score_vocabulary or 64)]
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:
