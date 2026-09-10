@@ -104,6 +104,18 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertEqual(result['dspark']['proposal_checks'], [])
         self.assertEqual(result['committed_tokens_per_second'], 123.0)
 
+    def test_history_publication_slot_does_not_shadow_trace_owner(self):
+        underlying = self.drafter
+        class HistoryProxy:
+            prepared = None
+
+            def __getattr__(self, name):
+                return getattr(underlying, name)
+
+        self.history_audit.return_value = HistoryProxy()
+        result = self.measure(audit=True, proposal_trace=True)
+        self.assertEqual(len(result['dspark']['proposal_checks']), 2)
+
     def test_both_prefills_precede_history_setup_and_warm_proposal_is_charged_to_factory(self):
         result = self.measure()
         self.assertEqual(self.events, ['native-control', 'candidate-prefill', 'factory'])

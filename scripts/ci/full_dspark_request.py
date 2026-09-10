@@ -22,7 +22,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
             or not 1 <= len(prompt) <= 8192 - max_new_tokens):
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
-    capture = drafter = runtime = None
+    capture = drafter = runtime = proposal_device = None
     golden_features, prefill_hashes = {}, None
     prefill_records, feature_checks, history_checks, proposal_checks = [], [], [], []
     seed = None
@@ -90,7 +90,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
     def factory():
-        nonlocal drafter, runtime
+        nonlocal drafter, runtime, proposal_device
         status('project_full_prefill_history', context=len(prompt))
         implementation = DSparkDevice
         if proposal_trace:
@@ -99,6 +99,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15,
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
+        proposal_device = drafter
         capture.close()
         if audit_features:
             from dspark_history_audit import AuditedHistoryDrafter
@@ -128,7 +129,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 or drafter.position != len(prompt) + result['committed_decode_tokens']):
             raise AssertionError('Complete target-feature publication and exact full-history frontier required')
         if proposal_trace:
-            proposal_checks = list(drafter.prepared.checks)
+            proposal_checks = list(proposal_device.prepared.checks)
             replay_count = 1 + sum(block['rows'] > 1 for block in result['blocks'])
             if len(proposal_checks) != (replay_count if audit_features else 0):
                 raise AssertionError('Every changing-input proposal replay and warmup must pass its eager audit')
