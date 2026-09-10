@@ -3,10 +3,22 @@ import io
 import tarfile
 import unittest
 
-from score_layout_result import EXTRA_SOURCES, validate_sources
+from score_layout_result import EXTRA_SOURCES, request_diagnostics, validate_sources
 
 
 class ScoreLayoutSourceTests(unittest.TestCase):
+    def test_host_diagnostics_recomputed_and_absence_preserved(self):
+        from request_host_health import summarize
+        request = dict(arm='control', instrumented_timing=False, committed_decode_tokens=52,
+            decode_ms=500, prefill_ms=1200)
+        self.assertIsNone(request_diagnostics([request])[0]['host_health'])
+        request['host_health'] = summarize(dict(monotonic_ns=1, cgroup={'cpu.stat': 'nr_throttled 1'}),
+            dict(monotonic_ns=2, cgroup={'cpu.stat': 'nr_throttled 3'}))
+        self.assertEqual(request_diagnostics([request])[0]['host_health']['counter_deltas']['cpu.stat']['nr_throttled'], 2)
+        request['host_health']['counter_deltas']['cpu.stat']['nr_throttled'] = 0
+        with self.assertRaises(ValueError):
+            request_diagnostics([request])
+
     def fixture(self):
         files = {'scripts/ci/probe.py': b'probe', 'scripts/ci/kernel.cpp': b'kernel',
             'speculative-decoding/harness/session.py': b'session', 'scripts/ci/result.json': b'{}'}

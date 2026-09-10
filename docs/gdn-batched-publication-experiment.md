@@ -19,9 +19,14 @@ deliberately stopped with exit 143: its 119 execution schedule cannot fit the
 not a pass. Repeated full-history transfers/comparisons dominate this diagnostic;
 these are not model decode measurements.
 
-A bounded `--layers 1 --prefix 16` diagnostic is running in
+A bounded `--layers 1 --prefix 16` diagnostic ran in
 `qwen-publication-prefix16-20260911.service`, report
-`20260910T233134Z-416-gdn-batched-publication-probe.json`. It retains both eager
+`20260910T233134Z-416-gdn-batched-publication-probe.json`. It failed with exit 1
+on the first candidate execution after the native comparison completed:
+`UndefinedBehavior: noc_cmd_ctrl: read: alignment of src_addr=0x149260 and dst_addr=0x1b380 does not match`.
+No candidate correctness or speed claim is permitted. This candidate remains
+excluded from combined hardware runs; fixing it is secondary to the active
+combined-runtime timing investigation. The diagnostic retains both eager
 arms, two input patterns, all storage comparisons and three changed-input trace
 replays: seven executions instead of 119. It exercises the last history row first.
 Its explicit `single-prefix-diagnostic` coverage can never satisfy the complete

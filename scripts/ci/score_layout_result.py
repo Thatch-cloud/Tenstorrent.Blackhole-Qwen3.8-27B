@@ -33,6 +33,20 @@ def validate_sources(report, snapshot):
     return len(expected)
 
 
+def request_diagnostics(requests):
+    from request_host_health import summarize
+
+    result = []
+    for ordinal, request in enumerate(requests):
+        health = request.get('host_health')
+        if health is not None and health != summarize(health['before'], health['after']):
+            raise ValueError('Recorded host diagnostics must match independent counter recomputation')
+        result.append(dict(ordinal=ordinal, arm=request['arm'], audit=request['instrumented_timing'],
+            committed_tokens=request['committed_decode_tokens'], decode_ms=request['decode_ms'],
+            prefill_ms=request['prefill_ms'], host_health=health))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, required=True)
@@ -59,7 +73,8 @@ def main():
         raise ValueError('Independent complete request recomputation must match the reported comparison')
     result = dict(passed=True, run=options.run, revision=options.revision, source_files=count,
         report_sha256=hashlib.sha256(options.report.read_bytes()).hexdigest(),
-        hardware_audit_sha256=audit, comparison=comparison, held_out_quality_certified=False)
+        hardware_audit_sha256=audit, comparison=comparison, held_out_quality_certified=False,
+        request_diagnostics=request_diagnostics(report['request_checks']))
     if options.functional:
         from coding_functional_eval import evaluate
         from coding_holdout_tasks import EXPECTED
