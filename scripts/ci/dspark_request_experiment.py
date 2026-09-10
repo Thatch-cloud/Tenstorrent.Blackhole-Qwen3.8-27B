@@ -247,6 +247,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     result['native_attention_kernel'] = kernel_audit
             if norm_scatter_variants:
                 result['norm_scatter_kernel'] = norm_audit
+            if target_attention_variants:
+                from dspark_target_attention_variants import validate_route
+                validate_route(result, arm)
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')

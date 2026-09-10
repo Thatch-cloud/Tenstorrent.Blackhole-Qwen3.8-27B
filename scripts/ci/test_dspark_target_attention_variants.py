@@ -1,11 +1,19 @@
 import copy
 import unittest
 
-from dspark_target_attention_variants import SCHEDULE, summarize_variants
+from dspark_target_attention_variants import POLICIES, SCHEDULE, summarize_variants, validate_route
 from test_dspark_request_variants import DSparkVariantTests
 
 
 class TargetAttentionVariantTests(unittest.TestCase):
+    def test_actual_policies_enable_only_candidate(self):
+        self.assertIs(POLICIES['control']['target_attention_t16'], False)
+        self.assertIs(POLICIES['parallel']['target_attention_t16'], True)
+        self.assertEqual({key: value for key, value in POLICIES['control'].items() if key != 'target_attention_t16'},
+                         {key: value for key, value in POLICIES['parallel'].items() if key != 'target_attention_t16'})
+        with self.assertRaises(ValueError):
+            validate_route(dict(target_attention_t16=False, attention_replay=False, family_routing=False), 'parallel')
+
     def requests(self):
         existing = DSparkVariantTests().requests()
         result = []

@@ -5,10 +5,19 @@ from dspark_request_variants import proposal_signature
 
 POLICIES = {
     'control': dict(proposal_trace=True, commit_only_gdn=True, native_attention=True, target_attention_t16=False),
-    'parallel': dict(proposal_trace=True, commit_only_gdn=True, native_attention=True),
+    'parallel': dict(proposal_trace=True, commit_only_gdn=True, native_attention=True, target_attention_t16=True),
 }
 SCHEDULE = (('control', True), ('parallel', True), ('control', False),
     ('parallel', False), ('parallel', False), ('control', False))
+
+
+def validate_route(value, arm):
+    if arm not in POLICIES:
+        raise ValueError('Unknown target attention arm')
+    selected = arm == 'parallel'
+    if any(value.get(field) is not selected for field in
+           ('target_attention_t16', 'attention_replay', 'family_routing')):
+        raise ValueError('Declared target attention route required')
 
 
 def summarize_variants(requests):
@@ -26,11 +35,7 @@ def summarize_variants(requests):
                 or value['emitted'] != requests[0]['emitted']
                 or any(value.get(name) is not True for name in ('exact', 'state_exact', 'inactive_exact'))):
             raise ValueError('Matched exact target outputs/state and declared attention backend required')
-        selected = arm == 'parallel'
-        if (value.get('target_attention_t16') is not selected
-                or value.get('attention_replay') is not selected
-                or value.get('family_routing') is not selected):
-            raise ValueError('Declared target attention route required')
+        validate_route(value, arm)
         signature = proposal_signature(value)
         if arm in signatures and signatures[arm] != signature:
             raise ValueError('Each backend must reproduce its audited proposals and acceptance')
