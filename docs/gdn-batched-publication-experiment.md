@@ -9,14 +9,24 @@ distinct chip inputs, all 17 prefixes at one layer, and selected boundary prefix
 at 48 layers. It resets inputs and NaN-poisoned checkpoints before every eager
 execution and changed-input captured replay. It checks all logical source, native
 and checkpoint elements and stable device addresses. Checkpoints are poisoned
-including physical tile padding. Readback expands the host tensor to its padded
-shape, requiring checkpoint padding to become zero while source/native padding
-canaries remain NaN. The host-only TTNN tiling/readback mechanism passed a local
-check without opening a device; device execution is still unproven.
-The previous full-chain simulator was deliberately stopped as incomplete and its
-runtime restoration verified. One-layer execution is now running as
-`qwen-batched-publication-1-20260911.service`, report
-`20260910T224336Z-417-gdn-batched-publication-probe.json`. No pass is claimed yet.
+including physical tile padding. The independently simulator-qualified physical
+bit comparator checks every storage word, including zero checkpoint padding and
+unchanged source/native padding canaries; only mismatch counters return to host.
+
+The full one-layer run `20260910T230705Z-427` progressed into prefix 2 but was
+deliberately stopped with exit 143: its 119 execution schedule cannot fit the
+30-minute cap at the observed roughly two minutes per execution. It is incomplete,
+not a pass. Repeated full-history transfers/comparisons dominate this diagnostic;
+these are not model decode measurements.
+
+A bounded `--layers 1 --prefix 16` diagnostic is running in
+`qwen-publication-prefix16-20260911.service`, report
+`20260910T233134Z-416-gdn-batched-publication-probe.json`. It retains both eager
+arms, two input patterns, all storage comparisons and three changed-input trace
+replays: seven executions instead of 119. It exercises the last history row first.
+Its explicit `single-prefix-diagnostic` coverage can never satisfy the complete
+simulator gate, even if every diagnostic check passes. Full qualification remains
+open; no hardware integration is enabled by this shorter diagnostic.
 
 `gdn_batched_publication_gate.py` independently requires the complete ordered
 matrices for both layer counts, exact source hashes before/after, clean closure,

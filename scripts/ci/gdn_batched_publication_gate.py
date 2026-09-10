@@ -18,6 +18,7 @@ def validate(report, directory, layers, exit_status):
     if (str(exit_status).strip() != '0' or report.get('passed') is not True
             or report.get('closed_cleanly') is not True or report.get('padding_audited') is not True
             or report.get('backend') != 'simulator' or report.get('stage') != 'complete'
+            or report.get('coverage') != 'full' or report.get('diagnostic_prefix') is not None
             or report.get('rows') != 16 or report.get('layers') != layers or 'error' in report):
         raise ValueError('Complete clean simulator execution and physical padding audit required')
     current = {name: hashlib.sha256((Path(directory) / name).read_bytes()).hexdigest() for name in SOURCES}

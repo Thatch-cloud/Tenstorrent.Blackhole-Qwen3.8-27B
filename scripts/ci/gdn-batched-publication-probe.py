@@ -23,6 +23,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--layers', type=int, choices=(1, 48), default=1)
+    parser.add_argument('--prefix', type=int, choices=range(17),
+        help='Single-prefix diagnostic only; never satisfies the complete simulator gate')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     if options.output.exists():
@@ -33,7 +35,9 @@ def main():
     def hashes():
         return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in SOURCES}
     report = dict(passed=False, closed_cleanly=False, backend='simulator', rows=16,
-        layers=options.layers, sources=hashes(), checks=[], padding_checks=[], poison_checks=[], padding_audited=False)
+        layers=options.layers, sources=hashes(), checks=[], padding_checks=[], poison_checks=[], padding_audited=False,
+        coverage='full' if options.prefix is None else 'single-prefix-diagnostic',
+        diagnostic_prefix=options.prefix, hardware_qualified=False, serving_qualified=False)
     mesh, tensors, traces = None, [], []
     def save(stage):
         report['stage'] = stage
@@ -106,6 +110,8 @@ def main():
             if bindings != [addresses(ttnn, value) for value in tensors]:
                 raise AssertionError('Publication/comparator bindings changed')
         prefixes = tuple(range(17)) if options.layers == 1 else (0, 1, 8, 16)
+        if options.prefix is not None:
+            prefixes = (options.prefix,)
         native = {prefix: native_prepare(mesh, layers, prefix) for prefix in prefixes}
         candidate = {prefix: candidate_prepare(mesh, layers, prefix) for prefix in prefixes}
         for prefix in prefixes:
