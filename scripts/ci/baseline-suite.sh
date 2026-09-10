@@ -78,7 +78,11 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             --simulator-exit-status /experiment-scripts/ci/dram-mlp-simulator.exit-status \
             --output /experiment/results/dram-mlp-preflight.json
     fi
-    bash /experiment-scripts/ci/ccl-links-build.sh
+    if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
+        python3 /experiment-scripts/ci/mlp_runtime_cache.py
+    else
+        bash /experiment-scripts/ci/ccl-links-build.sh
+    fi
     if [[ "${QWEN_MTP_DRAFTS:-0}" = 0 && "${QWEN_DFLASH_DRAFTS:-0}" = 0 ]]; then
         OMP_NUM_THREADS=1 timeout -k 15 900 python3 -u /experiment-scripts/ci/ccl-link-probe.py \
             --hardware --output /experiment/results/ccl-link-hardware.json 2>&1 | tee /experiment/results/ccl-link-hardware.log

@@ -43,11 +43,12 @@ four eager and six replay comparisons, including poisoned-output replacement.
 | --- | --- | --- |
 | Individual projections | Simulator pass | Exact outputs, input/packed-weight integrity |
 | Complete local MLP | Simulator pass | Exact composition and changed-input replay |
-| Real weights + four-link collective | Hardware comparison submitted | Latency result pending; no new TG claim |
+| Real weights + four-link collective | Correctness pass; slower | 0.357 ms versus 0.335 ms native; not promoted |
 
-[Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34466116546)
-compares both paths with input transfer included. This is not yet a full-model
-improvement. [Details](docs/dram-projection-reload-2026-09-10.md).
+[Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34466816834)
+includes input transfer and the collective. The candidate loses all nine timing
+blocks, **6.70% slower** overall. No new TG result.
+[Details](docs/dram-projection-reload-2026-09-10.md).
 
 ### Recent request experiments
 

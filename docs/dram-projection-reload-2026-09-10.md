@@ -1,11 +1,28 @@
 # DRAM-sharded projection: partial-reload investigation
 
-Status: simulator qualification passed. Hardware run `34466116546` on `a109569`
+Status: hardware correctness passes, but the complete MLP is slower. No promotion.
+
+| Real-weight T16 path | Complete MLP latency |
+| --- | ---: |
+| Native 1D control | 0.334692 ms |
+| Corrected DRAM-sharded candidate | 0.357111 ms |
+
+Run `34466816834` on `8f719ca` passes all correctness checks and clean closure.
+Independent result validation reproduces all nine ABBA blocks: the candidate
+loses every block, about 6.70% slower overall. Both arms include input transfer
+and the native four-link collective. These are layer timings, not PP/CTX/TG.
+Report SHA256: `48f1080e51d88550c34065d994401fbc205ecf6e1dee9c73d29fca86a105f4bd`.
+
+The next candidate should remove redundant layout conversions: stage the shared
+gate/up input once, keep their product sharded, and reshard directly for down.
+It needs fresh complete-MLP simulation and a matched hardware comparison.
+
+Earlier hardware run `34466116546` on `a109569`
 matched the first real-weight output on both cards, then failed cleanup before
 timing. The native TP2 collective consumes its input partial; the harness also
 retained that freed tensor, causing `Both chips required` during address lookup.
 The retry transfers ownership to the collective instead. No speed result or
-serving change.
+serving change resulted from that failed run.
 
 The native DRAM-sharded matmul factory uses Float32 intermediate partials when
 FP32 destination accumulation is enabled, but does not set the CB5 FP32 unpack
