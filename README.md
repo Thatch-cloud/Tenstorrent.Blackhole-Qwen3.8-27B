@@ -18,8 +18,11 @@ tokens or aggregate concurrent throughput. Results are offline, not endpoint tes
 | DSpark eager, latest matched control | 3,304.00 | 4,096 | 54.93 | One audited + two timed requests |
 | DSpark captured proposals | 3,355.78 | 4,096 | 56.92 | One audited + two timed requests |
 | DSpark captured proposals + commit-only GDN | 3,319.26 | 4,096 | **59.81** | Exact tokens/state; +8.89% over matched eager |
+| DSpark precise-native attention + capture + commit-only GDN | 3,310.11 | 4,096 | **86.69** | Exact tokens/state; +44.12% over matched composed attention |
 
 DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
+The new precise-native attention candidate reaches **86.69 TG** on two timed
+requests; an independent repeat is pending. [Matched results](docs/dspark-native-attention-results-2026-09-10.md).
 The latest comparison passes all nine requests after repairing trace allocation
 order. Its T16 simulator prerequisite passed all17 prefix/continuation cases.
 The repository-derived prompt changed, so historical rows are not matched controls.
@@ -62,7 +65,8 @@ These results do not certify held-out coding quality or long-context scaling.
   are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
 
 Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
-Native drafter SDPA remains disabled by default; its exact numerical gate failed. All rates
+Stock native drafter SDPA failed its earlier numerical gate; the separately
+qualified precise-native candidate remains opt-in. All rates
 below are offline coding-task experiments, not held-out quality or serving certification.
 
 [Approximate draft attention](docs/drafter-numerics-experiment-2026-09-09.md)
