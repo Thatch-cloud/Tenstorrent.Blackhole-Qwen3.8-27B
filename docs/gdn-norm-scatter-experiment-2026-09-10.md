@@ -1,5 +1,29 @@
 # Direct-scatter GDN norm reader
 
+## Hardware: small matched gain, not repeat-confirmed
+
+[Run 34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973)
+passes on source `8e315d6`. Both audited requests and all four timed A/B/B/A
+requests retain exact native target output, GDN/KV/inactive state, and identical
+proposals and acceptance across arms. Source and runtime fingerprints match
+before/after. The candidate loader executes 192 times per request and restores
+the baseline loader before the next arm.
+
+| Reader | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Control | 1 | 3329.08 | 4096 | 85.85 |
+| Direct scatter | 1 | 3331.87 | 4096 | 87.04 |
+
+Matched improvement: **1.39%**. Each arm commits 242 timed tokens and accepts
+222/330 proposals. All samples are retained. This small single-run gain is not
+repeat-confirmed, does not improve the previously recorded 87.10 TG result,
+and does not establish held-out coding quality or serving qualification.
+The independent validator reproduces the saved summary exactly.
+
+Artifact: `runner-evidence.local/34451473973/qwen-hardware-inventory-34451473973/dspark-norm-scatter-request-hardware.json`.
+SHA256: `27f9b57bbe82f27ff11c0af45c407823b7976dd526b9de784e38e1c53ea0778c`.
+Serving defaults remain unchanged; the 200 committed tok/s target is unmet.
+
 ## Stronger follow-up: passed
 
 Run `20260910T073624Z-398` exits 0 with 12 eager comparisons, 24 changed-input
