@@ -50,8 +50,13 @@ def main():
     parser.add_argument('--dram-replay', action='store_true')
     parser.add_argument('--dram-mlp', action='store_true')
     parser.add_argument('--sharded-mlp', action='store_true')
+    parser.add_argument('--down-mlp', action='store_true')
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.down_mlp and (options.sharded_mlp or options.dram_mlp or options.dram_projection
+            or options.dram_replay or options.approx_draft or options.target_attention
+            or options.norm_scatter or options.learned_layer or options.checkpoint):
+        raise ValueError('Down-only hybrid MLP is an isolated probe')
     if options.sharded_mlp and (options.dram_mlp or options.dram_projection or options.dram_replay
             or options.approx_draft or options.target_attention or options.norm_scatter
             or options.learned_layer or options.checkpoint):
@@ -123,6 +128,9 @@ def main():
         if options.sharded_mlp:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'dram-mlp-sharded-probe'
+        if options.down_mlp:
+            wrapper = 'run-native-layer-dispatch-probe.sh'
+            environment['QWEN_SIM_LAYER_PROBE'] = 'dram-mlp-down-probe'
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:

@@ -29,14 +29,19 @@ def main():
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--sharded-product', action='store_true')
     parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--down-only', action='store_true')
     options = parser.parse_args()
+    if options.down_only and (options.profile or options.sharded_product):
+        raise ValueError('Down-only comparison is separate from sharded-product profiling')
     require_profile_mode(os.environ, options.profile)
     require_projection_environment(os.environ, True)
     native_root = Path(os.environ['TT_METAL_HOME'])
-    names = variant_sources(options.sharded_product)
+    names = variant_sources(options.sharded_product, options.down_only)
     operation = execute
     if options.sharded_product:
         from dram_mlp_sharded import execute as operation
+    if options.down_only:
+        from dram_mlp_down import execute as operation
     sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
     native_sources = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
     prerequisite = json.loads(options.simulator_report.read_text())
@@ -47,7 +52,7 @@ def main():
         sources=sources, native_sources=native_sources,
         simulator_report_sha256=hashlib.sha256(options.simulator_report.read_bytes()).hexdigest(),
         hardware_script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        collective_links=4, sharded_product=options.sharded_product,
+        collective_links=4, sharded_product=options.sharded_product, down_only=options.down_only,
         timing_scope='Captured complete MLP including DRAM-to-L1 input, DRAM weight reads and native TP2 collective; upload, capture and validation excluded')
     if options.profile:
         from dram_mlp_profile_report import profile_sources
@@ -57,7 +62,8 @@ def main():
             timing_scope='Instrumented operation attribution only; not latency qualification or TG')
     try:
         report['simulator_gate'] = qualify(prerequisite, sources, native_sources,
-            options.simulator_exit_status.read_text().strip(), hardware=True, sharded=options.sharded_product)
+            options.simulator_exit_status.read_text().strip(), hardware=True,
+            sharded=options.sharded_product, down=options.down_only)
         report['fabric_sources'] = audit(native_root, os.environ)
         runpy.run_path(str(Path(__file__).with_name('dram-projection-binding-check.py')), run_name='__main__')
     except BaseException as error:
@@ -131,8 +137,12 @@ def main():
         source = retain(persistent, ttnn.from_torch(patterns[0], device=mesh, dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
         configs = {name: configurations(ttnn, mesh, name) for name in weights}
-        sharded = {name: retain(persistent, ttnn.to_memory_config(value, configs[name]['weights']))
+        sharded = {name: (value if options.down_only and name != 'down'
+            else retain(persistent, ttnn.to_memory_config(value, configs[name]['weights'])))
             for name, value in candidate_weights.items()}
+        if options.down_only:
+            configs['gate'] = dict(program=args.mlp_w1_decode_1d_progcfg)
+            configs['up'] = dict(program=args.mlp_w3_decode_1d_progcfg)
         bindings = [addresses(ttnn, value) for value in persistent + list(weights.values())]
         def forward(candidate, storage):
             if not candidate:

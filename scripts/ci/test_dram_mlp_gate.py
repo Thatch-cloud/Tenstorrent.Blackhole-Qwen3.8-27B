@@ -23,7 +23,22 @@ class DramMlpGateTests(unittest.TestCase):
     def test_recorded_simulator_pass_matches_current_sources(self):
         self.assertTrue(qualify(self.report, self.sources, self.native, '0')['passed'])
 
+    def test_down_only_simulator_matches_its_current_sources(self):
+        root = Path(__file__).parent
+        report = json.loads((root / 'dram-mlp-down-simulator.json').read_text())
+        sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in variant_sources(False, True)}
+        self.assertTrue(qualify(report, sources, report['native_sources'], '0', down=True)['passed'])
+        with self.assertRaises(ValueError):
+            qualify(report, sources, report['native_sources'], '0')
+
     def test_sharded_variant_requires_its_own_simulator_sources(self):
+        self.assertEqual(set(variant_sources(False, True)) - set(SOURCES),
+            {'dram_mlp_down.py', 'dram-mlp-down-probe.py'})
+        with self.assertRaises(ValueError):
+            variant_sources(True, True)
+        with self.assertRaises(ValueError):
+            qualify(self.report, self.sources, self.native, '0', down=True)
         self.assertEqual(set(variant_sources(True)) - set(SOURCES),
             {'dram_mlp_sharded.py', 'dram-mlp-sharded-probe.py'})
         with self.assertRaises(ValueError):

@@ -16,15 +16,17 @@ SOURCES = ["dram-mlp-probe.py","dram_mlp.py","dram_sharded_projection.py","dram_
 NATIVE_SOURCES = ["models/demos/blackhole/qwen36/tt/tp_common.py","ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp","ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp","ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp","tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h"]
 
 
-def variant_sources(sharded):
-    if type(sharded) is not bool:
-        raise ValueError('Explicit sharded-product selection required')
+def variant_sources(sharded, down=False):
+    if type(sharded) is not bool or type(down) is not bool or (sharded and down):
+        raise ValueError('Exclusive explicit MLP variant selection required')
     replacements = {'dram_mlp.py': 'dram_mlp_sharded.py',
         'dram-mlp-probe.py': 'dram-mlp-sharded-probe.py'} if sharded else {}
+    if down:
+        replacements = {'dram_mlp.py': 'dram_mlp_down.py', 'dram-mlp-probe.py': 'dram-mlp-down-probe.py'}
     return tuple(replacements.get(name, name) for name in SOURCES)
 
 
-def qualify(report, sources, native_sources, exit_status, *, hardware=False, sharded=False):
+def qualify(report, sources, native_sources, exit_status, *, hardware=False, sharded=False, down=False):
     if (exit_status != '0' or not isinstance(report, dict) or report.get('stage') != 'complete'
             or report.get('backend') != 'simulator' or report.get('error') or report.get('cleanup_error')
             or any(report.get(field) is not True for field in ('passed', 'closed_cleanly', 'full_local_mlp'))
@@ -33,7 +35,7 @@ def qualify(report, sources, native_sources, exit_status, *, hardware=False, sha
         raise ValueError('Clean terminal T16 complete local MLP simulator pass and zero wrapper exit required')
     if type(hardware) is not bool:
         raise ValueError('Explicit simulator or hardware source comparison required')
-    if set(sources) != set(variant_sources(sharded)) or set(native_sources) != set(NATIVE_SOURCES):
+    if set(sources) != set(variant_sources(sharded, down)) or set(native_sources) != set(NATIVE_SOURCES):
         raise ValueError('Complete current experiment and native source sets required')
     for values in (sources, native_sources):
         if any(not isinstance(value, str) or len(value) != 64
@@ -115,8 +117,11 @@ def main():
     root = Path(__file__).parent
     report = json.loads(options.hardware_result.read_text())
     sharded = report.get('sharded_product', False)
-    names = variant_sources(sharded)
+    down = report.get('down_only', False)
+    names = variant_sources(sharded, down)
     basename = 'dram-mlp-sharded-simulator' if sharded else 'dram-mlp-simulator'
+    if down:
+        basename = 'dram-mlp-down-simulator'
     simulator_path = root / (basename + '.json')
     simulator = json.loads(simulator_path.read_text())
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
@@ -125,7 +130,7 @@ def main():
             or report.get('hardware_script_sha256') != hashlib.sha256((root / 'dram-mlp-hardware.py').read_bytes()).hexdigest()):
         raise ValueError('Matching hardware harness and simulator artifact required')
     qualify(simulator, sources, report['native_sources'],
-        (root / (basename + '.exit-status')).read_text().strip(), hardware=True, sharded=sharded)
+        (root / (basename + '.exit-status')).read_text().strip(), hardware=True, sharded=sharded, down=down)
     print(json.dumps(qualify_hardware(report)))
 
 

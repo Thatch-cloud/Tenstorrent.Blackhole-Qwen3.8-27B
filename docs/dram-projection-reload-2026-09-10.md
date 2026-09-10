@@ -102,6 +102,15 @@ only the faster DRAM-sharded down projection. Its extra boundary conversions
 must be included, and the complete hybrid must pass simulator replay before
 hardware testing. No gain is claimed before those measurements.
 
+Down-only hybrid simulator run `20260910T111727Z-410` passed in 338 seconds:
+four eager comparisons and six changed-input replay comparisons, exact across
+all 32 physical rows on both simulated chips, with output poisoning and input
+integrity checks. Sources were unchanged, closure was clean, wrapper exit was
+zero and the original packer was restored. Its separate source-qualified
+artifact is `scripts/ci/dram-mlp-down-simulator.json`. Real-weight hardware ABBA
+must still establish whether the down-projection saving survives conversions
+and the native four-link collective.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives

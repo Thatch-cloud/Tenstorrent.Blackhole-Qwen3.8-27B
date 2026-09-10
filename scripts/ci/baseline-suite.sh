@@ -3,6 +3,13 @@ set -euo pipefail
 mkdir -p /experiment/results
 dram_mlp_args=()
 dram_mlp_report=dram-mlp-simulator
+if [ "${QWEN_DRAM_MLP_DOWN:-0}" = 1 ]; then
+    test "${QWEN_DRAM_MLP:-0}" = 1
+    test "${QWEN_DRAM_MLP_SHARDED:-0}" = 0
+    test "${QWEN_DRAM_MLP_PROFILE:-0}" = 0
+    dram_mlp_args=(--down-only)
+    dram_mlp_report=dram-mlp-down-simulator
+fi
 if [ "${QWEN_DRAM_MLP_SHARDED:-0}" = 1 ]; then
     test "${QWEN_DRAM_MLP:-0}" = 1
     dram_mlp_args=(--sharded-product)

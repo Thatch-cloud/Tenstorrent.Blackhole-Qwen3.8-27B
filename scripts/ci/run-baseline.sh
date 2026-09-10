@@ -2,6 +2,9 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
+dram_mlp_down=${QWEN_DRAM_MLP_DOWN:-0}
+[[ "$dram_mlp_down" = 0 || "$dram_mlp_down" = 1 ]]
+if [ "$dram_mlp_down" = 1 ]; then test "$mode" = dram-mlp; fi
 dram_mlp_profile=${QWEN_DRAM_MLP_PROFILE:-0}
 [[ "$dram_mlp_profile" = 0 || "$dram_mlp_profile" = 1 ]]
 if [ "$dram_mlp_profile" = 1 ]; then test "$mode" = dram-mlp-sharded; fi
@@ -243,6 +246,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_DRAM_MLP=$dram_mlp" \
+    -e "QWEN_DRAM_MLP_DOWN=$dram_mlp_down" \
     -e "QWEN_DRAM_MLP_PROFILE=$dram_mlp_profile" \
     -e "QWEN_DRAM_MLP_SHARDED=$dram_mlp_sharded" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
