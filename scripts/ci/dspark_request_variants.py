@@ -9,6 +9,11 @@ SCHEDULE = tuple((arm, True) for arm in POLICIES) + tuple(
     (arm, False) for arm in (*POLICIES, *reversed(POLICIES)))
 
 
+def proposal_signature(request):
+    return [(block['position'], block['rows'], tuple(block['input_tokens']), block['accepted'], block['committed'])
+        for block in request['blocks']]
+
+
 def summarize_variants(requests):
     from dspark_request_experiment import summarize
 
@@ -34,6 +39,10 @@ def summarize_variants(requests):
                     for block in blocks if block['rows'] > 1]
                 if checks != expected_checks:
                     raise ValueError('Every multirow verifier must preserve native GDN state before publication')
+    signatures = {arm: proposal_signature(next(value for value in requests if value['arm'] == arm)) for arm in POLICIES}
+    if (any(proposal_signature(value) != signatures[value['arm']] for value in requests)
+            or signatures['trace'] != signatures['trace_commit']):
+        raise ValueError('Each arm must reproduce its audited proposals; commit-only GDN must not change drafting or acceptance')
     arms = {arm: summarize([value for value in requests if value['arm'] == arm]) for arm in POLICIES}
     comparisons = {}
     for control, candidate in (('eager', 'trace'), ('trace', 'trace_commit'), ('eager', 'trace_commit')):

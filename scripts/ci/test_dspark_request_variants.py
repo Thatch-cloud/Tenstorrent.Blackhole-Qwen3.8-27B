@@ -15,7 +15,8 @@ class DSparkVariantTests(unittest.TestCase):
             checks = [dict(position=4096, tensors=6, exact=True)] * 2 if audit and policy['proposal_trace'] else []
             records.append(dict(arm=arm, instrumented_timing=audit, exact=True, state_exact=True, inactive_exact=True,
                 prompt_tokens=[1] * 4096, emitted=[2, 3, 4], length=4096, committed_decode_tokens=2,
-                blocks=[dict(position=4096, rows=16)], commit_only_gdn=policy['commit_only_gdn'],
+                blocks=[dict(position=4096, rows=16, input_tokens=list(range(2, 18)), accepted=1, committed=2)],
+                commit_only_gdn=policy['commit_only_gdn'],
                 dspark=dict(proposal_trace=policy['proposal_trace'], proposal_checks=checks),
                 gdn_verify_checks=[dict(position=4096, rows=16, unchanged=True)] if audit and policy['commit_only_gdn'] else [],
                 decode_ms=100 + ordinal, prefill_ms=1000, feature_setup_ms=100, engine_setup_ms=200,
@@ -62,6 +63,15 @@ class DSparkVariantTests(unittest.TestCase):
             else:
                 records[2]['gdn_verify_checks'][0]['rows'] = 8
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                summarize_variants(records)
+
+    def test_commit_only_cannot_claim_a_gain_from_changed_proposals_or_acceptance(self):
+        for change in ('repeat', 'state_policy'):
+            records = self.requests()
+            selected = [records[7]] if change == 'repeat' else [value for value in records if value['arm'] == 'trace_commit']
+            for record in selected:
+                record['blocks'][0]['input_tokens'][-1] = 18
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'audited proposals'):
                 summarize_variants(records)
 
     def test_ci_route_is_opt_in_and_preserves_original_control_suite(self):
