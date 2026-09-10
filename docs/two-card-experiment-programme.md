@@ -1,6 +1,51 @@
 # Qwen3.8-27B: two-card experiment programme
 
-## Current programme position - 2026-09-10
+## Combined-runtime tuning priorities - 2026-09-11
+
+Primary objective remains **200 committed TG tok/s, one coding stream, TP2**.
+Do not optimize aggregate request throughput instead, or promote isolated kernel
+timings. Serving defaults stay unchanged. The older dated results below are history.
+
+The composed folded-T16 attention, captured DSpark proposals, commit-only GDN and
+fused score-layout path reached repeat-pooled **96.08 TG at CTX4096** on the
+merge-intervals task. The separate stable-unique screen regressed to 22.37 TG
+versus 73.52 control. Its identical repeat passes correctness at 112.55 TG versus
+59.66 control, but timing instability prevents promotion of that apparent gain.
+[Score-layout evidence](dspark-score-layout-2026-09-11.md) /
+[Coding screen and repeat](coding-screen-2026-09-10.md).
+
+### TPU-derived techniques, adapted to Blackhole
+
+| Experiment | Concrete TT runtime work | Required evidence / priority |
+| --- | --- | --- |
+| Workload-specific combined tuning | Hold stream count 1 and TP2 fixed; sweep admitted context buckets, draft/verify widths and kernel combinations | First stabilize timings; complete PP/CTX/TG and request-latency comparison, not summed kernel gains |
+| Shape-specialized execution | Separate prefill, single-token decode and speculative verification configurations; test bucket waste | Existing T16 baseline first; other widths require exact prefix/continuation admission before timing |
+| Cache-update/attention fusion | Investigate combining KV writes with attention consumption without extra round trips | Simulator first; preserve rejected-token visibility, accepted-prefix continuation and cache padding |
+| Collective/matmul overlap | Investigate computing on ready fabric tiles instead of waiting for the complete collective | Explicit four-link topology; prove ordering and numerical correctness; measure full request impact |
+| Memory-format tuning | Account for weights, KV, recurrent state, retained speculative histories, traces and scratch | Use actual TT allocation/format evidence; no TPU HBM calculator or arbitrary 0.98 utilization assumption |
+| Compilation reuse | Reuse exact source/runtime/shape-keyed caches and separate cold setup from warmed execution | Report cold setup independently; never count capture/compile artifacts as steady decode gains |
+
+Execution order: the same-revision repeat is complete; use request-boundary
+CPU/memory-pressure diagnostics to investigate instability, then compare combined
+candidates against the matched control. Changed kernels stay simulator-first.
+The shorter publication diagnostic is not a substitute for its full correctness
+gate. Unsupported configurations fail admission rather than silently falling back.
+
+Every result row records task, revision, precision/cache formats, streams, draft /
+verify width, PP, CTX, committed TG, acceptance and setup-inclusive latency.
+Use repeated identical prompts and record actual timed token counts. Add P99 TTFT,
+ITL and E2E only with sufficient serving samples; two timed requests do not establish
+a useful P99. Keep cold/warm prefix-cache tests and multi-stream saturation in
+separate tables; neither may replace the single-stream target.
+
+References: [vLLM TPU architecture and RPA v3](https://vllm-project.github.io/2025/10/16/vllm-tpu.html)
+and [upstream auto-tuner](https://github.com/vllm-project/vllm/blob/main/benchmarks/auto_tune/auto_tune.sh).
+Borrow the optimization method, not TPU-only JAX/XLA/Pallas flags or claimed speedups.
+The upstream tuner maximizes request throughput and uses broad process termination;
+do not execute it unchanged on the shared hardware runner. Any adapted launcher
+must own only its experiment container and use supported TT plugin configuration.
+
+## Historical programme position - 2026-09-10
 
 **Latest completed:** folded T16 target attention passes two matched hardware
 runs, `34454698201` and `34455470051`, after its exact simulator gate. All twelve

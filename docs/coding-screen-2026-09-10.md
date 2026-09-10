@@ -31,7 +31,21 @@ excuse the regression. Container exit is zero with no OOM kill. Repeat the
 same frozen task before advancing the screen; do not promote this result.
 Report SHA256: `26e914466f6b3d70b7072b60072373546bf9d3da90f54707e3cbffcd48bf7d1d`.
 
-Identical immutable repeat `34542359051` is running before any runtime change.
+Identical immutable repeat `34542359051` passes all revision-bound correctness
+checks and four isolated functional cases, before any runtime change.
+
+| Repeat path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native score-layout control | 1 | 3038.15 | 4096 | 59.66 |
+| Combined fused score layout | 1 | 3024.83 | 4096 | 112.55 |
+
+Candidate decode durations are 465.73/458.31 ms for 52 tokens each. Control
+durations are 1236.54/506.54 ms. Both arms retain 98/120 acceptance across their
+two timed requests. This reverses the previous regression but does not establish
+a repeatable 88.64% gain: the control is unstable and the prior candidate was slow.
+Do not discard the bad samples or promote the fastest result alone.
+Repeat report SHA256: `9d39791a3f92aabc8312d0e7660d8cffa4b0acaf1965a9ab3bfb6e2fc3365b16`.
+
 For subsequent revisions, `request_host_health.py` records cgroup CPU throttling,
 memory events and raw pressure snapshots around each complete request, outside
 its timed work. Missing counters remain unknown, not zero. These diagnostics
