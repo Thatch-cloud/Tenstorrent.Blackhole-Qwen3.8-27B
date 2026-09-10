@@ -10,6 +10,17 @@ commit-only GDN and the unchanged norm reader. Only target attention differs.
 Two audited requests precede four timed A/B/B/A requests; all samples count.
 1,399 host tests pass before dispatch.
 
+That first hardware attempt failed final route validation: the candidate policy
+omitted `target_attention_t16=True`, so all six completed requests used native
+attention. Their exact outputs/state do not qualify the parallel candidate, and
+their timings must not be reported as its performance. The report records clean
+closure. No card reset was performed.
+
+Fix `7a1e6bd` explicitly enables the candidate and validates its declared route
+immediately after each request. Regression tests now inspect the actual policy,
+not just fabricated result records; 20 targeted tests pass. Corrected retry:
+[34454698201](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34454698201).
+
 Both arms use a 256-token generation cap so every prepared T16 attention bucket
 stays within the simulator-tested 4096..4352 family. This does not extend the
 qualification to arbitrary contexts. The repository-derived coding prompt can
