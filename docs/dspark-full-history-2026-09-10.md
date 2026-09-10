@@ -104,4 +104,17 @@ checks finite values and preservation of the old prefix, and stops at the first
 mutation. This tests suspected trace-buffer overlap rather than assuming poor
 acceptance is an inherent property of the checkpoint. Failed-token and cache
 evidence are now retained in the JSON instead of only an exception string.
-No kernel arithmetic, layout, numerical tolerance or serving default changes.
+The diagnostic run [34425893520](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34425893520)
+now **confirms cache corruption**: after the first 13 committed rows, the next
+target verifier changes layer 0 K on chip 0 at position 4,109. It passes the
+checks before and after drafting, then fails immediately after verifier replay.
+The warm-native-control correction is not reached in this run and remains to be
+validated; this failure is independent of that reference-harness bug.
+
+The fix preallocates two complete K/V banks before verifier capture. Publication
+copies the new full history into the spare bank and releases every temporary
+before target replay; commit swaps the banks without allocating or freeing them.
+Only the valid prefix enters proposal attention. Full history and learned math
+are unchanged. A dedicated TTsim probe checks all five K/V pairs on both chips,
+ragged publication, discard, changing-input scratch-writer traces, fixed addresses
+and preservation of every old row before another hardware run. No serving changes.

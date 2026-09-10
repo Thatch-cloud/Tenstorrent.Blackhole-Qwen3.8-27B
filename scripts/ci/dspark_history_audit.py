@@ -31,10 +31,11 @@ class AuditedHistoryDrafter:
                     raise ValueError('Both physical history shards required')
                 for chip, shard in enumerate(shards):
                     actual = self.operations.to_torch(shard).clone()
-                    if tuple(actual.shape) != (1, 4, position, 128) or not torch.isfinite(actual).all():
+                    capacity = getattr(self.drafter.history, 'capacity', position)
+                    if tuple(actual.shape) != (1, 4, capacity, 128) or capacity < position or not torch.isfinite(actual).all():
                         raise HistoryMismatch(dict(phase=phase, layer=layer, operand=operand, chip=chip,
                             position=position, shape=list(actual.shape), finite=bool(torch.isfinite(actual).all())))
-                    values.append(actual)
+                    values.append(actual[..., :position, :])
         return tuple(values)
 
     def compare(self, actual, expected, phase, position):

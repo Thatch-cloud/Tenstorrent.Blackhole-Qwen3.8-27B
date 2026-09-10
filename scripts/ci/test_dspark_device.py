@@ -40,6 +40,19 @@ class DSparkDeviceTests(unittest.TestCase):
         self.drafter = device.DSparkDevice(self.operations, self.target, object(), self.parameters, self.weights,
             object(), object(), (object(),), self.rotary, position=4096)
 
+    def test_fixed_history_uses_temporary_logical_views_not_capacity_padding_for_attention(self):
+        views = tuple((object(), object()) for index in range(5))
+        self.history.logical_layers = Mock(return_value=views)
+        with patch('dspark_stable_history.StableHistoryKV', return_value=self.history) as factory:
+            drafter = device.DSparkDevice(self.operations, self.target, object(), self.parameters, self.weights,
+                object(), object(), (object(),), self.rotary, position=4096, history_capacity=4384)
+        self.assertEqual(factory.call_args.kwargs, dict(position=4096, capacity=4384))
+        self.assertEqual(drafter.propose(777, 15), tuple(range(100, 115)))
+        self.history.logical_layers.assert_called_once_with(self.scope.retain)
+        for index, call in enumerate(self.layer.call_args_list):
+            self.assertIs(call.args[4], views[index])
+        self.scope.release.assert_called_once()
+
     def test_actual_target_boundaries_and_five_cached_layers_feed_all_markov_rows(self):
         self.assertEqual(self.drafter.propose(777, 15), tuple(range(100, 115)))
         self.assertEqual(self.drafter.position, 4096)

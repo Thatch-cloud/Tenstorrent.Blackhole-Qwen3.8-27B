@@ -90,7 +90,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         nonlocal drafter, runtime
         status('project_full_prefill_history', context=len(prompt))
         drafter = DSparkDevice(operations, model, collectives, parameters, layer_weights, predecessor, successor,
-            capture.outputs(), rotary, position=len(prompt), proposals=15)
+            capture.outputs(), rotary, position=len(prompt), proposals=15,
+            history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         capture.close()
         if audit_features:
             from dspark_history_audit import AuditedHistoryDrafter
@@ -114,6 +115,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
             history_checks=history_checks,
+            fixed_history_capacity=drafter.history.capacity, persistent_history_allocated_before_verifier=True,
             committed_feature_rows=runtime.committed_feature_rows, final_position=drafter.position,
             execution='Eager full-history proposal; batched captured target verifier; all request-loop costs retained',
             proposal_trace=False, packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,

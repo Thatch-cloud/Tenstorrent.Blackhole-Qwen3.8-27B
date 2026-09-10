@@ -22,6 +22,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.stack.enter_context(patch.object(request, 'FullHistoryCapture', side_effect=self.capture))
         self.stack.enter_context(patch.object(request, 'LayerOutputCapture', side_effect=self.decode_capture))
         self.drafter = SimpleNamespace(position=32, max_drafts=15, propose=Mock(return_value=tuple(range(15))),
+            history=SimpleNamespace(capacity=128),
             prepare_publication=Mock(), commit_publication=Mock(), discard_publication=Mock(), close=Mock())
         self.device = self.stack.enter_context(patch.object(request, 'DSparkDevice', return_value=self.drafter))
         self.history_audit = self.stack.enter_context(patch('dspark_history_audit.AuditedHistoryDrafter',
@@ -80,7 +81,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertEqual(self.events, ['native-control', 'candidate-prefill', 'factory'])
         self.assertEqual(self.base_prefill.call_count, 2)
         self.drafter.propose.assert_called_once_with(17, 15)
-        self.assertEqual(self.device.call_args.kwargs, dict(position=32, proposals=15))
+        self.assertEqual(self.device.call_args.kwargs, dict(position=32, proposals=15, history_capacity=128))
         self.assertEqual(result['dspark']['committed_feature_rows'], 2)
         self.assertEqual(result['dspark']['final_position'], 34)
         self.assertEqual(len(result['dspark']['prefill_chunks']), 2)

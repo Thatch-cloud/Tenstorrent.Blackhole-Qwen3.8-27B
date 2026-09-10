@@ -102,6 +102,16 @@ class HistoryAuditTests(unittest.TestCase):
             self.auditor.propose(10, 2)
         self.assertEqual(caught.exception.evidence['chip'], 1)
 
+    def test_fixed_capacity_audit_checks_the_complete_valid_prefix_and_rejects_nonfinite_padding(self):
+        self.drafter.history.capacity = 64
+        self.drafter.history.layers = tuple(tuple(torch.nn.functional.pad(value, (0, 0, 0, 32))
+            for value in pair) for pair in self.layers)
+        self.auditor.propose(10, 2)
+        self.drafter.history.layers[0][0][..., -1, -1] = float('nan')
+        with self.assertRaises(HistoryMismatch) as caught:
+            self.auditor.propose(10, 2)
+        self.assertFalse(caught.exception.evidence['finite'])
+
 
 if __name__ == '__main__':
     unittest.main()

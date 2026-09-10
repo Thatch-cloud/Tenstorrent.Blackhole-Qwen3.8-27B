@@ -11,7 +11,7 @@ from dspark_wide_target import noise_embeddings, pack_tokens, query_inputs, shar
 
 class DSparkDevice:
     def __init__(self, operations, target, collectives, parameters, layer_weights, predecessor, successor,
-            chunks, rotary, *, position, proposals=15):
+            chunks, rotary, *, position, proposals=15, history_capacity=None):
         geometry(position, proposals)
         if (target.num_devices != 2 or target.vocab_size != VOCABULARY
                 or getattr(target, '_lmhead_vocab_sharded', False) is not True):
@@ -20,7 +20,12 @@ class DSparkDevice:
         self.parameters, self.layer_weights = parameters, layer_weights
         self.predecessor, self.successor, self.rotary = predecessor, successor, rotary
         self.max_drafts, self.closed = proposals, False
-        self.history = FullHistoryKV(operations, self.mesh, collectives, parameters, layer_weights, chunks, rotary, position=position)
+        if history_capacity is None:
+            self.history = FullHistoryKV(operations, self.mesh, collectives, parameters, layer_weights, chunks, rotary, position=position)
+        else:
+            from dspark_stable_history import StableHistoryKV
+            self.history = StableHistoryKV(operations, self.mesh, collectives, parameters, layer_weights, chunks, rotary,
+                position=position, capacity=history_capacity)
 
     @property
     def position(self):
@@ -45,6 +50,7 @@ class DSparkDevice:
                 mesh_mapper=operations.ReplicateTensorToMesh(self.mesh), memory_config=operations.DRAM_MEMORY_CONFIG))
 
         try:
+            cached_layers = self.history.logical_layers(scope.retain) if hasattr(self.history, 'logical_layers') else self.history.layers
             device_ids = upload(identifiers, dtype=operations.uint32, row_major=True)
             device_anchor = upload(torch.tensor([[[[anchor]]]], dtype=torch.int64), dtype=operations.uint32, row_major=True)
             device_mask = upload(mask)
@@ -57,7 +63,7 @@ class DSparkDevice:
             device_live = upload(live, dtype=operations.float32)
             hidden = noise_embeddings(operations, self.target, self.mesh, self.collectives, device_ids,
                 scope.retain, proposals=self.max_drafts)
-            for weights, cached in zip(self.layer_weights, self.history.layers, strict=True):
+            for weights, cached in zip(self.layer_weights, cached_layers, strict=True):
                 hidden = layer(operations, self.mesh, self.collectives, hidden, cached, weights, tables, device_mask,
                     device_live, scope.retain, position=self.position, proposals=self.max_drafts, mask_validated=True)['finish']['output']
             normalized = norm(operations, hidden, self.parameters['norm.weight'], scope.retain)
