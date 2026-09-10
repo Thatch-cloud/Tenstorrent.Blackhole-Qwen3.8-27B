@@ -145,3 +145,9 @@ Retained report: `scripts/ci/dspark-history-bank-simulator.json`, SHA-256
 Hardware preflight now requires this exact report and unchanged qualified source.
 The repair must still pass full target token/state/cache audits and two timed
 requests before any PP/TG result is accepted.
+
+Repair hardware run: [34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694),
+immutable code `547bc2bed1f6626bc257d3bf1f7ae2d64c23716f`. The allocated runner is
+executing the full-request suite. It retains the all-cache lifetime audit and
+requires the fixed-bank simulator report. PP/TG and native-control warmup remain
+pending until all three complete requests pass.

@@ -135,6 +135,10 @@ This uses all historical draft K/V, not the DFlash2 2K window, and explicit
 four-link proposal/sampling collectives. The initial proposer is eager; the target
 verifier is batched and captured. [Scope and correctness gates](docs/dspark-full-history-2026-09-10.md).
 
+**Repair now on hardware:** [fixed-bank full-request validation](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694).
+Same 4K context, 15 drafts / 16 verifier rows, one audited request and two timed
+requests. Results are pending; serving defaults are unchanged.
+
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
 the drafting saving; caching is not enabled in serving or the8K ladder rows.

@@ -20,6 +20,8 @@ position 4,109. Fixed double-buffered full-history banks now retain their alloca
 across replay; all 372 dedicated simulator lifetime checks now pass with clean exit
 and independent full-reference/source verification. The next hardware preflight
 requires the exact fixed-bank report before running any target request.
+Repair run [34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694)
+is now executing on the allocated two-card runner, using code `547bc2b`.
 The diagnostic fails before timed controls, so native warmup remains unvalidated.
 Best repeat-confirmed B1
 TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).
