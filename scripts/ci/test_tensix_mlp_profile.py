@@ -48,6 +48,23 @@ def device_rows(records):
 
 
 class MlpProfileTests(unittest.TestCase):
+    def test_t16_records_all_eighteen_replays_without_changing_t8(self):
+        operations = SimpleNamespace(synchronize_device=Mock(), ReadDeviceProfiler=Mock(), execute_trace=Mock())
+        observer = MlpTraceProfile(operations, object(), [23, 24], signpost=Mock(), rows=16)
+        with redirect_stdout(io.StringIO()):
+            for pattern in range(3):
+                for arm in range(2):
+                    observer.replay(arm, pattern, 'audit')
+                for sample, arm in enumerate((0, 1, 1, 0)):
+                    observer.replay(arm, pattern, 'measurement', sample)
+        report = observer.summary()
+        self.assertEqual(report['trace_counts'], [9, 9])
+        self.assertTrue(all(record['rows'] == 16 for record in report['records']))
+        self.assertEqual(operations.ReadDeviceProfiler.call_count, 36)
+        for rows in (True, 0, 32):
+            with self.assertRaises(ValueError):
+                MlpTraceProfile(operations, object(), [23, 24], signpost=Mock(), rows=rows)
+
     def test_profiler_configuration_cannot_contaminate_performance_mode(self):
         require_profile_mode({}, False)
         require_profile_mode({name: '0' for name in PROFILER_FLAGS}, False)

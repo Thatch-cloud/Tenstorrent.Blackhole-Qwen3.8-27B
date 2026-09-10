@@ -9,6 +9,11 @@ from tiny_mlp_gate import PACKER, ORIGINAL_PACKER, TP_COMMON, HARDWARE_TP_COMMON
 
 
 class DramMlpGateTests(unittest.TestCase):
+    def test_instrumented_reports_cannot_qualify_performance(self):
+        for field in ('instrumented_timing', 'correctness_only'):
+            with self.assertRaisesRegex(ValueError, 'Instrumented'):
+                qualify_hardware({field: True})
+
     def setUp(self):
         root = Path(__file__).parent
         self.report = json.loads((root / 'dram-mlp-simulator.json').read_text())

@@ -76,8 +76,8 @@ def validate_profile(report, console):
     return records
 
 
-def attribute(records, rows):
-    devices = analyze_traces([{**record, 'position': None} for record in records], rows)
+def attribute(records, rows, *, full_rows=8):
+    devices = analyze_traces([{**record, 'position': None} for record in records], rows, full_rows=full_rows)
     sessions = defaultdict(list)
     for row in rows:
         if row.get('METAL TRACE ID') and row.get('METAL TRACE REPLAY SESSION ID'):

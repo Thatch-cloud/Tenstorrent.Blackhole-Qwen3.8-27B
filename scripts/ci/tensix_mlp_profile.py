@@ -16,12 +16,15 @@ def require_profile_mode(environment, enabled):
 
 
 class MlpTraceProfile:
-    def __init__(self, operations, mesh, traces, *, signpost=None):
+    def __init__(self, operations, mesh, traces, *, signpost=None, rows=8):
+        if type(rows) is not int or rows not in (8, 16):
+            raise ValueError('Qualified T8 or T16 MLP profile required')
         if len(traces) != 2 or len({int(trace) for trace in traces}) != 2:
             raise ValueError('Distinct native and streamed trace IDs required')
         if signpost is None:
             from tracy import signpost
         self.operations, self.mesh, self.traces, self.signpost = operations, mesh, traces, signpost
+        self.rows = rows
         self.records, self.counts = [], [0, 0]
         self.failed = False
 
@@ -34,7 +37,7 @@ class MlpTraceProfile:
             raise ValueError('One known trace, fixture and replay role required')
         operations = self.operations
         record = dict(block=len(self.records), arm=arm, pattern=pattern, role=role, sample=sample,
-            rows=8, trace_id=int(self.traces[arm]), trace_ordinal=self.counts[arm],
+            rows=self.rows, trace_id=int(self.traces[arm]), trace_ordinal=self.counts[arm],
             first_replay=self.counts[arm] == 0)
         label = f'qwen_mlp_arm{arm}_pattern{pattern}_{role}_{sample}_ordinal{self.counts[arm]}'
         operations.synchronize_device(self.mesh)
@@ -57,7 +60,8 @@ class MlpTraceProfile:
             print('QWEN_MLP_PROFILE_END ' + label, flush=True)
 
     def summary(self):
-        if self.failed or self.counts != [10, 10]:
-            raise ValueError('All twenty complete MLP replays must finish')
+        expected = 10 if self.rows == 8 else 9
+        if self.failed or self.counts != [expected, expected]:
+            raise ValueError('All configured complete MLP replays must finish')
         return dict(records=list(self.records), trace_ids=[int(trace) for trace in self.traces],
             trace_counts=list(self.counts), scope='Instrumented complete MLP replays; not throughput or promotion')

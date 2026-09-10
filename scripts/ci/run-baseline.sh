@@ -2,6 +2,9 @@
 set -euo pipefail
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 mode=${QWEN_RUN_MODE:-baseline}
+dram_mlp_profile=${QWEN_DRAM_MLP_PROFILE:-0}
+[[ "$dram_mlp_profile" = 0 || "$dram_mlp_profile" = 1 ]]
+if [ "$dram_mlp_profile" = 1 ]; then test "$mode" = dram-mlp-sharded; fi
 tensix_mlp_packet=${QWEN_TENSIX_PACKET_READS:-0}
 [[ "$tensix_mlp_packet" = 0 || "$tensix_mlp_packet" = 1 ]]
 if [ "$tensix_mlp_packet" = 1 ]; then test "$mode" = tensix-stream-mlp-16; fi
@@ -240,6 +243,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_DRAM_MLP=$dram_mlp" \
+    -e "QWEN_DRAM_MLP_PROFILE=$dram_mlp_profile" \
     -e "QWEN_DRAM_MLP_SHARDED=$dram_mlp_sharded" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
@@ -303,8 +307,13 @@ if [ "$tiny_mlp" = 1 ]; then
     python3 scripts/ci/tiny_mlp_gate.py --hardware-result "$output/tiny-mlp.json"
 fi
 if [ "$dram_mlp" = 1 ]; then
-    docker cp "$test_id:/experiment/results/dram-mlp.json" "$output/dram-mlp.json"
-    python3 scripts/ci/dram_mlp_gate.py --hardware-result "$output/dram-mlp.json"
+    if [ "$dram_mlp_profile" = 1 ]; then
+        docker cp "$test_id:/experiment/results/dram-mlp-profile" "$output/dram-mlp-profile"
+        python3 scripts/ci/dram_mlp_profile_report.py "$output/dram-mlp-profile"
+    else
+        docker cp "$test_id:/experiment/results/dram-mlp.json" "$output/dram-mlp.json"
+        python3 scripts/ci/dram_mlp_gate.py --hardware-result "$output/dram-mlp.json"
+    fi
 fi
 if [ "$tensix_mlp" = 1 ]; then
     if [ "$tensix_mlp_profile" = 1 ]; then

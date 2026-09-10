@@ -60,6 +60,8 @@ def qualify(report, sources, native_sources, exit_status, *, hardware=False, sha
 
 
 def qualify_hardware(report):
+    if report.get('instrumented_timing') or report.get('correctness_only'):
+        raise ValueError('Instrumented attribution cannot qualify performance')
     if report.get('sharded_product', False):
         from tensix_mlp_weight_views import qualify_views
         qualify_views(report.get('weight_views'))

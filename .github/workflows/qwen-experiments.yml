@@ -12,6 +12,10 @@ on:
         description: Inventory only; recover exact pinned image by verified registry digest, without card access
         type: boolean
         default: false
+      dram_mlp_profile:
+        description: Operation attribution only for dram-mlp-sharded; never qualifies throughput
+        type: boolean
+        default: false
       dspark_coding_task:
         description: Untuned coding task for the matched target-attention request suite only
         type: choice
@@ -250,6 +254,7 @@ jobs:
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
+          QWEN_DRAM_MLP_PROFILE: ${{ inputs.dram_mlp_profile && '1' || '0' }}
         run: timeout 3600 bash scripts/ci/run-baseline.sh
       - name: Simulator-qualified small-tile MLP hardware comparison
         if: inputs.suite == 'tiny-mlp'

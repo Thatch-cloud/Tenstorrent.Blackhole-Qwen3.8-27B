@@ -405,6 +405,10 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
         exit 0
     fi
     if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
+        if [ "${QWEN_DRAM_MLP_PROFILE:-0}" = 1 ]; then
+            bash /experiment-scripts/ci/dram-mlp-profile.sh
+            exit 0
+        fi
         timeout -k 30 900 python3 -u /experiment-scripts/ci/dram-mlp-hardware.py "${dram_mlp_args[@]}" \
             --simulator-report "/experiment-scripts/ci/$dram_mlp_report.json" \
             --simulator-exit-status "/experiment-scripts/ci/$dram_mlp_report.exit-status" \

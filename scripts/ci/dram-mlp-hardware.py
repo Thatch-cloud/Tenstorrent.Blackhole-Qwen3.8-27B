@@ -18,6 +18,7 @@ from dram_mlp import execute
 from dram_sharded_projection import configurations
 from dram_mlp_gate import NATIVE_SOURCES, variant_sources, qualify
 from tensix_mlp_weight_views import tensor_spec, weight_views
+from tensix_mlp_profile import MlpTraceProfile, require_profile_mode
 
 
 def main():
@@ -27,7 +28,9 @@ def main():
     parser.add_argument('--simulator-exit-status', type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--sharded-product', action='store_true')
+    parser.add_argument('--profile', action='store_true')
     options = parser.parse_args()
+    require_profile_mode(os.environ, options.profile)
     require_projection_environment(os.environ, True)
     native_root = Path(os.environ['TT_METAL_HOME'])
     names = variant_sources(options.sharded_product)
@@ -46,6 +49,12 @@ def main():
         hardware_script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         collective_links=4, sharded_product=options.sharded_product,
         timing_scope='Captured complete MLP including DRAM-to-L1 input, DRAM weight reads and native TP2 collective; upload, capture and validation excluded')
+    if options.profile:
+        from dram_mlp_profile_report import profile_sources
+        report.update(instrumented_timing=True, correctness_only=True, repeats_per_sample=1,
+            eligible_for_full_model_gate=False, profile_checks=[], input_checks=[],
+            profile_sources=profile_sources(Path(__file__).parent),
+            timing_scope='Instrumented operation attribution only; not latency qualification or TG')
     try:
         report['simulator_gate'] = qualify(prerequisite, sources, native_sources,
             options.simulator_exit_status.read_text().strip(), hardware=True, sharded=options.sharded_product)
@@ -152,6 +161,7 @@ def main():
             trace, output = capture_operation(ttnn, mesh, lambda candidate=candidate: forward(candidate, captured))
             traces.append(trace)
             outputs.append(output)
+        observer = MlpTraceProfile(ttnn, mesh, traces, rows=16) if options.profile else None
         def timed(arm):
             ttnn.execute_trace(mesh, traces[arm], cq_id=0, blocking=False)
             ttnn.synchronize_device(mesh)
@@ -166,11 +176,21 @@ def main():
         for pattern, host in enumerate(host_inputs):
             ttnn.copy_host_to_device_tensor(host, source)
             for arm, trace in enumerate(traces):
-                ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+                if observer:
+                    observer.replay(arm, pattern, 'audit')
+                else:
+                    ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                 if not exact(read(outputs[arm]), references[pattern]):
                     raise AssertionError('Changed-input trace differs from actual native forward')
                 report['trace_checks'].extend(dict(pattern=pattern, arm=arm, chip=chip, exact=True) for chip in range(2))
-            for block in range(3):
+            if observer:
+                for sample, arm in enumerate((0, 1, 1, 0)):
+                    observer.replay(arm, pattern, 'measurement', sample)
+                    if not exact(read(outputs[arm]), references[pattern]):
+                        raise AssertionError('Instrumented trace changed output')
+                    report['profile_checks'].extend(dict(pattern=pattern, sample=sample, chip=chip, exact=True)
+                        for chip in range(2))
+            for block in range(0 if observer else 3):
                 samples = []
                 for arm in (0, 1, 1, 0):
                     samples.append(timed(arm))
@@ -184,10 +204,15 @@ def main():
                 raise AssertionError('Persistent input, workspace or weight addresses changed')
             if not exact(read(source), [patterns[pattern]] * 2):
                 raise AssertionError('MLP modified caller-owned input')
+            if observer:
+                report['input_checks'].append(dict(pattern=pattern, unchanged=True, bindings_stable=True))
             progress(f'pattern_{pattern}_passed')
-        report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
-        report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
-        report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
+        if observer:
+            report['profile'] = observer.summary()
+        else:
+            report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
+            report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
+            report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
         if options.sharded_product:
             report['native_weights_after'] = {name: tensor_spec(ttnn, value) for name, value in weights.items()}
             if report['native_weights_after'] != {name: check['native'] for name, check in report['weight_views'].items()}:
@@ -211,6 +236,10 @@ def main():
     report['native_sources_after'] = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
     if report['sources_after'] != sources or report['native_sources_after'] != native_sources:
         raise AssertionError('Hardware experiment sources changed')
+    if options.profile:
+        report['profile_sources_after'] = profile_sources(Path(__file__).parent)
+        if report['profile_sources_after'] != report['profile_sources']:
+            raise AssertionError('Profile instrumentation sources changed')
     report['passed'] = True
     progress('complete')
 

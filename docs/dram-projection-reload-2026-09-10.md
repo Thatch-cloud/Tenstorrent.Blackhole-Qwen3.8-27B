@@ -60,6 +60,23 @@ inputs with poisoned outputs. It does not include the TP2 collective or measure
 token throughput. Intermediates are released between projections rather than
 retained across the whole composition; ten focused host tests pass.
 
+### Reduced-conversion hardware result
+
+Run `34468926073`, commit `a68ca2e`, passed correctness but did not qualify:
+native **0.334674 ms**, shared-staging/sharded-product candidate **0.385219 ms**,
+or **15.1% slower**. This includes input transfer and the four-link collective,
+not full-model PP or TG. The earlier native 2D versus candidate 4D weight guard
+failure was fixed with zero-copy views, preserving native metadata and buffers.
+
+The isolated native build cache hit: setup **2.34 seconds**, versus **260.52
+seconds** on its cold run. This reduces experiment setup, not model latency.
+
+Next: instrument eighteen complete MLP replays (three input fixtures, both
+arms, one ABBA per fixture), retain per-operation/per-chip timings and exact
+output checks. Instrumented results cannot qualify performance. The candidate
+kernel is unchanged from its successful simulator pass; this adds observation,
+not a new arithmetic implementation or serving default.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
