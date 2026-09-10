@@ -59,9 +59,17 @@ Two audited requests precede four timed requests in A/B/B/A order. Comparison
 requires identical target tokens, state, proposal tokens and acceptance.
 
 This route remains gated by both full-vocabulary simulator reports. The complete
-chain run `20260910T124104Z-619` is still pending; hardware has not been dispatched.
+chain run `20260910T124104Z-619` was interrupted; hardware has not been dispatched.
 Shell syntax, workflow YAML parsing and 31 relevant host tests pass. Learned-weight
 request audits and end-to-end timing remain unqualified.
+
+The interrupted report retains 30 exact first-pattern comparisons (15 steps on
+both chips), four input checks and four initial weight checks. It stops at
+`native_1`, with no replay checks, final source snapshot, clean close or exit-status
+file. This is partial evidence only, retained as
+`scripts/ci/dspark-markov-score-layout-interrupted.json`. No matching simulator
+process was found after the session interruption. The simulator packer remained
+patched, so its owned runtime state must be recovered before another launch.
 
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
