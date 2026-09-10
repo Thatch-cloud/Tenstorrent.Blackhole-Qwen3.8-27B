@@ -14,7 +14,23 @@ rates will not be pooled or substituted for the 4K merge-intervals baseline.
 
 Stable-unique run
 [34541480692](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34541480692)
-is underway on immutable `83f679f`, using the existing granted workflow tag.
+completed on immutable `83f679f`. All 688 revision-bound source fingerprints,
+learned score/token checks, request correctness checks and four isolated
+functional cases pass. Performance does **not** pass: the candidate regressed.
+
+| Score layout | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native control | 1 | 2499.98 | 4096 | 73.52 |
+| Fused candidate | 1 | 1459.38 | 4096 | 22.37 |
+
+Both arms commit 104 timed tokens with 98/120 accepted proposals. Candidate
+decode durations are 2214.52 and 2434.94 ms; control durations are 903.93 and
+510.67 ms. Prefill also varies substantially (candidate 1374.58/4238.76 ms).
+This suggests broad timing instability but does not establish its cause or
+excuse the regression. Container exit is zero with no OOM kill. Repeat the
+same frozen task before advancing the screen; do not promote this result.
+Report SHA256: `26e914466f6b3d70b7072b60072373546bf9d3da90f54707e3cbffcd48bf7d1d`.
+
 The other two tasks are pending, not submitted concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
