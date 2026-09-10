@@ -31,6 +31,13 @@ excuse the regression. Container exit is zero with no OOM kill. Repeat the
 same frozen task before advancing the screen; do not promote this result.
 Report SHA256: `26e914466f6b3d70b7072b60072373546bf9d3da90f54707e3cbffcd48bf7d1d`.
 
+Identical immutable repeat `34542359051` is running before any runtime change.
+For subsequent revisions, `request_host_health.py` records cgroup CPU throttling,
+memory events and raw pressure snapshots around each complete request, outside
+its timed work. Missing counters remain unknown, not zero. These diagnostics
+include setup and audits and cannot independently prove decode interference or
+exclusive host use. They are not present in the immutable repeat above.
+
 The other two tasks are pending, not submitted concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.

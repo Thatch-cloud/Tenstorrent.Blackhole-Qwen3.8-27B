@@ -268,6 +268,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             from native_draft_sdpa import precise_draft_kernel
             native = POLICIES[arm].get('native_attention', False)
             draft_observer = DraftProfile(operations, model.mesh_device) if profile_drafter else None
+            from request_host_health import snapshot as host_snapshot, summarize as host_summary
+            host_before = host_snapshot()
             with (precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext()) as kernel_audit, \
                     (scoped_reader() if (norm_scatter_variants or combined_variants) and arm == 'scatter' else nullcontext()) as norm_audit, \
                     (scoped_down(operations, model, tt_all_reduce, enabled=arm == 'down')
@@ -281,6 +283,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
+            result['host_health'] = host_summary(host_before, host_snapshot())
             if draft_observer is not None:
                 result['draft_profile'] = draft_observer.summary()
             if mlp_down:
