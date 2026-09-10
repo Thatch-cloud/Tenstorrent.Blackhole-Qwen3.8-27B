@@ -60,8 +60,9 @@ Profiling isolated a useful down-projection saving. The down-only hybrid is
 | Folded attention + native MLP | 4096 | 3286.50 | 90.08 |
 | Folded attention + DRAM down only | 4096 | 3334.04 | 88.93 |
 
-Not promoted: verification improves, but drafting regresses. Allocation effects
-are the next diagnostic; the cause is not yet established.
+Not promoted: verification improves, but drafting regresses. An equal-weight-footprint
+diagnostic gives **90.10 versus 88.79 TG**, retaining exact outputs. It supports
+investigating allocation effects, not a new gain over the original native baseline.
 [Details](docs/dram-projection-reload-2026-09-10.md).
 
 ### Recent request experiments

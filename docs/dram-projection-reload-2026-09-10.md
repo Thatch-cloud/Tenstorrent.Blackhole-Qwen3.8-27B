@@ -199,6 +199,30 @@ addresses. Equal resident footprint alone does not prove that every downstream
 allocation is identical. This is a diagnostic with a deliberately expanded
 control footprint, not a replacement for the original native-footprint result.
 
+The diagnostic completed and passed independent source, closure, exact
+token/state and proposal/acceptance validation. Report SHA256:
+`621915a197f5dc8f98a7d3e52ae1c88ce203b5867a49f840c7873123749d910e`.
+All four timed requests used identical prepared weight addresses on both chips.
+
+| Equal resident weights, one stream | CTX | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Original MLP execution | 4096 | 3248.30 | 88.79 |
+| Down-only MLP execution | 4096 | 3331.08 | 90.10 |
+
+The candidate improves **1.47% within this diagnostic**. Verify/readback falls
+from 69.224 to 68.474 ms/block, reproducing the roughly 0.75 ms saving. Drafting
+is now similar: 37.283 versus 37.006 ms/block. This is consistent with allocation
+effects contributing to the previous drafting regression, but does not identify
+its exact cause or prove a gain over the original 90.08 TG native-footprint
+baseline. Do not promote this as a new best serving result.
+
+Further small MLP layout sweeps are not the immediate priority. The remaining
+roughly 37 ms drafting and 68 ms verification costs need much larger reductions
+to reach 200 committed TG. Next, attribute the current captured drafter's device
+operations before selecting another fusion: its source still uses BF16 weights,
+HiFi4 FP32 projections and multiple explicit normalization/conversion operations.
+Those are observed implementation choices, not yet measured individual costs.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
