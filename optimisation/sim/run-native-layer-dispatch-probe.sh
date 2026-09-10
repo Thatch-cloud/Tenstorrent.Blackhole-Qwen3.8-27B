@@ -38,7 +38,11 @@ case "${QWEN_SIM_BOUNDED_MEMORY:-0}" in
         -p MemoryMax=3221225472 -p MemorySwapMax=4294967296 --) ;;
     *) printf 'QWEN_SIM_BOUNDED_MEMORY must be 0 or 1\n' >&2; exit 64 ;;
 esac
-PROBE=dspark-native-cached-layer-probe
+PROBE=${QWEN_SIM_LAYER_PROBE:-dspark-native-cached-layer-probe}
+case "$PROBE" in
+    dspark-native-cached-layer-probe|gdn-norm-scatter-probe) ;;
+    *) exit 64 ;;
+esac
 {
 REPORT="$SIM_ROOT/results/$RUN_ID-$PROBE.json"
 printf 'report=%s\n' "$REPORT"

@@ -43,8 +43,11 @@ def patched_bytes(original, patch):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--learned-layer', action='store_true')
+    parser.add_argument('--norm-scatter', action='store_true')
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.norm_scatter and (options.learned_layer or options.checkpoint is not None):
+        raise ValueError('Norm scatter is an isolated probe')
     if options.learned_layer != (options.checkpoint is not None):
         raise ValueError('Learned-layer probe requires an explicit checkpoint')
     directory = Path(__file__).resolve().parent
@@ -76,6 +79,9 @@ def main():
             OMP_NUM_THREADS='1', KERNEL_TIMEOUT='1800')
         arguments = ['--checkpoint', str(options.checkpoint.resolve())] if options.learned_layer else []
         wrapper = 'run-native-layer-dispatch-probe.sh' if options.learned_layer else 'run-dispatch-probe.sh'
+        if options.norm_scatter:
+            wrapper = 'run-native-layer-dispatch-probe.sh'
+            environment['QWEN_SIM_LAYER_PROBE'] = 'gdn-norm-scatter-probe'
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:
