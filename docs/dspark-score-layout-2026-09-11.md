@@ -85,6 +85,17 @@ so the previous two-hour cap was too short for all patterns and replays.
 Small-vocabulary runs remain capped at 30 minutes. Kernel sources, comparison
 matrices, exactness checks and the bounded memory policy are unchanged.
 
+The first service retry was terminated with exit 143 during a journal-confirmed
+WSL shutdown. A waiting Windows `wsl.exe` client is therefore kept alive for the
+service lifetime (`systemd-run --wait`, hidden window). A second launch exposed
+a separate TTNN import segmentation fault before any kernel test: the service
+import failed without `HOME`/`USER` and succeeded when both were provided.
+
+Current retry `20260910T210526Z-378` uses service
+`qwen-score-feedback-env-20260911.service`, with `HOME=/root`, `USER=root`, and
+a waiting WSL client. It has passed TTNN import and opened the simulated mesh.
+These fixes concern launch reliability only; full feedback validation is pending.
+
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.
