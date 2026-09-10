@@ -45,6 +45,17 @@ proposal intermediates does not establish ownership of internal operation scratc
 The repair needs a safe allocation lifecycle for both traces, not a fresh-prefill
 workaround or relaxed numerical acceptance. No new throughput is qualified.
 
+## Allocation-order candidate
+
+The opt-in captured arm now builds verifier initial snapshots, checkpoints,
+feature destinations and input fixtures before capturing the proposal. A
+pre-capture callback then prepares and warms the proposal before verifier capture.
+The eager arm and serving defaults are unchanged. Proposal trace setup now falls
+inside verifier setup time; both remain excluded from TG and included in total
+request setup. Snapshot protection stays enabled for the audit arm, including
+proposal preparation itself. This is a candidate repair, not hardware qualification:
+later trace outputs and internal scratch still require the existing exact checks.
+
 The last two runs reproduce identical actual/expected feature hashes:
 
 - Actual: `fa79684034f73743469633c3d96ef3de595d957b7de0698b18b0f8b086f29482`

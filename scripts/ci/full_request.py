@@ -39,7 +39,9 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
                     attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False,
-                    verifier_observer=None, feature_drafter_name='dflash2'):
+                    verifier_observer=None, feature_drafter_name='dflash2', verifier_before_capture=None):
+    if verifier_before_capture is not None and not callable(verifier_before_capture):
+        raise ValueError('Callable verifier pre-capture preparation required')
     if (feature_drafter_name not in ('dflash2', 'dspark')
             or (feature_drafter_name != 'dflash2' and feature_factory is None)):
         raise ValueError('Explicit supported feature-drafter name and matching factory required')
@@ -143,6 +145,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     session.max_new_tokens - len(session.emitted), max_verify_rows=lookup_max_rows, short_context=short_context)
             factory = VerifierEngine if engine_factory is None else engine_factory
             engine = factory(model, session, pages, helpers, sampler=sampler, norm_batch=norm_batch,
+                **(dict(before_capture=verifier_before_capture) if verifier_before_capture is not None else {}),
                 attention_replay=attention_replay, attention_mask_once=attention_mask_once,
                 replay_group_rows=replay_group_rows,
                 **(dict(native_sampling_rows=True) if native_sampling_rows else {}),

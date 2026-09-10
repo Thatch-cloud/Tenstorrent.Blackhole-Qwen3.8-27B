@@ -110,11 +110,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                     raise error
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
+    preparing_engine = None
+
     def protected_verifier_snapshot():
-        if runtime is None or runtime.engine is None:
+        engine = preparing_engine if runtime is None or runtime.engine is None else runtime.engine
+        if engine is None:
             return None
         result = []
-        for layer, snapshot in enumerate(runtime.engine.initial):
+        for layer, snapshot in enumerate(engine.initial):
             for operand, value in enumerate(snapshot):
                 shards = operations.get_device_tensors(value)
                 if len(shards) != 2:
@@ -123,6 +126,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                     result.append(dict(layer=layer, operand=operand, chip=chip,
                         address=shard.buffer_address(), sha256=tensor_digest(operations.to_torch(shard))))
         return result
+
+    def prepare_proposal_trace(engine):
+        nonlocal preparing_engine
+        preparing_engine = engine
+        status('prepare_proposal_trace_after_verifier_persistent_allocation')
+        drafter.prepare_trace(seed, audit=audit_features)
+        status('warm_fifteen_query_proposal_before_verifier_capture')
+        drafter.propose(seed, 15)
 
     def factory():
         nonlocal drafter, runtime, proposal_device
@@ -145,10 +156,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 drafter = TargetStateAuditedDrafter(drafter,
                     lambda: dict(gdn=live_digest(), kv=kv_digest(drafter.position), inactive=inactive_digest()),
                     protected_snapshot=protected_verifier_snapshot)
-            status('prepare_fixed_history_proposal_trace_before_verifier_capture')
-            drafter.prepare_trace(seed, audit=audit_features)
-        status('warm_fifteen_query_proposal_before_verifier_capture')
-        drafter.propose(seed, 15)
+        else:
+            status('warm_fifteen_query_proposal_before_verifier_capture')
+            drafter.propose(seed, 15)
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
         return runtime
 
@@ -158,6 +168,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=audit_features and commit_only_gdn,
             lookup_max_rows=16, feature_factory=factory, feature_drafter_name='dspark',
+            **(dict(verifier_before_capture=prepare_proposal_trace) if proposal_trace else {}),
             progress=lambda block: status('committed-block', **block))
         expected_checks = len(result['blocks']) * len(TAPS) * 2 if audit_features else 0
         if (runtime is None or len(prefill_records) != 2 or len(feature_checks) != expected_checks

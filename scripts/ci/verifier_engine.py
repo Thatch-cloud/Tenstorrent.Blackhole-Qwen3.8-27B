@@ -35,8 +35,11 @@ class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
-                 commit_only_gdn=False):
+                 commit_only_gdn=False, before_capture=None):
         import ttnn
+
+        if before_capture is not None and not callable(before_capture):
+            raise ValueError('Callable pre-capture preparation required')
 
         if type(commit_only_gdn) is not bool:
             raise ValueError('Explicit commit-only GDN policy required')
@@ -133,6 +136,8 @@ class VerifierEngine:
             if retain_mtp_hidden:
                 from mtp_hidden_rows import MTPHiddenRows
                 self.mtp_row_reader = MTPHiddenRows(ttnn, self.mesh, [bucket['mtp_hidden'] for bucket in self.buckets.values()])
+            if before_capture is not None:
+                before_capture(self)
             for bucket in self.buckets.values():
                 rows = bucket['rows']
                 self.restore_initial()

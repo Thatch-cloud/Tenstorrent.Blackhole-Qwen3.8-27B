@@ -59,6 +59,10 @@ class FullDSparkRequestTests(unittest.TestCase):
                 self.device.side_effect = RuntimeError('injected history preparation failure')
             self.events.append('factory')
             runtime = options['feature_factory']()
+            if proposal_trace:
+                self.drafter.prepare_trace.assert_not_called()
+                self.drafter.propose.assert_not_called()
+                options['verifier_before_capture'](SimpleNamespace(initial=[]))
             self.assertEqual(options['feature_drafter_name'], 'dspark')
             self.assertEqual(options['lookup_max_rows'], 16)
             self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
