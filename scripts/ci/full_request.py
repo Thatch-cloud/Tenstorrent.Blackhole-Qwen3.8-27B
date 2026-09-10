@@ -50,7 +50,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             or (audit_commit_only_gdn and not commit_only_gdn)):
         raise ValueError('Explicit commit-only GDN selection required before auditing deferred state')
     if verifier_observer is not None and (not callable(verifier_observer) or not audit_commit_only_gdn
-            or feature_factory is None or not norm_batch or not native_sampling_rows or attention_replay):
+            or feature_factory is None or not norm_batch or not native_sampling_rows
+            or (attention_replay and not target_attention_t16)):
         raise ValueError('Verifier observation requires a separate audited feature-drafter request')
     if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
         raise ValueError('Attention diagnostics require explicit short-context parallel attention')

@@ -22,7 +22,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     if type(score_layout) is not bool or (score_layout and not (
             proposal_trace and commit_only_gdn and native_attention and target_attention_t16 and not profile_verifier)):
         raise ValueError('Score layout requires the distinct traced native-drafter folded-target experiment')
-    if type(target_attention_t16) is not bool or (target_attention_t16 and profile_verifier):
+    if type(target_attention_t16) is not bool:
         raise ValueError('Choose a distinct T16 target attention experiment')
     if target_attention_t16:
         from pathlib import Path
@@ -196,7 +196,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     try:
         if profile_verifier:
             from request_verifier_profile import RequestVerifierProfile
-            observer = RequestVerifierProfile(operations, model.mesh_device, full_rows=16)
+            observer = RequestVerifierProfile(operations, model.mesh_device, full_rows=16,
+                target_attention_t16=target_attention_t16)
         result = measure_request(model, sampler, prompt, pages, helpers, prefill=captured_prefill, decode=gold_decode,
             live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,

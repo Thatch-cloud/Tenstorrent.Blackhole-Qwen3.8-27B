@@ -246,6 +246,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from models.tt_transformers.tt.ccl import tt_all_reduce
     if profile_drafter:
         from dspark_draft_profile import DraftProfile
+    if profile_drafter or profile_verifier:
         from target_t16_attention_gate import qualify as qualify_target
         qualify_target(Path(__file__).parent)
         POLICIES = {'native': dict(POLICIES['native'], target_attention_t16=True)}
@@ -275,7 +276,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter else 257, **POLICIES[arm],
+                    eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter or profile_verifier else 257, **POLICIES[arm],
                     **(dict(profile_verifier=True) if profile_verifier else {}),
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:

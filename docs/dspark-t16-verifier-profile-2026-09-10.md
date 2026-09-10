@@ -1,5 +1,21 @@
 # Current DSpark T16 verifier attribution
 
+## Updated profiling path (September 11)
+
+The opt-in `dspark-verifier-profile` suite now selects folded T16 target attention,
+matching the current target verifier rather than the older serial-attention path.
+It retains the simulator-qualified attention sources and audited complete request;
+the observer rejects an engine whose actual attention mode differs from its declared
+mode. The report records and independently checks that mode. The request budget is
+256 tokens, matching the current comparison. PP/TG remain suppressed.
+
+This is instrumentation only, not a new kernel or a performance result. The drafter
+still uses native score layout: its work lies outside verifier markers. Hardware
+attribution for this updated path is pending. The older measurements below remain
+valid only for their original serial-attention configuration.
+
+## Original serial-attention profile
+
 The repeat-confirmed native-attention request reaches87.10 committed TG at4K.
 Verification still takes about76ms/block. Earlier device attribution measured
 T8 DFlash2 and does not establish this T16 breakdown.

@@ -38,6 +38,12 @@ def validate_request(report, console, *, family='dflash2'):
                 or request.get('verifier_profile', {}).get('full_rows') != 16):
             raise ValueError('Profile the audited native-attention T16 DSpark configuration')
         features = draft.get('feature_checks', [])
+        folded = request.get('verifier_profile', {}).get('target_attention_t16', False)
+        if type(folded) is not bool or request.get('target_attention_t16', False) is not folded:
+            raise ValueError('Verifier attribution must identify its actual attention path')
+        if folded:
+            from dspark_target_attention_variants import validate_route
+            validate_route(request, 'parallel')
         if len(features) != 10 * len(request['blocks']) or any(value.get('exact') is not True for value in features):
             raise ValueError('Complete exact target-feature publication checks required')
     else:

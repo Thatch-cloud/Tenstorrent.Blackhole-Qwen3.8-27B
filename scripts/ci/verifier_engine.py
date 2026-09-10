@@ -76,6 +76,7 @@ class VerifierEngine:
         if target_attention_t16:
             from target_t16_attention_gate import qualify
             qualify(Path(__file__).parent)
+        self.target_attention_t16 = target_attention_t16
         if attention_replay and max_verify_rows != 32 and not short_context and not target_attention_t16:
             raise ValueError('Width-cap experiment currently requires native attention')
         self.norm_batch = norm_batch

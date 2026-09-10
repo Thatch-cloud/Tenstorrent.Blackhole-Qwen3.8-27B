@@ -11,6 +11,31 @@ from request_verifier_profile_report import analyze_traces, intervals, validate_
 
 
 class RequestVerifierProfileTests(unittest.TestCase):
+    def test_folded_observer_requires_matching_engine_and_records_path(self):
+        engine = self.engine()
+        engine.attention_replay = engine.target_attention_t16 = True
+        ticket = SimpleNamespace(position=4096, tokens=list(range(16)))
+        with patch.dict(os.environ, {name: '1' for name in PROFILER_FLAGS}), redirect_stdout(io.StringIO()):
+            observer = RequestVerifierProfile(engine.operations, engine.mesh, signpost=Mock(),
+                full_rows=16, target_attention_t16=True)
+            for index in range(3):
+                engine.phase, engine.pending = 'idle', None
+                with observer(engine, ticket):
+                    engine.phase, engine.pending = 'verified', ticket
+                    engine.buckets[8]['first'] = False
+            self.assertTrue(observer.summary()['target_attention_t16'])
+            engine.phase, engine.pending = 'idle', None
+            for replay, folded in ((False, True), (True, False), (False, False)):
+                engine.attention_replay, engine.target_attention_t16 = replay, folded
+                with self.assertRaises(ValueError):
+                    with observer(engine, ticket):
+                        self.fail('Mismatched attention path admitted')
+
+    def test_folded_observer_rejects_implicit_or_wrong_width(self):
+        for width, folded in ((8, True), (16, 1), (16, 'true')):
+            with self.assertRaises(ValueError):
+                RequestVerifierProfile(Mock(), object(), full_rows=width, target_attention_t16=folded)
+
     def test_explicit_t16_observer_requires_three_full_width_calls(self):
         engine = self.engine()
         engine.buckets = {16: engine.buckets[8]}

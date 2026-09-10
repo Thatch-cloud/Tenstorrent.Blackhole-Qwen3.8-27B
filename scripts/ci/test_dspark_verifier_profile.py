@@ -6,6 +6,18 @@ from test_request_verifier_profile import RequestProfileReportTests
 
 
 class DSparkVerifierProfileTests(unittest.TestCase):
+    def test_folded_profile_requires_matching_route(self):
+        report, console = self.fixture()
+        request = report['request_checks'][0]
+        request['verifier_profile']['target_attention_t16'] = True
+        request.update(target_attention_t16=True, attention_replay=True, family_routing=True)
+        validate_request(report, console, family='dspark')
+        for field in ('target_attention_t16', 'attention_replay', 'family_routing'):
+            changed = copy.deepcopy(report)
+            changed['request_checks'][0][field] = False
+            with self.assertRaises(ValueError):
+                validate_request(changed, console, family='dspark')
+
     def fixture(self):
         records, unused = RequestProfileReportTests().fixture()
         for record in records:

@@ -12,10 +12,13 @@ PROFILER_FLAGS = ('TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER', 'TT_METAL_PROF
 
 
 class RequestVerifierProfile:
-    def __init__(self, operations, mesh, *, signpost=None, full_rows=8):
+    def __init__(self, operations, mesh, *, signpost=None, full_rows=8, target_attention_t16=False):
         if type(full_rows) is not int or full_rows not in (8, 16):
             raise ValueError('Explicit supported verifier profile width required')
         self.full_rows = full_rows
+        if type(target_attention_t16) is not bool or (target_attention_t16 and full_rows != 16):
+            raise ValueError('Folded target attribution requires explicit T16 geometry')
+        self.target_attention_t16 = target_attention_t16
         if not all(os.environ.get(name) == '1' for name in PROFILER_FLAGS):
             raise ValueError('Request attribution requires runtime profiling with incremental device-data dumps')
         if signpost is None:
@@ -29,9 +32,11 @@ class RequestVerifierProfile:
     def __call__(self, engine, ticket):
         if (self.active or engine.mesh is not self.mesh or engine.operations is not self.operations
                 or not engine.commit_only_gdn or not engine.norm_batch or not engine.native_sampling_rows
-                or engine.attention_replay or engine.phase != 'idle'
+                or engine.attention_replay is not self.target_attention_t16
+                or getattr(engine, 'target_attention_t16', False) is not self.target_attention_t16
+                or engine.phase != 'idle'
                 or len(ticket.tokens) not in (1, 2, 4, 8, 16) or len(ticket.tokens) > self.full_rows):
-            raise ValueError('Profile the unchanged idle commit-only native-attention verifier')
+            raise ValueError('Profile the declared idle commit-only verifier attention path')
         key = engine.bucket_key(ticket)
         bucket = engine.buckets[key]
         trace_id = int(bucket['trace'])
@@ -70,5 +75,6 @@ class RequestVerifierProfile:
             calls.append(dict(file=filename, line=line, function=name, primitive_calls=primitive,
                 total_calls=total, self_seconds=own, cumulative_seconds=cumulative))
         return dict(records=list(self.records), trace_counts=dict(self.trace_counts), full_rows=self.full_rows,
+            target_attention_t16=self.target_attention_t16,
             host_calls=sorted(calls, key=lambda entry: -entry['cumulative_seconds'])[:40],
             scope='Instrumented actual verify calls including input staging and readback; profiler dumps and correctness digests outside markers; not throughput')
