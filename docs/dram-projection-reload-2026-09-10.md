@@ -185,6 +185,20 @@ affect the drafter; that is a hypothesis, not an established cause. Retain the
 native-footprint baseline above and disclose preparation/residency costs.
 No unchanged repeat or new kernel is justified before isolating this effect.
 
+### Equal-footprint diagnostic dispatched
+
+Run `34473390663`, immutable commit `1dca72d`, prepares the same 64 sharded
+down-weight copies before **each** control and candidate request and releases
+them after each request. The control executes only original MLP methods; the
+candidate executes the qualified hybrid for T16. Both pay preparation in
+setup-inclusive time. No kernel arithmetic changed; 33 relevant host tests pass.
+
+The report records both-chip addresses for every prepared weight, checks their
+stability, and reports whether all four timed requests reused identical weight
+addresses. Equal resident footprint alone does not prove that every downstream
+allocation is identical. This is a diagnostic with a deliberately expanded
+control footprint, not a replacement for the original native-footprint result.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
