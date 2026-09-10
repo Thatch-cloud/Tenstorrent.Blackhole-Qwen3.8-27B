@@ -20,6 +20,13 @@ tokens or aggregate concurrent throughput. Results are offline, not endpoint tes
 | DSpark captured proposals + commit-only GDN | 3,319.26 | 4,096 | **59.81** | Exact tokens/state; +8.89% over matched eager |
 | DSpark precise-native attention + capture + commit-only GDN | 3,337.21 | 4,096 | **87.10** | Repeat-confirmed; four timed requests across two runs |
 | DSpark above + folded T16 target attention | 3,312.91 | 4,096 | **89.86** | Repeat-confirmed; four timed requests across two matched runs |
+| DSpark above + fused Markov score layout | 3,339.11 | 4,096 | **95.36** | Initial matched run; control 88.51 TG; repeat pending |
+
+The fused score layout improves committed TG by **7.74%** with identical proposals,
+accepted tokens and target state. Drafting drops from **37.42 to 29.56 ms/block**;
+target verification/readback remains **69.09 ms/block**. This is not yet a
+repeat-confirmed or held-out coding-quality result.
+[Score-layout evidence](docs/dspark-score-layout-2026-09-11.md#first-complete-hardware-result).
 
 DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
 The precise-native attention candidate reaches repeat-confirmed **87.10 TG**,
@@ -33,7 +40,7 @@ The repository-derived prompt changed, so historical rows are not matched contro
 and [capture failure diagnosis](docs/dspark-capture-failure-2026-09-10.md).
 These results do not certify held-out coding quality or long-context scaling.
 
-### Current experiment
+### Previous MLP experiment
 
 **Native DRAM-sharded MLP with corrected FP32 partial reload.** Gate, up and down
 pass exact simulator replay checks. The complete T16 local MLP also passes:

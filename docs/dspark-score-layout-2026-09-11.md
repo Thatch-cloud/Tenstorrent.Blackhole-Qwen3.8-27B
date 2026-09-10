@@ -117,3 +117,49 @@ unqualified, and no hardware throughput result is implied by admission.
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.
+
+## First complete hardware result
+
+[Run 34535719147](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34535719147)
+passed on immutable revision `83f679f895296df3720df4aad8a17ef0343c5b6a`.
+One stream, CTX 4096, fifteen DSpark proposals and T16 target verification;
+both arms use precise native drafter attention and folded target attention.
+
+| Arm | PP tok/s | Committed TG tok/s | Timed committed tokens |
+| --- | ---: | ---: | ---: |
+| Native score layout | 3317.83 | 88.51 | 234 |
+| Fused score layout | 3339.11 | 95.36 | 234 |
+
+**Gain: 7.74%.** Each arm has one audited and two timed requests, in A/B/B/A
+timing order. Both accept 214 of 330 proposed tokens. Exact target tokens,
+state, inactive slots and proposal equivalence pass. The learned-weight hardware
+audit passes all 60 eager and 90 replay score/token checks before request timing.
+Independent local validation confirms the hardware gate, request summary,
+current source hashes and unchanged native sources.
+
+Mean timings below cover the 22 speculative blocks per arm, not setup or prefill.
+
+| Component | Control ms/block | Fused ms/block |
+| --- | ---: | ---: |
+| Draft | 37.42 | 29.56 |
+| Verify and readback | 69.05 | 69.09 |
+| Select and commit | 12.54 | 11.77 |
+| Input | 0.77 | 0.72 |
+| Complete block cycle | 120.12 | 111.49 |
+
+At the observed 10.64 committed tokens/block, 200 TG requires roughly 53.18 ms
+per block. Verification alone currently exceeds that budget. Eliminating the
+remaining drafting time alone would therefore not reach the target: the next
+major optimization must reduce verification/publication cost or increase accepted
+tokens per cycle without weakening correctness or coding quality.
+
+Artifact: `dspark-score-layout-request-hardware.json`, SHA-256
+`ea0825420e4325d35c7bb62c2b2468e18532f20f0d90ca44336f58d83d8f6aed`.
+Hardware audit canonical digest:
+`5a242ee9023a84fd9259235f96c1a226d25d94db5477e80601ad5c0854a068f5`.
+
+Unchanged confirmation run:
+[34536767330](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34536767330).
+Repeat confirmation remains pending. These short offline requests do not certify
+held-out coding quality, long-context scaling or serving readiness. The full-size
+synthetic feedback simulator remains a separate unfinished check, not a claimed pass.
