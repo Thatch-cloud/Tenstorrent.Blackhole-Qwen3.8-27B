@@ -53,7 +53,15 @@ blocks, **6.70% slower** overall. No new TG result.
 The [reduced-conversion run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34468926073)
 is **15.1% slower** despite fewer transfers.
 Profiling isolated a useful down-projection saving. The down-only hybrid is
-**about 4% lower latency** in both complete-MLP tests; full-model TG is not yet measured.
+**about 4% lower latency** in both complete-MLP tests, but the full request is slower:
+
+| One coding stream | CTX | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Folded attention + native MLP | 4096 | 3286.50 | 90.08 |
+| Folded attention + DRAM down only | 4096 | 3334.04 | 88.93 |
+
+Not promoted: verification improves, but drafting regresses. Allocation effects
+are the next diagnostic; the cause is not yet established.
 [Details](docs/dram-projection-reload-2026-09-10.md).
 
 ### Recent request experiments

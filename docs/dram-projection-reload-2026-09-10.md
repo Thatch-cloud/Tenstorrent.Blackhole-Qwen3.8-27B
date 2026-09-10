@@ -146,6 +146,45 @@ mislabelled as steady decode or PP. Thirty-nine relevant host tests pass.
 No full-request improvement is claimed until this run completes and its
 artifacts are independently validated.
 
+### Full-request result: not promoted
+
+Run `34472208506` completed and passed independent local validation of every
+recorded source fingerprint, clean closure, request summaries, all six exact
+token/state audits and identical proposals/acceptance. Artifact SHA256:
+`682e39ddae75aa75627975570d08fc6656f056a9cd29e9e2c75593db31c98a7c`.
+
+| One stream, CTX 4096 | PP tok/s | Committed TG tok/s | Setup-inclusive ms |
+| --- | ---: | ---: | ---: |
+| Folded attention + native MLP | 3286.50 | 90.08 | 6075.75 |
+| Folded attention + down-only MLP | 3334.04 | 88.93 | 6559.80 |
+
+The candidate is **1.27% slower in committed TG**, so the layer gain is not
+promoted. Both arms emit 234 timed tokens and accept 214 of 330 proposals.
+Every target layer uses the candidate during verifier construction/capture;
+the hook restores original methods and native bindings.
+
+Mean costs across 22 timed blocks per arm:
+
+| Stage | Native MLP ms | Down-only MLP ms |
+| --- | ---: | ---: |
+| Draft | 35.876 | 38.352 |
+| Input | 0.817 | 0.781 |
+| Verify + readback | 69.166 | 68.426 |
+| Select + commit | 11.830 | 11.623 |
+| Complete block | 118.039 | 119.552 |
+
+The expected verifier saving is visible (**0.740 ms/block**), but drafting
+regresses by **2.476 ms/block**. Extra weight preparation itself takes about
+16.7 ms per candidate request and is outside these decode costs. It cannot
+directly explain the drafting-stage increase.
+
+Next diagnostic: compare both arms with the same prepared down-weight memory
+footprint and allocation lifetime, while changing only the executed target
+MLP route. This tests whether extra resident weights and shifted allocations
+affect the drafter; that is a hypothesis, not an established cause. Retain the
+native-footprint baseline above and disclose preparation/residency costs.
+No unchanged repeat or new kernel is justified before isolating this effect.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
