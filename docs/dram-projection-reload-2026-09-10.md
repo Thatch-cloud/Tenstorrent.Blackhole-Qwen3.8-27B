@@ -130,6 +130,22 @@ exit or failure. Host tests cover every layer, fallback routing, caller-owned
 input, partial allocation failure and failed-kernel cleanup. This hook has not
 yet been measured in a complete request and is not a serving change.
 
+### Full-request integration underway
+
+Run `34472208506`, immutable commit `ed9483f`, compares native MLP against the
+down-only hybrid with folded T16 target attention enabled in **both** arms.
+Both use captured precise-native DSpark proposals and commit-only GDN.
+CTX is 4096, one coding stream, fifteen draft queries and sixteen verifier rows.
+The schedule is two feature/state audits followed by timed A/B/B/A requests.
+
+The gate requires exact output tokens, target state, feature publication and
+matching proposals/acceptance across arms. Candidate routing must execute in
+all 64 target layers and restore their original methods and weight bindings.
+Weight-resharding setup is included in setup-inclusive request time, but not
+mislabelled as steady decode or PP. Thirty-nine relevant host tests pass.
+No full-request improvement is claimed until this run completes and its
+artifacts are independently validated.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
