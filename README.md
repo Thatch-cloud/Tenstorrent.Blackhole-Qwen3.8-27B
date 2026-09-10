@@ -45,8 +45,9 @@ Folded T16 target attention now passes simulator and two hardware comparisons:
 **89.86 pooled TG versus 83.88 matched control**. Setup-inclusive latency is
 still worse, and long-context scaling and held-out coding quality remain open.
 [Attention results](docs/target-t16-attention-2026-09-10.md).
-The next hardware comparison combines folded attention with the scatter norm
-reader; it measures whether the gains actually combine rather than adding them.
+The combined hardware comparison passes correctness but adds **no speed**:
+90.24 TG with scatter norm versus 90.25 folded-attention control at CTX4096.
+No promotion. [Combined result](docs/dspark-combined-result-2026-09-10.md).
 [Experiment details](docs/gdn-norm-scatter-experiment-2026-09-10.md).
 
 ### Other measured results

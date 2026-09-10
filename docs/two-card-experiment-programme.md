@@ -10,10 +10,12 @@ versus **83.88 TG** native target-attention control. Setup-inclusive latency
 remains worse; held-out coding quality and long-context scaling remain open.
 [Detailed evidence](target-t16-attention-2026-09-10.md).
 
-**In flight:** `34456312393`, source `a0884c0`, compares folded target attention
+**Combined comparison complete:** `34456312393`, source `a0884c0`, compares folded target attention
 with versus without the scatter norm reader. Both arms retain captured native
 DSpark drafting and commit-only GDN. Two audits precede A/B/B/A timing;
 1408 host tests pass and both kernel simulator gates remain mandatory.
+All six requests pass, but TG is 90.24 combined versus 90.25 control: no useful
+gain and no promotion. [Result](dspark-combined-result-2026-09-10.md).
 This measures combined gains rather than assuming they add. No serving change.
 
 **Previous norm experiment:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
