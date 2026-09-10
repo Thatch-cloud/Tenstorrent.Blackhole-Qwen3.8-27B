@@ -64,3 +64,19 @@ are unchanged by design; simulator evidence must verify that claim.
 
 The current verifier profiler is independent and still needed: even removing
 publication completely would not make the existing request reach 200 TG.
+
+## Simulator readback bottleneck
+
+A read-only `py-spy` stack inspection located the first-case delay inside
+`FDMeshCommandQueue::wait_for_outstanding_reads`, called by the probe's physical
+readback of recurrent history on chip 1. The kernel had returned; this is not
+evidence of a publication deadlock. The run subsequently advanced through the
+first candidate case to the second native input pattern.
+
+An isolated `tensor_bit_compare` diagnostic is being prepared to compare every
+physical BF16 word on device and return 32 mismatch counters, instead of repeatedly
+reading megabytes through the simulator command queue. It performs direct bit
+comparison, not a probabilistic hash. **It is unqualified and is not used by the
+publication probe.** Before use it must pass independent simulator negative
+controls for changed words, padding, worker partitions and changed-input replay,
+including poisoned counter replacement. The current probe remains unchanged.
