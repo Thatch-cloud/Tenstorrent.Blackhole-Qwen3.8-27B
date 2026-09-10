@@ -1,7 +1,31 @@
 # T16 target attention replay
 
-Status: isolated simulator comparison passed; full-request integration and
-hardware performance remain unqualified. Serving defaults are unchanged.
+## Corrected hardware result
+
+[34454698201](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34454698201)
+passes with the candidate actually enabled. Independent re-analysis reproduces
+the saved summary; source/runtime fingerprints match before/after. All six
+requests preserve exact native outputs, state, inactive slots and cross-arm
+proposals/acceptance. All timed samples are retained.
+
+| Target attention | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native serial | 1 | 3330.87 | 4096 | 83.85 |
+| Folded T16 | 1 | 3264.04 | 4096 | **89.89** |
+
+Matched TG gain: **7.20%**, not yet repeat-confirmed. Each arm commits 234 timed
+tokens, accepting 214/330 proposals. Verification/readback averages 76.17 versus
+69.17 ms/block; whole cycles average 126.79 versus 118.29 ms. Setup-inclusive
+request time is worse: 6309.29 versus 6588.83 ms. No serving promotion or
+held-out quality claim follows; the 200 committed TG target remains unmet.
+
+Artifact: `runner-evidence.local/34454698201/qwen-hardware-inventory-34454698201/dspark-target-attention-request-hardware.json`.
+SHA256: `e0129e13e8877eb867ddca1ca3deadb9583bc7c1cff8153f68b9c0114ea94dc1`.
+
+## Development and simulator evidence
+
+The isolated simulator comparison and corrected hardware request comparison
+pass. Repeatability and broader contexts remain open; serving defaults are unchanged.
 
 Hardware comparison dispatched as
 [34453904831](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34453904831),
