@@ -9,8 +9,9 @@ class TargetStateChanged(AssertionError):
 
 
 class TargetStateAuditedDrafter:
-    def __init__(self, drafter, snapshot):
+    def __init__(self, drafter, snapshot, protected_snapshot=None):
         self.drafter, self.snapshot = drafter, snapshot
+        self.protected_snapshot = protected_snapshot
         self.initial_state = None
         self.initial_position = None
 
@@ -19,8 +20,12 @@ class TargetStateAuditedDrafter:
 
     def checked(self, phase, operation):
         before = self.snapshot()
+        protected_before = self.protected_snapshot() if self.protected_snapshot is not None else None
         result = operation()
         after = self.snapshot()
+        protected_after = self.protected_snapshot() if self.protected_snapshot is not None else None
+        if protected_before != protected_after:
+            raise TargetStateChanged(f'{phase}_protected_verifier_storage', protected_before, protected_after)
         if before != after:
             raise TargetStateChanged(phase, before, after)
         return result

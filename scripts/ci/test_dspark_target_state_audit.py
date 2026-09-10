@@ -6,6 +6,22 @@ from dspark_target_state_audit import TargetStateAuditedDrafter, TargetStateChan
 
 
 class TargetStateAuditTests(unittest.TestCase):
+    def test_saved_verifier_corruption_detected_even_when_live_state_is_unchanged(self):
+        draft = SimpleNamespace(propose=Mock(return_value=(1, 2)))
+        wrapper = TargetStateAuditedDrafter(draft, Mock(return_value=['same']),
+            protected_snapshot=Mock(side_effect=[['saved'], ['overwritten']]))
+        with self.assertRaises(TargetStateChanged) as failure:
+            wrapper.propose(3, 2)
+        self.assertEqual(failure.exception.evidence['phase'], 'proposal_replay_protected_verifier_storage')
+        self.assertEqual(failure.exception.evidence['before'], ['saved'])
+        self.assertEqual(failure.exception.evidence['after'], ['overwritten'])
+
+    def test_unbound_verifier_has_no_protected_storage(self):
+        draft = SimpleNamespace(propose=Mock(return_value=(1, 2)))
+        wrapper = TargetStateAuditedDrafter(draft, Mock(return_value=['same']),
+            protected_snapshot=Mock(return_value=None))
+        self.assertEqual(wrapper.propose(3, 2), (1, 2))
+
     def test_verifier_setup_corruption_is_detected_before_replay(self):
         draft = SimpleNamespace(position=4096, prepare_trace=Mock(), propose=Mock())
         wrapper = TargetStateAuditedDrafter(draft,

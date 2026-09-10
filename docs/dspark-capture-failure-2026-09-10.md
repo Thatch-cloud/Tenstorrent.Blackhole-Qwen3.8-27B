@@ -8,6 +8,24 @@ captured arm fails on the first target feature at CTX4096, tap5, chip0.
 | 34438631295 | Eager exact; captured arm fails before any timed request |
 | 34439165535 | Proposal capture/replay preserves target GDN and valid KV; 2543/2560 feature values differ |
 | 34439562578 | Verifier setup restores initial target state; actual token/position buffers match the ticket on both chips |
+| 34440152157 | Failure-only diagnostic cannot restore the independently recorded initial GDN state |
+| 34440590613 | Fresh prefill restores exact initial state; native T1 and eager batch match through layers 0–5 on both chips, but captured tap5 matches neither |
+
+## Latest isolation
+
+Run 34440590613 remains a correctness failure, not a speed measurement.
+All three diagnostic saved-state restoration attempts differ in 138 of 480
+GDN shard hashes (indices 0–137); all 64 valid-KV hashes remain exact.
+Fresh prefill restores the independently recorded initial hashes every time.
+From that verified frontier, all twelve layer/chip comparisons through layer5
+are bit-exact between native T1 and the identical-input eager batch.
+
+This narrows investigation to captured execution and state/buffer lifetime,
+not a demonstrated error in eager batched layer math. It does not yet prove
+whether saved active snapshots or inactive GDN slots are damaged: the digest
+covers whole tensors, while restoration writes only slot zero.
+Next inspect snapshot ownership and trace allocation/reuse, separating active
+from inactive state before changing kernels. Do not retry this candidate unchanged.
 
 The last two runs reproduce identical actual/expected feature hashes:
 

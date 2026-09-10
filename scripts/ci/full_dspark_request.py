@@ -110,6 +110,20 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                     raise error
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
+    def protected_verifier_snapshot():
+        if runtime is None or runtime.engine is None:
+            return None
+        result = []
+        for layer, snapshot in enumerate(runtime.engine.initial):
+            for operand, value in enumerate(snapshot):
+                shards = operations.get_device_tensors(value)
+                if len(shards) != 2:
+                    raise AssertionError('Both saved verifier state shards required')
+                for chip, shard in enumerate(shards):
+                    result.append(dict(layer=layer, operand=operand, chip=chip,
+                        address=shard.buffer_address(), sha256=tensor_digest(operations.to_torch(shard))))
+        return result
+
     def factory():
         nonlocal drafter, runtime, proposal_device
         status('project_full_prefill_history', context=len(prompt))
@@ -129,7 +143,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             if audit_features:
                 from dspark_target_state_audit import TargetStateAuditedDrafter
                 drafter = TargetStateAuditedDrafter(drafter,
-                    lambda: dict(gdn=live_digest(), kv=kv_digest(drafter.position)))
+                    lambda: dict(gdn=live_digest(), kv=kv_digest(drafter.position), inactive=inactive_digest()),
+                    protected_snapshot=protected_verifier_snapshot)
             status('prepare_fixed_history_proposal_trace_before_verifier_capture')
             drafter.prepare_trace(seed, audit=audit_features)
         status('warm_fifteen_query_proposal_before_verifier_capture')
