@@ -7,19 +7,25 @@ test "${QWEN_PROJECTION_LINKS:-0}" = 4
 test -z "${TT_METAL_SIMULATOR:-}"
 test -z "${TT_METAL_MOCK_CLUSTER_DESC_PATH:-}"
 test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
-export PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target ]]
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request ]]
 probe=dspark-pipeline-hardware
-if [ "$mode" = target ]; then
+request_options=()
+if [ "$mode" != backbone ]; then
     probe=dspark-target-hardware
     export MODEL_WEIGHTS_DIR=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
     export HF_MODEL="$MODEL_WEIGHTS_DIR"
 fi
-python3 "/experiment-scripts/ci/$probe.py" --preflight \
+report_name=$probe
+if [ "$mode" = request ]; then
+    report_name=dspark-request-hardware
+    request_options=(--request)
+fi
+python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
@@ -27,14 +33,14 @@ python3 /experiment-scripts/ci/dspark_runtime_cache.py
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e
-timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" \
+timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
-    --output "/experiment/results/$probe.json" 2>&1 | tee "/experiment/results/$probe.log"
+    --output "/experiment/results/$report_name.json" 2>&1 | tee "/experiment/results/$report_name.log"
 status=${PIPESTATUS[0]}
 set -e
-printf '%s\n' "$status" > "/experiment/results/$probe.exit-status"
+printf '%s\n' "$status" > "/experiment/results/$report_name.exit-status"
 test "$status" = 0
-if grep -q 'Failed to discover available ethernet links' "/experiment/results/$probe.log"; then
+if grep -q 'Failed to discover available ethernet links' "/experiment/results/$report_name.log"; then
     echo 'Explicit four-link integration unexpectedly invoked fallback discovery' >&2
     exit 1
 fi

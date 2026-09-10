@@ -2,11 +2,12 @@
 
 ## Current programme position - 2026-09-10
 
-**Latest drafter step: full 4K / 15-query attention passes 58 simulator checks.**
-Clean exit 0, unchanged numerical tolerance, independent source/runtime and
-matrix audit. Full-history capture, incremental learned K/V caching and the
-DSpark T16 publication bridge now pass host tests; the complete request still
-needs native integration and hardware measurement. Best repeat-confirmed B1
+**Latest drafter step: full 4K / 15-query attention passes 58 simulator checks;
+wider target/cache layouts pass another 126.** Both close cleanly with exit 0
+and independent source/runtime and matrix audits. Full-history capture,
+incremental learned K/V caching and the DSpark T16 publication bridge are wired
+into the explicit `dspark-request` CI suite. Hardware measurement is next;
+all1,275 host tests pass. Best repeat-confirmed B1
 TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).
 
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer

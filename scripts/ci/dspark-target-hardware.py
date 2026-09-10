@@ -125,6 +125,7 @@ def main():
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--request', action='store_true', help='Run full 4K coding requests with the T16 batched verifier')
     options = parser.parse_args()
     if (os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1'
             or os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE')
@@ -132,6 +133,14 @@ def main():
         raise ValueError('Fresh allocated fast-dispatch hardware run with four explicit proposal links required')
     root, weights = Path(os.environ['TT_METAL_HOME']), Path(os.environ['MODEL_WEIGHTS_DIR'])
     gate = preflight(root, weights, options.config)
+    if options.request:
+        from dspark_request_experiment import request_preflight
+        from sampling_link_policy import audit as sampling_link_audit
+
+        request_gate = request_preflight(Path(__file__).parent)
+        gate['sources'].update(request_gate['sources'])
+        gate['request_prerequisites'] = request_gate['request_prerequisites']
+        gate['sampling_link_sources'] = sampling_link_audit(root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
     native = native_fingerprints(root, dict(native_sources=gate['native_reference']))
     require_compatible_native(native, gate['native_reference'], require_built_library=not options.preflight)
     from transformers import AutoConfig, AutoTokenizer
@@ -142,6 +151,12 @@ def main():
     if any(len(prompt) < CONTEXT for prompt in prompts):
         raise ValueError('Both coding fixtures must supply at least 32 actual tokens')
     prompts = [prompt[:CONTEXT] for prompt in prompts]
+    context = None
+    if options.request:
+        from coding_context_request import make_context_prompt
+
+        prompt, context = make_context_prompt(tokenizer, context_tokens=4096)
+        prompts = [prompt]
     if options.preflight:
         options.output.write_text(json.dumps(dict(passed=True, scope='Target imports/config/tokenizer and component gates; no device execution',
             prompts=prompts, **gate), indent=2) + '\n')
@@ -155,6 +170,10 @@ def main():
         retained_numerical_gate_passed=False, target_verifier='Native serial oracle, not batched verification or publication',
         source_revision=os.environ.get('QWEN_SOURCE_REVISION'), workflow_run=os.environ.get('QWEN_WORKFLOW_RUN'),
         link_policy=validate(os.environ), cases=[], stages=[], native_sources=native, **gate)
+    if options.request:
+        report.update(scope='Full-history DSpark coding-request screen; one feature audit and two timed requests',
+            ctx_tokens=len(prompts[0]), drafter_history_rows=len(prompts[0]), proposal_rows=15,
+            target_verifier='Captured T16 batched verifier with exact native token/state and committed-feature checks')
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -245,6 +264,16 @@ def main():
         progress('audit_uploaded_parameters')
         check_parameters('before')
         layers = tuple({name:parameters[f'layers.{layer}.{name}'] for name in SPECIFICATIONS} for layer in range(5))
+        if options.request:
+            from dspark_request_experiment import run_loaded_requests
+
+            run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
+                layers, predecessor, successor, DSparkRotary(json.loads(options.config.read_text())), report, progress,
+                prompt=prompts[0], context=context)
+            progress('audit_parameters_after_full_requests')
+            check_parameters('after')
+            report['passed'] = True
+            return
         inputs = {name:upload(value) for name, value in metadata(json.loads(options.config.read_text())).items()}
         inputs.update({'feature_' + str(tap):upload(torch.zeros(2, 1, 32, 2560, dtype=torch.bfloat16), sharded=True) for tap in TAPS})
         identifiers = upload(query_inputs(0, CONTEXT)['identifiers'], integers=True)

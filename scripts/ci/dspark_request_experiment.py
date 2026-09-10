@@ -1,0 +1,165 @@
+"""Allocated-hardware full-request DSpark screen, reusing the loaded target and verified learned parameters."""
+
+import json
+import math
+import os
+from pathlib import Path
+
+from dspark_hardware_gate import digest
+from dspark_projection import tensor_digest
+from gdn_multitoken_conv import addresses
+
+
+PREREQUISITES = {
+    'dspark-full-attention-simulator.json': '7fa3290673df7b77aaed954ab55d683caedbcc51e32da4eb10df8eb292829499',
+    'dspark-wide-layout-simulator.json': '3746601ab4c6b45b5287b1e41e2bc99d6a74cc25cd9764c92c24d710510dc6ef',
+}
+
+
+def request_preflight(directory):
+    directory = Path(directory)
+    specifications = {
+        'dspark-full-attention-simulator.json': dict(eager_checks=4, replay_checks=6, input_checks=40,
+            fixture_controls=6, stale_controls=2),
+        'dspark-wide-layout-simulator.json': dict(eager_checks=28, replay_checks=28, input_checks=56, stale_controls=14),
+    }
+    prerequisites = {}
+    for name, counts in specifications.items():
+        path = directory / name
+        if digest(path) != PREREQUISITES[name]:
+            raise ValueError('Exact independently audited full-history/wider-layout report required')
+        report = json.loads(path.read_text())
+        if (path.with_suffix('.exit-status').read_text().strip() != '0'
+                or report.get('passed') is not True or report.get('closed_cleanly') is not True
+                or report.get('backend') != 'simulator' or report.get('stage') != 'complete'
+                or report.get('sources') != report.get('sources_after')
+                or report.get('native_sources') != report.get('native_sources_after')
+                or {key: len(report.get(key, [])) for key in counts} != counts):
+            raise ValueError('Complete clean unchanged full-history/wider-layout simulator evidence required')
+        for field in counts:
+            flag = 'exact' if field == 'input_checks' else 'detected' if field in ('fixture_controls', 'stale_controls') else 'passed'
+            if any(record.get(flag) is not True for record in report[field]):
+                raise ValueError('Every full-history/wider-layout comparison must pass')
+        for source, checksum in report['sources'].items():
+            if source != '../../optimisation/sim/run-dispatch-probe.sh' and digest(directory / source) != checksum:
+                raise ValueError('Qualified full-history/wider-layout source changed: ' + source)
+        prerequisites[name] = digest(path)
+    files = [path for path in directory.iterdir() if path.is_file() and path.suffix in ('.py', '.cpp', '.hpp', '.h')]
+    harness = directory.parents[1] / 'speculative-decoding/harness'
+    if not (harness / 'greedy_session.py').is_file():
+        raise ValueError('Complete request harness must be mounted before hardware preflight')
+    sources = {path.name: digest(path) for path in sorted(files)}
+    sources.update({'../../speculative-decoding/harness/' + path.name: digest(path) for path in sorted(harness.glob('*.py'))})
+    return dict(request_prerequisites=prerequisites, sources=sources)
+
+
+def summarize(requests):
+    if (len(requests) != 3 or [value.get('instrumented_timing') for value in requests] != [True, False, False]
+            or any(value.get('exact') is not True or value.get('state_exact') is not True
+                or value.get('inactive_exact') is not True for value in requests)):
+        raise ValueError('One feature-audited and two exact timed full requests required')
+    first = requests[0]
+    if any(value['prompt_tokens'] != first['prompt_tokens'] or value['emitted'] != first['emitted']
+            or type(value['length']) is not int or value['length'] != len(value['prompt_tokens'])
+            or value['committed_decode_tokens'] != len(value['emitted']) - 1 for value in requests):
+        raise ValueError('Every complete request must reproduce identical target tokens at the same context')
+    timed = requests[1:]
+    for value in timed:
+        if any(type(value[field]) not in (int, float) or not math.isfinite(value[field]) or value[field] < 0
+                for field in ('decode_ms', 'prefill_ms', 'prefill_setup_decode_ms', 'feature_setup_ms', 'engine_setup_ms')):
+            raise ValueError('Finite nonnegative complete request timings required')
+    tokens = sum(value['committed_decode_tokens'] for value in timed)
+    milliseconds = sum(value['decode_ms'] for value in timed)
+    prefill_ms = sum(value['prefill_ms'] for value in timed)
+    if tokens < 1 or milliseconds <= 0 or prefill_ms <= 0:
+        raise ValueError('Positive committed-token, complete decode-cycle and prefill measurements required')
+    proposed = sum(value['proposed'] for value in timed)
+    accepted = sum(value['accepted'] for value in timed)
+    return dict(pp=1000 * sum(value['length'] for value in timed) / prefill_ms, ctx=first['length'],
+        committed_tg=1000 * tokens / milliseconds, streams=1, verifier_rows=16, draft_queries=15,
+        committed_tokens=tokens, proposed=proposed, accepted=accepted,
+        acceptance=accepted / proposed if proposed else None,
+        measured_requests=2, audit_requests=1, mean_setup_inclusive_ms=sum(value['prefill_setup_decode_ms'] for value in timed) / 2,
+        mean_feature_setup_ms=sum(value['feature_setup_ms'] for value in timed) / 2,
+        mean_verifier_setup_ms=sum(value['engine_setup_ms'] for value in timed) / 2,
+        proposal_trace=False, held_out_coding_quality=False, serving_qualified=False)
+
+
+def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
+        layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context):
+    import torch
+    from full_dspark_request import measure_dspark_request
+    from full_request import terminal_ids
+    from gdn_snapshot import ActiveSnapshot
+    from models.common.sampling.generator import SamplingGenerator
+    from sampling_link_policy import sampler_links
+
+    eos = terminal_ids(Path(os.environ['MODEL_WEIGHTS_DIR']), model.args.vocab_size)
+    sampler = SamplingGenerator(args=model.args, mesh_device=model.mesh_device, tt_ccl=collectives)
+    sampler.set_trace_bucket(1)
+    layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
+    helpers = [ActiveSnapshot(layer, operations, direct=True) for layer in layers]
+    recurrent = [value for layer in layers for value in (layer.rec_state, *layer.conv_states)]
+    caches = [value for pair in model._paged_kv_caches for value in pair]
+    if len(helpers) != 48 or len(recurrent) != 240 or len(caches) != 32:
+        raise ValueError('Complete native hybrid target state required')
+    bindings = [addresses(operations, value) for value in (*recurrent, *caches)]
+
+    def host(value):
+        shards = operations.get_device_tensors(value)
+        if len(shards) != 2:
+            raise AssertionError('Both actual target-state shards required')
+        return [operations.to_torch(shard).clone() for shard in shards]
+
+    def live_digest():
+        if [addresses(operations, value) for value in (*recurrent, *caches)] != bindings:
+            raise AssertionError('Native target-state bindings changed')
+        return [tensor_digest(shard) for value in recurrent for shard in host(value)]
+
+    def kv_digest(valid):
+        if type(valid) is not int or not 1 <= valid <= 65536:
+            raise ValueError('Explicit valid target KV prefix required')
+        result = []
+        for value in caches:
+            for start in range(0, math.ceil(valid / 64), 64):
+                end = min(start + 64, math.ceil(valid / 64))
+                sliced = operations.slice(value, (start, 0, 0, 0), (end, value.shape[1], 64, value.shape[3]))
+                try:
+                    for shard in host(sliced):
+                        logical = shard.permute(1, 0, 2, 3).reshape(shard.shape[1], -1, shard.shape[3])
+                        result.append(tensor_digest(logical[:, :min((end - start) * 64, valid - start * 64)]))
+                finally:
+                    if addresses(operations, sliced) != addresses(operations, value):
+                        operations.deallocate(sliced)
+        return result
+
+    def inactive_digest():
+        return [tensor_digest(shard[1:] if index % 5 == 0 else shard[:, 1:])
+            for index, value in enumerate(recurrent) for shard in host(value)]
+
+    def prefill(tokens):
+        generator.prev_page_table = None
+        logits, unused = generator.prefill_forward(torch.tensor([tokens], dtype=torch.int32), pages, kv_cache,
+            [len(tokens)], empty_slots=[0], enable_trace=False)
+        return int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax())
+
+    def decode(token, position, traced):
+        output = generator.decode_forward(tokens=torch.tensor([[token]], dtype=torch.int32),
+            start_pos=torch.tensor([position], dtype=torch.int32), page_table=pages, kv_cache=kv_cache,
+            enable_trace=traced, read_from_device=True)
+        return (output[0] if isinstance(output, tuple) else output).clone()
+
+    report['coding_context'], report['request_checks'] = context, []
+    report['sampler_links'] = 4
+    with sampler_links(sampler.tt_sampling, 4):
+        for ordinal, audit in enumerate((True, False, False)):
+            progress(f'full_request_{ordinal}_' + ('feature_audit' if audit else 'timed'))
+            result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
+                parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
+                prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
+                eos_ids=eos, audit_features=audit, max_new_tokens=257)
+            report['request_checks'].append(result)
+            progress(f'full_request_{ordinal}_complete')
+    report['request_summary'] = summarize(report['request_checks'])
+    report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,
+        pp=report['request_summary']['pp'], committed_tg=report['request_summary']['committed_tg'])

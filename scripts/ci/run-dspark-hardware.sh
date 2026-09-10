@@ -4,9 +4,9 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target ]]
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request ]]
 target_mount=()
-if [ "$mode" = target ]; then
+if [ "$mode" != backbone ]; then
     target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
     test -d "$target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
     target_mount=(--mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly")
@@ -63,6 +63,9 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
 docker cp optimisation "$test_id:/experiment-optimisation"
+if [ "$mode" = request ]; then
+    docker cp speculative-decoding "$test_id:/speculative-decoding"
+fi
 docker cp optimisation/sim/sdpa-graft-registration.patch "$test_id:/tmp/ccl-graft-registration.patch"
 docker start -a "$test_id" | tee "$output/dspark-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$test_id")" = 0
