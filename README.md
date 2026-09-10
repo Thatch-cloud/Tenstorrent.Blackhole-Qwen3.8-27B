@@ -45,12 +45,15 @@ four eager and six replay comparisons, including poisoned-output replacement.
 | Complete local MLP | Simulator pass | Exact composition and changed-input replay |
 | Real weights + four-link collective | Correctness pass; slower | 0.357 ms versus 0.335 ms native; not promoted |
 | Shared staging + sharded product | Correctness pass; slower | 0.385 ms versus 0.335 ms native; not promoted |
+| Native gate/up/product + DRAM down only | First hardware gate passes | 0.322 ms versus 0.335 ms native; repeat pending |
 
 [Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34466816834)
 includes input transfer and the collective. The candidate loses all nine timing
 blocks, **6.70% slower** overall. No new TG result.
 The [reduced-conversion run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34468926073)
-is **15.1% slower** despite fewer transfers. Operation-level profiling is next.
+is **15.1% slower** despite fewer transfers.
+Profiling isolated a useful down-projection saving. The down-only hybrid is
+**3.95% lower latency** in its first complete-MLP test; full-model TG is not yet measured.
 [Details](docs/dram-projection-reload-2026-09-10.md).
 
 ### Recent request experiments

@@ -111,6 +111,13 @@ artifact is `scripts/ci/dram-mlp-down-simulator.json`. Real-weight hardware ABBA
 must still establish whether the down-projection saving survives conversions
 and the native four-link collective.
 
+First down-only hardware run `34471157896`, immutable commit `7e64401`, passed
+the independent gate: **0.321541 ms** versus **0.334778 ms** native, a **3.95%
+latency reduction**. All nine matched ABBA blocks exceed the 2% speedup gate;
+the six eager and twelve changed-input trace checks are exact and the mesh
+closes cleanly. This qualifies a repeat and then full-model integration, not a
+new PP/CTX/TG result. An unchanged repeat has been dispatched before promotion.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
