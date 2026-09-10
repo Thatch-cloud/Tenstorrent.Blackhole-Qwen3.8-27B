@@ -3,6 +3,15 @@
 Status: implementation and host checks only. No simulator or hardware pass yet.
 The qualified publication path and serving defaults remain unchanged.
 
+`scripts/ci/gdn-batched-publication-probe.py` now implements the first simulator
+comparison: native and candidate against an independent host reference, two
+distinct chip inputs, all 17 prefixes at one layer, and selected boundary prefixes
+at 48 layers. It resets inputs and NaN-poisoned checkpoints before every eager
+execution and changed-input captured replay. It checks all logical source, native
+and checkpoint elements and stable device addresses. Physical tile-padding audit
+is explicitly reported as missing; this first-pass report alone cannot qualify
+the candidate for hardware. Execution is pending the existing simulator owner.
+
 ## Why test it
 
 The matched score-layout request spends about 11.77 ms/block in selection and

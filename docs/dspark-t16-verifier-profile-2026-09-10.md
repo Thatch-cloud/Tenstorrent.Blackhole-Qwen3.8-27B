@@ -11,10 +11,43 @@ mode. The report records and independently checks that mode. The request budget 
 
 This is instrumentation only, not a new kernel or a performance result. The drafter
 still uses native score layout: its work lies outside verifier markers. Hardware
-attribution for this updated path is pending. The older measurements below remain
+attribution for this updated path passed as recorded below. The older measurements remain
 valid only for their original serial-attention configuration.
 
-## Original serial-attention profile
+## Folded-T16 hardware result
+
+[Run 34537396817](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34537396817)
+passed on immutable revision `1148fb7`. Independent analysis reproduces the saved
+device attribution and validates the declared folded-attention route and complete
+request checks. Eleven real T16 calls per chip yield ten steady replays.
+
+| Interval | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Kernel envelope | 69.301 ms | 69.302 ms |
+| Union of kernel intervals | 68.074 ms | 68.068 ms |
+| Uncovered interval | 1.224 ms | 1.235 ms |
+
+| Chip 0 group | Cores | Calls/replay | Median summed kernel time |
+| --- | ---: | ---: | ---: |
+| Matmul subgroup | 39 | 128 | 11.789 ms |
+| Generic operation | 96 | 48 | 11.734 ms |
+| Matmul subgroup | 32 | 128 | 10.810 ms |
+| Matmul subgroup | 43 | 48 | 5.739 ms |
+| Generic operation | 48 | 112 | 4.607 ms |
+| Generic operation | 24 | 48 | 4.495 ms |
+| Native decode SDPA | 110 | 32 | 3.513 ms |
+
+Compared with the older profile, attention calls fall from 256 to 32 and their
+summed time from 11.648 to 3.513 ms. This confirms the folded path executes;
+it does not establish additive critical-path savings. Projection and generic
+operation costs remain substantial. Generic labels still do not identify kernel
+sources, so they must not be presented as an exact per-kernel GDN attribution.
+
+Request SHA-256: `c0e422bb06ac573a555fa9c5c44a0c11a985b93d5edd96981450a731acd88c48`.
+Device CSV SHA-256: `376f41bd8789c678b7db3022d1072a7f4e0ad73e2dadb9514ed650e73af5c717`.
+This is device attribution, not a new PP/TG result or held-out quality certification.
+
+## Original serial-attention measurements
 
 The repeat-confirmed native-attention request reaches87.10 committed TG at4K.
 Verification still takes about76ms/block. Earlier device attribution measured
