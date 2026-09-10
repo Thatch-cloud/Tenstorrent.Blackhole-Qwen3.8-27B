@@ -45,8 +45,12 @@ def main():
     parser.add_argument('--learned-layer', action='store_true')
     parser.add_argument('--norm-scatter', action='store_true')
     parser.add_argument('--target-attention', action='store_true')
+    parser.add_argument('--approx-draft', action='store_true')
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.approx_draft and (options.target_attention or options.norm_scatter
+            or options.learned_layer or options.checkpoint is not None):
+        raise ValueError('Approximate draft attention is an isolated probe')
     if options.target_attention and (options.norm_scatter or options.learned_layer or options.checkpoint is not None):
         raise ValueError('Target attention is an isolated probe')
     if options.norm_scatter and (options.learned_layer or options.checkpoint is not None):
@@ -88,6 +92,9 @@ def main():
         if options.target_attention:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'target-t16-attention-probe'
+        if options.approx_draft:
+            wrapper = 'run-native-layer-dispatch-probe.sh'
+            environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-approx-fixed-attention-probe'
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:

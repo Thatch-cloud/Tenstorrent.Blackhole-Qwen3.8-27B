@@ -40,7 +40,7 @@ case "${QWEN_SIM_BOUNDED_MEMORY:-0}" in
 esac
 PROBE=${QWEN_SIM_LAYER_PROBE:-dspark-native-cached-layer-probe}
 case "$PROBE" in
-    dspark-native-cached-layer-probe|gdn-norm-scatter-probe|target-t16-attention-probe) ;;
+    dspark-native-cached-layer-probe|gdn-norm-scatter-probe|target-t16-attention-probe|dspark-approx-fixed-attention-probe) ;;
     *) exit 64 ;;
 esac
 {
