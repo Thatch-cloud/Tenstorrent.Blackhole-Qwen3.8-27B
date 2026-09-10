@@ -1,4 +1,4 @@
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -47,7 +47,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         return result
 
     def measure(self, *, audit=False, corrupt=False, wrong_accounting=False, fail_factory=False,
-            proposal_trace=False, commit_only_gdn=False):
+            proposal_trace=False, commit_only_gdn=False, **experiment_options):
         def native_request(model, sampler, prompt, pages, helpers, **options):
             self.events.append('native-control')
             options['prefill'](prompt)
@@ -86,7 +86,50 @@ class FullDSparkRequestTests(unittest.TestCase):
                 collectives=object(), parameters={}, layer_weights=[], predecessor=object(), successor=object(), rotary=object(),
                 prefill=self.base_prefill, decode=self.base_decode, live_digest=Mock(), kv_digest=Mock(), inactive_digest=Mock(),
                 eos_ids=(99,), audit_features=audit, max_new_tokens=65,
-                proposal_trace=proposal_trace, commit_only_gdn=commit_only_gdn)
+                proposal_trace=proposal_trace, commit_only_gdn=commit_only_gdn, **experiment_options)
+
+    def score_scope(self):
+        for target in ('target_t16_attention_gate.qualify', 'target_t16_attention_gate.validate_request_option',
+                'dspark_native_fixed_gate.qualify', 'native_draft_sdpa.audit_active_kernel'):
+            self.stack.enter_context(patch(target))
+        self.stack.enter_context(patch.dict('os.environ', {'TT_METAL_HOME': '/unused-unit-test-runtime'}))
+        events = []
+
+        @contextmanager
+        def install():
+            events.append('install')
+            try:
+                yield
+            finally:
+                events.append('restore')
+
+        arm = SimpleNamespace(install=install, summary=Mock(return_value={'restored': True, 'calls': 2}))
+        constructor = self.stack.enter_context(patch('dspark_score_layout_scope.ScoreLayoutArm', return_value=arm))
+        self.drafter.prepare_trace.side_effect = lambda *args, **kwargs: events.append('capture')
+        self.drafter.close.side_effect = lambda: events.append('close')
+        return events, arm, constructor
+
+    def test_score_scope_installs_before_capture_and_restores_before_device_close(self):
+        events, arm, constructor = self.score_scope()
+        result = self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,
+            target_attention_t16=True, score_layout=True)
+        self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
+        constructor.assert_called_once_with(self.drafter)
+        arm.summary.assert_called_once()
+        self.assertEqual(result['score_layout'], {'restored': True, 'calls': 2})
+
+    def test_score_scope_restores_on_request_validation_failure(self):
+        events, arm, constructor = self.score_scope()
+        with self.assertRaisesRegex(AssertionError, 'publication'):
+            self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,
+                target_attention_t16=True, score_layout=True, wrong_accounting=True)
+        self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
+        arm.summary.assert_not_called()
+
+    def test_score_scope_requires_explicit_compatible_request_policy(self):
+        with self.assertRaisesRegex(ValueError, 'Score layout requires'):
+            self.measure(score_layout=True)
+        self.base_prefill.assert_not_called()
 
     def test_captured_variant_prepares_before_target_and_reports_complete_replay_audit(self):
         events = []

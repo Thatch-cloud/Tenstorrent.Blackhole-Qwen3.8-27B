@@ -1,6 +1,7 @@
 """Complete full-history DSpark coding-request experiment; target exactness, not held-out quality certification."""
 
 import json
+from contextlib import ExitStack
 
 from dspark_device import DSparkDevice
 from dspark_intake import TAPS
@@ -15,9 +16,12 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
-        target_attention_t16=False):
+        target_attention_t16=False, score_layout=False):
     import torch
     from full_request import measure_request
+    if type(score_layout) is not bool or (score_layout and not (
+            proposal_trace and commit_only_gdn and native_attention and target_attention_t16 and not profile_verifier)):
+        raise ValueError('Score layout requires the distinct traced native-drafter folded-target experiment')
     if type(target_attention_t16) is not bool or (target_attention_t16 and profile_verifier):
         raise ValueError('Choose a distinct T16 target attention experiment')
     if target_attention_t16:
@@ -43,6 +47,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         qualify(Path(__file__).parent)
         audit_active_kernel(os.environ['TT_METAL_HOME'])
     capture = drafter = runtime = proposal_device = None
+    score_scope, score_arm = ExitStack(), None
     golden_features, prefill_hashes = {}, None
     prefill_records, feature_checks, history_checks, proposal_checks = [], [], [], []
     seed = None
@@ -156,7 +161,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         drafter.propose(seed, 15)
 
     def factory():
-        nonlocal drafter, runtime, proposal_device
+        nonlocal drafter, runtime, proposal_device, score_arm
         status('project_full_prefill_history', context=len(prompt))
         implementation = DSparkDevice
         if proposal_trace:
@@ -167,6 +172,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             **(dict(native_attention=True) if native_attention else {}),
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         proposal_device = drafter
+        if score_layout:
+            from dspark_score_layout_scope import ScoreLayoutArm
+            score_arm = ScoreLayoutArm(proposal_device)
+            score_scope.enter_context(score_arm.install())
         capture.close()
         if audit_features:
             from dspark_history_audit import AuditedHistoryDrafter
@@ -225,11 +234,17 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             result['committed_tokens_per_second'] = None
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
+        score_scope.close()
+        if score_arm is not None:
+            result['score_layout'] = score_arm.summary()
         return result
     finally:
         try:
-            if drafter is not None:
-                drafter.close()
+            score_scope.close()
         finally:
-            if capture is not None:
-                capture.close()
+            try:
+                if drafter is not None:
+                    drafter.close()
+            finally:
+                if capture is not None:
+                    capture.close()
