@@ -2,6 +2,13 @@
 
 ## Current programme position - 2026-09-10
 
+**In flight:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
+source `8e315d6`, compares the direct-scatter norm reader against the current
+native-attention DSpark control. Two audits precede four A/B/B/A timed requests.
+The isolated simulator passes 12 eager, 24 replay and 30 output-poison checks;
+1,382 host tests pass. No new hardware throughput result is available.
+[Kernel experiment](gdn-norm-scatter-experiment-2026-09-10.md).
+
 **Current single-stream candidate: precise-native DSpark attention, captured
 proposals and commit-only GDN.** All six full requests in
 [34446713555](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34446713555)

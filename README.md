@@ -24,7 +24,7 @@ DSpark's baseline preserves native target tokens/state, but does not beat DFlash
 The precise-native attention candidate reaches repeat-confirmed **87.10 TG**,
 versus59.43 matched control. All12 requests retain exact target outputs/state.
 [Matched results](docs/dspark-native-attention-results-2026-09-10.md).
-The latest comparison passes all nine requests after repairing trace allocation
+The earlier allocation-order comparison passes all nine requests after repairing trace allocation
 order. Its T16 simulator prerequisite passed all17 prefix/continuation cases.
 The repository-derived prompt changed, so historical rows are not matched controls.
 [Latest comparison and timings](docs/dspark-allocation-order-results-2026-09-10.md).
@@ -32,9 +32,18 @@ The repository-derived prompt changed, so historical rows are not matched contro
 and [capture failure diagnosis](docs/dspark-capture-failure-2026-09-10.md).
 These results do not certify held-out coding quality or long-context scaling.
 
+### Current experiment
+
+The direct-scatter GDN norm reader passes 12 eager and 24 trace-replay simulator
+comparisons, including poisoned outputs and padding checks. The full-request
+[A/B hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973)
+is dispatched; **no speed result yet**. Both arms use the same native-attention
+DSpark path at CTX 4,096, with one stream and T16 verification.
+[Experiment details](docs/gdn-norm-scatter-experiment-2026-09-10.md).
+
 ### Other measured results
 
-- **Best single stream: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
+- **Short-context DFlash2: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
   commit-only GDN and fused draft convolution improve the matched control by
   8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
 - **Repeat-confirmed 4K result: PP 3,324.52 / CTX 4,096 / TG 74.27**, versus
@@ -43,8 +52,9 @@ These results do not certify held-out coding quality or long-context scaling.
   [Results](docs/drafter-numerics-experiment-2026-09-09.md).
 - **8K:** the uncached repeat reaches 53.48 TG. This uses the older draft path,
   not the new 4K candidate; these are not scaling guarantees.
-- **Main bottleneck:** the 4K target verifier takes about 62 ms/block, almost
-  entirely on device. [Attribution](docs/current-verifier-profile-2026-09-09.md).
+- **Current DSpark bottleneck:** T16 verification occupies about 76.17 ms on
+  device. The earlier DFlash2 T8 verifier took about 62 ms/block.
+  [Current attribution](docs/dspark-t16-verifier-profile-2026-09-10.md).
 - **Attention result:** live-query attention is 7-10% faster in isolation, but
   the two complete 4K runs pool to **57.64 TG versus 59.27 control**. Both pass
   correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
