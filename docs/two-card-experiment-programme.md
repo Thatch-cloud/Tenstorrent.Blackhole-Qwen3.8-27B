@@ -2,11 +2,14 @@
 
 ## Current programme position - 2026-09-10
 
-**In flight:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
+**Latest completed:** [34451473973](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973),
 source `8e315d6`, compares the direct-scatter norm reader against the current
-native-attention DSpark control. Two audits precede four A/B/B/A timed requests.
+native-attention DSpark control. Two audits and four A/B/B/A timed requests pass.
 The isolated simulator passes 12 eager, 24 replay and 30 output-poison checks;
-1,382 host tests pass. No new hardware throughput result is available.
+1,382 host tests pass. Hardware gives PP3331.87 / CTX4096 / TG87.04 versus
+85.85 control: +1.39%, not repeat-confirmed and not a new overall best.
+All target outputs/state and cross-arm proposals remain exact. Next investigate
+the serial attention component with a separate T16/4K replay simulator gate.
 [Kernel experiment](gdn-norm-scatter-experiment-2026-09-10.md).
 
 **Current single-stream candidate: precise-native DSpark attention, captured

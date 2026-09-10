@@ -35,10 +35,12 @@ These results do not certify held-out coding quality or long-context scaling.
 ### Current experiment
 
 The direct-scatter GDN norm reader passes 12 eager and 24 trace-replay simulator
-comparisons, including poisoned outputs and padding checks. The full-request
+comparisons, including poisoned outputs and padding checks. Its full-request
 [A/B hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973)
-is dispatched; **no speed result yet**. Both arms use the same native-attention
-DSpark path at CTX 4,096, with one stream and T16 verification.
+passes all six requests: **PP 3331.87 / CTX 4096 / TG 87.04**, versus 85.85 TG
+control (**+1.39%**, not repeat-confirmed). Both arms use the same native-attention
+DSpark path with one stream and T16 verification. This is not a new overall best.
+The next simulator experiment targets serial attention work in the T16 verifier.
 [Experiment details](docs/gdn-norm-scatter-experiment-2026-09-10.md).
 
 ### Other measured results
