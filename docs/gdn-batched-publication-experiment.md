@@ -117,3 +117,10 @@ Revised one-layer run `20260910T230103Z-389` is active under
 `qwen-publication-compared-1-20260911.service`. It remains unqualified until
 complete independent validation and clean exit. The 48-layer run follows only
 after that succeeds.
+
+The first comparator-integrated run was stopped as incomplete with exit 143
+after repeated stack samples remained at the first poison comparison's readback.
+An ordering difference from the qualified comparator probe was identified:
+the integration lacked its explicit mesh fence before reading counters. The
+retry restores that fence and logs enqueue/fence milestones for the first case.
+This is a diagnostic hypothesis, not a proven fix or a numerical pass.

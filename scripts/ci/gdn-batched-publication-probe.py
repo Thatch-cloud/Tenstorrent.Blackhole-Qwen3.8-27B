@@ -74,6 +74,11 @@ def main():
             ttnn.copy_host_to_device_tensor(staged, references[operand])
             ttnn.copy_host_to_device_tensor(poison, counter)
             comparisons[layer][operand]()
+            if not report['checks'] and layer == 0:
+                print(json.dumps(dict(comparator_stage='enqueued', operand=operand)), flush=True)
+            ttnn.synchronize_device(mesh)
+            if not report['checks'] and layer == 0:
+                print(json.dumps(dict(comparator_stage='fenced', operand=operand)), flush=True)
             for chip, shard in enumerate(ttnn.get_device_tensors(counter)):
                 if torch.count_nonzero(ttnn.to_torch(shard).to(torch.int64)):
                     raise AssertionError(f'Physical bit comparison failed: {layer=} {operand=} {chip=}')
