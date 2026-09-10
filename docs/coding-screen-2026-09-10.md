@@ -4,6 +4,21 @@ These three frozen tasks were not used to tune the current kernels. They are
 not a standardized benchmark or evidence of exclusion from model training.
 Target-token equivalence and functional correctness are separate checks.
 
+## Score-layout rerun
+
+The repeat-confirmed score-layout kernel is being screened on the same frozen
+tasks, in order: `stable_unique_v1`, `run_length_encode_v1`, `rotate_right_v1`.
+Each task gets its own matched native-score-layout control with folded T16 target
+attention in both arms, exact request audits and A/B/B/A timing. Different-task
+rates will not be pooled or substituted for the 4K merge-intervals baseline.
+
+Stable-unique run
+[34541480692](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34541480692)
+is underway on immutable `83f679f`, using the existing granted workflow tag.
+The other two tasks are pending, not submitted concurrently because the workflow
+concurrency group retains only one pending run. This screen uses no experimental
+batched-publication kernel and does not change serving defaults.
+
 ## Stable unique: completed
 
 Hardware run `34458413589`, source `348c61b`, passes all six matched requests
