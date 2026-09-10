@@ -4,6 +4,9 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
+draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
+[[ "$draft_profile" = 0 || "$draft_profile" = 1 ]]
+if [ "$draft_profile" = 1 ]; then test "$mode" = request-verifier-profile; fi
 mlp_down=${QWEN_DSPARK_MLP_DOWN:-0}
 mlp_footprint=${QWEN_DSPARK_MLP_FOOTPRINT:-0}
 [[ "$mlp_footprint" = 0 || "$mlp_footprint" = 1 ]]
@@ -67,6 +70,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e "QWEN_DSPARK_MODE=$mode" \
+    -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \

@@ -33,6 +33,10 @@ on:
         description: Give both MLP request arms resident sharded down weights; requires dspark_mlp_down
         type: boolean
         default: false
+      dspark_draft_profile:
+        description: Attribute captured drafter operations instead of verifier; dspark-verifier-profile suite only
+        type: boolean
+        default: false
       weight_packets:
         description: Fixed single-packet weight reads; sixteen-producer MLP suite only, requires its own simulator evidence
         type: boolean
@@ -146,6 +150,7 @@ jobs:
           QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
           QWEN_DSPARK_MLP_DOWN: ${{ inputs.dspark_mlp_down && '1' || '0' }}
           QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
+          QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_DSPARK_MODE: ${{ inputs.suite == 'dspark-combined-request' && 'request-combined' || inputs.suite == 'dspark-target-attention-request' && 'request-target-attention' || inputs.suite == 'dspark-norm-scatter-request' && 'request-norm-scatter' || inputs.suite == 'dspark-verifier-profile' && 'request-verifier-profile' || inputs.suite == 'dspark-native-attention-request' && 'request-native-attention' || inputs.suite == 'dspark-request-variants' && 'request-variants' || inputs.suite == 'dspark-request' && 'request' || inputs.suite == 'dspark-target' && 'target' || 'backbone' }}
         run: timeout -k 30 5100 bash scripts/ci/run-dspark-hardware.sh

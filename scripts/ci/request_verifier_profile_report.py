@@ -98,7 +98,7 @@ def intervals(rows):
 
 
 def analyze_traces(records, rows, *, full_rows=8):
-    if type(full_rows) is not int or full_rows not in (8, 16):
+    if type(full_rows) is not int or full_rows not in (8, 15, 16):
         raise ValueError('Explicit supported verifier attribution width required')
     by_trace = defaultdict(list)
     for record in records:

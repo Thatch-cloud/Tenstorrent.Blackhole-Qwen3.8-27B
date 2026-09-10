@@ -136,7 +136,8 @@ def cache_formats(operations, caches, recurrent):
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
-        target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False):
+        target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
+        profile_drafter=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -203,6 +204,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return (output[0] if isinstance(output, tuple) else output).clone()
 
     from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
+    if type(profile_drafter) is not bool or (profile_drafter and any((variants, native_attention_variants,
+            profile_verifier, norm_scatter_variants, target_attention_variants, combined_variants, mlp_down))):
+        raise ValueError('Drafter attribution requires its own audited request')
     if type(mlp_equal_footprint) is not bool or (mlp_equal_footprint and not mlp_down):
         raise ValueError('Equal-footprint diagnostic requires the down-only MLP experiment')
     if type(mlp_down) is not bool or (mlp_down and not target_attention_variants):
@@ -213,7 +217,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             or type(combined_variants) is not bool
             or sum((native_attention_variants, variants, profile_verifier, norm_scatter_variants, target_attention_variants, combined_variants)) > 1):
         raise ValueError('Choose one explicit matched experiment')
-    if native_attention_variants or profile_verifier or norm_scatter_variants or target_attention_variants or combined_variants:
+    if native_attention_variants or profile_verifier or profile_drafter or norm_scatter_variants or target_attention_variants or combined_variants:
         from dspark_native_request_variants import SCHEDULE, POLICIES, summarize_variants
         from dspark_native_fixed_gate import qualify
         qualify(Path(__file__).parent)
@@ -230,11 +234,16 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down
         from models.tt_transformers.tt.ccl import tt_all_reduce
+    if profile_drafter:
+        from dspark_draft_profile import DraftProfile
+        from target_t16_attention_gate import qualify as qualify_target
+        qualify_target(Path(__file__).parent)
+        POLICIES = {'native': dict(POLICIES['native'], target_attention_t16=True)}
 
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
     schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants else tuple(('eager', audit) for audit in (True, False, False))
-    if profile_verifier:
+    if profile_verifier or profile_drafter:
         schedule = (('native', True),)
     report['coding_context'], report['request_checks'] = context, []
     report['sampler_links'] = 4
@@ -247,17 +256,21 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             progress(f'full_request_{ordinal}_{arm}_' + ('feature_audit' if audit else 'timed'))
             from native_draft_sdpa import precise_draft_kernel
             native = POLICIES[arm].get('native_attention', False)
+            draft_observer = DraftProfile(operations, model.mesh_device) if profile_drafter else None
             with (precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext()) as kernel_audit, \
                     (scoped_reader() if (norm_scatter_variants or combined_variants) and arm == 'scatter' else nullcontext()) as norm_audit, \
                     (scoped_down(operations, model, tt_all_reduce, enabled=arm == 'down')
-                     if mlp_down and (arm == 'down' or mlp_equal_footprint) else nullcontext()) as down_audit:
+                     if mlp_down and (arm == 'down' or mlp_equal_footprint) else nullcontext()) as down_audit, \
+                    (draft_observer.install() if draft_observer is not None else nullcontext()):
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants else 257, **POLICIES[arm],
+                    eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter else 257, **POLICIES[arm],
                     **(dict(profile_verifier=True) if profile_verifier else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
+            if draft_observer is not None:
+                result['draft_profile'] = draft_observer.summary()
             if mlp_down:
                 result['down_mlp'] = down_audit
                 result['down_mlp_equal_footprint'] = mlp_equal_footprint
@@ -271,8 +284,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
-    if profile_verifier:
-        report.update(instrumented_timing=True, correctness_only=True, profile_family='dspark',
+    if profile_verifier or profile_drafter:
+        report.update(instrumented_timing=True, correctness_only=True,
+            profile_family='dspark-draft' if profile_drafter else 'dspark',
             ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15, pp=None, committed_tg=None)
         return
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:

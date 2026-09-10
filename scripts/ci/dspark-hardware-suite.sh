@@ -61,6 +61,10 @@ fi
 if [ "$mode" = request-verifier-profile ]; then
     report_name=dspark-verifier-profile-hardware
     request_options+=(--profile-verifier)
+    if [ "${QWEN_DSPARK_DRAFT_PROFILE:-0}" = 1 ]; then
+        report_name=dspark-draft-profile-hardware
+        request_options=(--request --profile-drafter)
+    fi
 fi
 python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
