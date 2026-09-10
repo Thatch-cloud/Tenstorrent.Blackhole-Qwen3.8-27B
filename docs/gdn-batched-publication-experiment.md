@@ -8,9 +8,22 @@ comparison: native and candidate against an independent host reference, two
 distinct chip inputs, all 17 prefixes at one layer, and selected boundary prefixes
 at 48 layers. It resets inputs and NaN-poisoned checkpoints before every eager
 execution and changed-input captured replay. It checks all logical source, native
-and checkpoint elements and stable device addresses. Physical tile-padding audit
-is explicitly reported as missing; this first-pass report alone cannot qualify
-the candidate for hardware. Execution is pending the existing simulator owner.
+and checkpoint elements and stable device addresses. Checkpoints are poisoned
+including physical tile padding. Readback expands the host tensor to its padded
+shape, requiring checkpoint padding to become zero while source/native padding
+canaries remain NaN. The host-only TTNN tiling/readback mechanism passed a local
+check without opening a device; device execution is still unproven.
+Execution is pending the existing simulator owner.
+
+After the existing owner exits and restores its runtime, use the bounded launcher:
+
+```sh
+QWEN_SIM_LAYER_PROBE=gdn-batched-publication-probe QWEN_SIM_BOUNDED_MEMORY=1 \
+  KERNEL_TIMEOUT=1800 bash optimisation/sim/run-native-layer-dispatch-probe.sh --layers 1
+```
+
+Require complete passing evidence before repeating with `--layers 48`. Neither
+report alone replaces the full accepted-prefix continuation hardware gate.
 
 ## Why test it
 

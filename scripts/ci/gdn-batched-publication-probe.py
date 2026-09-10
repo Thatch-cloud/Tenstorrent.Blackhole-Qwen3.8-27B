@@ -32,7 +32,7 @@ def main():
     def hashes():
         return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in SOURCES}
     report = dict(passed=False, closed_cleanly=False, backend='simulator', rows=16,
-        layers=options.layers, sources=hashes(), checks=[], padding_audited=False)
+        layers=options.layers, sources=hashes(), checks=[], padding_checks=[], poison_checks=[], padding_audited=False)
     mesh, tensors, traces = None, [], []
     def save(stage):
         report['stage'] = stage
@@ -58,7 +58,7 @@ def main():
                     value.fill_(float('nan'))
                 host_layers.append(values)
                 staged_layers.append([ttnn.from_torch(value, dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper) for value in values])
+                    layout=ttnn.TILE_LAYOUT, pad_value=float('nan'), mesh_mapper=mapper) for value in values])
             patterns.append(host_layers)
             uploads.append(staged_layers)
         layers = []
@@ -67,14 +67,22 @@ def main():
             layers.append(local)
             for value in values:
                 tensor = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)
+                    layout=ttnn.TILE_LAYOUT, pad_value=float('nan'),
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)
                 tensors.append(tensor)
                 local.append(tensor)
         bindings = [addresses(ttnn, value) for value in tensors]
+        def physical(tensor, chip):
+            host = ttnn.from_device(ttnn.get_device_tensors(tensor)[chip])
+            return ttnn.to_torch(host.reshape(host.padded_shape))
         def update(pattern):
-            for staged, local in zip(uploads[pattern], layers, strict=True):
+            for layer, (staged, local) in enumerate(zip(uploads[pattern], layers, strict=True)):
                 for source, destination in zip(staged, local, strict=True):
                     ttnn.copy_host_to_device_tensor(source, destination)
+                for chip in range(2):
+                    if any(not torch.isnan(physical(tensor, chip)).all() for tensor in local[15:]):
+                        raise AssertionError('Complete checkpoint poison including padding required')
+                    report['poison_checks'].append(dict(pattern=pattern, layer=layer, chip=chip, exact=True))
         def check(pattern, prefix, arm, repetition):
             for layer, local in enumerate(layers):
                 for chip in range(2):
@@ -86,9 +94,19 @@ def main():
                     for slot in range(1, 5):
                         expected[10 + slot][:, 0:1] = selected[slot]
                     for operand, (tensor, reference) in enumerate(zip(local, expected, strict=True)):
-                        actual = ttnn.to_torch(ttnn.get_device_tensors(tensor)[chip])
+                        raw = physical(tensor, chip)
+                        slices = tuple(slice(0, size) for size in reference.shape)
+                        actual = raw[slices].contiguous()
                         if not torch.equal(actual.view(torch.int16), reference.contiguous().view(torch.int16)):
                             raise AssertionError(f'{arm=} {pattern=} {prefix=} {layer=} {chip=} {operand=}')
+                        mask = torch.ones(raw.shape, dtype=torch.bool)
+                        mask[slices] = False
+                        if mask.any():
+                            padding = raw[mask]
+                            if not (torch.all(padding == 0) if operand >= 15 else torch.isnan(padding).all()):
+                                raise AssertionError(f'Physical padding changed: {arm=} {prefix=} {operand=}')
+                            report['padding_checks'].append(dict(arm=arm, pattern=pattern, prefix=prefix,
+                                repetition=repetition, layer=layer, chip=chip, operand=operand, exact=True))
                     report['checks'].append(dict(arm=arm, pattern=pattern, prefix=prefix,
                         repetition=repetition, layer=layer, chip=chip, exact=True))
             if bindings != [addresses(ttnn, value) for value in tensors]:
@@ -112,6 +130,7 @@ def main():
                 update(pattern)
                 ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                 check(pattern, prefix, 'replay', repetition)
+        report['padding_audited'] = True
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
