@@ -118,6 +118,18 @@ the six eager and twelve changed-input trace checks are exact and the mesh
 closes cleanly. This qualifies a repeat and then full-model integration, not a
 new PP/CTX/TG result. An unchanged repeat has been dispatched before promotion.
 
+The unchanged repeat `34471337398` also passed: **0.321349 ms** versus
+**0.334666 ms** native, again about **4.0% lower latency**. Its independent local
+gate passes. Both full reports are retained under `scripts/ci/dram-mlp-down-*.json`.
+
+The target-integration hook now prepares separate down weights for all 64
+layers and routes only exact `[1,1,16,5120]` inputs through the qualified hybrid.
+Prefill, T1 and other shapes call the original method. Setup cost is recorded;
+native weights stay untouched; methods and temporary weights are restored on
+exit or failure. Host tests cover every layer, fallback routing, caller-owned
+input, partial allocation failure and failed-kernel cleanup. This hook has not
+yet been measured in a complete request and is not a serving change.
+
 `scripts/ci/dram-projection-binding-check.py` exercises the installed native
 bindings without opening devices. It checks that the exact 64-entry unpack
 policy survives descriptor mutation and that the explicit no-bias slot survives
