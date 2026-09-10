@@ -1,5 +1,6 @@
 """Own the pinned simulator-only packer compatibility change for one native attention probe."""
 
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -26,6 +27,12 @@ def patched_bytes(original, patch):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--learned-layer', action='store_true')
+    parser.add_argument('--checkpoint', type=Path)
+    options = parser.parse_args()
+    if options.learned_layer != (options.checkpoint is not None):
+        raise ValueError('Learned-layer probe requires an explicit checkpoint')
     directory = Path(__file__).resolve().parent
     root = Path(os.environ.get('SIM_ROOT', '/opt/ttsim'))
     packer = root / 'tt-metal/tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
@@ -41,9 +48,12 @@ def main():
         packer.write_bytes(patched)
         changed = True
         environment = dict(os.environ, QWEN_SIM_PACKER_ZERO_GRAFT='1', QWEN_SIM_SHARED_BDF='1',
-            QWEN_SIM_BOUNDED_MEMORY='1', QWEN_SIM_DISPATCH_PROBE='dspark-native-fixed-attention-probe',
+            QWEN_SIM_BOUNDED_MEMORY='1', QWEN_SIM_DISPATCH_PROBE='dspark-native-cached-layer-probe'
+            if options.learned_layer else 'dspark-native-fixed-attention-probe',
             OMP_NUM_THREADS='1', KERNEL_TIMEOUT='1800')
-        result = subprocess.run(['bash', str(directory / 'run-dispatch-probe.sh')], env=environment)
+        arguments = ['--checkpoint', str(options.checkpoint.resolve())] if options.learned_layer else []
+        wrapper = 'run-native-layer-dispatch-probe.sh' if options.learned_layer else 'run-dispatch-probe.sh'
+        result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:
         if changed:
