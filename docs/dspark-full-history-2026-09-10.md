@@ -1,6 +1,6 @@
 # DSpark: full history and wider verification
 
-**4K attention and fifteen-query layouts pass TTsim. Full-request hardware CI is running.**
+**4K attention and fifteen-query layouts pass TTsim. The first full-request hardware screen fails.**
 Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 
 ## What is ready
@@ -9,12 +9,12 @@ Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 | --- | --- | --- |
 | Full attention | One global softmax over 2,048 / 2,048 / 64-key chunks | 58 simulator checks pass; clean exit 0 |
 | Native prefill capture | Retain all five taps from every chunk, starting at position zero | Host tests; no 2,048-row sliding window |
-| Learned history cache | Project each 32-row block once; cache all five layers' K/V | Host orchestration tests; native integration pending |
+| Learned history cache | Project each 32-row block once; cache all five layers' K/V | Full request executes; cache lifetime is under investigation |
 | Cache publication | Prepare only the verified input prefix; commit after target publication | Host tests cover rejection, discard, failure and ragged tails |
 | Cached layer | Seven or 15 query rows attend to all cached history | Host tests; no historical re-projection inside the layer |
 | Request bridge | Explicit `dspark` route with 15 proposals and a T16 target verifier | Host request-loop test; DFlash2 defaults unchanged |
-| Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Host tests; complete native execution pending |
-| Full-request adapter | Native token/state controls plus all-tap committed-feature audit; timed requests exclude that audit | Connected to the explicit `dspark-request` CI suite; hardware result pending |
+| Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Full request executes; acceptance collapses after the first two blocks |
+| Full-request adapter | Native token/state controls plus all-tap committed-feature audit; timed requests exclude that audit | Audited request passes; first timed request fails |
 
 The cache uses existing 32-row learned projection, normalization and rotary
 operations. Host tests do **not** qualify their new native composition. Initial
@@ -72,5 +72,36 @@ PP / actual CTX / committed TG, and keeps all stalls and setup costs visible.
 Serving defaults remain unchanged; this is not permission to deploy the drafter.
 
 First full-request run: [34424354652](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652),
-source `7f52347fb14ee3c42ebd213dc6e9ce9b9a625dea`. It is in progress; no new
-hardware PP/TG is available yet.
+source `7f52347fb14ee3c42ebd213dc6e9ce9b9a625dea`. It fails at token index 121
+in the first timed request; the second timed request never runs. No new hardware
+PP/TG is qualified.
+
+## First full-request result
+
+| Check | Result |
+| --- | --- |
+| Context / streams / draft-verifier rows | 4,096 / 1 / 15-16 |
+| Instrumented native token, recurrent-state, valid-KV and inactive-state comparison | Pass; 121 committed tokens through EOS |
+| Committed five-tap features, both chips | All 970 comparisons pass |
+| Draft acceptance | 24/1,455 (1.65%); first two blocks accept 12 and 6, then collapse |
+| First uninstrumented request | Fails against native at token index 121 |
+| Physical link-discovery fallback | None in the hardware log |
+| Complete timed PP / TG | Not qualified |
+
+The audited request is correctness evidence, not a throughput sample. Its history
+frontier reaches 4,217. The failed report is retained as
+`scripts/ci/dspark-request-hardware-failed.json` (SHA-256
+`adb3e59b8e3c5b19ec70ceb228d34d2658918e38417270e400b04138df3be789`).
+Independent reconciliation checks all 568 source fingerprints against the tagged
+revision and unchanged before/after sets for 1,517 native files. Do not replace
+the failed gate with the narrower audited success.
+
+The pinned native generator performs decode while compiling and capturing a cold
+trace. Unlike the existing full-prefix harness, the new request lane omitted its
+warmup before fresh prefill. The next run fixes that reference-state preparation.
+It also hashes every learned K/V shard around proposal, verifier and publication,
+checks finite values and preservation of the old prefix, and stops at the first
+mutation. This tests suspected trace-buffer overlap rather than assuming poor
+acceptance is an inherent property of the checkpoint. Failed-token and cache
+evidence are now retained in the JSON instead of only an exception string.
+No kernel arithmetic, layout, numerical tolerance or serving default changes.

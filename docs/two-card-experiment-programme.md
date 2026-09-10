@@ -8,8 +8,12 @@ and independent source/runtime and matrix audits. Full-history capture,
 incremental learned K/V caching and the DSpark T16 publication bridge are wired
 into the explicit `dspark-request` CI suite. Hardware run
 [34424354652](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652)
-is in progress; no new PP/TG result yet;
-all1,275 host tests pass. Best repeat-confirmed B1
+fails in the first timed request at token index 121. The preceding audited request
+preserves target tokens/state and all 970 committed-feature checks, but accepts only
+24/1,455 drafts. No new PP/TG is qualified. Cold native trace capture was incorrectly
+inside the gold decode; the correction warms it before fresh prefill. A read-only
+all-layer draft-cache audit now checks capture, proposal, verification and publication
+boundaries to locate the acceptance collapse. Best repeat-confirmed B1
 TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).
 
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer

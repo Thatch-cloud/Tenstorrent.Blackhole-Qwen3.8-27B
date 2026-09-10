@@ -119,12 +119,15 @@ layouts now pass 58 + 126 simulator checks. Learned numerical differences and
 committed DSpark TG remain open.
 Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
 
-**Now testing:** [full DSpark coding requests on both cards](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652).
-One feature-audited request, then two timed requests; all stalls stay in TG.
+**Full-request screen failed:** [DSpark on both cards](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652).
+The audited request preserves all 121 committed tokens and target state, but
+accepts only **24/1,455 drafts (1.65%)**. The first timed request diverges at token
+index 121, so there is **no valid new TG result**. Native trace warmup and draft
+cache lifetime checks are the next corrections, not another throughput claim.
 
 | Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 15 / 16 | 4,096 requested | Pending | Pending |
+| 1 | 15 / 16 | 4,096 | Not qualified | Failed correctness |
 
 This uses all historical draft K/V, not the DFlash2 2K window, and explicit
 four-link proposal/sampling collectives. The initial proposer is eager; the target

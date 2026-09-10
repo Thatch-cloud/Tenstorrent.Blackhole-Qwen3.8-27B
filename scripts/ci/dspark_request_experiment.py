@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+import time
 
 from dspark_hardware_gate import digest
 from dspark_projection import tensor_digest
@@ -85,6 +86,18 @@ def summarize(requests):
         proposal_trace=False, held_out_coding_quality=False, serving_qualified=False)
 
 
+def warm_native_control(generator, kv_cache, report, progress):
+    progress('warm_native_control_before_fresh_request_prefill')
+    started = time.perf_counter()
+    generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
+        num_blocks=1024, can_sample_on_device=False)
+    traces = generator.trace_ids_decode[False]
+    if not traces or any(value is None for value in traces.values()):
+        raise AssertionError('Native control must not first capture a state-mutating trace inside gold decode')
+    report['native_control_warmup'] = dict(milliseconds=(time.perf_counter() - started) * 1000,
+        trace_count=len(traces), before_fresh_prefill=True, charged_to_candidate_decode=False)
+
+
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context):
     import torch
@@ -144,6 +157,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax())
 
     def decode(token, position, traced):
+        if traced and not generator.trace_ids_decode[False]:
+            raise AssertionError('Cold native trace capture is forbidden inside the measured control')
         output = generator.decode_forward(tokens=torch.tensor([[token]], dtype=torch.int32),
             start_pos=torch.tensor([position], dtype=torch.int32), page_table=pages, kv_cache=kv_cache,
             enable_trace=traced, read_from_device=True)
@@ -153,6 +168,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     report['sampler_links'] = 4
     with sampler_links(sampler.tt_sampling, 4):
         for ordinal, audit in enumerate((True, False, False)):
+            if ordinal == 1:
+                warm_native_control(generator, kv_cache, report, progress)
             progress(f'full_request_{ordinal}_' + ('feature_audit' if audit else 'timed'))
             result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                 parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,

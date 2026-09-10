@@ -1,13 +1,36 @@
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
-from dspark_request_experiment import PREREQUISITES, request_preflight, summarize
+from dspark_request_experiment import PREREQUISITES, request_preflight, summarize, warm_native_control
 
 
 class DSparkRequestExperimentTests(unittest.TestCase):
+    def test_native_trace_is_captured_before_the_gold_prefill_resets_recurrent_state(self):
+        events, report = [], {}
+        generator = SimpleNamespace(trace_ids_decode={False: None})
+        def capture(**options):
+            events.append('compile_capture_replay_mutates_state')
+            generator.trace_ids_decode[False] = {0: 17}
+        generator.warmup_model_decode = Mock(side_effect=capture)
+        warm_native_control(generator, 'kv', report, events.append)
+        generator.warmup_model_decode.assert_called_once_with(kv_cache='kv', enable_trace=True,
+            max_batch_size=1, num_blocks=1024, can_sample_on_device=False)
+        self.assertEqual(events, ['warm_native_control_before_fresh_request_prefill',
+            'compile_capture_replay_mutates_state'])
+        self.assertTrue(report['native_control_warmup']['before_fresh_prefill'])
+        self.assertEqual(report['native_control_warmup']['trace_count'], 1)
+        self.assertFalse(report['native_control_warmup']['charged_to_candidate_decode'])
+
+    def test_missing_native_control_trace_fails_before_any_measurement(self):
+        for traces in (None, {}, {0: None}):
+            generator = SimpleNamespace(trace_ids_decode={False: traces}, warmup_model_decode=Mock())
+            with self.subTest(traces=traces), self.assertRaisesRegex(AssertionError, 'state-mutating'):
+                warm_native_control(generator, object(), {}, Mock())
+
     def requests(self):
         return [dict(instrumented_timing=audit, exact=True, state_exact=True, inactive_exact=True,
             prompt_tokens=[1, 2] * 2048, emitted=[3, 4, 5], length=4096, committed_decode_tokens=2,

@@ -416,6 +416,8 @@ def main():
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'
+        if hasattr(error, 'evidence'):
+            report['failure_evidence'] = error.evidence
         raise
     finally:
         try:

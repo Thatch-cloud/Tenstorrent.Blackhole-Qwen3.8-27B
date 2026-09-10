@@ -22,7 +22,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
     capture = drafter = runtime = None
     golden_features, prefill_hashes = {}, None
-    prefill_records, feature_checks = [], []
+    prefill_records, feature_checks, history_checks = [], [], []
     seed = None
 
     def status(stage, **values):
@@ -92,6 +92,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         drafter = DSparkDevice(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15)
         capture.close()
+        if audit_features:
+            from dspark_history_audit import AuditedHistoryDrafter
+            drafter = AuditedHistoryDrafter(operations, drafter, history_checks)
         status('warm_fifteen_query_proposal_before_verifier_capture')
         drafter.propose(seed, 15)
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
@@ -110,6 +113,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             raise AssertionError('Complete target-feature publication and exact full-history frontier required')
         result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
+            history_checks=history_checks,
             committed_feature_rows=runtime.committed_feature_rows, final_position=drafter.position,
             execution='Eager full-history proposal; batched captured target verifier; all request-loop costs retained',
             proposal_trace=False, packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,

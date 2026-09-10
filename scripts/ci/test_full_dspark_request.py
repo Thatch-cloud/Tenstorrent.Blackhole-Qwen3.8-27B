@@ -24,6 +24,8 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.drafter = SimpleNamespace(position=32, max_drafts=15, propose=Mock(return_value=tuple(range(15))),
             prepare_publication=Mock(), commit_publication=Mock(), discard_publication=Mock(), close=Mock())
         self.device = self.stack.enter_context(patch.object(request, 'DSparkDevice', return_value=self.drafter))
+        self.history_audit = self.stack.enter_context(patch('dspark_history_audit.AuditedHistoryDrafter',
+            return_value=self.drafter))
         self.base_prefill = Mock(return_value=17)
         self.base_decode = Mock(return_value=torch.zeros(1, 100))
         self.events = []
@@ -84,6 +86,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertEqual(len(result['dspark']['prefill_chunks']), 2)
         self.assertFalse(result['instrumented_timing'])
         self.assertEqual(result['committed_tokens_per_second'], 123.0)
+        self.history_audit.assert_not_called()
         self.drafter.close.assert_called_once()
         self.assertTrue(all(capture.close.called for capture in self.captures))
 
@@ -93,6 +96,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertIsNone(result['committed_tokens_per_second'])
         self.assertEqual(len(result['dspark']['feature_checks']), 10)
         self.assertEqual(len(result['dspark']['prefill_hashes']), 10)
+        self.history_audit.assert_called_once()
         self.assertTrue(all(call.args[-1] is False for call in self.base_decode.call_args_list))
         self.assertTrue(all(capture.close.called for capture in self.decode_captures))
 
