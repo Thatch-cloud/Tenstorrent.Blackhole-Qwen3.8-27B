@@ -25,7 +25,7 @@ class RequestPilotTests(unittest.TestCase):
                     neural=None, selected_drafter=None, lookup_enabled=True, mtp_runtime=None,
                     mtp_factory=None, prefill=None, progress=None, native_sampling_rows=False, short_context=False,
                     attention_audit=False, feature_factory=None, commit_only_gdn=False,
-                    audit_commit_only_gdn=False, live_digest=None, verify_hook=None):
+                    audit_commit_only_gdn=False, live_digest=None, verify_hook=None, feature_drafter_name='dflash2'):
         def decode(token, position, trace):
             logits = torch.zeros(1, 100)
             logits[0, (token + 1) % 3] = 1
@@ -73,7 +73,7 @@ class RequestPilotTests(unittest.TestCase):
                 lookup_enabled=lookup_enabled, mtp_runtime=mtp_runtime, mtp_factory=mtp_factory, progress=progress,
                 native_sampling_rows=native_sampling_rows, short_context=short_context, attention_audit=attention_audit,
                 feature_factory=feature_factory, commit_only_gdn=commit_only_gdn,
-                audit_commit_only_gdn=audit_commit_only_gdn)
+                audit_commit_only_gdn=audit_commit_only_gdn, feature_drafter_name=feature_drafter_name)
         return result, constructor
 
     def test_commit_only_audit_checks_every_multirow_before_decision_and_excludes_timing(self):
@@ -126,6 +126,47 @@ class RequestPilotTests(unittest.TestCase):
             self.assertEqual(result['mtp_setup_ms'], 0)
             self.assertEqual(max(block['rows'] for block in result['blocks']), rows)
             factory.assert_called_once()
+
+    def test_dspark_15_proposals_use_t16_verifier_and_committed_feature_publication(self):
+        from dspark_request_runtime import DSparkRequestRuntime
+        from dflash_request_runtime import TARGET_TAPS
+
+        drafter = SimpleNamespace(position=36, max_drafts=15,
+            propose=Mock(side_effect=lambda seed, count: tuple((seed + offset + 1) % 3 for offset in range(count))),
+            prepare_publication=Mock(side_effect=lambda features, prefix, **kwargs: prefix), discard_publication=Mock())
+        def commit(prefix):
+            drafter.position += prefix
+        drafter.commit_publication = commit
+        runtime = DSparkRequestRuntime(drafter, position=36)
+        result, constructor = self.run_fixture(feature_factory=lambda: runtime, feature_drafter_name='dspark',
+            lookup_max_rows=16, norm_batch=True, native_sampling_rows=True)
+        self.assertEqual(result['selected_drafter'], 'dspark')
+        self.assertEqual(result['drafting_policy'], 'neural-with-target-fallback')
+        self.assertEqual(constructor.call_args.kwargs['retain_feature_taps'], TARGET_TAPS)
+        self.assertEqual(constructor.call_args.kwargs['max_verify_rows'], 16)
+        self.assertEqual(max(block['rows'] for block in result['blocks']), 16)
+        self.assertEqual((runtime.committed_feature_rows, drafter.position), (32, 68))
+        self.assertTrue(all(call.args[1] == 15 for call in drafter.propose.call_args_list))
+        self.assertTrue(all(call.args[1] == 16 for call in drafter.prepare_publication.call_args_list))
+
+    def test_dspark_route_requires_matching_feature_runtime_and_keeps_dflash_widths_unchanged(self):
+        from dflash_request_runtime import DFlashRequestRuntime
+        from dspark_request_runtime import DSparkRequestRuntime
+
+        drafter = SimpleNamespace(position=36, max_drafts=15, propose=Mock(), prepare_publication=Mock(),
+            commit_publication=Mock(), discard_publication=Mock())
+        with self.assertRaises(ValueError):
+            DFlashRequestRuntime(drafter, position=36)
+        runtime = DSparkRequestRuntime(drafter, position=36)
+        with self.assertRaisesRegex(ValueError, 'named complete'):
+            self.run_fixture(feature_factory=lambda: runtime)
+        for name in ('dspark', 'unknown', None, True):
+            with self.assertRaises(ValueError):
+                self.run_fixture(feature_drafter_name=name)
+        for width in (8, 31, True):
+            drafter.max_drafts = width
+            with self.assertRaises(ValueError):
+                DSparkRequestRuntime(drafter, position=36)
 
     def test_instrumented_attention_cannot_claim_decode_throughput(self):
         result, constructor = self.run_fixture(norm_batch=True, native_sampling_rows=True,

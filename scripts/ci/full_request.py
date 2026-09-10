@@ -39,7 +39,10 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
                     attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False,
-                    verifier_observer=None):
+                    verifier_observer=None, feature_drafter_name='dflash2'):
+    if (feature_drafter_name not in ('dflash2', 'dspark')
+            or (feature_drafter_name != 'dflash2' and feature_factory is None)):
+        raise ValueError('Explicit supported feature-drafter name and matching factory required')
     if (type(commit_only_gdn) is not bool or type(audit_commit_only_gdn) is not bool
             or (audit_commit_only_gdn and not commit_only_gdn)):
         raise ValueError('Explicit commit-only GDN selection required before auditing deferred state')
@@ -61,7 +64,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         if (not callable(feature_factory) or mtp_factory is not None or mtp_runtime is not None
                 or neural or selected_drafter is not None or engine_factory is not None):
             raise ValueError('One post-prefill feature-drafter factory must own request routing')
-        neural, selected_drafter, lookup_enabled = {'dflash2': feature_factory}, 'dflash2', False
+        neural, selected_drafter, lookup_enabled = {feature_drafter_name: feature_factory}, feature_drafter_name, False
     if mtp_runtime is not None or mtp_factory is not None:
         if (neural or selected_drafter is not None or engine_factory is not None
                 or (mtp_runtime is not None and not all(
@@ -118,9 +121,10 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         feature_runtime = feature_factory()
         feature_setup_ms = (time.perf_counter() - started) * 1000
         if (not all(callable(getattr(feature_runtime, name, None)) for name in ('bind', 'publish', '__call__'))
-                or tuple(feature_runtime.tap_ids) != TARGET_TAPS):
-            raise ValueError('DFlash2 factory must return a complete target-feature request bridge')
-        neural = {'dflash2': feature_runtime}
+                or tuple(feature_runtime.tap_ids) != TARGET_TAPS
+                or getattr(feature_runtime, 'drafter_name', 'dflash2') != feature_drafter_name):
+            raise ValueError('Feature factory must return its named complete target-feature request bridge')
+        neural = {feature_drafter_name: feature_runtime}
     runtime = mtp_runtime if mtp_runtime is not None else feature_runtime
     inactive_before = inactive_digest()
     session = GreedySession('lookup-pilot', prompt, seed, vocab_size=model.args.vocab_size,

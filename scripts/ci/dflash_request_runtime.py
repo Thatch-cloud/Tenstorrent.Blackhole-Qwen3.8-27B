@@ -6,16 +6,18 @@ TARGET_TAPS = (5, 19, 33, 47, 61)
 
 class DFlashRequestRuntime:
     tap_ids = TARGET_TAPS
+    drafter_name = 'dflash2'
+    proposal_counts = (7, 31)
 
     def __init__(self, drafter, *, position, validate_features=None):
         if (type(position) is not int or position < 1 or drafter.position != position
                 or not all(callable(getattr(drafter, name, None)) for name in ('propose', 'prepare_publication', 'commit_publication', 'discard_publication'))
                 or (validate_features is not None and not callable(validate_features))):
-            raise ValueError('Prepared DFlash2 drafter at the exact prefilled frontier required')
+            raise ValueError('Prepared feature drafter at the exact prefilled frontier required')
         self.drafter, self.position = drafter, position
         self.max_drafts = getattr(drafter, 'max_drafts', 7)
-        if type(self.max_drafts) is not int or self.max_drafts not in (7, 31):
-            raise ValueError('Explicit seven/31-proposal DFlash2 geometry required')
+        if type(self.max_drafts) is not int or self.max_drafts not in self.proposal_counts:
+            raise ValueError('Explicit supported feature-drafter proposal geometry required')
         self.validate_features = validate_features
         self.session = self.engine = None
         self.phase = 'unbound'
@@ -34,13 +36,13 @@ class DFlashRequestRuntime:
                 or self.session.phase != 'drafting' or self.session.position != self.position
                 or self.drafter.position != self.position or not history or history[-1] != self.session.seed
                 or type(count) is not int or count < 1):
-            raise ValueError('DFlash2 proposal requires the current committed request frontier')
+            raise ValueError('Feature proposal requires the current committed request frontier')
         self.phase = 'drafting'
         try:
             candidates = tuple(self.drafter.propose(self.session.seed, min(count, self.max_drafts)))
             if (len(candidates) != min(count, self.max_drafts) or any(type(token) is not int or not 0 <= token < self.session.vocab_size
                     for token in candidates)):
-                raise ValueError('Complete global DFlash2 proposal IDs required')
+                raise ValueError('Complete global feature-drafter proposal IDs required')
             self.proposed = candidates
             self.phase = 'proposed'
             return candidates
@@ -53,7 +55,7 @@ class DFlashRequestRuntime:
         if (self.phase not in ('idle', 'proposed') or ticket is None or self.session.phase != 'committing'
                 or self.engine.phase != 'verified' or self.engine.pending is not ticket
                 or ticket.position != self.position or type(prefix) is not int or not 0 <= prefix <= len(ticket.tokens)):
-            raise ValueError('DFlash2 feature publication requires the current verified target transaction')
+            raise ValueError('Feature publication requires the current verified target transaction')
         self.phase = 'committing'
         publication = None
         try:

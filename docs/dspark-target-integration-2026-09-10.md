@@ -66,8 +66,10 @@ pass cannot establish the 200 TG target or replace the 4K benchmark.
 Serving defaults remain unchanged. Select the explicit `dspark-target` CI suite
 only while the pair is allocated to this experiment.
 
-The next targeted simulator experiment covers **4,096 historical rows and 15
-proposal rows**. It combines 2,048 / 2,048 / 64-key chunks with a single global
-softmax, preserving the existing bounded SFPU kernels rather than increasing
-their on-core buffers. This new composition is not yet simulator-qualified,
-connected to a full-history learned proposer, or a hardware speed result.
+The targeted simulator experiment for **4,096 historical rows and 15 proposal
+rows passes all 58 checks**, with clean exit 0 and an independent evidence audit.
+It combines 2,048 / 2,048 / 64-key chunks with a single global softmax, preserving
+the bounded SFPU kernels rather than increasing their on-core buffers.
+Full-history capture, incremental learned K/V caching and the T16 publication
+bridge now have host tests. Their complete learned request still needs native
+integration and hardware measurement. [Scope and remaining work](dspark-full-history-2026-09-10.md).

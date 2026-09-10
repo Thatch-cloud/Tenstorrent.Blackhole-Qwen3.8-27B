@@ -2,6 +2,13 @@
 
 ## Current programme position - 2026-09-10
 
+**Latest drafter step: full 4K / 15-query attention passes 58 simulator checks.**
+Clean exit 0, unchanged numerical tolerance, independent source/runtime and
+matrix audit. Full-history capture, incremental learned K/V caching and the
+DSpark T16 publication bridge now pass host tests; the complete request still
+needs native integration and hardware measurement. Best repeat-confirmed B1
+TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).
+
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch
 changes. BF4 generated reader code falls from 1,156 to 832 bytes, not a latency

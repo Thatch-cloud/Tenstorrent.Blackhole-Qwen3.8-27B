@@ -466,6 +466,11 @@ setup from 262 seconds to 2 seconds.
 
 ## Next gates
 
+The [4K/15-query full-attention component](dspark-full-history-2026-09-10.md)
+passes 58 simulator checks with clean exit 0. Full-history capture, incremental
+learned K/V caching and a DSpark T16 request bridge pass host tests. They do not
+yet constitute a complete native request or a new PP/TG result.
+
 1. Extend history to 4K and qualify useful wider proposals; retain mask,
    ownership, numerical diagnostics and exact target-state gates.
 2. Connect batched verification and committed-feature publication, not just the
