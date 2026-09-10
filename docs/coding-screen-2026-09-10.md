@@ -56,9 +56,27 @@ Generated-source SHA256:
 Hardware report SHA256:
 `9913eefe60a905a6163dc0bee2386bab830724d58a90971fc1df2ace6494bdc6`.
 
+## Rotate right: completed
+
+Run `34459661914` passes all six matched requests on the same immutable source.
+Independent recomputation reproduces the summary; experiment/native fingerprints
+are unchanged and closure is clean.
+
+| Path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native target attention | 1 | 3325.73 | 4096 | 73.06 |
+| Folded T16 target attention | 1 | 3382.31 | 4096 | 76.93 |
+
+Two timed requests per arm commit 128 tokens and accept 116/210 proposals.
+Setup-inclusive latency is 5710.46 versus 5657.55 ms. The EOS-terminated function
+passes all five isolated functional cases, with input preservation.
+Generated-source SHA256:
+`84e739616807a222ead11e1abbdae128c9c6f52817e1a3fca30e14fa8768a76e`.
+Hardware report SHA256:
+`06020a5887cac7558ef3b4725b11658e2bb426aa7b3929c4c92dca61dc8228bc`.
+
 ## Remaining work
 
-Rotate-right is dispatched as `34459661914` using the same immutable source.
-Functional results and PP/CTX/TG must be
-recorded separately for each task; do not pool different-task rates as a matched
+All three task summaries and isolated functional results have been rechecked.
+Results are recorded separately for each task; do not pool different-task rates as a matched
 speedup. Broader coding quality, long contexts and the 200 TG target remain open.

@@ -68,10 +68,18 @@ No promotion. [Combined result](docs/dspark-combined-result-2026-09-10.md).
 
 ### Other measured results
 
-- **Untuned stable-unique task:** PP3351.31 / CTX4096 / TG109.04 versus
-  103.20 control; exact target tokens/state and four functional cases pass.
-  One short task/run, not broad quality certification or a matched comparison
-  against the tuning task. [Coding screen](docs/coding-screen-2026-09-10.md).
+Untuned coding tasks, one stream / batch1, using folded target attention:
+
+| Task | PP tok/s | CTX | Committed TG | Matched control TG | Functional cases |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stable unique | 3351.31 | 4096 | 109.04 | 103.20 | 4/4 pass |
+| Run-length encoding | 3320.98 | 4096 | 107.18 | 104.33 | 4/4 pass |
+| Rotate right | 3382.31 | 4096 | 76.93 | 73.06 | 5/5 pass |
+
+Each task has two timed requests per arm plus correctness audits. These are
+short local tasks, not broad coding-quality certification or long-context
+results; do not pool their rates into one claimed speedup.
+[Coding screen](docs/coding-screen-2026-09-10.md).
 
 - **Short-context DFlash2: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
   commit-only GDN and fused draft convolution improve the matched control by
