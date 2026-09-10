@@ -9,7 +9,7 @@ from gdn_commit_provenance import source_hashes
 
 
 REPORT = 'dspark-commit16-simulator.json'
-SHA256 = None
+SHA256 = 'fae61660a4718de7b8eaf39a42dee2cf20fbd7a7f667bdd6bd361d4271f681f8'
 GENERATED = {
     'compute': '9512188a20fd63f2853f1ac427f1b7dfaf96bab18f9bfb32e73c2d647283a9e0',
     'reader': '6c56547a34384f9727c72fff1905566459b96233e703d5415d3f88328df0d072',
