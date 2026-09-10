@@ -3,10 +3,20 @@ import hashlib
 from pathlib import Path
 import unittest
 
-from target_t16_attention_gate import SOURCES, validate
+from target_t16_attention_gate import SOURCES, validate, validate_request_option
 
 
 class GateTests(unittest.TestCase):
+    def test_request_option_rejects_unqualified_geometry(self):
+        valid = dict(rows=16, position=4096, remaining=256, replay=True, norm_batch=True,
+                     native_sampling=True, group_rows=4, short_context=False)
+        validate_request_option(True, **valid)
+        for field, value in (('rows', 32), ('position', 4352), ('remaining', 257),
+                             ('replay', False), ('norm_batch', False), ('native_sampling', False),
+                             ('group_rows', 8), ('short_context', True)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_request_option(True, **dict(valid, **{field: value}))
+
     def setUp(self):
         self.directory = Path(__file__).parent
         hashes = {name: hashlib.sha256((self.directory / name).read_bytes()).hexdigest() for name in SOURCES}

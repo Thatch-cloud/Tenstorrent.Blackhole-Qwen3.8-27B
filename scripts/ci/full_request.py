@@ -39,7 +39,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     lookup_max_rows=32, engine_factory=None, neural=None, selected_drafter=None, lookup_enabled=True,
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
                     attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False,
-                    verifier_observer=None, feature_drafter_name='dflash2', verifier_before_capture=None):
+                    verifier_observer=None, feature_drafter_name='dflash2', verifier_before_capture=None,
+                    target_attention_t16=False):
     if verifier_before_capture is not None and not callable(verifier_before_capture):
         raise ValueError('Callable verifier pre-capture preparation required')
     if (feature_drafter_name not in ('dflash2', 'dspark')
@@ -82,7 +83,14 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
         raise ValueError('Explicit registered neural adapter selection required')
     if type(lookup_max_rows) is not int or lookup_max_rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError('Explicit supported lookup width cap required')
-    if lookup_max_rows != 32 and (family_routing or attention_replay) and not short_context:
+    if type(target_attention_t16) is not bool:
+        raise ValueError('Explicit T16 attention selection required')
+    if target_attention_t16:
+        from target_t16_attention_gate import validate_request_option
+        validate_request_option(target_attention_t16, rows=lookup_max_rows, position=len(prompt),
+            remaining=max_new_tokens - 1, replay=attention_replay, norm_batch=norm_batch,
+            native_sampling=native_sampling_rows, group_rows=replay_group_rows, short_context=short_context)
+    if lookup_max_rows != 32 and (family_routing or attention_replay) and not short_context and not target_attention_t16:
         raise ValueError('Lookup width-cap experiment requires native attention')
     if type(norm_batch) is not bool:
         raise ValueError('Explicit boolean norm-batch selection required')
@@ -150,6 +158,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 replay_group_rows=replay_group_rows,
                 **(dict(native_sampling_rows=True) if native_sampling_rows else {}),
                 **(dict(short_context=True) if short_context else {}),
+                **(dict(target_attention_t16=True) if target_attention_t16 else {}),
                 **(dict(attention_audit=True) if attention_audit else {}),
                 **(dict(retain_mtp_hidden=True) if mtp_runtime is not None else {}),
                 **(dict(retain_feature_taps=feature_runtime.tap_ids) if feature_runtime is not None else {}),
@@ -203,6 +212,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             exact=True, state_exact=True, inactive_exact=True, blocks=blocks, norm_batch=norm_batch,
             commit_only_gdn=commit_only_gdn, gdn_verify_checks=gdn_verify_checks,
             attention_replay=attention_replay, family_routing=family_routing, capture_count=capture_count,
+            target_attention_t16=target_attention_t16,
             attention_mask_once=attention_mask_once, replay_group_rows=replay_group_rows,
             lookup_max_rows=lookup_max_rows, native_sampling_rows=native_sampling_rows, short_context=short_context,
             attention_audit=attention_audit, instrumented_timing=attention_audit or audit_commit_only_gdn,

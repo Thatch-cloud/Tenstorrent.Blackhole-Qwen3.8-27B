@@ -2,6 +2,7 @@
 
 import os
 import time
+from pathlib import Path
 from contextlib import ExitStack
 
 from attention_batch import capture_operation
@@ -35,7 +36,7 @@ class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
-                 commit_only_gdn=False, before_capture=None):
+                 commit_only_gdn=False, before_capture=None, target_attention_t16=False):
         import ttnn
 
         if before_capture is not None and not callable(before_capture):
@@ -67,7 +68,15 @@ class VerifierEngine:
         if type(attention_replay) is not bool or (attention_replay and not norm_batch):
             raise ValueError('Explicit replay attention requires norm batching')
         validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
-        if attention_replay and max_verify_rows != 32 and not short_context:
+        from target_t16_attention_gate import validate_request_option
+        validate_request_option(target_attention_t16, rows=max_verify_rows, position=session.position,
+            remaining=session.max_new_tokens - len(session.emitted), replay=attention_replay,
+            norm_batch=norm_batch, native_sampling=native_sampling_rows,
+            group_rows=replay_group_rows, short_context=short_context)
+        if target_attention_t16:
+            from target_t16_attention_gate import qualify
+            qualify(Path(__file__).parent)
+        if attention_replay and max_verify_rows != 32 and not short_context and not target_attention_t16:
             raise ValueError('Width-cap experiment currently requires native attention')
         self.norm_batch = norm_batch
         self.attention_replay = attention_replay

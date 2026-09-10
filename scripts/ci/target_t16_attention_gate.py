@@ -10,6 +10,19 @@ SOURCES = {'attention_replay.py', 'attention_mask_replay.py', 'attention_mask_re
            'target-t16-attention-probe.py'}
 
 
+def validate_request_option(enabled, *, rows, position, remaining, replay, norm_batch,
+                            native_sampling, group_rows, short_context):
+    if type(enabled) is not bool:
+        raise ValueError('Explicit T16 attention selection required')
+    if not enabled:
+        return
+    if (any(type(value) is not int for value in (rows, position, remaining, group_rows))
+            or rows != 16 or position != 4096 or not 1 <= remaining <= 256
+            or replay is not True or norm_batch is not True or native_sampling is not True
+            or group_rows != 4 or short_context is not False):
+        raise ValueError('Qualified T16 experiment requires a bounded 4096..4352 request and native sampling')
+
+
 def validate(report, directory):
     if report.get('passed') is not True or report.get('closed') is not True or report.get('backend') != 'simulator':
         raise ValueError('Complete closed simulator result required')
