@@ -12,8 +12,8 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]
-if [[ "$mode" = request-variants || "$mode" = request-native-attention ]]; then
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-verifier-profile ]]
+if [[ "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-verifier-profile ]]; then
     test -f /experiment-optimisation/sim/gdn-multitoken.py
     ln -s /experiment-optimisation /optimisation
     test -f /experiment-scripts/ci/../../optimisation/sim/gdn-multitoken.py
@@ -26,7 +26,7 @@ if [ "$mode" != backbone ]; then
     export HF_MODEL="$MODEL_WEIGHTS_DIR"
 fi
 report_name=$probe
-if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]; then
+if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-verifier-profile ]]; then
     report_name=dspark-request-hardware
     request_options=(--request)
 fi
@@ -38,6 +38,10 @@ if [ "$mode" = request-native-attention ]; then
     report_name=dspark-native-attention-request-hardware
     request_options+=(--native-attention-variants)
 fi
+if [ "$mode" = request-verifier-profile ]; then
+    report_name=dspark-verifier-profile-hardware
+    request_options+=(--profile-verifier)
+fi
 python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
@@ -46,9 +50,13 @@ python3 /experiment-scripts/ci/dspark_runtime_cache.py
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e
-timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}" \
-    --checkpoint /dspark/model.safetensors --config /dspark/config.json \
-    --output "/experiment/results/$report_name.json" 2>&1 | tee "/experiment/results/$report_name.log"
+runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
+    --checkpoint /dspark/model.safetensors --config /dspark/config.json
+    --output "/experiment/results/$report_name.json")
+if [ "$mode" = request-verifier-profile ]; then
+    runner=(bash /experiment-scripts/ci/dspark-request-profile.sh)
+fi
+"${runner[@]}" 2>&1 | tee "/experiment/results/$report_name.log"
 status=${PIPESTATUS[0]}
 set -e
 printf '%s\n' "$status" > "/experiment/results/$report_name.exit-status"

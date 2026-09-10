@@ -12,15 +12,36 @@ import sys
 from full_dflash_request import summarize_dflash_requests
 
 
-def validate_request(report, console):
+def validate_request(report, console, *, family='dflash2'):
     if report.get('passed') is not True or report.get('instrumented_timing') is not True or report.get('correctness_only') is not True:
         raise ValueError('Passed attribution-only complete request required')
     requests = report.get('request_checks', [])
-    summary = summarize_dflash_requests(requests, audit_only=True)
-    request = requests[0]
-    if (summary['context'] != 4096 or any(request.get(key) is not True for key in ('commit_only_gdn', 'fused_convolution', 'cache_history'))
-            or request.get('cache_projection_capture') is not False or request['dflash'].get('block_rows') != 8):
-        raise ValueError('Profile the qualified cached 4K T8 eager-update configuration')
+    if family == 'dflash2':
+        summary = summarize_dflash_requests(requests, audit_only=True)
+        request = requests[0]
+        if (summary['context'] != 4096 or any(request.get(key) is not True for key in ('commit_only_gdn', 'fused_convolution', 'cache_history'))
+                or request.get('cache_projection_capture') is not False or request['dflash'].get('block_rows') != 8):
+            raise ValueError('Profile the qualified cached 4K T8 eager-update configuration')
+    elif family == 'dspark':
+        if (len(requests) != 1 or report.get('profile_family') != 'dspark' or report.get('closed_cleanly') is not True
+                or report.get('committed_tg') is not None or report.get('sources') != report.get('sources_after')
+                or not report.get('sources') or report.get('native_sources') != report.get('native_sources_after')
+                or not report.get('native_sources')):
+            raise ValueError('One complete unchanged DSpark attribution request required')
+        request = requests[0]
+        draft = request.get('dspark', {})
+        if (request.get('length') != 4096 or request.get('lookup_max_rows') != 16
+                or any(request.get(key) is not True for key in ('exact', 'state_exact', 'inactive_exact',
+                    'instrumented_timing', 'commit_only_gdn', 'norm_batch', 'native_sampling_rows'))
+                or any(draft.get(key) is not True for key in ('native_attention', 'proposal_trace', 'audit_features'))
+                or request.get('committed_tokens_per_second') is not None
+                or request.get('verifier_profile', {}).get('full_rows') != 16):
+            raise ValueError('Profile the audited native-attention T16 DSpark configuration')
+        features = draft.get('feature_checks', [])
+        if len(features) != 10 * len(request['blocks']) or any(value.get('exact') is not True for value in features):
+            raise ValueError('Complete exact target-feature publication checks required')
+    else:
+        raise ValueError('Explicit supported verifier profile family required')
     profile = request.get('verifier_profile', {})
     records = profile.get('records', [])
     if len(records) != len(request['blocks']) or len(records) < 3 or not profile.get('host_calls'):
@@ -129,18 +150,18 @@ def analyze_traces(records, rows, *, full_rows=8):
     return output
 
 
-def main(root):
+def main(root, family='dflash2'):
     root = Path(root)
     result = dict(passed=False, scope='Instrumented current-request verifier attribution, not throughput or held-out coding quality')
     try:
         request_path = root / 'request.json'
-        request, records = validate_request(json.loads(request_path.read_text()), (root / 'console.log').read_text(errors='replace'))
+        request, records = validate_request(json.loads(request_path.read_text()), (root / 'console.log').read_text(errors='replace'), family=family)
         paths = [root / location / 'cpp_device_perf_report.csv' for location in ('metadata', '.logs')]
         profile_path = next((path for path in paths if path.is_file()), None)
         if profile_path is None:
             raise ValueError('Runtime C++ device operation report required')
         with profile_path.open(newline='') as stream:
-            devices = analyze_traces(records, csv.DictReader(stream))
+            devices = analyze_traces(records, csv.DictReader(stream), full_rows=16 if family == 'dspark' else 8)
         result.update(passed=True, context=4096, streams=1, devices=devices, host_calls=request['verifier_profile']['host_calls'],
             request_sha256=hashlib.sha256(request_path.read_bytes()).hexdigest(),
             device_report_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),
@@ -158,4 +179,4 @@ def main(root):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 'dflash2')

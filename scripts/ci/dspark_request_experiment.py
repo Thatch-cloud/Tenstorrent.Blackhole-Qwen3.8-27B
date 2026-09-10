@@ -135,7 +135,7 @@ def cache_formats(operations, caches, recurrent):
 
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
-        native_attention_variants=False):
+        native_attention_variants=False, profile_verifier=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -202,9 +202,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return (output[0] if isinstance(output, tuple) else output).clone()
 
     from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
-    if type(native_attention_variants) is not bool or (native_attention_variants and variants):
+    if (type(native_attention_variants) is not bool or type(profile_verifier) is not bool
+            or sum((native_attention_variants, variants, profile_verifier)) > 1):
         raise ValueError('Choose one explicit matched experiment')
-    if native_attention_variants:
+    if native_attention_variants or profile_verifier:
         from dspark_native_request_variants import SCHEDULE, POLICIES, summarize_variants
         from dspark_native_fixed_gate import qualify
         qualify(Path(__file__).parent)
@@ -212,6 +213,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
     schedule = SCHEDULE if variants or native_attention_variants else tuple(('eager', audit) for audit in (True, False, False))
+    if profile_verifier:
+        schedule = (('native', True),)
     report['coding_context'], report['request_checks'] = context, []
     report['sampler_links'] = 4
     control_warmed = False
@@ -227,12 +230,17 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=257, **POLICIES[arm])
+                    eos_ids=eos, audit_features=audit, max_new_tokens=257, **POLICIES[arm],
+                    **(dict(profile_verifier=True) if profile_verifier else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
+    if profile_verifier:
+        report.update(instrumented_timing=True, correctness_only=True, profile_family='dspark',
+            ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15, pp=None, committed_tg=None)
+        return
     if variants or native_attention_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms']['native' if native_attention_variants else 'trace_commit']

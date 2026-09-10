@@ -14,9 +14,12 @@ from target_features import LayerOutputCapture
 def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *, collectives,
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
-        proposal_trace=False, commit_only_gdn=False, native_attention=False):
+        proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False):
     import torch
     from full_request import measure_request
+    if type(profile_verifier) is not bool or (profile_verifier and not (
+            audit_features and proposal_trace and commit_only_gdn and native_attention)):
+        raise ValueError('Profile only the audited native-attention commit-only request')
 
     if (any(type(value) is not bool for value in (audit_features, proposal_trace, commit_only_gdn, native_attention))
             or (native_attention and not proposal_trace)
@@ -171,13 +174,18 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
         return runtime
 
+    observer = None
     try:
+        if profile_verifier:
+            from request_verifier_profile import RequestVerifierProfile
+            observer = RequestVerifierProfile(operations, model.mesh_device, full_rows=16)
         result = measure_request(model, sampler, prompt, pages, helpers, prefill=captured_prefill, decode=gold_decode,
             live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=audit_features and commit_only_gdn,
             lookup_max_rows=16, feature_factory=factory, feature_drafter_name='dspark',
             **(dict(verifier_before_capture=prepare_proposal_trace) if proposal_trace else {}),
+            **(dict(verifier_observer=observer) if observer is not None else {}),
             progress=lambda block: status('committed-block', **block))
         expected_checks = len(result['blocks']) * len(TAPS) * 2 if audit_features else 0
         if (runtime is None or len(prefill_records) != 2 or len(feature_checks) != expected_checks
@@ -199,6 +207,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             proposal_trace=proposal_trace, proposal_checks=proposal_checks, native_attention=native_attention,
             packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
+        if observer is not None:
+            result['verifier_profile'] = observer.summary()
         result['instrumented_timing'] = audit_features
         if audit_features:
             result['committed_tokens_per_second'] = None
