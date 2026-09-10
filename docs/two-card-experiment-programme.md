@@ -2,29 +2,27 @@
 
 ## Current programme position - 2026-09-10
 
-**Latest drafter step: full 4K / 15-query attention passes 58 simulator checks;
-wider target/cache layouts pass another 126.** Both close cleanly with exit 0
-and independent source/runtime and matrix audits. Full-history capture,
-incremental learned K/V caching and the DSpark T16 publication bridge are wired
-into the explicit `dspark-request` CI suite. Hardware run
-[34424354652](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652)
-fails in the first timed request at token index 121. The preceding audited request
-preserves target tokens/state and all 970 committed-feature checks, but accepts only
-24/1,455 drafts. No new PP/TG is qualified. Cold native trace capture was incorrectly
-inside the gold decode; the correction warms it before fresh prefill. A read-only
-all-layer draft-cache audit now checks capture, proposal, verification and publication
-boundaries locates the acceptance collapse: run
-[34425893520](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34425893520)
-detects layer 0 K corruption on chip 0 immediately after target verifier replay at
-position 4,109. Fixed double-buffered full-history banks now retain their allocations
-across replay; all 372 dedicated simulator lifetime checks now pass with clean exit
-and independent full-reference/source verification. The next hardware preflight
-requires the exact fixed-bank report before running any target request.
-Repair run [34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694)
-is now executing on the allocated two-card runner, using code `547bc2b`.
-The diagnostic fails before timed controls, so native warmup remains unvalidated.
-Best repeat-confirmed B1
-TG remains 74.27 at CTX4,096. [Scope and next test](dspark-full-history-2026-09-10.md).
+**DSpark full-request repair passes on hardware.** Run
+[34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694),
+code `547bc2b`, preserves all native tokens/state in one audited and two timed
+requests. Fixed history banks repair confirmed verifier-induced cache corruption;
+the native-reference warmup correction also passes. Acceptance rises to 74.67%.
+
+| Streams | Draft / verify | PP tok/s | CTX tokens | Committed TG tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 15 / 16 | 3,350.93 | 4,096 | **65.16** |
+
+All 372 new fixed-bank simulator checks pass; the earlier 58 attention and 126
+layout checks remain required. Independent hardware reconciliation verifies 573
+source files, 1,517 native fingerprints, 120 parameter records, 100 feature checks
+and 1,240 cache-tensor lifetime checks. This is one coding task, not held-out quality.
+
+Next: capture the 86.49-ms eager proposal, investigate wider useful proposal
+windows, and reduce target verification/publication. Current verification alone
+costs 83.44 ms/block; 12.1 committed tokens/block requires a **60.5-ms total cycle**
+for 200 TG. Capture alone cannot meet the target. Wider drafting is an acceptance
+experiment, not an assumed gain. Best repeat-confirmed B1 TG remains **74.27 at
+CTX4,096**. [Evidence and next tests](dspark-full-history-2026-09-10.md).
 
 **Completed target-kernel experiment: fixed-packet weight reads.** The sixteen-producer
 mapping and native math stay unchanged; only fixed-size BF4/BF8 read dispatch

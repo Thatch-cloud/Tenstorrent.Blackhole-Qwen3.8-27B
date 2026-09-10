@@ -115,29 +115,29 @@ This excludes embeddings, target head, Markov selection and verification—**not
 [Real-target proposal integration now passes](docs/dspark-target-integration-2026-09-10.md),
 preserving target tokens/GDN/KV. Short-prefix acceptance is only **3/7 and 0/7**;
 these are not complete coding responses. Full-history attention and fifteen-query
-layouts now pass 58 + 126 simulator checks. Learned numerical differences and
-committed DSpark TG remain open.
+layouts now pass 58 + 126 simulator checks. Earlier learned numerical differences
+and held-out coding quality remain open.
 Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
 
-**Full-request screen failed:** [DSpark on both cards](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652).
-The audited request preserves all 121 committed tokens and target state, but
-accepts only **24/1,455 drafts (1.65%)**. The first timed request diverges at token
-index 121, so there is **no valid new TG result**. A diagnostic now confirms
-verifier replay corrupts the newly published draft K cache. The fixed-buffer
-repair passes all 372 TTsim lifetime checks; it and the native-reference warmup fix still need hardware
-validation. This candidate is being repaired, not abandoned.
+**DSpark repair passes:** [three complete hardware requests](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694).
+Fixed buffers stop verifier replay overwriting draft K/V; native control warmup is
+also corrected. Acceptance rises from **1.65% to 74.67%** on this request. All
+three runs preserve native tokens/state; two uninstrumented samples measure TG.
 
 | Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 15 / 16 | 4,096 | Not qualified | Failed correctness |
+| 1 | 15 / 16 | 4,096 | 3,350.93 | **65.16** |
 
 This uses all historical draft K/V, not the DFlash2 2K window, and explicit
 four-link proposal/sampling collectives. The initial proposer is eager; the target
 verifier is batched and captured. [Scope and correctness gates](docs/dspark-full-history-2026-09-10.md).
 
-**Repair now on hardware:** [fixed-bank full-request validation](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694).
-Same 4K context, 15 drafts / 16 verifier rows, one audited request and two timed
-requests. Results are pending; serving defaults are unchanged.
+The two timed samples are **64.80 / 65.52 TG** through EOS. Mean fresh
+prefill/setup/decode is **7.42 seconds**, excluding model loading. This is not a
+matched win over the 74.27-TG DFlash2 lead. Drafting costs **86.49 ms/block**;
+verification **83.44 ms**, publication **14.07 ms**. At 12.1 committed tokens/block,
+200 TG needs a **60.5-ms total cycle**: proposal capture alone will not suffice.
+Serving defaults remain unchanged.
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of

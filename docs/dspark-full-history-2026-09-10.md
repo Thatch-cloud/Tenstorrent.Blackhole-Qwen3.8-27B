@@ -1,6 +1,6 @@
 # DSpark: full history and wider verification
 
-**4K attention and fifteen-query layouts pass TTsim. The first full-request hardware screen fails.**
+**The fixed-bank repair passes full-request hardware validation: PP3,350.93 / CTX4,096 / TG65.16.**
 Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 
 ## What is ready
@@ -9,12 +9,12 @@ Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 | --- | --- | --- |
 | Full attention | One global softmax over 2,048 / 2,048 / 64-key chunks | 58 simulator checks pass; clean exit 0 |
 | Native prefill capture | Retain all five taps from every chunk, starting at position zero | Host tests; no 2,048-row sliding window |
-| Learned history cache | Project each 32-row block once; cache all five layers' K/V | Full request executes; cache lifetime is under investigation |
+| Learned history cache | Project each 32-row block once; cache all five layers' K/V | Fixed-bank repair passes all cache lifetime checks |
 | Cache publication | Prepare only the verified input prefix; commit after target publication | Host tests cover rejection, discard, failure and ragged tails |
 | Cached layer | Seven or 15 query rows attend to all cached history | Host tests; no historical re-projection inside the layer |
 | Request bridge | Explicit `dspark` route with 15 proposals and a T16 target verifier | Host request-loop test; DFlash2 defaults unchanged |
-| Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Full request executes; acceptance collapses after the first two blocks |
-| Full-request adapter | Native token/state controls plus all-tap committed-feature audit; timed requests exclude that audit | Audited request passes; first timed request fails |
+| Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Repaired full-request acceptance is 74.67% |
+| Full-request adapter | Native token/state controls plus all-tap committed-feature audit; timed requests exclude that audit | One audited and two timed requests pass |
 
 The cache uses existing 32-row learned projection, normalization and rotary
 operations. Host tests do **not** qualify their new native composition. Initial
@@ -148,6 +148,38 @@ requests before any PP/TG result is accepted.
 
 Repair hardware run: [34428179694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694),
 immutable code `547bc2bed1f6626bc257d3bf1f7ae2d64c23716f`. The allocated runner is
-executing the full-request suite. It retains the all-cache lifetime audit and
-requires the fixed-bank simulator report. PP/TG and native-control warmup remain
-pending until all three complete requests pass.
+finished successfully. It retains the all-cache lifetime audit and requires the
+fixed-bank simulator report. Native-control warmup and all three complete requests
+pass; no serving default changes.
+
+## Repaired hardware result
+
+| Metric | Result |
+| --- | ---: |
+| PP / CTX / committed TG, one stream | 3,350.93 / 4,096 / **65.16** |
+| Two timed samples through EOS | 64.80 / 65.52 TG; 121 committed tokens each |
+| Accepted / proposed drafts | 224 / 300 (74.67%) |
+| Mean fresh prefill + setup + decode | 7.418 seconds; excludes loading |
+| Mean eager proposal / verifier-readback / publication | 86.49 / 83.44 / 14.07 ms per block |
+| Mean committed tokens / complete block cycle | 12.1 / 185.63 ms |
+| Required cycle at this acceptance for 200 TG | **60.5 ms** |
+
+One separately instrumented request also passes all 100 committed-feature checks
+and 62 complete-history audit groups (1,240 tensor comparisons). Every request
+matches native tokens, all recurrent state, valid target KV and inactive slots.
+The fixed draft cache reaches position 4,217 at capacity 4,384. All stalls remain
+in the timed samples; the instrumented request is excluded from TG.
+
+Independent reconciliation checks all 573 sources against the immutable tag,
+1,517 unchanged native fingerprints, all 62 checkpoint hashes and 120 before/after
+device-parameter records. Complete-request accounting and pooled PP/TG are
+recomputed from the two samples. Native build reuse is a cache hit.
+Retained report: `scripts/ci/dspark-request-hardware.json`, SHA-256
+`271d30a5ee46db12b06128f53d22adb2bcb2dac933d111bec961eb7c2f28952a`.
+
+The repair qualifies correctness on this task, not a speed win over the DFlash2
+lead, held-out coding quality, or 200 TG. Next experiments must reduce eager
+proposal overhead and target costs, or increase useful committed rows per block.
+Even a free proposal would not reach 200 at the current verifier latency and
+acceptance. Test wider drafting rather than assuming training on 16 rows certifies
+a wider serving window; preserve a measured 15-query control.
