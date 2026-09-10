@@ -99,6 +99,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                                 for part in operations.get_device_tensors(getattr(fixture, name))]
                             for name in ('tokens', 'positions')}
                         error.evidence['proposal_checks'] = list(proposal_device.prepared.checks) if proposal_trace else []
+                        if proposal_trace and position == len(prompt):
+                            from dspark_verifier_failure import compare_first_block
+                            try:
+                                error.evidence['first_block_comparison'] = compare_first_block(engine, decode,
+                                    drafter.snapshot, drafter.initial_state, actual[..., :1, :].clone(), tap=tap, chip=chip)
+                            except BaseException as diagnostic_error:
+                                error.evidence['first_block_diagnostic_error'] = f'{type(diagnostic_error).__name__}: {diagnostic_error}'
                     raise error
                 feature_checks.append(dict(tap=tap, chip=chip, position=position, rows=prefix, exact=True))
 
