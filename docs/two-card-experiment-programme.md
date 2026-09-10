@@ -11,6 +11,12 @@ fused score-layout path reached repeat-pooled **96.08 TG at CTX4096** on the
 merge-intervals task. The separate stable-unique screen regressed to 22.37 TG
 versus 73.52 control. Its identical repeat passes correctness at 112.55 TG versus
 59.66 control, but timing instability prevents promotion of that apparent gain.
+The host-instrumented run `34543303342` then passes at **PP3346.45 / CTX4096 /
+TG114.43**, versus 107.36 TG control on stable-unique. No CPU quota throttling or
+memory-limit events occurred in its request windows; earlier outliers remain
+unexplained. The identical combined runtime is now screening run-length encoding
+in `34543886854`. These task-specific results do not replace the merge-intervals
+baseline or establish the 200 TG target.
 [Score-layout evidence](dspark-score-layout-2026-09-11.md) /
 [Coding screen and repeat](coding-screen-2026-09-10.md).
 

@@ -52,7 +52,30 @@ its timed work. Missing counters remain unknown, not zero. These diagnostics
 include setup and audits and cannot independently prove decode interference or
 exclusive host use. They are not present in the immutable repeat above.
 
-The other two tasks are pending, not submitted concurrently because the workflow
+### Host-instrumented combined result
+
+Run `34543303342`, immutable `f49cee9`, passes independent validation of all 707
+source fingerprints, exact learned/request checks and the same four functional
+cases. Runtime kernels are unchanged; host snapshots are outside timed work.
+
+| Path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native score-layout control | 1 | 2531.27 | 4096 | 107.36 |
+| Combined fused score layout | 1 | 3346.45 | 4096 | 114.43 |
+
+Both arms commit 104 timed tokens with 98/120 acceptance. Candidate decode
+durations are 472.16/436.71 ms; control durations are 477.27/491.44 ms.
+The matched TG improvement is 6.58%, not the previous unstable 88.64% estimate.
+Control prefill still varies (1227.07/2009.25 ms). Across all six whole-request
+windows, CPU quota throttling and memory-limit/OOM event deltas are zero; memory
+pressure totals do not increase. CPU pressure is nonzero. This does not establish
+the cause of earlier outliers or prove an exclusive host. Do not discard them.
+Setup-inclusive means are 5768.67 ms candidate and 6753.29 ms control.
+Report SHA256: `62ebfea992b011765bf66bf43ed71b9bfb8e91346c933516d91c4be7663a0895`.
+
+The same immutable combined runtime now tests `run_length_encode_v1` in run
+`34543886854`; `rotate_right_v1` remains pending. Tasks are not submitted
+concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
 
