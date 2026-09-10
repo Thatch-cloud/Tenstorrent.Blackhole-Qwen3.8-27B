@@ -1,7 +1,22 @@
 # Remove DSpark attention round trips
 
-**Candidate plan, not a measured speedup.** Keep the pending captured-proposal
-comparison unchanged so it remains a clean measurement.
+**Candidate, not a measured speedup.** The captured-proposal comparison is complete;
+this attention replacement remains separate from the qualified request path.
+
+## Fifteen-query simulator result
+
+Run `20260910T055634Z-396-dspark-native-fixed-attention-probe` passes all82 checks
+at capacity4384, positions4096/4109, and fifteen queries on both simulated chips:
+4 eager, 4 exact replay, 48 unchanged inputs, 16 layouts, 8 fixture controls,
+and 2 stale-input controls. The original CPU tolerance remains rtol/atol0.01.
+Maximum absolute difference is0.452 on deliberately high-amplitude inputs;
+CPU agreement is tolerance-based, while replay agreement is bit-exact.
+
+The report and exit0 are pinned by `dspark_native_fixed_gate.py`. All recorded
+sources match before/after and the checkout; the original packer is restored
+and both ownership locks are absent. Existing decomposed-attention evidence
+was not modified. Learned-layer comparison and full-request hardware checks
+remain required before adoption. This result provides no TG measurement.
 
 ## Existing cost sources
 
