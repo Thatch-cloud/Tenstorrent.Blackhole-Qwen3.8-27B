@@ -15,7 +15,9 @@ retain exact target outputs/state. Two audited arms precede A/B/B/A timing.
 The gain is44.12% within this matched run. Native drafting takes37.78ms/block,
 verification76.17ms and select/publication11.70ms. At11 committed tokens/block,
 200TG requires a55ms **whole cycle**, versus126.84ms measured. The target is
-not achieved. The same-tag independent repeat is running as34447570149.
+not achieved. Same-tag repeat34447570149 passes at87.52TG. Pooling four timed
+requests per arm gives PP3337.21 / CTX4096 / TG87.10 versus59.43 control;
+all12 requests preserve exact target outputs/state.
 [Results and scope](dspark-native-attention-results-2026-09-10.md).
 
 Completed prerequisites and repairs:

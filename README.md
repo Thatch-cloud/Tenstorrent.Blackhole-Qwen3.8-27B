@@ -18,11 +18,12 @@ tokens or aggregate concurrent throughput. Results are offline, not endpoint tes
 | DSpark eager, latest matched control | 3,304.00 | 4,096 | 54.93 | One audited + two timed requests |
 | DSpark captured proposals | 3,355.78 | 4,096 | 56.92 | One audited + two timed requests |
 | DSpark captured proposals + commit-only GDN | 3,319.26 | 4,096 | **59.81** | Exact tokens/state; +8.89% over matched eager |
-| DSpark precise-native attention + capture + commit-only GDN | 3,310.11 | 4,096 | **86.69** | Exact tokens/state; +44.12% over matched composed attention |
+| DSpark precise-native attention + capture + commit-only GDN | 3,337.21 | 4,096 | **87.10** | Repeat-confirmed; four timed requests across two runs |
 
 DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
-The new precise-native attention candidate reaches **86.69 TG** on two timed
-requests; an independent repeat is pending. [Matched results](docs/dspark-native-attention-results-2026-09-10.md).
+The precise-native attention candidate reaches repeat-confirmed **87.10 TG**,
+versus59.43 matched control. All12 requests retain exact target outputs/state.
+[Matched results](docs/dspark-native-attention-results-2026-09-10.md).
 The latest comparison passes all nine requests after repairing trace allocation
 order. Its T16 simulator prerequisite passed all17 prefix/continuation cases.
 The repository-derived prompt changed, so historical rows are not matched controls.

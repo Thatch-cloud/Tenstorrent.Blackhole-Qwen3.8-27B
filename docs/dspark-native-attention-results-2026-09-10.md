@@ -43,3 +43,19 @@ Held-out coding quality, endpoint latency and long-context scaling are not certi
 Raw report SHA256: `cbafa38784a26bf57f10e7ba461ada85bd1cc59a2efc01eee1566608c761ac9d`.
 An independent repeat uses the same immutable tag in
 [run34447570149](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34447570149).
+
+## Independent repeat confirmed
+
+Run34447570149 passes with87.52 native TG. Both reports have unchanged source
+and native-runtime fingerprints, identical prompt hashes and exact target
+outputs/state across all12 requests. Pooling four timed requests per arm:
+
+| Attention | PP tok/s | CTX | Committed TG tok/s | Committed tokens |
+|---|---:|---:|---:|---:|
+| Composed | 3319.61 | 4096 | 59.43 | 484 |
+| Precise-native | 3337.21 | 4096 | **87.10** | 484 |
+
+Pooling sums committed tokens and elapsed decode time, not the arithmetic mean
+of TG. Acceptance remains444/660 native versus440/720 composed. No request or
+stall is removed. Repeat report SHA256:
+`c72ade53b762d61cbeaab9b113201f950526ec30d1cf9b37de9ee2f5677a1646`.
