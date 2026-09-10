@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from dram_mlp_gate import SOURCES, qualify, qualify_hardware
+from dram_mlp_gate import SOURCES, qualify, qualify_hardware, variant_sources
 from tiny_mlp_gate import PACKER, ORIGINAL_PACKER, TP_COMMON, HARDWARE_TP_COMMON
 
 
@@ -17,6 +17,14 @@ class DramMlpGateTests(unittest.TestCase):
 
     def test_recorded_simulator_pass_matches_current_sources(self):
         self.assertTrue(qualify(self.report, self.sources, self.native, '0')['passed'])
+
+    def test_sharded_variant_requires_its_own_simulator_sources(self):
+        self.assertEqual(set(variant_sources(True)) - set(SOURCES),
+            {'dram_mlp_sharded.py', 'dram-mlp-sharded-probe.py'})
+        with self.assertRaises(ValueError):
+            qualify(self.report, self.sources, self.native, '0', sharded=True)
+        with self.assertRaises(ValueError):
+            variant_sources(1)
 
     def test_incomplete_duplicate_or_failed_checks_rejected(self):
         for mutation in ('missing', 'duplicate', 'failed', 'unclean'):

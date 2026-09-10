@@ -19,6 +19,7 @@ dflash_native_proposal_abba=0
 dflash_context=0
 tiny_mlp=0
 dram_mlp=0
+dram_mlp_sharded=0
 tensix_mlp=0
 tensix_mlp_profile=0
 tensix_mlp_producers=8
@@ -28,7 +29,8 @@ if [ "$mode" = live-qk ]; then
     mode=baseline
     [[ "${QWEN_CODING_REQUEST:-0}" = 0 && "${QWEN_FABRIC_LINK_PROBE:-0}" = 0 && "${QWEN_LEARNED_STACK:-0}" = 0 && "${QWEN_PREFIX_ZERO_REUSE:-0}" = 0 ]]
 fi
-if [ "$mode" = dram-mlp ]; then
+if [[ "$mode" = dram-mlp || "$mode" = dram-mlp-sharded ]]; then
+    if [ "$mode" = dram-mlp-sharded ]; then dram_mlp_sharded=1; fi
     dram_mlp=1
     mode=full-norm-engine
     export QWEN_CODING_REQUEST=1 QWEN_FABRIC_LINK_PROBE=1
@@ -238,6 +240,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DFLASH_VERIFIER_PROFILE=$dflash_profile" \
     -e "QWEN_TINY_MLP=$tiny_mlp" \
     -e "QWEN_DRAM_MLP=$dram_mlp" \
+    -e "QWEN_DRAM_MLP_SHARDED=$dram_mlp_sharded" \
     -e "QWEN_TENSIX_MLP=$tensix_mlp" \
     -e "QWEN_TENSIX_MLP_PROFILE=$tensix_mlp_profile" \
     -e "QWEN_TENSIX_MLP_PRODUCERS=$tensix_mlp_producers" \

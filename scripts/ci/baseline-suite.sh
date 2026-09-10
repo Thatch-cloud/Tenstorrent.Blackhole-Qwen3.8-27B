@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p /experiment/results
+dram_mlp_args=()
+dram_mlp_report=dram-mlp-simulator
+if [ "${QWEN_DRAM_MLP_SHARDED:-0}" = 1 ]; then
+    test "${QWEN_DRAM_MLP:-0}" = 1
+    dram_mlp_args=(--sharded-product)
+    dram_mlp_report=dram-mlp-sharded-simulator
+fi
 sampling_args=()
 prefix_copy_args=()
 [[ "${QWEN_LEARNED_STACK:-0}" = 0 || ( "${QWEN_LEARNED_STACK:-0}" = 1 && "${QWEN_RUN_MODE:-baseline}" = learned-attention ) ]]
@@ -73,9 +80,9 @@ if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
             --output /experiment/results/tiny-mlp-preflight.json
     fi
     if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
-        python3 /experiment-scripts/ci/dram-mlp-hardware.py --preflight \
-            --simulator-report /experiment-scripts/ci/dram-mlp-simulator.json \
-            --simulator-exit-status /experiment-scripts/ci/dram-mlp-simulator.exit-status \
+        python3 /experiment-scripts/ci/dram-mlp-hardware.py --preflight "${dram_mlp_args[@]}" \
+            --simulator-report "/experiment-scripts/ci/$dram_mlp_report.json" \
+            --simulator-exit-status "/experiment-scripts/ci/$dram_mlp_report.exit-status" \
             --output /experiment/results/dram-mlp-preflight.json
     fi
     if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
@@ -398,9 +405,9 @@ if [ "${QWEN_RUN_MODE:-baseline}" = full-norm-engine ]; then
         exit 0
     fi
     if [ "${QWEN_DRAM_MLP:-0}" = 1 ]; then
-        timeout -k 30 900 python3 -u /experiment-scripts/ci/dram-mlp-hardware.py \
-            --simulator-report /experiment-scripts/ci/dram-mlp-simulator.json \
-            --simulator-exit-status /experiment-scripts/ci/dram-mlp-simulator.exit-status \
+        timeout -k 30 900 python3 -u /experiment-scripts/ci/dram-mlp-hardware.py "${dram_mlp_args[@]}" \
+            --simulator-report "/experiment-scripts/ci/$dram_mlp_report.json" \
+            --simulator-exit-status "/experiment-scripts/ci/$dram_mlp_report.exit-status" \
             --output /experiment/results/dram-mlp.json
         exit 0
     fi

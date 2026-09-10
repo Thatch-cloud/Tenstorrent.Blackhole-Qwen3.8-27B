@@ -16,7 +16,7 @@ from gdn_multitoken_conv import addresses, release_owned
 from sampling_link_policy import audit
 from dram_mlp import execute
 from dram_sharded_projection import configurations
-from dram_mlp_gate import NATIVE_SOURCES, SOURCES, qualify
+from dram_mlp_gate import NATIVE_SOURCES, variant_sources, qualify
 
 
 def main():
@@ -25,10 +25,15 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--simulator-exit-status', type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--sharded-product', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, True)
     native_root = Path(os.environ['TT_METAL_HOME'])
-    sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in SOURCES}
+    names = variant_sources(options.sharded_product)
+    operation = execute
+    if options.sharded_product:
+        from dram_mlp_sharded import execute as operation
+    sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
     native_sources = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
     prerequisite = json.loads(options.simulator_report.read_text())
     report = dict(passed=False, closed_cleanly=False, backend='hardware', scope=__doc__, layer=0, rows=16, streams=1,
@@ -38,11 +43,11 @@ def main():
         sources=sources, native_sources=native_sources,
         simulator_report_sha256=hashlib.sha256(options.simulator_report.read_bytes()).hexdigest(),
         hardware_script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        collective_links=4,
+        collective_links=4, sharded_product=options.sharded_product,
         timing_scope='Captured complete MLP including DRAM-to-L1 input, DRAM weight reads and native TP2 collective; upload, capture and validation excluded')
     try:
         report['simulator_gate'] = qualify(prerequisite, sources, native_sources,
-            options.simulator_exit_status.read_text().strip(), hardware=True)
+            options.simulator_exit_status.read_text().strip(), hardware=True, sharded=options.sharded_product)
         report['fabric_sources'] = audit(native_root, os.environ)
         runpy.run_path(str(Path(__file__).with_name('dram-projection-binding-check.py')), run_name='__main__')
     except BaseException as error:
@@ -120,7 +125,7 @@ def main():
             if not candidate:
                 return retain(storage, mlp.forward(source))
             interleaved = retain(storage, ttnn.to_memory_config(source, ttnn.L1_MEMORY_CONFIG))
-            partial = execute(ttnn, interleaved, sharded, configs, compute,
+            partial = operation(ttnn, interleaved, sharded, configs, compute,
                 lambda value: value)
             return retain(storage, tt_all_reduce(partial, mesh, collectives, cluster_axis=0, dim=3,
                 topology=args.ccl_topology(), memory_config=ttnn.DRAM_MEMORY_CONFIG))
@@ -194,7 +199,7 @@ def main():
                 ttnn.close_mesh_device(mesh)
                 report['closed_cleanly'] = True
                 progress('failed' if report.get('error') else 'closed')
-    report['sources_after'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in SOURCES}
+    report['sources_after'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
     report['native_sources_after'] = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
     if report['sources_after'] != sources or report['native_sources_after'] != native_sources:
         raise AssertionError('Hardware experiment sources changed')
