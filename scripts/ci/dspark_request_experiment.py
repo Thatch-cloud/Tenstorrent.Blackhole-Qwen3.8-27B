@@ -135,7 +135,7 @@ def cache_formats(operations, caches, recurrent):
 
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
-        native_attention_variants=False, profile_verifier=False):
+        native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -203,16 +203,20 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
 
     from dspark_request_variants import SCHEDULE, POLICIES, summarize_variants
     if (type(native_attention_variants) is not bool or type(profile_verifier) is not bool
-            or sum((native_attention_variants, variants, profile_verifier)) > 1):
+            or type(norm_scatter_variants) is not bool
+            or sum((native_attention_variants, variants, profile_verifier, norm_scatter_variants)) > 1):
         raise ValueError('Choose one explicit matched experiment')
-    if native_attention_variants or profile_verifier:
+    if native_attention_variants or profile_verifier or norm_scatter_variants:
         from dspark_native_request_variants import SCHEDULE, POLICIES, summarize_variants
         from dspark_native_fixed_gate import qualify
         qualify(Path(__file__).parent)
+    if norm_scatter_variants:
+        from dspark_norm_request_variants import SCHEDULE, POLICIES, summarize_variants
+        from gdn_norm_scatter_scope import scoped_reader
 
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
-    schedule = SCHEDULE if variants or native_attention_variants else tuple(('eager', audit) for audit in (True, False, False))
+    schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants else tuple(('eager', audit) for audit in (True, False, False))
     if profile_verifier:
         schedule = (('native', True),)
     report['coding_context'], report['request_checks'] = context, []
@@ -226,7 +230,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             progress(f'full_request_{ordinal}_{arm}_' + ('feature_audit' if audit else 'timed'))
             from native_draft_sdpa import precise_draft_kernel
             native = POLICIES[arm].get('native_attention', False)
-            with precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext() as kernel_audit:
+            with (precise_draft_kernel(os.environ['TT_METAL_HOME']) if native else nullcontext()) as kernel_audit, \
+                    (scoped_reader() if norm_scatter_variants and arm == 'scatter' else nullcontext()) as norm_audit:
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
@@ -234,6 +239,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     **(dict(profile_verifier=True) if profile_verifier else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
+            if norm_scatter_variants:
+                result['norm_scatter_kernel'] = norm_audit
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
@@ -241,9 +248,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report.update(instrumented_timing=True, correctness_only=True, profile_family='dspark',
             ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15, pp=None, committed_tg=None)
         return
-    if variants or native_attention_variants:
+    if variants or native_attention_variants or norm_scatter_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
-        report['request_summary'] = report['request_comparison']['arms']['native' if native_attention_variants else 'trace_commit']
+        report['request_summary'] = report['request_comparison']['arms'][
+            'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

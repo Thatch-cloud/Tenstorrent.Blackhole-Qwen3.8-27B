@@ -129,7 +129,11 @@ def main():
     parser.add_argument('--request-variants', action='store_true', help='Compare eager, captured proposal and commit-only GDN in one loaded session')
     parser.add_argument('--native-attention-variants', action='store_true')
     parser.add_argument('--profile-verifier', action='store_true')
+    parser.add_argument('--norm-scatter-variants', action='store_true')
     options = parser.parse_args()
+    if options.norm_scatter_variants and (not options.request or options.request_variants
+            or options.native_attention_variants or options.profile_verifier):
+        raise ValueError('Norm scatter requires its own complete request comparison')
     if options.request_variants and not options.request:
         raise ValueError('Proposal variants require the complete request experiment')
     if options.native_attention_variants and (not options.request or options.request_variants):
@@ -147,10 +151,14 @@ def main():
         from sampling_link_policy import audit as sampling_link_audit
 
         request_gate = request_preflight(Path(__file__).parent,
-            prepared_proposals=options.request_variants or options.native_attention_variants or options.profile_verifier)
-        if options.native_attention_variants or options.profile_verifier:
+            prepared_proposals=options.request_variants or options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants)
+        if options.native_attention_variants or options.profile_verifier or options.norm_scatter_variants:
             from dspark_native_fixed_gate import qualify
             request_gate['request_prerequisites'].update(qualify(Path(__file__).parent))
+        if options.norm_scatter_variants:
+            from gdn_norm_scatter_report import validate as validate_norm
+            request_gate['request_prerequisites']['norm_scatter'] = validate_norm(
+                json.loads(Path(__file__).with_name('gdn-norm-scatter-simulator.json').read_text()), Path(__file__).parent)
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
@@ -194,6 +202,8 @@ def main():
             report['scope'] = 'Matched composed/native DSpark attention screen; two audits and four timed requests'
         if options.profile_verifier:
             report['scope'] = 'Audited native-attention DSpark T16 verifier attribution; no throughput measurement'
+        if options.norm_scatter_variants:
+            report['scope'] = 'Matched native-attention DSpark norm reader screen; two audits and four timed requests'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -290,7 +300,8 @@ def main():
             run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
                 layers, predecessor, successor, DSparkRotary(json.loads(options.config.read_text())), report, progress,
                 prompt=prompts[0], context=context, variants=options.request_variants,
-                native_attention_variants=options.native_attention_variants, profile_verifier=options.profile_verifier)
+                native_attention_variants=options.native_attention_variants, profile_verifier=options.profile_verifier,
+                norm_scatter_variants=options.norm_scatter_variants)
             progress('audit_parameters_after_full_requests')
             check_parameters('after')
             report['passed'] = True
