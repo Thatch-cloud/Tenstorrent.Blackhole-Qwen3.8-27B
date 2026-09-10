@@ -37,3 +37,30 @@ Report allocated bytes separately from valid-history bytes, including both banks
 and trace-owned copies. Smaller storage alone is not a throughput result. Target
 KV changes require quality comparisons against the original target, not merely
 agreement between speculative decoding and an equally quantized native control.
+
+## External implementation intake: NInfer
+
+Reviewed [compressed-KV PR35](https://github.com/Neroued/ninfer/pull/35) at head
+`00856286d307e5c1bbf74bc58fde14be46b0158b`, not an assumed merged release.
+Its `gqa_attention_decode_i8.cuh` stages compressed codes and scales locally,
+dequantizes V while QK executes, and prefetches the next tile while PV executes.
+The lesson is to overlap conversion with computation and avoid whole-cache
+expanded intermediates, not to assume conversion itself is free.
+
+`gqa_attention_kv_quant.cuh` includes 64-wide Hadamard transforms, packed signed
+4-bit values clamped to [-7,7], and a separate inverse-output rotation kernel.
+Any TT port must charge that rotation, scaling, packing and scratch space too.
+CUDA warp shuffles and producer/consumer scheduling need a Tensix-specific design;
+NVIDIA NVFP4 and Tenstorrent BF4 are not interchangeable quantization formats.
+
+The [user's NInfer report](https://www.reddit.com/r/LocalLLM/comments/1vyyi93/qwen3827b_at_262k_context_on_a_single_rtx_5090/)
+lists 118–121 tok/s around 194K–210K actual prompt tokens, with 262K configured
+capacity, MTP width3 and rotated INT8 keys/INT4 values. It is uncontrolled coding
+session evidence, not a full262K benchmark. The author reports degraded recall
+with 4-bit keys; use that as a reason to test asymmetric K/V precision and
+long-context coding retrieval, not as a measured universal quality result.
+
+Follow-up candidate: tile-local K8/V4 unpack and scale inside attention with
+prefetch overlap, compared against unchanged cache precision. Start with the
+already-qualified native attention layout; do not combine unqualified layout,
+rotation and precision changes in one opaque full-model run.
