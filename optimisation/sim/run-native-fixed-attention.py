@@ -147,7 +147,7 @@ def main():
             environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-score-layout-probe'
             if options.score_feedback:
                 environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-markov-score-layout-probe'
-                environment['KERNEL_TIMEOUT'] = '7200'
+                environment['KERNEL_TIMEOUT'] = '21600' if options.score_vocabulary == 248320 else '1800'
             arguments = ['--vocabulary', str(options.score_vocabulary or 64)]
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode

@@ -77,6 +77,14 @@ was reversed, its original SHA-256 `87b9c251202c28ffd8b3e419699b04de7d3f4cb4176f
 verified, and the abandoned owner lock removed. This restores runtime state only;
 it does not turn the interrupted report into a pass.
 
+Fresh retry `20260910T210038Z-427` runs under the managed WSL service
+`qwen-score-feedback-recovery-20260911.service`, independent of the terminal.
+The full-vocabulary process timeout is now six hours: initialization plus just
+the first native/candidate pair took roughly 45 minutes in the interrupted run,
+so the previous two-hour cap was too short for all patterns and replays.
+Small-vocabulary runs remain capped at 30 minutes. Kernel sources, comparison
+matrices, exactness checks and the bounded memory policy are unchanged.
+
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.
