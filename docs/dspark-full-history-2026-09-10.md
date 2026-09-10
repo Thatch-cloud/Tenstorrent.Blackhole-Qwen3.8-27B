@@ -1,6 +1,6 @@
 # DSpark: full history and wider verification
 
-**4K attention and fifteen-query layouts pass TTsim. Full-request hardware measurement is next.**
+**4K attention and fifteen-query layouts pass TTsim. Full-request hardware CI is running.**
 Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 
 ## What is ready
@@ -70,3 +70,7 @@ requested 4K context, each with a 257-token generation cap. It preserves all
 native tokens, full recurrent state, valid KV and inactive slots; reports pooled
 PP / actual CTX / committed TG, and keeps all stalls and setup costs visible.
 Serving defaults remain unchanged; this is not permission to deploy the drafter.
+
+First full-request run: [34424354652](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652),
+source `7f52347fb14ee3c42ebd213dc6e9ce9b9a625dea`. It is in progress; no new
+hardware PP/TG is available yet.

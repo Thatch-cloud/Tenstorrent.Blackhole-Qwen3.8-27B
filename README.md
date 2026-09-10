@@ -114,8 +114,21 @@ The warm replay mean is **10.19 ms/block at 32 history rows / seven query rows**
 This excludes embeddings, target head, Markov selection and verification—**not TG**.
 [Real-target proposal integration now passes](docs/dspark-target-integration-2026-09-10.md),
 preserving target tokens/GDN/KV. Short-prefix acceptance is only **3/7 and 0/7**;
-full 4K history, wider blocks, numerical differences and committed TG remain open.
+these are not complete coding responses. Full-history attention and fifteen-query
+layouts now pass 58 + 126 simulator checks. Learned numerical differences and
+committed DSpark TG remain open.
 Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
+
+**Now testing:** [full DSpark coding requests on both cards](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34424354652).
+One feature-audited request, then two timed requests; all stalls stay in TG.
+
+| Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 15 / 16 | 4,096 requested | Pending | Pending |
+
+This uses all historical draft K/V, not the DFlash2 2K window, and explicit
+four-link proposal/sampling collectives. The initial proposer is eager; the target
+verifier is batched and captured. [Scope and correctness gates](docs/dspark-full-history-2026-09-10.md).
 
 The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
 against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
