@@ -21,7 +21,9 @@ DSpark's baseline preserves native target tokens/state, but does not beat DFlash
 The next comparison isolates proposal capture and commit-only state publication;
 its T16 simulator prerequisite passed all17 prefix/continuation cases.
 [Baseline run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694)
-and [current hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34438403628).
+and [current hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34438631295).
+The first dispatch stopped before measurement on a container source-path error;
+the retry fixes staging without changing kernels or the simulator gate.
 Neither result certifies held-out coding quality or long-context scaling.
 
 ### Other measured results

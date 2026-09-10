@@ -3,6 +3,14 @@
 **Prototype only. Not simulated, hardware-qualified or enabled in requests yet.**
 This is separate from the captured-proposal / commit-only hardware comparison.
 
+First simulator attempt `20260910T044619Z-414-dspark-markov-sfpu-probe` exited1
+before numerical qualification: `UnimplementedFunctionality: tensix_unpacr:
+unpack_to_dst=1 in_data_format=5`. Compilation reached execution; this is not an
+accuracy pass or proof that hardware supports the intended mixed-format path.
+Retain this failure while checking BF16-to-FP32 destination unpack semantics.
+Do not replace the input with externally widened FP32 and call that the same
+BF16-storage optimization.
+
 ## Why the previous candidate failed
 
 The retained learned Markov diagnostic isolates the error to native grouped
