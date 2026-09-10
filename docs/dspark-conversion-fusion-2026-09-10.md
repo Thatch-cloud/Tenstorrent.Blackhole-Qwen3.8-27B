@@ -18,6 +18,17 @@ and both ownership locks are absent. Existing decomposed-attention evidence
 was not modified. Learned-layer comparison and full-request hardware checks
 remain required before adoption. This result provides no TG measurement.
 
+The full learned-layer simulator attempt `20260910T060817Z-381` timed out
+after1800 seconds during baseline case1, before any candidate comparison.
+Its retained report is explicitly incomplete (exit124), not a numerical rejection.
+Baseline case0 preserved all checked inputs and weights. The timeout left the
+child-owned SDPA graft installed; it was restored and both original source hashes
+verified. The outer launcher now also restores this known child patch on timeout,
+with tests rejecting unexpected external modifications.
+Do not repeat this entire expensive baseline loop unchanged. The changed attention
+kernel has already passed the82-check simulator gate; full learned-layer and
+request comparison can next run on hardware without claiming the timeout passed.
+
 ## Existing cost sources
 
 `dspark_full_attention.execute` explicitly widens query, keys, values and masks

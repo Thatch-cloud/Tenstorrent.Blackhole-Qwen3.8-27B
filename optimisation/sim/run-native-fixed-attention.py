@@ -5,10 +5,24 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 ORIGINAL = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 PATCHED = '8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7'
+
+
+def restore_owned_sources(directory, original, patched, lock):
+    current = {name: (directory / name).read_bytes() for name in original}
+    if current == original and not lock.exists():
+        return
+    if current != patched or not lock.exists():
+        raise ValueError('Owned SDPA sources changed unexpectedly; refusing to overwrite')
+    for name, data in original.items():
+        (directory / name).write_bytes(data)
+    if {name: (directory / name).read_bytes() for name in original} != original:
+        raise ValueError('SDPA restoration failed')
+    lock.unlink()
 
 
 def patched_bytes(original, patch):
@@ -35,6 +49,15 @@ def main():
         raise ValueError('Learned-layer probe requires an explicit checkpoint')
     directory = Path(__file__).resolve().parent
     root = Path(os.environ.get('SIM_ROOT', '/opt/ttsim'))
+    sys.path.insert(0, str(directory.parents[1] / 'scripts/ci'))
+    from native_draft_sdpa import KERNEL_DIRECTORY, patched_sources
+    native_directory = root / 'tt-metal' / KERNEL_DIRECTORY
+    native_lock = native_directory / '.qwen-precise-draft.lock'
+    if native_lock.exists():
+        raise ValueError('Another precise SDPA owner is active')
+    from native_draft_sdpa import SOURCE_HASHES
+    native_original = {name: (native_directory / name).read_bytes() for name in SOURCE_HASHES}
+    native_patched = patched_sources(native_original)
     packer = root / 'tt-metal/tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
     lock = packer.with_name('.qwen-native-fixed-packer.lock')
     original = packer.read_bytes()
@@ -56,13 +79,16 @@ def main():
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:
-        if changed:
-            if packer.read_bytes() != patched:
-                raise ValueError('Owned packer changed externally; refusing to overwrite it')
-            packer.write_bytes(original)
-            if hashlib.sha256(packer.read_bytes()).hexdigest() != ORIGINAL:
-                raise ValueError('Original packer restoration failed')
-        lock.unlink()
+        try:
+            restore_owned_sources(native_directory, native_original, native_patched, native_lock)
+        finally:
+            if changed:
+                if packer.read_bytes() != patched:
+                    raise ValueError('Owned packer changed externally; refusing to overwrite it')
+                packer.write_bytes(original)
+                if hashlib.sha256(packer.read_bytes()).hexdigest() != ORIGINAL:
+                    raise ValueError('Original packer restoration failed')
+            lock.unlink()
 
 
 if __name__ == '__main__':
