@@ -127,9 +127,12 @@ def main():
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--request', action='store_true', help='Run full 4K coding requests with the T16 batched verifier')
     parser.add_argument('--request-variants', action='store_true', help='Compare eager, captured proposal and commit-only GDN in one loaded session')
+    parser.add_argument('--native-attention-variants', action='store_true')
     options = parser.parse_args()
     if options.request_variants and not options.request:
         raise ValueError('Proposal variants require the complete request experiment')
+    if options.native_attention_variants and (not options.request or options.request_variants):
+        raise ValueError('Native attention requires its own complete request comparison')
     if (os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1'
             or os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('TT_METAL_SLOW_DISPATCH_MODE')
             or options.output.exists() or os.environ.get('QWEN_PROJECTION_LINKS') != '4'):
@@ -140,7 +143,11 @@ def main():
         from dspark_request_experiment import request_preflight
         from sampling_link_policy import audit as sampling_link_audit
 
-        request_gate = request_preflight(Path(__file__).parent, prepared_proposals=options.request_variants)
+        request_gate = request_preflight(Path(__file__).parent,
+            prepared_proposals=options.request_variants or options.native_attention_variants)
+        if options.native_attention_variants:
+            from dspark_native_fixed_gate import qualify
+            request_gate['request_prerequisites'].update(qualify(Path(__file__).parent))
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
@@ -180,6 +187,8 @@ def main():
             target_verifier='Captured T16 batched verifier with exact native token/state and committed-feature checks')
         if options.request_variants:
             report['scope'] = 'Matched full-history DSpark proposal/commit-only screen; three audits and six timed requests'
+        if options.native_attention_variants:
+            report['scope'] = 'Matched composed/native DSpark attention screen; two audits and four timed requests'
     owned, transient, captured_owned = [], [], []
     mesh = reader = trace = capture = None
     started = time.perf_counter()
@@ -275,7 +284,8 @@ def main():
 
             run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
                 layers, predecessor, successor, DSparkRotary(json.loads(options.config.read_text())), report, progress,
-                prompt=prompts[0], context=context, variants=options.request_variants)
+                prompt=prompts[0], context=context, variants=options.request_variants,
+                native_attention_variants=options.native_attention_variants)
             progress('audit_parameters_after_full_requests')
             check_parameters('after')
             report['passed'] = True

@@ -12,8 +12,8 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants ]]
-if [[ "$mode" = request-variants ]]; then
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]
+if [[ "$mode" = request-variants || "$mode" = request-native-attention ]]; then
     test -f /experiment-optimisation/sim/gdn-multitoken.py
     ln -s /experiment-optimisation /optimisation
     test -f /experiment-scripts/ci/../../optimisation/sim/gdn-multitoken.py
@@ -26,13 +26,17 @@ if [ "$mode" != backbone ]; then
     export HF_MODEL="$MODEL_WEIGHTS_DIR"
 fi
 report_name=$probe
-if [[ "$mode" = request || "$mode" = request-variants ]]; then
+if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]; then
     report_name=dspark-request-hardware
     request_options=(--request)
 fi
 if [ "$mode" = request-variants ]; then
     report_name=dspark-request-variants-hardware
     request_options+=(--request-variants)
+fi
+if [ "$mode" = request-native-attention ]; then
+    report_name=dspark-native-attention-request-hardware
+    request_options+=(--native-attention-variants)
 fi
 python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \

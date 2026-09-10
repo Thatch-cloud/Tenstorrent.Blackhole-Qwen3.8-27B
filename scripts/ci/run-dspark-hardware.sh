@@ -4,7 +4,7 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants ]]
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]
 target_mount=()
 if [ "$mode" != backbone ]; then
     target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
@@ -63,7 +63,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
 docker cp optimisation "$test_id:/experiment-optimisation"
-if [[ "$mode" = request || "$mode" = request-variants ]]; then
+if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention ]]; then
     docker cp speculative-decoding "$test_id:/speculative-decoding"
 fi
 docker cp optimisation/sim/sdpa-graft-registration.patch "$test_id:/tmp/ccl-graft-registration.patch"
