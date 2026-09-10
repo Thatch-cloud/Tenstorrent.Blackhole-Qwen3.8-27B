@@ -20,6 +20,20 @@ repeat-confirmed, does not improve the previously recorded 87.10 TG result,
 and does not establish held-out coding quality or serving qualification.
 The independent validator reproduces the saved summary exactly.
 
+Mean times across all 22 timed T16 blocks per arm:
+
+| Complete request phase | Control ms | Scatter ms |
+| --- | ---: | ---: |
+| Draft | 38.34 | 39.02 |
+| Input | 0.73 | 0.83 |
+| Verify and readback | 76.49 | 74.57 |
+| Select and commit | 12.17 | 11.51 |
+| Whole cycle | 128.08 | 126.33 |
+
+Verification/readback falls 1.92 ms/block. These are host phase boundaries, not
+isolated device norm timing. At 11 committed tokens/block, the 200 TG target
+requires a 55 ms whole cycle; this optimization alone cannot close that gap.
+
 Artifact: `runner-evidence.local/34451473973/qwen-hardware-inventory-34451473973/dspark-norm-scatter-request-hardware.json`.
 SHA256: `27f9b57bbe82f27ff11c0af45c407823b7976dd526b9de784e38e1c53ea0778c`.
 Serving defaults remain unchanged; the 200 committed tok/s target is unmet.
