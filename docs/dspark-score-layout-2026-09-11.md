@@ -96,6 +96,24 @@ Current retry `20260910T210526Z-378` uses service
 a waiting WSL client. It has passed TTNN import and opened the simulated mesh.
 These fixes concern launch reliability only; full feedback validation is pending.
 
+## Faster validation sequence
+
+The long synthetic full-chain simulator run is no longer the sole admission
+route to hardware correctness. The changed score kernel already has exact
+full-vocabulary eager/replay simulator evidence, and the complete feedback path
+has the small-vocabulary simulator gate. Those admit **hardware correctness only**.
+
+Before any request timing, the new hardware audit runs both unchanged native and
+candidate fifteen-step chains with the actual loaded learned weights, two distinct
+anchor/logit patterns, and three changed-input captured replays. It requires all
+60 eager and 90 replay score/token comparisons, input integrity, unchanged weight
+hashes and stable bindings. Each candidate request requires that audit and the
+same learned-weight allocation. Full-request audits and A/B/B/A timing follow.
+
+This moves expensive repeated unchanged matmuls to hardware, not out of validation.
+The existing simulator run is left intact. Partial simulator reports remain
+unqualified, and no hardware throughput result is implied by admission.
+
 The earlier SFPU **dot-product** prototype remains unqualified and is not used.
 This kernel receives already-computed FP32 bias; its only arithmetic is addition.
 Serving defaults and learned weights are unchanged.

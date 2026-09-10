@@ -16,7 +16,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
-        target_attention_t16=False, score_layout=False):
+        target_attention_t16=False, score_layout=False, score_layout_evidence=None):
     import torch
     from full_request import measure_request
     if type(score_layout) is not bool or (score_layout and not (
@@ -174,7 +174,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         proposal_device = drafter
         if score_layout:
             from dspark_score_layout_scope import ScoreLayoutArm
-            score_arm = ScoreLayoutArm(proposal_device)
+            score_arm = ScoreLayoutArm(proposal_device, hardware_audit=score_layout_evidence)
             score_scope.enter_context(score_arm.install())
         capture.close()
         if audit_features:

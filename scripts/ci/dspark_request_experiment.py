@@ -235,8 +235,11 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from dspark_combined_variants import SCHEDULE, POLICIES, summarize_variants
     if score_layout:
         from dspark_score_layout_variants import SCHEDULE, POLICIES, summarize_variants
-        from dspark_markov_score_layout_gate import qualify as qualify_scores
+        from dspark_score_layout_hardware_gate import qualify as qualify_scores
         qualify_scores(Path(__file__).parent)
+        from dspark_score_layout_hardware_audit import audit as audit_scores
+        progress('learned_score_layout_hardware_correctness_before_requests')
+        report['score_layout_hardware_audit'] = audit_scores(operations, model.mesh_device, predecessor, successor)
     if mlp_down:
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down
@@ -273,7 +276,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
                     eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter else 257, **POLICIES[arm],
-                    **(dict(profile_verifier=True) if profile_verifier else {}))
+                    **(dict(profile_verifier=True) if profile_verifier else {}),
+                    **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
             if draft_observer is not None:

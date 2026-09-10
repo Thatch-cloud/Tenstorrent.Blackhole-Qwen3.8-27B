@@ -114,7 +114,7 @@ class FullDSparkRequestTests(unittest.TestCase):
         result = self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,
             target_attention_t16=True, score_layout=True)
         self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
-        constructor.assert_called_once_with(self.drafter)
+        constructor.assert_called_once_with(self.drafter, hardware_audit=None)
         arm.summary.assert_called_once()
         self.assertEqual(result['score_layout'], {'restored': True, 'calls': 2})
 

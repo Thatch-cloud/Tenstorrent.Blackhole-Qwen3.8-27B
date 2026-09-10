@@ -8,9 +8,12 @@ from test_dspark_request_variants import DSparkVariantTests
 
 class ScoreLayoutVariantTests(unittest.TestCase):
     def setUp(self):
-        patcher = patch('dspark_markov_score_layout_gate.qualify', return_value={'test_gate': True})
+        patcher = patch('dspark_score_layout_hardware_gate.qualify', return_value={'test_gate': True})
         patcher.start()
         self.addCleanup(patcher.stop)
+        validator = patch('dspark_score_layout_hardware_gate.validate_hardware', return_value='digest')
+        validator.start()
+        self.addCleanup(validator.stop)
 
     def requests(self):
         existing = DSparkVariantTests().requests()
@@ -23,7 +26,8 @@ class ScoreLayoutVariantTests(unittest.TestCase):
             for field in ('target_attention_t16', 'attention_replay', 'family_routing'):
                 value[field] = True
             if arm == 'scores':
-                value['score_layout'] = dict(calls=2, restored=True, qualification={'test_gate': True})
+                value['score_layout'] = dict(calls=2, restored=True, qualification={'test_gate': True},
+                    hardware_audit={}, hardware_audit_sha256='digest')
             result.append(value)
         return result
 

@@ -196,7 +196,7 @@ def main():
             from dram_mlp_down_gate import qualify_repeated
             request_gate['request_prerequisites']['down_mlp'] = qualify_repeated(Path(__file__).parent, root)
         if options.score_layout:
-            from dspark_markov_score_layout_gate import qualify as qualify_scores
+            from dspark_score_layout_hardware_gate import qualify as qualify_scores
             request_gate['request_prerequisites']['score_layout'] = qualify_scores(Path(__file__).parent)
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']

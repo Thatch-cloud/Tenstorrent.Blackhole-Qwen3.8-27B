@@ -14,7 +14,7 @@ SCHEDULE = (('control', True), ('scores', True), ('control', False),
 def validate_route(value, arm):
     from pathlib import Path
     from dspark_target_attention_variants import validate_route as attention_route
-    from dspark_markov_score_layout_gate import qualify
+    from dspark_score_layout_hardware_gate import qualify, validate_hardware
 
     if arm not in POLICIES:
         raise ValueError('Unknown score-layout arm')
@@ -28,6 +28,8 @@ def validate_route(value, arm):
             or type(audit.get('calls')) is not int or audit['calls'] < 2
             or audit.get('qualification') != qualify(Path(__file__).parent)):
         raise ValueError('Used, restored and independently qualified score-layout scope required')
+    if audit.get('hardware_audit_sha256') != validate_hardware(audit.get('hardware_audit'), Path(__file__).parent):
+        raise ValueError('Complete learned hardware audit digest required')
 
 
 def summarize_variants(requests):
