@@ -124,3 +124,14 @@ An ordering difference from the qualified comparator probe was identified:
 the integration lacked its explicit mesh fence before reading counters. The
 retry restores that fence and logs enqueue/fence milestones for the first case.
 This is a diagnostic hypothesis, not a proven fix or a numerical pass.
+
+## Hardware integration preparation
+
+`gdn_batched_publication_scope.py` provides an unused opt-in preparation hook.
+It requires both completed simulator reports before installation, verifies the
+declared mesh and all 48 native state owners, routes only T16 to the candidate,
+and keeps smaller verifier buckets native. It restores its own binding and refuses
+to overwrite an externally replaced hook. Its summary requires all 17 prefixes
+but explicitly does not claim hardware execution or serving qualification.
+Eight scope/geometry tests pass. No workflow or serving path activates this hook
+yet; learned-state continuation and matched full-request audits remain mandatory.
