@@ -11,6 +11,27 @@ from request_verifier_profile_report import analyze_traces, intervals, validate_
 
 
 class RequestVerifierProfileTests(unittest.TestCase):
+    def test_explicit_t16_observer_requires_three_full_width_calls(self):
+        engine = self.engine()
+        engine.buckets = {16: engine.buckets[8]}
+        engine.bucket_key = lambda ticket: 16
+        with patch.dict(os.environ, {name: '1' for name in PROFILER_FLAGS}), redirect_stdout(io.StringIO()):
+            observer = RequestVerifierProfile(engine.operations, engine.mesh, signpost=Mock(), full_rows=16)
+            for index in range(3):
+                ticket = SimpleNamespace(position=4096 + index * 16, tokens=list(range(16)))
+                engine.phase, engine.pending = 'idle', None
+                with observer(engine, ticket):
+                    engine.phase, engine.pending = 'verified', ticket
+                    engine.buckets[16]['first'] = False
+            result = observer.summary()
+        self.assertEqual(result['full_rows'], 16)
+        self.assertEqual([record['rows'] for record in result['records']], [16, 16, 16])
+
+    def test_invalid_profile_width_is_rejected(self):
+        for width in (True, 7, 32, '16'):
+            with self.assertRaises(ValueError):
+                RequestVerifierProfile(Mock(), object(), full_rows=width)
+
     def engine(self):
         mesh = object()
         operations = SimpleNamespace(synchronize_device=Mock(), ReadDeviceProfiler=Mock())
@@ -79,6 +100,18 @@ class RequestVerifierProfileTests(unittest.TestCase):
 
 
 class RequestProfileReportTests(unittest.TestCase):
+    def test_t16_attribution_requires_explicit_width_and_both_chips(self):
+        records, rows = self.fixture()
+        for record in records:
+            record['rows'] = 16
+        with self.assertRaises(ValueError):
+            analyze_traces(records, rows)
+        result = analyze_traces(records, rows, full_rows=16)
+        self.assertEqual({entry['device'] for entry in result}, {'0', '1'})
+        self.assertTrue(all(entry['steady_replays'] == 2 for entry in result))
+        with self.assertRaises(ValueError):
+            analyze_traces(records, [row for row in rows if row['DEVICE ID'] == '0'], full_rows=16)
+
     def fixture(self):
         records, rows = [], []
         for repeat in range(3):

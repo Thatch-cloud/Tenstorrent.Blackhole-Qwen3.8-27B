@@ -12,7 +12,10 @@ PROFILER_FLAGS = ('TTNN_OP_PROFILER', 'TT_METAL_DEVICE_PROFILER', 'TT_METAL_PROF
 
 
 class RequestVerifierProfile:
-    def __init__(self, operations, mesh, *, signpost=None):
+    def __init__(self, operations, mesh, *, signpost=None, full_rows=8):
+        if type(full_rows) is not int or full_rows not in (8, 16):
+            raise ValueError('Explicit supported verifier profile width required')
+        self.full_rows = full_rows
         if not all(os.environ.get(name) == '1' for name in PROFILER_FLAGS):
             raise ValueError('Request attribution requires runtime profiling with incremental device-data dumps')
         if signpost is None:
@@ -26,7 +29,8 @@ class RequestVerifierProfile:
     def __call__(self, engine, ticket):
         if (self.active or engine.mesh is not self.mesh or engine.operations is not self.operations
                 or not engine.commit_only_gdn or not engine.norm_batch or not engine.native_sampling_rows
-                or engine.attention_replay or engine.phase != 'idle'):
+                or engine.attention_replay or engine.phase != 'idle'
+                or len(ticket.tokens) not in (1, 2, 4, 8, 16) or len(ticket.tokens) > self.full_rows):
             raise ValueError('Profile the unchanged idle commit-only native-attention verifier')
         key = engine.bucket_key(ticket)
         bucket = engine.buckets[key]
@@ -59,12 +63,12 @@ class RequestVerifierProfile:
             print('QWEN_REQUEST_VERIFY_END ' + label, flush=True)
 
     def summary(self):
-        if self.active or len(self.records) < 3 or sum(record['rows'] == 8 for record in self.records) < 3:
+        if self.active or len(self.records) < 3 or sum(record['rows'] == self.full_rows for record in self.records) < 3:
             raise ValueError('Complete multi-block request attribution required')
         calls = []
         for (filename, line, name), (primitive, total, own, cumulative, callers) in pstats.Stats(self.host_profile).stats.items():
             calls.append(dict(file=filename, line=line, function=name, primitive_calls=primitive,
                 total_calls=total, self_seconds=own, cumulative_seconds=cumulative))
-        return dict(records=list(self.records), trace_counts=dict(self.trace_counts),
+        return dict(records=list(self.records), trace_counts=dict(self.trace_counts), full_rows=self.full_rows,
             host_calls=sorted(calls, key=lambda entry: -entry['cumulative_seconds'])[:40],
             scope='Instrumented actual verify calls including input staging and readback; profiler dumps and correctness digests outside markers; not throughput')

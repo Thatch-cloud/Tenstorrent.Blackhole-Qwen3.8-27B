@@ -76,7 +76,9 @@ def intervals(rows):
         uncovered_interval_ns_estimate=(envelope - covered) * scale)
 
 
-def analyze_traces(records, rows):
+def analyze_traces(records, rows, *, full_rows=8):
+    if type(full_rows) is not int or full_rows not in (8, 16):
+        raise ValueError('Explicit supported verifier attribution width required')
     by_trace = defaultdict(list)
     for record in records:
         by_trace[record['trace_id']].append(record)
@@ -122,8 +124,8 @@ def analyze_traces(records, rows):
                 operation_core_groups=sorted([dict(op=key[0], cores=key[1], operations_per_replay=coverage[key],
                     median_summed_kernel_ns=statistics.median(values)) for key, values in group_totals.items()],
                     key=lambda entry: -entry['median_summed_kernel_ns'])))
-    if not any(entry['steady_replays'] >= 2 and all(replay['rows'] == 8 for replay in entry['replays']) for entry in output):
-        raise ValueError('Multiple steady actual T8 replays required')
+    if not any(entry['steady_replays'] >= 2 and all(replay['rows'] == full_rows for replay in entry['replays']) for entry in output):
+        raise ValueError(f'Multiple steady actual T{full_rows} replays required')
     return output
 
 
