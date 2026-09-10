@@ -14,14 +14,22 @@ from target_features import LayerOutputCapture
 def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *, collectives,
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
-        proposal_trace=False, commit_only_gdn=False):
+        proposal_trace=False, commit_only_gdn=False, native_attention=False):
     import torch
     from full_request import measure_request
 
-    if (any(type(value) is not bool for value in (audit_features, proposal_trace, commit_only_gdn))
+    if (any(type(value) is not bool for value in (audit_features, proposal_trace, commit_only_gdn, native_attention))
+            or (native_attention and not proposal_trace)
             or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
             or not 1 <= len(prompt) <= 8192 - max_new_tokens):
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
+    if native_attention:
+        import os
+        from pathlib import Path
+        from dspark_native_fixed_gate import qualify
+        from native_draft_sdpa import audit_active_kernel
+        qualify(Path(__file__).parent)
+        audit_active_kernel(os.environ['TT_METAL_HOME'])
     capture = drafter = runtime = proposal_device = None
     golden_features, prefill_hashes = {}, None
     prefill_records, feature_checks, history_checks, proposal_checks = [], [], [], []
@@ -144,6 +152,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             implementation = TracedDSparkDevice
         drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15,
+            **(dict(native_attention=True) if native_attention else {}),
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         proposal_device = drafter
         capture.close()
@@ -187,7 +196,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             committed_feature_rows=runtime.committed_feature_rows, final_position=drafter.position,
             execution=('Captured fixed-capacity' if proposal_trace else 'Eager')
                 + ' full-history proposal; batched captured target verifier; all request-loop costs retained',
-            proposal_trace=proposal_trace, proposal_checks=proposal_checks,
+            proposal_trace=proposal_trace, proposal_checks=proposal_checks, native_attention=native_attention,
             packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
         result['instrumented_timing'] = audit_features

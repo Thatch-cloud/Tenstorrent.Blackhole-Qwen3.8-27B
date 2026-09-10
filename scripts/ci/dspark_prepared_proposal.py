@@ -14,10 +14,11 @@ from gdn_multitoken_conv import addresses
 
 def execute(device, inputs, history, retain):
     operations, mesh = device.operations, device.mesh
+    layer_backend = getattr(device, 'proposal_layer', layer)
     hidden = noise_embeddings(operations, device.target, mesh, device.collectives, inputs['identifiers'],
         retain, proposals=device.max_drafts)
     for weights, cached in zip(device.layer_weights, history, strict=True):
-        hidden = layer(operations, mesh, device.collectives, hidden, cached, weights,
+        hidden = layer_backend(operations, mesh, device.collectives, hidden, cached, weights,
             (inputs['cosine'], inputs['sine']), inputs['mask'], inputs['live'], retain,
             position=device.history.capacity, proposals=device.max_drafts, mask_validated=True)['finish']['output']
     normalized = norm(operations, hidden, device.parameters['norm.weight'], retain)
@@ -157,7 +158,12 @@ class PreparedDSparkProposal:
 
 
 class TracedDSparkDevice(DSparkDevice):
-    def __init__(self, *args, **options):
+    def __init__(self, *args, native_attention=False, **options):
+        if type(native_attention) is not bool:
+            raise ValueError('Explicit native proposal attention policy required')
+        if native_attention:
+            from dspark_native_cached_layer import execute as native_layer
+            self.proposal_layer = native_layer
         self.prepared = None
         super().__init__(*args, **options)
 
