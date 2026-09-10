@@ -52,6 +52,11 @@ No promotion. [Combined result](docs/dspark-combined-result-2026-09-10.md).
 
 ### Other measured results
 
+- **Untuned stable-unique task:** PP3351.31 / CTX4096 / TG109.04 versus
+  103.20 control; exact target tokens/state and four functional cases pass.
+  One short task/run, not broad quality certification or a matched comparison
+  against the tuning task. [Coding screen](docs/coding-screen-2026-09-10.md).
+
 - **Short-context DFlash2: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
   commit-only GDN and fused draft convolution improve the matched control by
   8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
