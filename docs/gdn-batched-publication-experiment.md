@@ -77,6 +77,23 @@ An isolated `tensor_bit_compare` diagnostic is being prepared to compare every
 physical BF16 word on device and return 32 mismatch counters, instead of repeatedly
 reading megabytes through the simulator command queue. It performs direct bit
 comparison, not a probabilistic hash. **It is unqualified and is not used by the
-publication probe.** Before use it must pass independent simulator negative
-controls for changed words, padding, worker partitions and changed-input replay,
-including poisoned counter replacement. The current probe remains unchanged.
+publication probe.** Its control probe now passed as described below. Integration
+must preserve the complete publication matrices, not sample fewer values.
+
+The direct-readback publication run was deliberately stopped with exit 143 after
+six completed per-chip checks and 96 padding checks. The saved report is incomplete
+and unqualified. Its last saved stage is `eager_candidate_0_1`; no complete replay
+or accepted-prefix matrix is claimed.
+
+Comparator run `20260910T225407Z-408` failed in simulation because its four-byte
+counter writes had different source/destination NoC alignment. The fix gives each
+worker's scratch counter the same offset as its destination. Aligned run
+`20260910T225452Z-384` passed in about 22 seconds, closed cleanly and exited zero.
+Independent validation accepts all 28 controls: both chips, one and 64 tiles,
+known bit flips, physical-padding differences, unused workers, changed-input
+replay, unchanged physical inputs and complete poisoned-counter replacement.
+
+Evidence is retained as `scripts/ci/tensor-bit-compare-simulator.json` with its
+exit status. `tensor_bit_compare_gate.py` verifies the exact matrix and source
+hashes. This qualifies only the comparator controls, not the publication kernel,
+model correctness, hardware performance or serving.

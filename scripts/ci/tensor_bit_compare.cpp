@@ -21,9 +21,10 @@ void kernel_main() {
             mismatches += left_words[word] != right_words[word];
         }
     }
-    auto result = reinterpret_cast<volatile uint32_t*>(scratch);
+    const uint32_t counter = scratch + worker * 4;
+    auto result = reinterpret_cast<volatile uint32_t*>(counter);
     result[0] = mismatches;
     asm volatile("" ::: "memory");
-    noc_async_write(scratch, output.get_noc_addr(0, worker * 4), 4);
+    noc_async_write(counter, output.get_noc_addr(0, worker * 4), 4);
     noc_async_write_barrier();
 }
