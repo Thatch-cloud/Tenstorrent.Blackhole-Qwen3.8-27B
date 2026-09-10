@@ -1,0 +1,118 @@
+from contextlib import ExitStack, nullcontext
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
+import full_dspark_request as request
+from dspark_prefill import FeatureChunk
+
+
+class FullDSparkRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.operations = SimpleNamespace(get_device_tensors=lambda value: [value, value], to_torch=lambda value: value,
+            DRAM_MEMORY_CONFIG='dram', clone=lambda value, **kwargs: value.clone(), deallocate=Mock())
+        self.captures, self.decode_captures = [], []
+        self.stack.enter_context(patch.object(request, 'FullHistoryCapture', side_effect=self.capture))
+        self.stack.enter_context(patch.object(request, 'LayerOutputCapture', side_effect=self.decode_capture))
+        self.drafter = SimpleNamespace(position=32, max_drafts=15, propose=Mock(return_value=tuple(range(15))),
+            prepare_publication=Mock(), commit_publication=Mock(), discard_publication=Mock(), close=Mock())
+        self.device = self.stack.enter_context(patch.object(request, 'DSparkDevice', return_value=self.drafter))
+        self.base_prefill = Mock(return_value=17)
+        self.base_decode = Mock(return_value=torch.zeros(1, 100))
+        self.events = []
+
+    def capture(self, operations, model, position):
+        values = tuple(torch.full((1, 1, 32, 2560), tap, dtype=torch.bfloat16) for tap in range(5))
+        result = SimpleNamespace(capture=lambda: nullcontext(), outputs=lambda: (FeatureChunk(0, 32, values),), close=Mock())
+        self.captures.append(result)
+        return result
+
+    def decode_capture(self, *args, **kwargs):
+        position = 32 + len(self.decode_captures)
+        values = tuple(torch.full((1, 1, 1, 2560), position + tap, dtype=torch.bfloat16) for tap in range(5))
+        result = SimpleNamespace(capture=lambda: nullcontext(), outputs=lambda: values, close=Mock())
+        self.decode_captures.append(result)
+        return result
+
+    def measure(self, *, audit=False, corrupt=False, wrong_accounting=False, fail_factory=False):
+        def native_request(model, sampler, prompt, pages, helpers, **options):
+            self.events.append('native-control')
+            options['prefill'](prompt)
+            options['decode'](17, 32, True)
+            options['decode'](18, 33, True)
+            self.events.append('candidate-prefill')
+            options['prefill'](prompt)
+            if fail_factory:
+                self.device.side_effect = RuntimeError('injected history preparation failure')
+            self.events.append('factory')
+            runtime = options['feature_factory']()
+            self.assertEqual(options['feature_drafter_name'], 'dspark')
+            self.assertEqual(options['lookup_max_rows'], 16)
+            self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
+            if audit:
+                values = [torch.cat([capture.outputs()[tap] for capture in self.decode_captures], dim=2) for tap in range(5)]
+                if corrupt:
+                    values[0] = values[0].flip(2)
+                runtime.validate_features(values, 2, 32)
+            else:
+                self.assertIsNone(runtime.validate_features)
+            self.drafter.position = 34
+            runtime.committed_feature_rows = 1 if wrong_accounting else 2
+            return dict(blocks=[dict(committed=2)], committed_decode_tokens=2, committed_tokens_per_second=123.0)
+
+        with patch('full_request.measure_request', side_effect=native_request):
+            return request.measure_dspark_request(self.operations, object(), object(), list(range(32)), object(), [],
+                collectives=object(), parameters={}, layer_weights=[], predecessor=object(), successor=object(), rotary=object(),
+                prefill=self.base_prefill, decode=self.base_decode, live_digest=Mock(), kv_digest=Mock(), inactive_digest=Mock(),
+                eos_ids=(99,), audit_features=audit, max_new_tokens=65)
+
+    def test_both_prefills_precede_history_setup_and_warm_proposal_is_charged_to_factory(self):
+        result = self.measure()
+        self.assertEqual(self.events, ['native-control', 'candidate-prefill', 'factory'])
+        self.assertEqual(self.base_prefill.call_count, 2)
+        self.drafter.propose.assert_called_once_with(17, 15)
+        self.assertEqual(self.device.call_args.kwargs, dict(position=32, proposals=15))
+        self.assertEqual(result['dspark']['committed_feature_rows'], 2)
+        self.assertEqual(result['dspark']['final_position'], 34)
+        self.assertEqual(len(result['dspark']['prefill_chunks']), 2)
+        self.assertFalse(result['instrumented_timing'])
+        self.assertEqual(result['committed_tokens_per_second'], 123.0)
+        self.drafter.close.assert_called_once()
+        self.assertTrue(all(capture.close.called for capture in self.captures))
+
+    def test_instrumented_request_checks_all_taps_both_chips_and_cannot_claim_tg(self):
+        result = self.measure(audit=True)
+        self.assertTrue(result['instrumented_timing'])
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertEqual(len(result['dspark']['feature_checks']), 10)
+        self.assertEqual(len(result['dspark']['prefill_hashes']), 10)
+        self.assertTrue(all(call.args[-1] is False for call in self.base_decode.call_args_list))
+        self.assertTrue(all(capture.close.called for capture in self.decode_captures))
+
+    def test_reordered_actual_features_fail_before_success_and_release_request_resources(self):
+        with self.assertRaisesRegex(AssertionError, 'committed feature mismatch'):
+            self.measure(audit=True, corrupt=True)
+        self.drafter.close.assert_called_once()
+        self.assertTrue(all(capture.close.called for capture in self.captures))
+
+    def test_missing_committed_feature_accounting_rejects_the_result(self):
+        with self.assertRaisesRegex(AssertionError, 'publication'):
+            self.measure(wrong_accounting=True)
+        self.drafter.close.assert_called_once()
+
+    def test_failed_history_setup_releases_prefill_but_not_an_unconstructed_drafter(self):
+        with self.assertRaisesRegex(RuntimeError, 'history preparation'):
+            self.measure(fail_factory=True)
+        self.assertTrue(all(capture.close.called for capture in self.captures))
+        self.drafter.close.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -14,10 +14,14 @@ Best repeat-confirmed single-stream hardware TG remains **74.27 at CTX 4,096**.
 | Cached layer | Seven or 15 query rows attend to all cached history | Host tests; no historical re-projection inside the layer |
 | Request bridge | Explicit `dspark` route with 15 proposals and a T16 target verifier | Host request-loop test; DFlash2 defaults unchanged |
 | Wider device plumbing | Target embeddings, five cached layers, full target head and 15-step Markov feedback | Host tests; complete native execution pending |
+| Full-request adapter | Native token/state controls plus all-tap committed-feature audit; timed requests exclude that audit | Host tests; hardware driver still needs this adapter |
 
 The cache uses existing 32-row learned projection, normalization and rotary
 operations. Host tests do **not** qualify their new native composition. Initial
 prefill setup and per-publication concatenation costs still need measurement.
+The wider layout probe is running as `20260910T004253Z-387`, source `218fe82`;
+both eager cases pass and the final replay is running. The complete gate is not
+yet established.
 
 ## Simulator evidence
 
@@ -40,7 +44,8 @@ and it does not clear earlier learned-backbone numerical failures.
 
 Retained report: `scripts/ci/dspark-full-attention-simulator.json`.
 SHA-256: `7fa3290673df7b77aaed954ab55d683caedbcc51e32da4eb10df8eb292829499`.
-All **1,265 CI host tests** pass after the cache, request-bridge and wider-device changes.
+All **1,270 CI host tests** and **61 simulator-harness tests** pass after the
+cache, request-bridge, wider-device and full-request-adapter changes.
 
 ## Next hardware path
 
