@@ -46,8 +46,12 @@ def main():
     parser.add_argument('--norm-scatter', action='store_true')
     parser.add_argument('--target-attention', action='store_true')
     parser.add_argument('--approx-draft', action='store_true')
+    parser.add_argument('--dram-projection', action='store_true')
     parser.add_argument('--checkpoint', type=Path)
     options = parser.parse_args()
+    if options.dram_projection and (options.approx_draft or options.target_attention
+            or options.norm_scatter or options.learned_layer or options.checkpoint is not None):
+        raise ValueError('DRAM projection is an isolated probe')
     if options.approx_draft and (options.target_attention or options.norm_scatter
             or options.learned_layer or options.checkpoint is not None):
         raise ValueError('Approximate draft attention is an isolated probe')
@@ -95,6 +99,9 @@ def main():
         if options.approx_draft:
             wrapper = 'run-native-layer-dispatch-probe.sh'
             environment['QWEN_SIM_LAYER_PROBE'] = 'dspark-approx-fixed-attention-probe'
+        if options.dram_projection:
+            wrapper = 'run-native-layer-dispatch-probe.sh'
+            environment['QWEN_SIM_LAYER_PROBE'] = 'dram-sharded-projection-probe'
         result = subprocess.run(['bash', str(directory / wrapper), *arguments], env=environment)
         return result.returncode
     finally:
