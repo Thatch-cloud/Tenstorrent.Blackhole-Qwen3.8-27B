@@ -1,6 +1,42 @@
 # Read native GDN state during verification
 
-Status: synthetic recurrence simulator comparison passed; no integrated or hardware qualification.
+Status: combined hardware correctness passed; no end-to-end throughput improvement. Not promoted.
+
+## Combined hardware result
+
+[Run 34552817569](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34552817569),
+revision `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`, passed. Independent analysis
+validated 737 source files, exact target outputs/state/inactive slots, learned
+feature and proposal audits, all 48 direct-state layers and paired publication
+prefixes, restored hooks, and matched A/B/B/A request timings.
+
+| One stream, merge-intervals prompt | PP tok/s | CTX | Committed TG tok/s | Mean setup-inclusive ms |
+| --- | ---: | ---: | ---: | ---: |
+| Combined control | 3299.53 | 4096 | 99.73 | 5915.29 |
+| Direct native GDN state | 3317.76 | 4096 | 99.42 | 6991.65 |
+
+Each arm committed 242 timed tokens, with identical 222/330 draft acceptance.
+TG changed -0.312%; this is not an improvement. Candidate decode samples were
+1216.01/1218.22 ms versus control 1227.58/1199.06 ms. No held-out quality
+certification or default change is implied.
+
+| Mean per block, 22 timed blocks per arm | Control ms | Direct ms |
+| --- | ---: | ---: |
+| Draft | 27.988 | 28.494 |
+| Verify and readback | 69.231 | 68.494 |
+| Select and commit | 11.912 | 12.364 |
+| Complete cycle | 110.259 | 110.603 |
+
+The measured verifier saving is about 0.737 ms/block, not tens of milliseconds.
+Setup is worse because the candidate adds explicit zero-publication preparation.
+Stop treating state-copy elimination as the main route to 200 TG. At 11 committed
+tokens/block, the whole cycle needs to fall below 55 ms; projection/recurrence
+work or accepted tokens per unit verification cost must change materially.
+
+Hardware report SHA256:
+`3b286eabd0668e40bdae7d22f808bb66fdea5a8ab14a8940cf1c36456c22db35`.
+
+## Earlier simulator admission
 
 The full projected GDN composition has now also passed TTsim: 84 output/history
 comparisons and 144 input-preservation comparisons, including fresh eager controls
