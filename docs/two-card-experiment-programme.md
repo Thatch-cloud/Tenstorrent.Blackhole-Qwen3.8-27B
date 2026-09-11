@@ -2,6 +2,27 @@
 
 ## Combined-runtime tuning priorities - 2026-09-11
 
+### T32 integration work in progress
+
+The next candidate amortizes target verification over up to 31 draft queries /
+32 verifier rows. It is not yet enabled in the full-request benchmark.
+
+| Prerequisite | Current evidence |
+| --- | --- |
+| Synthetic 31-query Markov feedback | Simulator pass, independently verified, run 34589904935 |
+| T32 folded target attention | Simulator pass, independently verified, run 34590151457 |
+| Learned full-vocabulary feedback | Simulator run 34590621276 active |
+| 31-query drafter attention | Simulator run 34591332709 pending behind learned feedback |
+| Cached layer, embedding/logits, trace and publication | Implemented experimentally; host checks only |
+| T32 target gate/up fusion | Exact retained T32 simulator manifest reused; scope host-tested |
+| Complete T32 request and coding screen | Not run; device-state and combined PP/CTX/TG admission still required |
+
+The assembled T32 host regression passes 49 tests (33 drafter tests plus 16
+attention/runtime/fusion/CI tests). This does not establish device numerical
+correctness. Keep the validated T16 baseline and serving defaults unchanged.
+Do not assume acceptance or cycle time scales linearly with block width.
+Runtime pins and simulator results: [T32 admission](t32-runtime-admission.md).
+
 ### Latest combined fusion result
 
 T16 gate/up fusion now passes simulator target-math replay, all-layer packed
