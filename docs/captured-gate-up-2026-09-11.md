@@ -38,7 +38,20 @@ and present it as measured end-to-end improvement.
 The T16 captured simulator extension retains the original T1/T8/T32 checks
 and adds changing-input T16 replay. The local run passed T16 replay but was
 deliberately stopped before full completion to free the developer PC.
-The full test has moved to [CPU-only CI](ttsim-ci.md); it is not a pass yet.
+The full test moved to [CPU-only CI](ttsim-ci.md).
+
+CI run [34558325869](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34558325869)
+passed on `db4c7c0`: exit 0, four byte-exact packed-weight checks, all six eager
+widths on both chips, and changing-input replay at T1/T8/T16/T32. Independent
+artifact validation checks all 48 replay combinations and 16 stale controls,
+plus the trace-helper hash. This remains the non-approximate component gate,
+not target-mode or complete-runtime qualification.
+
+Report SHA256: `3b417d24dc125b35d336cf570794a3c41c1718ada39042eeb9078f9f165b2d07`.
+
+The separate target-math run is
+[34559222228](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34559222228),
+revision `3b3de38`; it was still running at this update.
 
 Source inspection found an additional numerical-mode admission gap. The probe's
 native control and `FusedProjection` explicitly use `math_approx_mode=False`.

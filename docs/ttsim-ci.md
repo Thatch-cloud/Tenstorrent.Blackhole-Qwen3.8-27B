@@ -26,7 +26,9 @@ group without removing existing grants. Neither route enables serving changes
 or provides hardware throughput measurements.
 
 The initial CI run is [34558325869](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34558325869).
-Its outcome must be checked before qualification; dispatch is not a passing test.
+It passed the complete non-approximate fusion matrix with exit 0; see the
+[validated result](captured-gate-up-2026-09-11.md). The separate target-native
+math comparison must also pass before target integration.
 
 The preceding local run was deliberately stopped to free the developer PC.
 It completed packed-weight checks and T1/T8/T16 changing-input replay, but not
