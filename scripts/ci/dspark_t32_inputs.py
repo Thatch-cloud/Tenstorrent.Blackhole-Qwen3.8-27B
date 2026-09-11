@@ -14,18 +14,28 @@ def geometry(capacity, proposals=PROPOSALS):
     return tuple((start, min(start + 2048, padded)) for start in range(0, padded, 2048))
 
 
-def fixed_mask(position, capacity):
+def fixed_mask(position, capacity, proposals=PROPOSALS):
     import torch
 
     if (type(position) is not int or type(capacity) is not int
             or not 1 <= position <= capacity <= 8192 or capacity % 32):
         raise ValueError('Committed frontier in tile-aligned full history required')
-    padded = geometry(capacity)[-1][1]
+    padded = geometry(capacity, proposals)[-1][1]
     mask = torch.full((1, 1, 32, padded), float('-inf'), dtype=torch.bfloat16)
     mask[:, :, :PROPOSALS, :position] = 0
     mask[:, :, :PROPOSALS, capacity:capacity + PROPOSALS] = 0
     mask[:, :, PROPOSALS:, capacity] = 0
     return mask
+
+
+def validate_fixed_mask(mask, position, capacity, proposals=PROPOSALS):
+    import torch
+
+    expected = fixed_mask(position, capacity, proposals)
+    if (not isinstance(mask, torch.Tensor) or mask.device.type != 'cpu'
+            or mask.dtype != torch.bfloat16 or tuple(mask.shape) != tuple(expected.shape)
+            or not torch.equal(mask, expected)):
+        raise ValueError('Exact full-history T32 mask required; uncommitted gap must remain hidden')
 
 
 def proposal_inputs(anchor, position, capacity, rotary):

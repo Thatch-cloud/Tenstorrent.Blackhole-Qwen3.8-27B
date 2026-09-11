@@ -15,7 +15,7 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertLessEqual(len(names), 25)
         self.assertEqual(len(names), len(set(names)))
         self.assertIn('simulator_t32', names)
-        self.assertIn('options: [none, t32-markov, t32-markov-learned, t32-attention]', inputs)
+        self.assertIn('options: [none, t32-markov, t32-markov-learned, t32-attention, t32-draft-attention]', inputs)
         self.assertNotIn('simulator_t32_learned', names)
 
     def test_dedicated_fusion_workflow_is_serialized_and_cpu_only(self):

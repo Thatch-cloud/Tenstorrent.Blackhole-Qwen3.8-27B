@@ -31,7 +31,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
     printf '%s\n' "$status" > /experiment/results/t32-markov.exit-status
     exit "$status"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-attention ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention ]]; then
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path
@@ -43,6 +43,14 @@ patch = Path('/simulator-support/blackhole-packer-zero-flags.patch').read_bytes(
 packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
+    if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
+        python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
+        status=0
+        timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
+            --output /experiment/results/t32-draft-attention.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t32-draft-attention.exit-status
+        exit "$status"
+    fi
     if [ "$QWEN_SIM_CASE" = t32-attention ]; then
         python3 -B -m unittest test_target_t32_attention_gate test_target_t16_attention_gate
         status=0
