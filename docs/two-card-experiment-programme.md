@@ -32,6 +32,37 @@ Details and artifact hashes: [combined fusion evidence](captured-gate-up-2026-09
 
 ### Prior combined-runtime evidence
 
+### Post-screen cycle budget
+
+Recomputed from the two uninstrumented fusion requests in each retained report;
+audited requests are excluded. Cycle is total decode time divided by block count,
+so it includes between-block overhead rather than only the block timer.
+
+| Task / run | Cycle ms | Verify/readback ms | Draft ms | Select/commit ms | Required cycle for 200 TG ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Merge repeat / 34586017906 | 107.97 | 68.44 | 27.00 | 11.44 | 55.00 |
+| Stable unique / 34586808967 | 108.73 | 68.38 | 26.65 | 12.32 | 65.00 |
+| Run-length / 34587483522 | 107.86 | 68.49 | 26.81 | 11.45 | 65.63 |
+| Rotate right / 34588114930 | 107.93 | 68.54 | 26.50 | 11.75 | 45.71 |
+
+The required cycle retains each task's observed committed tokens per block.
+An arithmetic zero-draft counterfactual, holding everything else fixed, reaches
+only 135.86, 158.39, 161.93 and 112.29 TG respectively. These are budget bounds,
+not achievable measurements. Even perfect 16-token acceptance at the current
+roughly 108 ms cycle would yield only about 148 TG. Acceptance-only or
+drafter-only tuning cannot meet the objective at this cycle cost.
+
+Next design decision: reduce target verification materially or increase useful
+tokens per verification beyond T16, with measured amortization. A T32 extension
+is not a configuration flip: `PreparedDSparkProposal` currently admits only
+7/15 drafts, and folded target attention/fusion integration is T16-qualified.
+It requires new proposal/layout and every-prefix state simulator gates before
+the same combined hardware comparison. Do not dispatch an unchanged small
+projection benchmark or claim the generic 96-core profile group is an exact
+kernel attribution.
+
+### Historical combined-runtime evidence
+
 Primary objective remains **200 committed TG tok/s, one coding stream, TP2**.
 Do not optimize aggregate request throughput instead, or promote isolated kernel
 timings. Serving defaults stay unchanged. The older dated results below are history.
