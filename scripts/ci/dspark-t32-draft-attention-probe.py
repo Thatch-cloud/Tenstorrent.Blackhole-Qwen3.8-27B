@@ -36,6 +36,23 @@ def source_hashes():
     return {name: digest(Path(__file__).parent / name) for name in SOURCES}
 
 
+def numerical_details(actual, golden):
+    import torch
+
+    difference = (actual.float() - golden).abs()
+    failed = ~torch.isclose(actual.float(), golden, rtol=.01, atol=.01)
+    coordinates = failed.nonzero()[:16].tolist()
+    return dict(actual_shape=list(actual.shape), expected_shape=list(golden.shape),
+        actual_dtype=str(actual.dtype), nonfinite=int((~torch.isfinite(actual)).sum()),
+        failed_by_row=failed.sum(dim=(0, 1, 3)).tolist(),
+        max_abs_by_row=difference.amax(dim=(0, 1, 3)).tolist(),
+        failures=[dict(index=index, actual=float(actual[tuple(index)]),
+                       expected=float(golden[tuple(index)]),
+                       absolute_error=float(difference[tuple(index)]),
+                       allowed_error=float(.01 + .01 * golden[tuple(index)].abs()))
+                  for index in coordinates])
+
+
 def fixtures():
     import torch
 
@@ -193,7 +210,8 @@ def main():
                 report[mode + '_checks'].append(dict(ordinal=ordinal, case=case, chip=chip, passed=passed,
                     replay_exact=exact if mode == 'replay' else None, numerical_close=bool(close.all()),
                     sha256=checksum, expected_sha256=tensor_digest(golden), failed_elements=int((~close).sum()),
-                    max_abs=float((actual.float() - golden).abs().max())))
+                    max_abs=float((actual.float() - golden).abs().max()),
+                    diagnostics=numerical_details(actual, golden)))
                 if not passed:
                     raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
                 for name in ('key', 'value'):

@@ -7,6 +7,20 @@ from test_dspark_native_fixed_probe import load
 
 
 class T32DraftProbeTests(unittest.TestCase):
+    def test_numerical_diagnostics_locate_live_and_padding_errors(self):
+        probe = load('dspark-t32-draft-attention-probe')
+        golden = torch.zeros(1, 16, 32, 128)
+        actual = golden.bfloat16()
+        actual[0, 2, 30, 3] = .25
+        actual[0, 1, 31, 7] = .5
+        result = probe.numerical_details(actual, golden)
+        self.assertEqual(sum(result['failed_by_row']), 2)
+        self.assertEqual(result['failed_by_row'][30:], [1, 1])
+        self.assertEqual({tuple(entry['index']) for entry in result['failures']},
+                         {(0, 2, 30, 3), (0, 1, 31, 7)})
+        self.assertEqual(result['nonfinite'], 0)
+        self.assertTrue(all(entry['absolute_error'] > entry['allowed_error'] for entry in result['failures']))
+
     def test_fixture_masks_all_31_queries_and_excludes_unused_row(self):
         probe = load('dspark-t32-draft-attention-probe')
         self.assertEqual(probe.PROPOSALS, 31)
