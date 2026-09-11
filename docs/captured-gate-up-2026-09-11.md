@@ -51,7 +51,17 @@ Report SHA256: `3b417d24dc125b35d336cf570794a3c41c1718ada39042eeb9078f9f165b2d07
 
 The separate target-math run is
 [34559222228](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34559222228),
-revision `3b3de38`; it was still running at this update.
+revision `3b3de38`; it passed with exit 0. Independent artifact checks confirm
+`math_approx_mode=True` in the report and all six kernel manifests, 48 exact
+replay comparisons at T1/T8/T16/T32, 16 stale-input controls, 12 eager checks,
+four byte-exact packed-weight checks and the trace-helper hash.
+
+Target-math report SHA256:
+`f155635711e3617cbdb9566a3fdd19e8ab62d9dc7d9eacbf684b9343ab8bd9bb`.
+This closes the synthetic/geometry-matched target-mode simulator gap, not the
+all-layer target-weight or combined-runtime hardware gates. The earlier 4-5%
+hardware component gain was measured in non-approximate mode; do not transfer
+that timing claim to this newly qualified mode.
 
 Source inspection found an additional numerical-mode admission gap. The probe's
 native control and `FusedProjection` explicitly use `math_approx_mode=False`.
