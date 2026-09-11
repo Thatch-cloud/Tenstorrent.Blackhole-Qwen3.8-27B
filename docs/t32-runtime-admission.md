@@ -51,6 +51,9 @@ complete learned proposal or a throughput measurement.
 | 34642483772 | Retain exact error coordinates | All three failures are head 11, live query row 13, columns 53/70/106 |
 | 34643311170 | 32-key chunks instead of 64 | Same three failing coordinates and values |
 | 34644020684 | Scoped precise reciprocal with 32-key chunks | Same three failing coordinates and values; clean teardown |
+| 34644680369 | Retain failed tensor and audit failing-chip inputs | Both assembled KV tensors and all six inputs exact on both chips |
+| 34645764708 | Rebuild with FP32 partial-output and statistics buffers | 227 numerical failures on chip 0; rejected |
+| 34647839458 | Matched rebuild without FP32 buffers | Both first-eager output hashes exactly match original baseline; original three chip-1 failures remain |
 
 The observed values are -44.75 versus approximately -44.295 in the FP32
 reference, narrowly outside the unchanged `rtol=.01, atol=.01` bound. Neither
@@ -59,6 +62,14 @@ Simple CPU rounding diagnostics also do not reproduce the simulator output;
 they are not a bit-accurate native-kernel model and do not rule out intermediate
 precision loss. The drafter attention gate remains failed, with no hardware
 promotion or T32 throughput claim.
+
+The matched rebuild isolates the FP32-intermediate regression from build effects.
+Its runtime binary SHA256 is
+`9abba20f930dd47c0c4dcab25a95b67dec6394a7bba558992ab51f4d680a02c8`;
+the FP32 variant is `761e78b2b951d34435696de20b1de2a05316f7cc1165de5f2055e3d84c37de89`.
+Neither is numerically qualified. A preliminary CPU truncation model reproduces
+the failing scalar but is not proof of the native rounding cause. Simply widening
+both buffer classes is demonstrably not a fix for this fixture.
 
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
 `t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
