@@ -94,8 +94,8 @@ CPU pressure is nonzero; GC, compilation, publication substeps and other host
 interference are not yet independently attributed. Keep all outliers in the result.
 Report SHA256: `61f5809340abb134a8fd466f2566d2bcf093b9bb2acf67c67cc3cd54089bd689`.
 
-The diagnostic repeat is recorded below. `rotate_right_v1` is now running as
-`34545607581` on the same immutable `1c27221` combined runtime. Tasks are not submitted
+The diagnostic repeat is recorded below. `rotate_right_v1` completed as
+`34545607581` on the same immutable `1c27221` combined runtime. Tasks were not submitted
 concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
@@ -122,6 +122,23 @@ the previous outlier. Candidate decode requests take 884.01/969.63 ms, control
 953.63/1149.87 ms. Setup-inclusive means remain worse for the candidate:
 6915.46 versus 6400.77 ms. No outliers are removed and no promotion is claimed.
 Report SHA256: `51443079b34484a412b7acfb0b7f508ff6889a9eb95be4fe80741af521a4cead`.
+
+### Rotate right: combined screen completed
+
+Run `34545607581` passes independent source, exact request, publication-stage and
+five isolated functional checks. Both arms commit 128 timed tokens with 116/210
+accepted proposals (55.24%, versus 81.67% for the other two tasks).
+
+| Instrumented path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native score-layout control | 1 | 3306.53 | 4096 | 76.34 |
+| Combined fused score layout | 1 | 3338.49 | 4096 | 83.86 |
+
+Candidate decode durations are 751.30/775.07 ms, control 827.33/849.44 ms.
+Setup-inclusive means remain worse: 5862.64 versus 5755.38 ms. All three frozen
+tasks now pass their functional cases, but neither comprehensive coding quality
+nor the 200 committed TG target is established. No-copy bank traces were not used.
+Report SHA256: `6eb7859992419d1d9808ee6efaedb8f83fb93fccd8e50ac8d3074256bee197d6`.
 
 ## Stable unique: completed
 

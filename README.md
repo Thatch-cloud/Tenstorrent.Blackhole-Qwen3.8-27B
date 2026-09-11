@@ -6,6 +6,26 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ## Current position
 
+### Combined-runtime coding screen
+
+Same composed path: native DSpark attention, captured proposals, commit-only GDN,
+folded T16 target attention and fused score layout. All rows are **one stream /
+batch 1, CTX 4096, 15 draft queries / 16 verifier rows**.
+
+| Coding task | Combined PP tok/s | Control TG | Combined committed TG | Functional cases |
+| --- | ---: | ---: | ---: | ---: |
+| Stable unique | 3346.45 | 107.36 | **114.43** | 4/4 |
+| Run-length encoding | 3174.52 | 99.83 | **113.29** | 4/4 |
+| Rotate right | 3338.49 | 76.34 | **83.86** | 5/5 |
+
+Latest completed matched runs, not pooled across tasks. Exact target tokens/state
+and proposal audits pass. These small frozen cases are not comprehensive coding
+quality certification. Run-length and rotate-right include publication diagnostics.
+Earlier runs had severe stalls (22.37 and 33.39 TG); they remain in the evidence,
+not discarded. Setup-inclusive latency is still worse on two of these comparisons.
+The 200 TG target is unmet. The no-copy trace prototype is **not included**.
+[Complete results, revisions and regressions](docs/coding-screen-2026-09-10.md).
+
 ### Latest single-stream comparison
 
 All rows use one stream / batch1. TG counts committed output tokens, not draft

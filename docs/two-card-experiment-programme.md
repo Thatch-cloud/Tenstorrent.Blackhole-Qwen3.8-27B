@@ -17,6 +17,11 @@ memory-limit events occurred in its request windows; earlier outliers remain
 unexplained. The identical combined runtime is now screening run-length encoding
 in `34543886854`. These task-specific results do not replace the merge-intervals
 baseline or establish the 200 TG target.
+The complete three-task screen now passes its 13 functional cases. Latest combined
+TG is 114.43 stable-unique, 113.29 run-length encoding and 83.86 rotate-right, all
+CTX4096 / one stream. Do not pool these different tasks or erase earlier stalls.
+Next admit the no-copy runtime candidate through bank-lifetime and changed-input
+checks, then compare the complete runtime against the existing composed control.
 [Score-layout evidence](dspark-score-layout-2026-09-11.md) /
 [Coding screen and repeat](coding-screen-2026-09-10.md).
 
