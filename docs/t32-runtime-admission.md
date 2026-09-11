@@ -36,8 +36,18 @@ CI revisions (`cab5126` and `8e90139`). Markov report SHA256:
 Attention report SHA256:
 `774a53bf54fcbb7fe5c02fb1f358be63c9fcc0254679f19543232d4079429b1b`.
 
-The learned full-vocabulary Markov gate is queued as 34590621276, using the
-cached checkpoint read-only. Dispatch now uses `simulator_t32` with values
-`none`, `t32-markov`, `t32-markov-learned` or `t32-attention`, avoiding GitHub's
-25-input limit. These component passes do not qualify complete T32 drafting,
-every-prefix target state, coding quality or combined PP/CTX/TG.
+The learned full-vocabulary Markov gate is running as 34590621276, using the
+cached checkpoint read-only. T32 drafter attention (34591332709) is pending
+behind it in the shared queue. Neither has a validated result yet.
+
+Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
+`t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
+25-input limit. These CPU-only jobs have a 16-CPU quota and 64 GiB memory limit;
+they do not mount the cards or measure hardware speed.
+
+Before a combined hardware comparison, validate both pending numerical reports,
+complete captured T32 proposal integration and every-prefix target-state gates.
+The prepared T32 Markov path currently uses native score layout, not the fused
+score layout used in the T16 comparison: that difference must be explicit in
+the eventual matched baseline. Component passes and host tests do not qualify
+complete T32 drafting, coding quality or combined PP/CTX/TG.
