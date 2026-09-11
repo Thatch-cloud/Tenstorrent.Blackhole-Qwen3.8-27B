@@ -17,9 +17,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
-        banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False):
+        banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False):
     import torch
     from full_request import measure_request
+    if type(fused_t16_mlp) is not bool or (fused_t16_mlp and not (
+            proposal_trace and commit_only_gdn and native_attention and target_attention_t16
+            and score_layout and not profile_verifier and not native_slot_gdn and not banked_proposal)):
+        raise ValueError('T16 fusion requires the combined score-layout runtime without other experimental MLP/state routes')
     if type(native_slot_gdn) is not bool or (native_slot_gdn and (not score_layout or banked_proposal)):
         raise ValueError('Native-slot GDN requires the combined score-layout runtime without banked drafting')
     bank_evidence = None
@@ -210,8 +214,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
         return runtime
 
-    observer = native_slot_arm = None
+    observer = native_slot_arm = fusion_arm = None
     try:
+        if fused_t16_mlp:
+            from fused_t16_scope import FusedT16Arm
+            from models.tt_transformers.tt.ccl import tt_all_reduce
+            fusion_arm = FusedT16Arm(operations, model, tt_all_reduce)
+            score_scope.enter_context(fusion_arm.install())
         if native_slot_gdn:
             from gdn_native_slot_scope import NativeSlotArm
             native_slot_arm = NativeSlotArm(operations, model)
@@ -264,6 +273,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
         score_scope.close()
+        if fusion_arm is not None:
+            result['fused_t16_mlp'] = fusion_arm.audit
         if native_slot_arm is not None:
             result['native_slot_gdn'] = native_slot_arm.summary()
         if score_arm is not None:
