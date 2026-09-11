@@ -28,7 +28,10 @@ def main():
     import torch
     import ttnn
 
-    directory, root = Path(__file__).parent, Path(os.environ['TT_METAL_HOME'])
+    directory = Path(__file__).parent
+    root = directory.resolve().parents[1] / 'hardware-evidence.local/34009341359/qwen-hardware-inventory-34009341359/gdn-source'
+    from gdn_vsplit_norm_batch import load_kernels
+    load_kernels(root)
     def hashes():
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in SOURCES}
     report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__,
