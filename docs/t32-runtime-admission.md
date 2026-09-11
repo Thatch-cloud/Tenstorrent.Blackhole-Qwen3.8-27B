@@ -30,6 +30,7 @@ remain unqualified. No serving defaults change.
 | 34589904935 | 31-query Markov, synthetic vocabulary 64 | 186 eager and 248 replay query/chip comparisons; input/weight/stale controls pass |
 | 34590151457 | T32 folded target attention at CTX4096 | 8 replay, 24 distinct mask-bundle and 4 KV-integrity checks pass against native B1 |
 | 34590621276 | Learned full-vocabulary, 31-query Markov | 124 eager and 186 replay comparisons pass; immutable probe sources verified |
+| 34653659471 | T32 drafter attention with FP32 SFPU denominator reduction | 4 eager, 4 exact replay, 48 input and 16 layout checks pass; 46 source hashes verified |
 
 Both exit cleanly with zero status; recorded probe sources match their immutable
 CI revisions (`cab5126` and `8e90139`). Markov report SHA256:
@@ -83,12 +84,27 @@ describe it as a qualified T32 attention implementation or throughput gain.
 Statistics-only widening changes output hashes but does not remove the original
 three failing comparisons. No tested precision-buffer combination is admitted.
 
+### Denominator reduction fix
+
+Run 34653659471 (`f2bba8d`) replaces the final denominator matmul reduction with
+the FP32 SFPU row-reduction pattern already used by `draft_row_sum_compute.cpp`.
+It keeps the original buffer formats, 64-key chunks and `.01/.01` tolerances.
+No diagnostic taps or disposable FP32 build are enabled. Both eager cases and
+changed-input exact replay pass on both simulated chips, including negative
+fixture controls, input preservation, stable bindings and clean teardown.
+
+Independent validation checks zero exit status, report coverage and all 46 probe
+source hashes against the immutable CI revision. Report SHA256:
+`9bb6b5c8f65627efddccfa88e0c9453f9719bb7b0c65714217050257a8032941`.
+This qualifies the tested attention component only. Complete captured drafting,
+every-prefix target state, coding quality and combined PP/CTX/TG remain pending.
+
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
 `t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
 25-input limit. These CPU-only jobs have a 16-CPU quota and 64 GiB memory limit;
 they do not mount the cards or measure hardware speed.
 
-Before a combined hardware comparison, fix and validate drafter attention,
+Before a combined hardware comparison, integrate the validated SFPU reduction,
 complete captured T32 proposal integration and every-prefix target-state gates.
 The prepared T32 Markov path currently uses native score layout, not the fused
 score layout used in the T16 comparison: that difference must be explicit in
