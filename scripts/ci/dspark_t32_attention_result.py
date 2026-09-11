@@ -19,9 +19,11 @@ def coverage(report, field, columns, expected, flag):
     return records
 
 
-def validate(report, *, key_chunk_size=64):
+def validate(report, *, key_chunk_size=64, precise_reciprocal=False):
     if type(key_chunk_size) is not int or key_chunk_size not in (32, 64):
         raise ValueError('Explicit supported key chunk size required')
+    if type(precise_reciprocal) is not bool or report.get('precise_reciprocal', False) is not precise_reciprocal:
+        raise ValueError('Explicit reciprocal experiment policy required')
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('backend') != 'simulator'
             or report.get('capacity') != 4384 or report.get('proposal_rows') != 31

@@ -10,6 +10,26 @@ import native_draft_sdpa as kernel
 
 
 class NativeDraftSdpaTests(unittest.TestCase):
+    def test_experimental_reciprocal_is_scoped_and_restored(self):
+        with TemporaryDirectory() as root:
+            directory, original, hashes = self.fixture(root)
+            original['compute_common.hpp'] += (kernel.ORIGINAL_RECIP_INIT + '\n' + kernel.ORIGINAL_RECIP + '\n').encode()
+            (directory / 'compute_common.hpp').write_bytes(original['compute_common.hpp'])
+            hashes['compute_common.hpp'] = hashlib.sha256(original['compute_common.hpp']).hexdigest()
+            with patch.object(kernel, 'SOURCE_HASHES', hashes), patch.dict(os.environ,
+                    {'QWEN_T32_PRECISE_RECIP': '1', 'QWEN_SIM_ONLY': '1',
+                     'QWEN_HARDWARE_TESTS': '0', 'QWEN_CARDS_ALLOCATED': '0'}):
+                with kernel.precise_draft_kernel(root):
+                    source = (directory / 'compute_common.hpp').read_text()
+                    self.assertIn('recip_tile_first_column<QWEN_DRAFT_EXP_APPROX>', source)
+                    self.assertIn('sfpu_reciprocal_init<false>()', source)
+                self.assertEqual((directory / 'compute_common.hpp').read_bytes(), original['compute_common.hpp'])
+
+    def test_experimental_reciprocal_rejects_hardware(self):
+        with patch.dict(os.environ, {'QWEN_T32_PRECISE_RECIP': '1', 'QWEN_SIM_ONLY': '1',
+                                    'QWEN_HARDWARE_TESTS': '1'}), self.assertRaises(ValueError):
+            kernel.replacements()
+
     def fixture(self, root):
         directory = Path(root) / kernel.KERNEL_DIRECTORY
         directory.mkdir(parents=True)

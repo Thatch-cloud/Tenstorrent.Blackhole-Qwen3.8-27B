@@ -22,15 +22,38 @@ PRECISE_INIT = '''#ifndef QWEN_DRAFT_EXP_APPROX
     exp_tile_init<QWEN_DRAFT_EXP_APPROX, scale_fp32, InputClamping::None>();'''
 PRECISE_EXP = '''                exp_tile<QWEN_DRAFT_EXP_APPROX, !QWEN_DRAFT_EXP_APPROX, InputClamping::None, iterations>(
                     j, vector_mode_exp, static_cast<uint16_t>(scale_fp32 >> 16));'''
+ORIGINAL_RECIP_INIT = '    recip_tile_init();'
+ORIGINAL_RECIP = '        MATH((recip_tile_first_column(0)));'
+PRECISE_RECIP_INIT = '''#if defined(QWEN_DRAFT_EXP_APPROX)
+    if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+        MATH((ckernel::sfpu::sfpu_reciprocal_init<false>()));
+    } else {
+        recip_tile_init();
+    }
+#else
+    recip_tile_init();
+#endif'''
+PRECISE_RECIP = '''#if defined(QWEN_DRAFT_EXP_APPROX)
+        MATH((recip_tile_first_column<QWEN_DRAFT_EXP_APPROX>(0)));
+#else
+        MATH((recip_tile_first_column(0)));
+#endif'''
 
 
 def replacements():
     signature = ' && '.join(f'get_compile_time_arg_val({index}) == {value}' for index, value in SIGNATURE.items())
     include = '#include "compute_common.hpp"'
-    return {
+    result = {
         'compute_common.hpp': ((ORIGINAL_INIT, PRECISE_INIT), (ORIGINAL_EXP, PRECISE_EXP)),
         'sdpa.cpp': ((include, f'#define QWEN_DRAFT_EXP_APPROX (EXP_APPROX_MODE || !({signature}))\n{include}'),),
     }
+    if os.environ.get('QWEN_T32_PRECISE_RECIP') == '1':
+        if (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
+            raise ValueError('Experimental reciprocal is simulator-only')
+        result['compute_common.hpp'] += ((ORIGINAL_RECIP_INIT, PRECISE_RECIP_INIT),
+                                        (ORIGINAL_RECIP, PRECISE_RECIP))
+    return result
 
 
 def patched_sources(original):

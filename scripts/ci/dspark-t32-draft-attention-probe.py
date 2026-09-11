@@ -144,6 +144,7 @@ def main():
         sources=source_hashes(), native_sources=fingerprints(root),
         kernel_audit=kernel_audit, key_chunk_size=options.key_chunk_size, resources_before=snapshot(),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
+        precise_reciprocal=os.environ.get('QWEN_T32_PRECISE_RECIP') == '1',
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None

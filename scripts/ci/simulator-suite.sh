@@ -48,7 +48,7 @@ PY
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
         python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
         status=0
-        timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
+        QWEN_T32_PRECISE_RECIP=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
             --key-chunk-size 32 --output /experiment/results/t32-draft-attention.json || status=$?
         printf '%s\n' "$status" > /experiment/results/t32-draft-attention.exit-status
         exit "$status"
