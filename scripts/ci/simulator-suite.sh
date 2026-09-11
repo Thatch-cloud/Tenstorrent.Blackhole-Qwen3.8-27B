@@ -19,6 +19,19 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
+    ln -s /experiment-scripts /scripts
+    export TT_METAL_SLOW_DISPATCH_MODE=1
+    export QWEN_SIM_REPORT=/experiment/results/t32-commit.json
+    python3 -B -m unittest test_gdn_device_loop_state
+    status=0
+    timeout -k 15 9000 python3 -u /optimisation/sim/gdn-multitoken.py \
+        --source-root /opt/tt-metal --rows 32 --norm-gate --conv --batch-conv \
+        --dma-windows --packed-checkpoints --model-adapter --continuation \
+        --compact-prologue --norm-batch-layer --defer-conv-publication --commit-only-gdn || status=$?
+    printf '%s\n' "$status" > /experiment/results/t32-commit.exit-status
+    exit "$status"
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
     weight_flags=()
     if [ "$QWEN_SIM_CASE" = t32-markov-learned ]; then
