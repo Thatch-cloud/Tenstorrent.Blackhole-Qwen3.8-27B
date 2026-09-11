@@ -94,19 +94,34 @@ CPU pressure is nonzero; GC, compilation, publication substeps and other host
 interference are not yet independently attributed. Keep all outliers in the result.
 Report SHA256: `61f5809340abb134a8fd466f2566d2bcf093b9bb2acf67c67cc3cd54089bd689`.
 
-Next investigate the commit-path stalls in the combined runtime before advancing
-to `rotate_right_v1`, which remains pending. Tasks are not submitted
+The diagnostic repeat is recorded below. `rotate_right_v1` is now running as
+`34545607581` on the same immutable `1c27221` combined runtime. Tasks are not submitted
 concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
 
-The next revision records host-wall/process-CPU duration and Python GC pauses for
+Revision `1c27221` records host-wall/process-CPU duration and Python GC pauses for
 feature access, drafter-history preparation, target publication and history commit.
 It adds no device fences and does not disable GC or alter kernels. Device work may
 be charged to a later synchronization; these are host-stage boundaries, not device
 kernel durations. The diagnostics are inside measured request time and must be
 labelled instrumented. Transaction failure/discard and prefix-zero tests remain
 mandatory; all 47 focused tests and retained request simulator prerequisites pass.
+
+Run `34544974175` independently passes source, request, publication-stage and four
+functional checks. Both arms commit 210 timed tokens with 196/240 acceptance.
+
+| Instrumented path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native score-layout control | 1 | 3343.22 | 4096 | 99.83 |
+| Combined fused score layout | 1 | 3174.52 | 4096 | 113.29 |
+
+The multi-second stalls do not recur. Timed history preparation is approximately
+9-37 ms, with no recorded GC pauses in those stages; this does not identify or fix
+the previous outlier. Candidate decode requests take 884.01/969.63 ms, control
+953.63/1149.87 ms. Setup-inclusive means remain worse for the candidate:
+6915.46 versus 6400.77 ms. No outliers are removed and no promotion is claimed.
+Report SHA256: `51443079b34484a412b7acfb0b7f508ff6889a9eb95be4fe80741af521a4cead`.
 
 ## Stable unique: completed
 
