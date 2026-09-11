@@ -137,7 +137,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
-        profile_drafter=False, score_layout=False, banked_proposal=False):
+        profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False):
     import torch
     from full_dspark_request import measure_dspark_request
     from full_request import terminal_ids
@@ -211,6 +211,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         raise ValueError('Equal-footprint diagnostic requires the down-only MLP experiment')
     if type(banked_proposal) is not bool or (banked_proposal and not score_layout):
         raise ValueError('Banked comparison requires fused scores in both combined runtime arms')
+    if type(native_slot_gdn) is not bool or (native_slot_gdn and (not score_layout or banked_proposal)):
+        raise ValueError('Direct-state comparison requires fused scores without banked drafting')
     if type(score_layout) is not bool or (score_layout and (
             not target_attention_variants or mlp_down or mlp_equal_footprint or profile_drafter)):
         raise ValueError('Score layout requires an isolated matched folded-attention request experiment')
@@ -246,6 +248,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from dspark_banked_variants import SCHEDULE, POLICIES, summarize_variants, EVIDENCE
         from dspark_banked_gate import qualify as qualify_banks
         report['banked_simulator_evidence'] = qualify_banks(EVIDENCE, Path(__file__).parent)
+    if native_slot_gdn:
+        from dspark_native_slot_variants import SCHEDULE, POLICIES, summarize_variants
+        from gdn_native_slot_gate import qualify as qualify_native_slot
+        report['native_slot_simulator_evidence'] = qualify_native_slot(Path(__file__).parent)
     if mlp_down:
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down
@@ -313,7 +319,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms'][
-            'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
+            'direct' if native_slot_gdn else 'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

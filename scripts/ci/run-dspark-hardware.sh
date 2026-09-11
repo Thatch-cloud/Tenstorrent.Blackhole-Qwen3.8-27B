@@ -10,6 +10,9 @@ if [ "$draft_profile" = 1 ]; then test "$mode" = request-verifier-profile; fi
 mlp_down=${QWEN_DSPARK_MLP_DOWN:-0}
 score_layout=${QWEN_DSPARK_SCORE_LAYOUT:-0}
 banked_proposal=${QWEN_DSPARK_BANKED_PROPOSAL:-0}
+native_slot=${QWEN_DSPARK_NATIVE_SLOT:-0}
+[[ "$native_slot" = 0 || "$native_slot" = 1 ]]
+if [ "$native_slot" = 1 ]; then test "$score_layout" = 1; test "$banked_proposal" = 0; fi
 [[ "$banked_proposal" = 0 || "$banked_proposal" = 1 ]]
 if [ "$banked_proposal" = 1 ]; then test "$score_layout" = 1; fi
 [[ "$score_layout" = 0 || "$score_layout" = 1 ]]
@@ -84,6 +87,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \
     -e "QWEN_DSPARK_SCORE_LAYOUT=$score_layout" \
     -e "QWEN_DSPARK_BANKED_PROPOSAL=$banked_proposal" \
+    -e "QWEN_DSPARK_NATIVE_SLOT=$native_slot" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \

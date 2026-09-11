@@ -95,6 +95,8 @@ def main():
     from dspark_score_layout_variants import summarize_variants
     if 'banked_simulator_evidence' in report:
         from dspark_banked_variants import summarize_variants
+    if 'native_slot_simulator_evidence' in report:
+        from dspark_native_slot_variants import summarize_variants
     audit = validate_hardware(report['score_layout_hardware_audit'], Path(__file__).parent)
     comparison = summarize_variants(report['request_checks'])
     if comparison != report.get('request_comparison'):
