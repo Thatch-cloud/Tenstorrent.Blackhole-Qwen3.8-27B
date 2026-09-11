@@ -177,6 +177,9 @@ class PreparedDSparkProposal:
 
 class TracedDSparkDevice(DSparkDevice):
     def __init__(self, *args, native_attention=True, **options):
+        from t32_attention_admission import require_active
+
+        self.attention_admission = require_active()
         if native_attention is not True:
             raise ValueError('Explicit native proposal attention policy required')
         if native_attention:
