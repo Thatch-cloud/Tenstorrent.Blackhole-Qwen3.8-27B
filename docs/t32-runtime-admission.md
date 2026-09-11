@@ -56,6 +56,7 @@ complete learned proposal or a throughput measurement.
 | 34647839458 | Matched rebuild without FP32 buffers | Both first-eager output hashes exactly match original baseline; original three chip-1 failures remain |
 | 34648932728 | FP32 partial outputs, BF16 statistics | 63,488 failures on chip 0 (all 31 live rows across 16 heads); max absolute error 16.7873; rejected |
 | 34649985604 | Same output-only variant plus explicit pack format in max-difference correction | Failures fall to 106 on chip 0, max absolute error 0.5837; still unqualified |
+| 34651033542 | FP32 statistics, BF16 partial outputs, explicit correction packing | First eager chip 0 passes; three chip-1 failures remain; not qualified |
 
 The observed values are -44.75 versus approximately -44.295 in the FP32
 reference, narrowly outside the unchanged `rtol=.01, atol=.01` bound. Neither
@@ -79,6 +80,8 @@ Adding `pack_reconfig_data_format(out_cb)` in the scoped `sub_exp_block` path
 removes most of that mixed-format corruption, but does not meet the numerical
 gate. Retain this correction when investigating mixed-format variants; do not
 describe it as a qualified T32 attention implementation or throughput gain.
+Statistics-only widening changes output hashes but does not remove the original
+three failing comparisons. No tested precision-buffer combination is admitted.
 
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
 `t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
