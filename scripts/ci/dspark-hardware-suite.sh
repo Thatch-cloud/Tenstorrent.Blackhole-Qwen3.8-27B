@@ -45,6 +45,10 @@ if [ "$mode" = request-target-attention ]; then
         test "${QWEN_DSPARK_MLP_DOWN:-0}" = 0
         report_name=dspark-score-layout-request-hardware
         request_options+=(--score-layout)
+        if [ "${QWEN_DSPARK_FUSION_T16:-0}" = 1 ]; then
+            report_name=dspark-fusion-request-hardware
+            request_options+=(--fused-t16-mlp)
+        fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
             report_name=dspark-native-slot-request-hardware
             request_options+=(--native-slot-gdn)

@@ -11,6 +11,9 @@ mlp_down=${QWEN_DSPARK_MLP_DOWN:-0}
 score_layout=${QWEN_DSPARK_SCORE_LAYOUT:-0}
 banked_proposal=${QWEN_DSPARK_BANKED_PROPOSAL:-0}
 native_slot=${QWEN_DSPARK_NATIVE_SLOT:-0}
+fusion=${QWEN_DSPARK_FUSION_T16:-0}
+[[ "$fusion" = 0 || "$fusion" = 1 ]]
+if [ "$fusion" = 1 ]; then test "$score_layout" = 1; test "$native_slot" = 0; test "$banked_proposal" = 0; fi
 [[ "$native_slot" = 0 || "$native_slot" = 1 ]]
 if [ "$native_slot" = 1 ]; then test "$score_layout" = 1; test "$banked_proposal" = 0; fi
 [[ "$banked_proposal" = 0 || "$banked_proposal" = 1 ]]
@@ -48,6 +51,16 @@ fixture=/home/thatch/.cache/qwen-experiments/dspark-b9a5dbdf03bc999c6c73c426b19c
 timeout -k 10 1200 python3 scripts/ci/dspark-hardware-fixtures.py --output "$fixture" \
     > "$output/dspark-checkpoint-manifest.json"
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+if [ "$fusion" = 1 ]; then
+    timeout -k 15 300 docker run --rm --network none --cap-drop ALL \
+        --security-opt no-new-privileges --memory 4g --cpus 2 \
+        --mount "type=bind,src=$PWD,dst=/source,readonly" --workdir /source \
+        -e PYTHONPATH=/source/scripts/ci:/source/speculative-decoding/harness \
+        -e PYTHONDONTWRITEBYTECODE=1 --entrypoint python3 "$image" -B -m unittest \
+        test_dspark_fusion_variants test_fused_t16_scope test_fused_t16_admission \
+        test_full_dspark_request test_dspark_score_layout_variants \
+        2>&1 | tee "$output/fusion-host-tests.log"
+fi
 test_id=''
 cleanup() {
     status=$?
@@ -88,6 +101,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_SCORE_LAYOUT=$score_layout" \
     -e "QWEN_DSPARK_BANKED_PROPOSAL=$banked_proposal" \
     -e "QWEN_DSPARK_NATIVE_SLOT=$native_slot" \
+    -e "QWEN_DSPARK_FUSION_T16=$fusion" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \

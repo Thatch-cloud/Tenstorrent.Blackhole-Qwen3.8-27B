@@ -138,7 +138,10 @@ def main():
     parser.add_argument('--score-layout', action='store_true')
     parser.add_argument('--banked-proposal', action='store_true')
     parser.add_argument('--native-slot-gdn', action='store_true')
+    parser.add_argument('--fused-t16-mlp', action='store_true')
     options = parser.parse_args()
+    if options.fused_t16_mlp and (not options.score_layout or options.native_slot_gdn or options.banked_proposal):
+        parser.error('Fusion requires score layout without native-slot or banked candidates')
     if options.native_slot_gdn and (not options.score_layout or options.banked_proposal):
         raise ValueError('Direct-state GDN requires fused scores without banked drafting')
     if options.banked_proposal and not options.score_layout:
@@ -374,7 +377,8 @@ def main():
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants, mlp_down=options.mlp_down,
                 mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
-                score_layout=options.score_layout, banked_proposal=options.banked_proposal, native_slot_gdn=options.native_slot_gdn)
+                score_layout=options.score_layout, banked_proposal=options.banked_proposal,
+                native_slot_gdn=options.native_slot_gdn, fused_t16_mlp=options.fused_t16_mlp)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']
