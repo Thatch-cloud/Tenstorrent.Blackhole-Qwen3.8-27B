@@ -33,4 +33,22 @@ T16 captured correctness, and a matched combined-runtime PP / CTX / TG result.
 Keep both no-copy candidates disabled. Do not multiply a projection delta by 64
 and present it as measured end-to-end improvement.
 
+## Target integration admission
+
+The T16 captured simulator extension is now running; it is not a pass yet.
+It retains the original T1/T8/T32 checks and adds changing-input T16 replay.
+
+Source inspection found an additional numerical-mode admission gap. The probe's
+native control and `FusedProjection` explicitly use `math_approx_mode=False`.
+The retained target `mlp.py` constructs its decode compute configuration without
+that argument; querying the local TTNN constructor confirms its default is
+`True`. The existing streamed-verifier guard also requires `True`.
+
+The measured component result therefore compares matched non-approximate arms,
+not yet the target's exact compute configuration. Before runtime integration,
+compare against the native target mode and record the actual hardware model
+configuration. Do not silently change the target control to make fusion pass.
+If results differ, preserve the target mode in a separately validated candidate.
+Existing packed target weights still need per-layer byte-exact qualification.
+
 Report SHA256: `b25cf1baa36e3b6aca6ec35a4ca0e27fd0a64e9f4050cfa76c1b378ecd61b154`.

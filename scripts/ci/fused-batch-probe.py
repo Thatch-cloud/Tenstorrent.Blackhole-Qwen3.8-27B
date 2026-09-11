@@ -34,8 +34,12 @@ def main():
     parser.add_argument('--hardware', action='store_true')
     parser.add_argument('--timing', action='store_true')
     parser.add_argument('--trace-replay', action='store_true')
+    parser.add_argument('--trace-t16', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
+    if options.trace_t16 and not options.trace_replay:
+        parser.error('T16 trace coverage requires --trace-replay')
+    trace_rows = (1, 8, 16, 32) if options.trace_t16 else (1, 8, 32)
     if options.trace_replay and not options.device_weight_check:
         parser.error('Trace replay requires byte-exact weight checks')
     if options.timing and not options.hardware:
@@ -146,7 +150,7 @@ def main():
                     raise AssertionError(f'Fused multi-row output differs: rows={rows}, chip={chip}, mismatches={int((observed != reference).sum())}')
                 report['checks'].append(dict(rows=rows, chip=chip, exact=True))
                 references.append(reference.clone())
-            if options.trace_replay and rows in (1, 8, 32):
+            if options.trace_replay and rows in trace_rows:
                 from fusion_trace import validate_replays
                 def native_replay(temporary):
                     return native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, temporary)
@@ -200,9 +204,9 @@ def main():
         raise AssertionError('All six widths and both chips required')
     if len(report['timings']) != (9 if options.timing and not options.trace_replay else 0):
         raise AssertionError('Three paired timing blocks at T1/T8/T32 required')
-    if options.trace_replay and (len(report.get('trace_replays', [])) != 3
+    if options.trace_replay and (len(report.get('trace_replays', [])) != len(trace_rows)
             or not all(result['passed'] for result in report['trace_replays'])):
-        raise AssertionError('All three changing-input trace gates required')
+        raise AssertionError('All requested changing-input trace gates required')
     report['passed'] = True
     options.output.write_text(json.dumps(report, indent=2))
 

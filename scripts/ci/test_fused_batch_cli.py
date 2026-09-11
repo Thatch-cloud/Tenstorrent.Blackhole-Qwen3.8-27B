@@ -8,6 +8,8 @@ import unittest
 class FusedBatchCLITests(unittest.TestCase):
     def test_timing_and_device_weight_guards_precede_fixture_loading(self):
         for flags, environment, message in (
+                (['--trace-t16'], {'TT_METAL_SIMULATOR': 'placeholder'},
+                    'T16 trace coverage requires --trace-replay'),
                 (['--hardware', '--trace-replay'],
                     {'QWEN_HARDWARE_TESTS': '1', 'QWEN_CARDS_ALLOCATED': '1'},
                     'Trace replay requires byte-exact weight checks'),
