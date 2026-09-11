@@ -65,7 +65,7 @@ def replacements():
     }
 #endif'''
         result['compute_common.hpp'] += ((before, after),)
-    if os.environ.get('QWEN_T32_NUMERATOR_TAP') == '1':
+    if os.environ.get('QWEN_T32_NUMERATOR_TAP') in ('1', '2'):
         if (os.environ.get('QWEN_SIM_ONLY') != '1'
                 or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
             raise ValueError('Numerator tap is simulator-only and not a correctness candidate')
@@ -81,6 +81,26 @@ def replacements():
 #else
 ''' + before + '''
 #endif'''
+        if os.environ['QWEN_T32_NUMERATOR_TAP'] == '2':
+            numerator = '''                reconfig_data_format_srca(alias_mm2_prev_out);
+                copy_block(alias_mm2_prev_out, cb_out, out_chunk_tiles);'''
+            inverse_sum = '''                reconfig_data_format_srca(alias_prev_sum);
+                copy_tile_to_dst_init_short(alias_prev_sum);
+                pack_reconfig_data_format(cb_out);
+                CircularBuffer(alias_prev_sum).wait_front(Sq_chunk_t);
+                CircularBuffer(cb_out).reserve_back(out_chunk_tiles);
+                for (uint32_t tile_index = 0; tile_index < out_chunk_tiles; ++tile_index) {
+                    tile_regs_acquire();
+                    copy_tile(alias_prev_sum, tile_index / vDHt, 0);
+                    tile_regs_commit();
+                    tile_regs_wait();
+                    pack_tile(0, cb_out);
+                    tile_regs_release();
+                    CircularBuffer(cb_out).push_back(1);
+                }
+                CircularBuffer(alias_mm2_prev_out).wait_front(out_chunk_tiles);
+                CircularBuffer(alias_mm2_prev_out).pop_front(out_chunk_tiles);'''
+            after = after.replace(numerator, inverse_sum)
         result['compute_common.hpp'] += ((before, after),)
     return result
 

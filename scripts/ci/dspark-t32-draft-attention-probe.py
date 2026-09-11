@@ -150,6 +150,7 @@ def main():
         fp32_build=build_evidence(root),
         explicit_pack_transition=os.environ.get('QWEN_T32_EXPLICIT_PACK') == '1',
         numerator_tap=os.environ.get('QWEN_T32_NUMERATOR_TAP') == '1',
+        inverse_sum_tap=os.environ.get('QWEN_T32_NUMERATOR_TAP') == '2',
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None
