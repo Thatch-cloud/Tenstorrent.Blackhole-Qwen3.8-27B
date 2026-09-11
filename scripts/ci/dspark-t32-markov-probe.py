@@ -8,14 +8,15 @@ from pathlib import Path
 
 from attention_batch import capture_operation
 from dspark_t32_markov import execute
-from dspark_native_reference import POLICY, NativeMarkovReference, audit_scores
+from dspark_native_reference import POLICY, audit_scores
+from dspark_t32_reference import T32MarkovReference
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 
 
 SOURCES = ('dspark-t32-markov-probe.py', 'dspark_t32_markov.py', 'dspark_projection.py', 'dspark_markov_device.py', 'dspark_markov.py', 'dspark_intake.py',
     'dspark_markov_fixture.py', 'attention_batch.py', 'gdn_multitoken_conv.py',
-    'dspark_native_reference.py', 'projection_rounding.py')
+    'dspark_native_reference.py', 'dspark_t32_reference.py', 'projection_rounding.py')
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 BINARY_SHA256 = {
@@ -94,7 +95,7 @@ def main():
     try:
         native_references = []
         if options.native_reference:
-            oracle = NativeMarkovReference(predecessor, successor)
+            oracle = T32MarkovReference(predecessor, successor)
             for pattern, (anchor, base) in enumerate(patterns):
                 progress(f'native_reference_{pattern}_start')
                 native_references.append(oracle.trajectory(base.reshape(1, steps, vocabulary), int(anchor.item()),
