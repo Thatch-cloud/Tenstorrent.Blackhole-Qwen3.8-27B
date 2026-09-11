@@ -49,6 +49,15 @@ merge-intervals baseline or establish broad held-out coding quality.
 
 Report SHA256: `fd93f1c3c9fb01ace53a3551f528976907190f5f7a52b7dca00da9c170dd20ae`.
 
+[Run-length encoding 34587483522](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34587483522)
+also passes independent source/request validation and four isolated functional
+cases. At CTX4096 / one stream, control PP/TG is 3332.30 / 117.72; fusion is
+3311.14 / 121.68. Both accept 196/240 drafts and commit 210 timed tokens.
+Setup-inclusive mean is 5571.42 versus 5843.45 ms. This is a different coding
+task, not a higher result for the merge-intervals benchmark.
+
+Report SHA256: `a47e3e80ccd7836f177a0577e4cf2a359d442847deab623b73d63a7ac1350988`.
+
 [Run 34553944965](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34553944965)
 completed the previously blocked captured-fusion test on revision
 `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`.
