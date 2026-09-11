@@ -11,6 +11,7 @@ test ! -e /experiment/results/t32-fp32-build.json
 python3 - <<'PY'
 import hashlib
 import json
+import os
 from pathlib import Path
 from t32_ci_runtime import PINS
 from t32_attention_fp32_patch import SOURCE_PATH, patched_bytes
@@ -21,7 +22,12 @@ assert binaries == {name: value for name, value in PINS.items() if name.endswith
 source = root / SOURCE_PATH
 original = source.read_bytes()
 candidate = patched_bytes(original)
+variant = os.environ.get('QWEN_T32_FP32_VARIANT', 'fp32')
+assert variant in ('baseline', 'fp32')
+if variant == 'baseline':
+    candidate = original
 report = dict(stage='prepared', base_binaries=binaries,
+              variant=variant,
               original_factory=hashlib.sha256(original).hexdigest(),
               candidate_factory=hashlib.sha256(candidate).hexdigest())
 Path('/experiment/results/t32-fp32-build.json').write_text(json.dumps(report, indent=2))
