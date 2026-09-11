@@ -35,6 +35,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32
     mkdir -p /optimisation
     ln -s /simulator-support /optimisation/sim
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
+        python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
         export QWEN_T32_FP32_BUILD=1
         export QWEN_T32_FP32_VARIANT=baseline
         bash /experiment-scripts/ci/t32-attention-fp32-build.sh
@@ -51,7 +52,6 @@ packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
-        python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
         status=0
         timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
             --key-chunk-size 64 --output /experiment/results/t32-draft-attention.json || status=$?

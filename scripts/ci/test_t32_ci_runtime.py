@@ -22,6 +22,7 @@ class CiRuntimeTests(unittest.TestCase):
         hashes[str(Path('/runtime') / SOURCE_PATH)] = candidate
         hashes['/simulator-support/sdpa-graft-registration.patch'] = 'b' * 64
         with patch.dict(os.environ, {'QWEN_T32_FP32_BUILD': '1', 'QWEN_SIM_ONLY': '1',
+                                    'QWEN_T32_FP32_VARIANT': 'fp32',
                                     'QWEN_HARDWARE_TESTS': '0', 'QWEN_CARDS_ALLOCATED': '0'}), \
                 patch('t32_ci_runtime.digest', side_effect=lambda path: hashes[str(path)]):
             with patch.object(Path, 'read_text', return_value=json.dumps(report)):
