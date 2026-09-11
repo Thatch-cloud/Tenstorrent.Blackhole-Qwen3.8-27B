@@ -32,6 +32,8 @@ if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
     exit "$status"
 fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention ]]; then
+    mkdir -p /optimisation
+    ln -s /simulator-support /optimisation/sim
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path

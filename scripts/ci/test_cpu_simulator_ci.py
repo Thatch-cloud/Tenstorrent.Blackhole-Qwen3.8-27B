@@ -45,6 +45,14 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertIn('--captured-stack', source)
         self.assertNotIn('--hardware', source)
 
+    def test_attention_fingerprints_keep_repository_relative_support_path(self):
+        source = Path(__file__).with_name('simulator-suite.sh').read_text()
+        link = 'ln -s /simulator-support /optimisation/sim'
+        self.assertIn(link, source)
+        self.assertLess(source.index(link), source.index('python3 -B -m unittest test_t32_ci_runtime'))
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('docker cp optimisation/sim "$container:/simulator-support"', runner)
+
     def test_shortlist_gate_uses_same_exclusive_cpu_container(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
