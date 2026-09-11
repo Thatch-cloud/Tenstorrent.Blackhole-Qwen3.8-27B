@@ -1,6 +1,26 @@
 # Read native GDN state during verification
 
-Status: recurrence adapter prototype; not simulator- or hardware-qualified.
+Status: synthetic recurrence simulator comparison passed; no integrated or hardware qualification.
+
+## Simulator result
+
+The source-corrected run completed cleanly on 11 September, exit status 0.
+All 42 output comparisons and 56 input-preservation comparisons passed on both
+chips. Captured compact and native-slot outputs were each compared with a fresh
+eager control for three refreshed seeds. Checks include every retained prefix,
+the FP32 bridge, and all eight native state slots, with seven inactive slots
+poisoned. Current source hashes match the report before and after execution.
+
+Report: `/opt/ttsim/results/20260911T010024Z-391-gdn-native-slot-probe.json`.
+SHA256: `1457280642d502e75ad3ea2b633272bb55f9b2f05a8619d03033153137e61bac`.
+The preceding attempt stopped before recurrence execution because the simulator
+checkout lacked the pinned GDN source; the corrected run uses the hash-checked
+source snapshot already used by earlier GDN simulator tests.
+
+This validates the recurrence input-layout hypothesis, not complete GDN integration.
+Convolution-window native-slot admission, retained publication, learned request
+correctness, and combined runtime speed remain untested. Host readback dominates
+the roughly fourteen-minute diagnostic; it is not an accelerator timing result.
 
 The combined verifier still calls `active.save(entry)` in each GDN layer before
 projection. The proposed replacement reads native slot zero directly and keeps
