@@ -6,11 +6,15 @@ from pathlib import Path
 def comparison_geometry(packed_shape, separate_shape, offset):
     if type(offset) is not int or offset not in (0, 1):
         raise ValueError('Gate or up tile offset required')
+    if len(packed_shape) == 2:
+        packed_shape = (1, 1, *packed_shape)
+    if len(separate_shape) == 2:
+        separate_shape = (1, 1, *separate_shape)
     if (len(separate_shape) != 4 or tuple(separate_shape[:2]) != (1, 1)
             or any(type(value) is not int or value % 32 for value in separate_shape[2:])
             or not 32 <= separate_shape[2] <= 5120 or not 32 <= separate_shape[3] <= 8704
             or tuple(packed_shape) != (*separate_shape[:3], 2 * separate_shape[3])):
-        raise ValueError('Tile-aligned bounded local BF4 projection geometry required')
+        raise ValueError(f'Tile-aligned bounded local BF4 projection geometry required: packed={packed_shape}, separate={separate_shape}')
     columns = separate_shape[3] // 32
     pages = separate_shape[2] // 32 * columns
     return min(64, pages), columns, pages

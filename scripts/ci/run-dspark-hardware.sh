@@ -57,7 +57,7 @@ if [ "$fusion" = 1 ]; then
         --mount "type=bind,src=$PWD,dst=/source,readonly" --workdir /source \
         -e PYTHONPATH=/source/scripts/ci:/source/speculative-decoding/harness \
         -e PYTHONDONTWRITEBYTECODE=1 --entrypoint python3 "$image" -B -m unittest \
-        test_dspark_fusion_variants test_fused_t16_scope test_fused_t16_admission \
+        test_packed_weight_check test_dspark_fusion_variants test_fused_t16_scope test_fused_t16_admission \
         test_full_dspark_request test_dspark_score_layout_variants \
         2>&1 | tee "$output/fusion-host-tests.log"
 fi

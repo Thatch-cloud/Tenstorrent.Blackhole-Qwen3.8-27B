@@ -7,6 +7,15 @@ from packed_weight_check import comparison_geometry, read_comparison
 
 
 class PackedWeightCheckTests(unittest.TestCase):
+    def test_native_rank_two_weights_have_identical_tile_geometry(self):
+        for packed in ((5120, 17408), (1, 1, 5120, 17408)):
+            for separate in ((5120, 8704), (1, 1, 5120, 8704)):
+                for offset in (0, 1):
+                    self.assertEqual(comparison_geometry(packed, separate, offset), (64, 272, 43520))
+        for shape in ((2, 1, 5120, 8704), (1, 2, 5120, 8704), (5120, 8736)):
+            with self.assertRaises(ValueError):
+                comparison_geometry((5120, 17408), shape, 0)
+
     def test_geometry_and_complete_tile_mapping(self):
         for rows, columns in ((32, 32), (64, 96), (320, 256), (5120, 8704)):
             for offset in (0, 1):
