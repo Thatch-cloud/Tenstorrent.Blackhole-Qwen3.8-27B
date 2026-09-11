@@ -29,6 +29,7 @@ remain unqualified. No serving defaults change.
 | --- | --- | --- |
 | 34589904935 | 31-query Markov, synthetic vocabulary 64 | 186 eager and 248 replay query/chip comparisons; input/weight/stale controls pass |
 | 34590151457 | T32 folded target attention at CTX4096 | 8 replay, 24 distinct mask-bundle and 4 KV-integrity checks pass against native B1 |
+| 34590621276 | Learned full-vocabulary, 31-query Markov | 124 eager and 186 replay comparisons pass; immutable probe sources verified |
 
 Both exit cleanly with zero status; recorded probe sources match their immutable
 CI revisions (`cab5126` and `8e90139`). Markov report SHA256:
@@ -36,16 +37,35 @@ CI revisions (`cab5126` and `8e90139`). Markov report SHA256:
 Attention report SHA256:
 `774a53bf54fcbb7fe5c02fb1f358be63c9fcc0254679f19543232d4079429b1b`.
 
-The learned full-vocabulary Markov gate is running as 34590621276, using the
-cached checkpoint read-only. T32 drafter attention (34591332709) is pending
-behind it in the shared queue. Neither has a validated result yet.
+The learned Markov report SHA256 is
+`d93147bfa2e0223ad479d6bffba7416e5e41e663e1a6463080a1172ccb9bec3a`.
+It uses learned full-vocabulary matrices with synthetic base logits, not a
+complete learned proposal or a throughput measurement.
+
+### Drafter attention investigation
+
+| Run | Change | Result |
+| --- | --- | --- |
+| 34591332709 | Initial CI packaging | Failed before simulation: missing repository-relative support path |
+| 34599714782 | Restore support path | Three numerical failures on chip 1; chip 0 passes first eager case |
+| 34642483772 | Retain exact error coordinates | All three failures are head 11, live query row 13, columns 53/70/106 |
+| 34643311170 | 32-key chunks instead of 64 | Same three failing coordinates and values |
+| 34644020684 | Scoped precise reciprocal with 32-key chunks | Same three failing coordinates and values; clean teardown |
+
+The observed values are -44.75 versus approximately -44.295 in the FP32
+reference, narrowly outside the unchanged `rtol=.01, atol=.01` bound. Neither
+chunk-size reduction nor the precise reciprocal is a demonstrated fix.
+Simple CPU rounding diagnostics also do not reproduce the simulator output;
+they are not a bit-accurate native-kernel model and do not rule out intermediate
+precision loss. The drafter attention gate remains failed, with no hardware
+promotion or T32 throughput claim.
 
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
 `t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
 25-input limit. These CPU-only jobs have a 16-CPU quota and 64 GiB memory limit;
 they do not mount the cards or measure hardware speed.
 
-Before a combined hardware comparison, validate both pending numerical reports,
+Before a combined hardware comparison, fix and validate drafter attention,
 complete captured T32 proposal integration and every-prefix target-state gates.
 The prepared T32 Markov path currently uses native score layout, not the fused
 score layout used in the T16 comparison: that difference must be explicit in
