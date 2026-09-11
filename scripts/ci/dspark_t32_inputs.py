@@ -6,18 +6,34 @@ from dspark_inputs import MASK_TOKEN, VOCABULARY
 PROPOSALS = 31
 
 
-def proposal_inputs(anchor, position, capacity, rotary):
+def geometry(capacity, proposals=PROPOSALS):
+    if (type(capacity) is not int or not 1 <= capacity <= 8192
+            or type(proposals) is not int or proposals != PROPOSALS):
+        raise ValueError('Explicit 31-query complete-history geometry required')
+    padded = ((capacity + proposals + 63) // 64) * 64
+    return tuple((start, min(start + 2048, padded)) for start in range(0, padded, 2048))
+
+
+def fixed_mask(position, capacity):
     import torch
 
-    if (type(anchor) is not int or not 0 <= anchor < VOCABULARY
-            or type(position) is not int or type(capacity) is not int
+    if (type(position) is not int or type(capacity) is not int
             or not 1 <= position <= capacity <= 8192 or capacity % 32):
-        raise ValueError('Valid anchor and committed frontier in tile-aligned full history required')
-    padded = ((capacity + PROPOSALS + 63) // 64) * 64
+        raise ValueError('Committed frontier in tile-aligned full history required')
+    padded = geometry(capacity)[-1][1]
     mask = torch.full((1, 1, 32, padded), float('-inf'), dtype=torch.bfloat16)
     mask[:, :, :PROPOSALS, :position] = 0
     mask[:, :, :PROPOSALS, capacity:capacity + PROPOSALS] = 0
     mask[:, :, PROPOSALS:, capacity] = 0
+    return mask
+
+
+def proposal_inputs(anchor, position, capacity, rotary):
+    import torch
+
+    if type(anchor) is not int or not 0 <= anchor < VOCABULARY:
+        raise ValueError('Valid global anchor required')
+    mask = fixed_mask(position, capacity)
     identifiers = torch.full((1, PROPOSALS), MASK_TOKEN, dtype=torch.int64)
     identifiers[0, 0] = anchor
     cosine = torch.ones(1, 1, 32, 128, dtype=torch.bfloat16)

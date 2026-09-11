@@ -4,11 +4,22 @@ import unittest
 import torch
 
 from dspark_inputs import MASK_TOKEN
-from dspark_t32_inputs import proposal_inputs
+from dspark_t32_inputs import proposal_inputs, geometry as experimental_geometry
 from dspark_full_attention import geometry
 
 
 class T32InputsTests(unittest.TestCase):
+    def test_geometry_covers_complete_history_without_gaps(self):
+        for capacity in (1, 32, 4096, 4384, 8192):
+            chunks = experimental_geometry(capacity)
+            self.assertEqual(chunks[0][0], 0)
+            self.assertEqual(chunks[-1][1], ((capacity + 31 + 63) // 64) * 64)
+            for before, after in zip(chunks, chunks[1:]):
+                self.assertEqual(before[1], after[0])
+        for width in (7, 15, 32, True):
+            with self.assertRaises(ValueError):
+                experimental_geometry(4096, width)
+
     def rotary(self):
         return SimpleNamespace(tables=lambda position, rows: (
             torch.full((1, 1, rows, 128), .5, dtype=torch.bfloat16),
