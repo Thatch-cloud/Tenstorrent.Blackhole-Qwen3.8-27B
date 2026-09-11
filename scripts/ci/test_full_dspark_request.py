@@ -135,6 +135,20 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.drafter.close.side_effect = lambda: events.append('close')
         return events, arm, constructor
 
+    def test_native_slot_scope_is_explicit_and_reported_after_restore(self):
+        self.score_scope()
+        native = SimpleNamespace(install=lambda: nullcontext(), summary=Mock(return_value={'restored': True}))
+        with patch('gdn_native_slot_scope.NativeSlotArm', return_value=native) as scope:
+            result = self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,
+                target_attention_t16=True, score_layout=True, native_slot_gdn=True)
+        scope.assert_called_once()
+        self.assertEqual(result['native_slot_gdn'], {'restored': True})
+
+    def test_native_slot_requires_combined_score_runtime_before_prefill(self):
+        with self.assertRaisesRegex(ValueError, 'combined score-layout'):
+            self.measure(native_slot_gdn=True)
+        self.base_prefill.assert_not_called()
+
     def test_score_scope_installs_before_capture_and_restores_before_device_close(self):
         events, arm, constructor = self.score_scope()
         result = self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,

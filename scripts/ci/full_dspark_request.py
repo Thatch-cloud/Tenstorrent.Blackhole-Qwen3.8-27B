@@ -17,9 +17,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
-        banked_proposal=False, banked_proposal_evidence=None):
+        banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False):
     import torch
     from full_request import measure_request
+    if type(native_slot_gdn) is not bool or (native_slot_gdn and (not score_layout or banked_proposal)):
+        raise ValueError('Native-slot GDN requires the combined score-layout runtime without banked drafting')
     bank_evidence = None
     if type(banked_proposal) is not bool or (banked_proposal and not (
             proposal_trace and commit_only_gdn and native_attention and target_attention_t16 and not profile_verifier)):
@@ -208,8 +210,12 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
         return runtime
 
-    observer = None
+    observer = native_slot_arm = None
     try:
+        if native_slot_gdn:
+            from gdn_native_slot_scope import NativeSlotArm
+            native_slot_arm = NativeSlotArm(operations, model)
+            score_scope.enter_context(native_slot_arm.install())
         if profile_verifier:
             from request_verifier_profile import RequestVerifierProfile
             observer = RequestVerifierProfile(operations, model.mesh_device, full_rows=16,
@@ -258,6 +264,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
         score_scope.close()
+        if native_slot_arm is not None:
+            result['native_slot_gdn'] = native_slot_arm.summary()
         if score_arm is not None:
             result['score_layout'] = score_arm.summary()
         return result
