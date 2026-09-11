@@ -1,5 +1,29 @@
 # Captured gate/up fusion: hardware result
 
+## Combined T16 runtime
+
+[Run 34585332201](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34585332201)
+passed at `f301272`, after guarded fabric recovery. Independent validation checks
+743 source files, complete request recomputation and correctness/weight gates.
+
+| One coding stream, merge intervals | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Combined control | 3344.93 | 4096 | 100.45 |
+| T16 gate/up fusion | 3302.00 | 4096 | 102.44 |
+
+Both arms commit 242 timed tokens, accepting 222/330 drafts. The measured TG
+gain is 1.98%, not a route to 200 TG by itself. Mean complete cycle decreases
+109.459 to 107.340 ms, but verifier/readback only decreases 69.157 to 68.512 ms;
+draft and commit variation contributes to the overall result. Setup-inclusive
+mean increases 5988.16 to 6274.35 ms. No serving or held-out quality qualification.
+
+A same-revision repeat is [34586017906](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34586017906).
+Do not promote the candidate until repeatability is assessed.
+
+Report SHA256: `74696c102735f26f9191a955dc5c3df7287afd5ff0f1309b31b10b4b2469b7d1`.
+
+## Earlier component timing
+
 [Run 34553944965](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34553944965)
 completed the previously blocked captured-fusion test on revision
 `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`.
