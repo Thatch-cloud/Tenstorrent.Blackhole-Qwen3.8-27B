@@ -18,7 +18,21 @@ draft and commit variation contributes to the overall result. Setup-inclusive
 mean increases 5988.16 to 6274.35 ms. No serving or held-out quality qualification.
 
 A same-revision repeat is [34586017906](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34586017906).
-Do not promote the candidate until repeatability is assessed.
+It passed independent validation of 743 source files and complete request
+recomputation. Control PP/CTX/TG is 3325.70 / 4096 / 100.47; fusion is
+3354.98 / 4096 / 101.88 (+1.40% TG). Acceptance remains 222/330, with 242
+timed committed tokens per arm. Verifier/readback falls 69.211 to 68.441 ms;
+complete cycle falls 109.441 to 107.926 ms. Setup-inclusive mean is 6020.81
+versus 6074.33 ms.
+
+The two paired runs support a small repeatable improvement on this prompt.
+Keep it as an opt-in combined-runtime candidate, not a serving default or a
+broad coding-quality claim. At 11 committed tokens per block, 200 TG requires
+a 55 ms cycle; the observed roughly 108 ms cycle still needs a major reduction.
+Further work must target larger verifier/drafter costs rather than repeat this
+same small projection experiment.
+
+Repeat report SHA256: `2fc8ce17545ba1aa6defb5c323428c54b7d662c921a0667a758c07643ce55d32`.
 
 Report SHA256: `74696c102735f26f9191a955dc5c3df7287afd5ff0f1309b31b10b4b2469b7d1`.
 
