@@ -36,6 +36,8 @@ def fingerprints(root):
             if path.suffix in ('.cpp', '.hpp', '.h') and path.is_file())
     result = {str(path): digest(root / path) for path in sorted(paths)}
     if result[PACKER] != ORIGINAL_PACKER or any(result[str(path)] != BINARY_SHA256 for path in paths[1:3]):
+        print(json.dumps(dict(stage='runtime_admission_rejected', observed={str(path): result[str(path)]
+            for path in paths[:3]}, expected_binary=BINARY_SHA256, expected_packer=ORIGINAL_PACKER)), flush=True)
         raise ValueError('Original reviewed native runtime and packer required')
     return result
 
