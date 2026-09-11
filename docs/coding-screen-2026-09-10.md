@@ -73,8 +73,29 @@ the cause of earlier outliers or prove an exclusive host. Do not discard them.
 Setup-inclusive means are 5768.67 ms candidate and 6753.29 ms control.
 Report SHA256: `62ebfea992b011765bf66bf43ed71b9bfb8e91346c933516d91c4be7663a0895`.
 
-The same immutable combined runtime now tests `run_length_encode_v1` in run
-`34543886854`; `rotate_right_v1` remains pending. Tasks are not submitted
+### Run-length encoding: combined correctness passes, timing regresses
+
+Run `34543886854` on the same immutable `f49cee9` passes all source, learned
+proposal, target-state and four isolated functional checks. Both arms commit 210
+timed tokens with 196/240 accepted proposals.
+
+| Path | Streams | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Native score-layout control | 1 | 2001.16 | 4096 | 100.31 |
+| Combined fused score layout | 1 | 1451.70 | 4096 | 33.39 |
+
+Candidate request durations are 5267.59/1021.13 ms; control 1013.21/1080.27 ms.
+The slow candidate localizes to `session.commit` / selection-publication: its first
+block spends 2533.32 ms there, followed by several 368-534 ms blocks. Drafting
+remains about 26-32 ms and verification/readback about 69-70 ms. This is not
+evidence that the score-layout kernel itself stalls. No CPU quota throttling,
+OOM kills or memory-pressure total increases occur in the request windows.
+CPU pressure is nonzero; GC, compilation, publication substeps and other host
+interference are not yet independently attributed. Keep all outliers in the result.
+Report SHA256: `61f5809340abb134a8fd466f2566d2bcf093b9bb2acf67c67cc3cd54089bd689`.
+
+Next investigate the commit-path stalls in the combined runtime before advancing
+to `rotate_right_v1`, which remains pending. Tasks are not submitted
 concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
