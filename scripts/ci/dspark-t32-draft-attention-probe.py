@@ -17,14 +17,16 @@ from dspark_projection import tensor_digest
 from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from sim_memory_budget import require_clean
-from t32_ci_runtime import fingerprints, snapshot
+from t32_ci_runtime import build_evidence, fingerprints, snapshot
 
 
 SPEC = importlib.util.spec_from_file_location('fixed_full_attention', Path(__file__).with_name('dspark-full-attention-probe.py'))
 FULL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FULL)
 SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark-t32-draft-attention-probe.py', 'dspark_t32_inputs.py', 'dspark_t32_attention.py',
-    'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 't32_ci_runtime.py'))))
+    'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 't32_ci_runtime.py',
+    't32-attention-fp32-build.sh', 't32_attention_fp32_patch.py', 'sdpa_graft_build.py',
+    '../../optimisation/sim/sdpa-graft-registration.patch'))))
 CAPACITY, PROPOSALS = 4384, 31
 POSITIONS = (4096, 4109)
 REPLAYS = (1, 0)
@@ -145,6 +147,7 @@ def main():
         kernel_audit=kernel_audit, key_chunk_size=options.key_chunk_size, resources_before=snapshot(),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         precise_reciprocal=os.environ.get('QWEN_T32_PRECISE_RECIP') == '1',
+        fp32_build=build_evidence(root),
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None

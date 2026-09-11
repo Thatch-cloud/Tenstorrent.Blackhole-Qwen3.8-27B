@@ -34,6 +34,10 @@ fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention ]]; then
     mkdir -p /optimisation
     ln -s /simulator-support /optimisation/sim
+    if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
+        export QWEN_T32_FP32_BUILD=1
+        bash /experiment-scripts/ci/t32-attention-fp32-build.sh
+    fi
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path

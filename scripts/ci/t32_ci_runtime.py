@@ -1,6 +1,8 @@
 """Admission and resource evidence for the isolated 16-CPU, 64-GiB simulator container."""
 
 from pathlib import Path
+import json
+import os
 
 from dspark_hardware_gate import digest
 from native_draft_sdpa import audit_active_kernel
@@ -14,11 +16,38 @@ PINS = {
 }
 
 
+def build_evidence(root):
+    if os.environ.get('QWEN_T32_FP32_BUILD') != '1':
+        return None
+    if (os.environ.get('QWEN_SIM_ONLY') != '1'
+            or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
+        raise ValueError('Disposable FP32 build is simulator-only')
+    from t32_attention_fp32_patch import SOURCE_PATH, SOURCE_SHA256
+
+    root = Path(root)
+    report = json.loads(Path('/experiment/results/t32-fp32-build.json').read_text())
+    base = {name: value for name, value in PINS.items() if name.endswith('.so')}
+    binaries = {name: digest(root / name) for name in base}
+    candidate = '12e5cc308f777ebf01bbfd5b48fee71335af916eead62763e0db8953c720972e'
+    if (report.get('stage') != 'built' or report.get('base_binaries') != base
+            or report.get('original_factory') != SOURCE_SHA256
+            or report.get('candidate_factory') != candidate or digest(root / SOURCE_PATH) != candidate
+            or report.get('binaries') != binaries or len(set(binaries.values())) != 1
+            or any(binaries[name] == value for name, value in base.items())
+            or report.get('registration_patch') != digest('/simulator-support/sdpa-graft-registration.patch')):
+        raise ValueError('Complete matching disposable build provenance required')
+    return report
+
+
 def fingerprints(root):
     root = Path(root)
     audit_active_kernel(root)
+    build = build_evidence(root)
+    expected = dict(PINS)
+    if build is not None:
+        expected.update(build['binaries'])
     result = {name: digest(root / name) for name in PINS}
-    if result != PINS:
+    if result != expected:
         raise ValueError('Exact CI binaries and simulator compatibility packer required')
     directory = root / 'ttnn/cpp/ttnn/operations/transformer/sdpa'
     result.update({str(path.relative_to(root)): digest(path) for path in sorted(directory.rglob('*'))
