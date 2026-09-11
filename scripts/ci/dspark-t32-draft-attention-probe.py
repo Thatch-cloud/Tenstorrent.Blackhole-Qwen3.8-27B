@@ -216,7 +216,10 @@ def main():
                     max_abs=float((actual.float() - golden).abs().max()),
                     diagnostics=numerical_details(actual, golden)))
                 if not passed:
-                    raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
+                    failure_path = options.output.with_name(f't32-attention-{mode}-{ordinal}-chip-{chip}.pt')
+                    torch.save(dict(actual=actual.cpu(), expected=golden.cpu()), failure_path)
+                    report[mode + '_checks'][-1]['failure_tensor'] = dict(
+                        name=failure_path.name, sha256=digest(failure_path))
                 for name in ('key', 'value'):
                     actual_layout = ttnn.to_torch(ttnn.get_device_tensors(output[name])[chip])
                     reference_layout = joined(patterns[case], name)[chip:chip + 1]
@@ -231,6 +234,8 @@ def main():
                     report['input_checks'].append(dict(mode=mode, ordinal=ordinal, case=case, chip=chip, name=name, exact=exact_input))
                     if not exact_input:
                         raise AssertionError('Fixed-storage attention mutates a borrowed input')
+                if not passed:
+                    raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
 
         for case in range(2):
             progress(f'eager_{case}')
