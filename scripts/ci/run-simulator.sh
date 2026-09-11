@@ -2,14 +2,18 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
-case "${QWEN_SIM_CASE:-stack}" in stack|shortlist) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
-for kind in attention convolution mlp stack selector; do
+kinds='attention convolution mlp stack selector'
+if [ "${QWEN_SIM_CASE:-stack}" = fusion-t16 ]; then kinds=mlp; fi
+mounts=()
+for kind in $kinds; do
     test -d "$cache/dflash2-$kind-$revision"
+    mounts+=(--mount "type=bind,src=$cache/dflash2-$kind-$revision,dst=/fixture-$kind,readonly")
 done
 curl --fail --location --max-time 180 https://github.com/tenstorrent/ttsim/releases/download/v1.10.3/libttsim_bh_x2.so -o "$assets/libttsim_bh_x2.so"
 curl --fail --location --max-time 180 https://raw.githubusercontent.com/tenstorrent/tt-umd/115b809170ff762182f925a07636887e5afb910e/tests/cluster_descriptor_examples/blackhole_P300_both_mmio.yaml -o "$assets/cluster_descriptor.yaml"
@@ -35,16 +39,15 @@ trap 'exit 130' INT
 container=$(docker create --network none --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit 4096 --memory 64g --cpus 16 --shm-size 8g \
     --mount "type=bind,src=$assets,dst=/simulator-assets,readonly" \
-    --mount "type=bind,src=$cache/dflash2-attention-$revision,dst=/fixture-attention,readonly" \
-    --mount "type=bind,src=$cache/dflash2-convolution-$revision,dst=/fixture-convolution,readonly" \
-    --mount "type=bind,src=$cache/dflash2-mlp-$revision,dst=/fixture-mlp,readonly" \
-    --mount "type=bind,src=$cache/dflash2-stack-$revision,dst=/fixture-stack,readonly" \
-    --mount "type=bind,src=$cache/dflash2-selector-$revision,dst=/fixture-selector,readonly" \
+    "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
+if [ "${QWEN_SIM_CASE:-stack}" = fusion-t16 ]; then
+    docker cp optimisation/sim "$container:/simulator-support"
+fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     docker cp optimisation/sim/sdpa-graft-registration.patch "$container:/tmp/ccl-graft-registration.patch"
 fi

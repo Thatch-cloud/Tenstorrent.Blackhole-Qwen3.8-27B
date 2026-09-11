@@ -6,6 +6,17 @@ import unittest
 
 
 class CpuSimulatorCiTests(unittest.TestCase):
+    def test_dedicated_fusion_workflow_is_serialized_and_cpu_only(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-ttsim.yml').read_text()
+        self.assertIn('group: qwen-two-p150a-exclusive', workflow)
+        self.assertIn('timeout-minutes: 180', workflow)
+        self.assertIn('bash scripts/ci/run-simulator.sh', workflow)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('--device-weight-check --trace-replay --trace-t16', suite)
+        self.assertIn('compatibility.patched_bytes', suite)
+        self.assertIn('fused-batch.exit-status', suite)
+
     def test_container_has_no_physical_device_permissions(self):
         source = Path(__file__).with_name('run-simulator.sh').read_text()
         for prohibited in ('--device', '--privileged', '--cap-add', 'src=/dev', 'src=/home,dst='):
@@ -26,7 +37,7 @@ class CpuSimulatorCiTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
         self.assertIn('group: qwen-two-p150a-exclusive', workflow)
-        self.assertIn("QWEN_SIM_CASE: ${{ inputs.learned_stack && 'stack' || 'shortlist' }}", workflow)
+        self.assertIn("inputs.learned_stack && 'stack' || 'shortlist'", workflow)
         self.assertIn('bash scripts/ci/run-simulator.sh', workflow)
         suite = Path(__file__).with_name('simulator-suite.sh').read_text()
         self.assertIn('for width in 32768 65536', suite)

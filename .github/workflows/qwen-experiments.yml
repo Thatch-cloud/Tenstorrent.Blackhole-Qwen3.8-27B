@@ -85,6 +85,10 @@ on:
         description: CPU-only learned-attention suite; learned_stack selects five-layer gate, otherwise MTP shortlist gate
         type: boolean
         default: false
+      simulator_fusion_t16:
+        description: CPU-only T16 fusion; requires simulator_only and learned-attention
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -103,7 +107,7 @@ jobs:
       QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
       QWEN_SIM_ONLY: ${{ inputs.simulator_only && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Verify dedicated host
         shell: bash
@@ -187,9 +191,9 @@ jobs:
         shell: bash
         env:
           QWEN_LEARNED_STACK: '1'
-          QWEN_SIM_CASE: ${{ inputs.learned_stack && 'stack' || 'shortlist' }}
+          QWEN_SIM_CASE: ${{ inputs.simulator_fusion_t16 && 'fusion-t16' || inputs.learned_stack && 'stack' || 'shortlist' }}
           QWEN_CCL_LAZY_BUILD: ${{ inputs.fabric_link_probe && '1' || '0' }}
-        run: timeout -k 30 7000 bash scripts/ci/run-simulator.sh
+        run: timeout -k 30 9600 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'
         shell: bash
