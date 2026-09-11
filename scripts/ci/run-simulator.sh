@@ -2,7 +2,7 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
-case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16|fusion-t16-target|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16|fusion-t16-target|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
@@ -12,10 +12,18 @@ kinds='attention convolution mlp stack selector'
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then kinds=''; fi
 mounts=()
-if [ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned ]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined ]]; then
     checkpoint="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/model.safetensors"
     test -f "$checkpoint"
     mounts+=(--mount "type=bind,src=$checkpoint,dst=/dspark-model.safetensors,readonly")
+fi
+if [ "${QWEN_SIM_CASE:-stack}" = t32-combined ]; then
+    config="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/config.json"
+    target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+    test -f "$config"
+    test -d "$target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    mounts+=(--mount "type=bind,src=$config,dst=/dspark-config.json,readonly")
+    mounts+=(--mount "type=bind,src=$target,dst=/target,readonly")
 fi
 for kind in $kinds; do
     test -d "$cache/dflash2-$kind-$revision"
@@ -54,7 +62,7 @@ docker cp scripts "$container:/experiment-scripts"
 if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
     docker cp optimisation "$container:/optimisation"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined ]]; then
     docker cp optimisation/sim "$container:/simulator-support"
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then

@@ -44,7 +44,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
     printf '%s\n' "$status" > /experiment/results/t32-markov.exit-status
     exit "$status"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined ]]; then
     mkdir -p /optimisation
     ln -s /simulator-support /optimisation/sim
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
@@ -61,6 +61,16 @@ patch = Path('/simulator-support/blackhole-packer-zero-flags.patch').read_bytes(
 packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
+    if [ "$QWEN_SIM_CASE" = t32-combined ]; then
+        python3 -B -m unittest test_dspark_t32_prepared test_t32_sim_target test_t32_target_weights
+        status=0
+        QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/t32-combined-proposal-probe.py \
+            --checkpoint /dspark-model.safetensors --config /dspark-config.json \
+            --target /target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+            --output /experiment/results/t32-combined.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t32-combined.exit-status
+        exit "$status"
+    fi
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
         status=0
         QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
