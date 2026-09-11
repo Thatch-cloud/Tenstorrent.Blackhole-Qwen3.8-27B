@@ -18,7 +18,10 @@ SOURCES = ('dspark-t32-markov-probe.py', 'dspark_t32_markov.py', 'dspark_project
     'dspark_native_reference.py', 'projection_rounding.py')
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
-BINARY_SHA256 = 'd2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24'
+BINARY_SHA256 = {
+    'build_Release/lib/_ttnncpp.so': 'f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3',
+    'build_Release/ttnn/_ttnncpp.so': 'd6c53113a104719a442b4d4a9ec2b344cdd0e00daa1e4d907afb9c13d1e531d9',
+}
 
 
 def digest(path):
@@ -35,10 +38,10 @@ def fingerprints(root):
         paths.extend(path.relative_to(root) for path in (root / 'ttnn/cpp/ttnn/operations' / directory).rglob('*')
             if path.suffix in ('.cpp', '.hpp', '.h') and path.is_file())
     result = {str(path): digest(root / path) for path in sorted(paths)}
-    if result[PACKER] != ORIGINAL_PACKER or any(result[str(path)] != BINARY_SHA256 for path in paths[1:3]):
+    if result[PACKER] != ORIGINAL_PACKER or any(result[name] != checksum for name, checksum in BINARY_SHA256.items()):
         print(json.dumps(dict(stage='runtime_admission_rejected', observed={str(path): result[str(path)]
             for path in paths[:3]}, expected_binary=BINARY_SHA256, expected_packer=ORIGINAL_PACKER)), flush=True)
-        raise ValueError('Original reviewed native runtime and packer required')
+        raise ValueError('Exact pinned CPU CI image runtime and original packer required')
     return result
 
 
