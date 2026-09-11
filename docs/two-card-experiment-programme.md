@@ -2,6 +2,30 @@
 
 ## Combined-runtime tuning priorities - 2026-09-11
 
+### Latest combined fusion result
+
+T16 gate/up fusion now passes simulator target-math replay, all-layer packed
+weight checks and two complete paired hardware comparisons. It remains opt-in.
+
+| Merge intervals, one stream | Control TG | Fusion PP | CTX | Fusion TG |
+| --- | ---: | ---: | ---: | ---: |
+| Run 34585332201 | 100.45 | 3302.00 | 4096 | 102.44 |
+| Repeat 34586017906 | 100.47 | 3354.98 | 4096 | 101.88 |
+
+Both runs preserve the same outputs, target state and draft acceptance. The
+1.40-1.98% gain is modest: verifier/readback saves only 0.65-0.77 ms/block.
+The current roughly 108 ms whole cycle still needs to reach 55 ms at 11 committed
+tokens/block. Do not present this fusion as resolving the 200-TG target.
+
+Next acceptance gate: unchanged combined fusion runtime on the untuned
+stable-unique task, run 34586808967. This is a task-specific correctness and
+performance screen, not a broad held-out quality certification. Subsequent
+performance work must address the larger projection/recurrence costs; preserve
+the already rejected no-copy, small-tile and DRAM-conversion findings below.
+Details and artifact hashes: [combined fusion evidence](captured-gate-up-2026-09-11.md).
+
+### Prior combined-runtime evidence
+
 Primary objective remains **200 committed TG tok/s, one coding stream, TP2**.
 Do not optimize aggregate request throughput instead, or promote isolated kernel
 timings. Serving defaults stay unchanged. The older dated results below are history.
