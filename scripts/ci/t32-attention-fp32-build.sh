@@ -22,7 +22,7 @@ assert binaries == {name: value for name, value in PINS.items() if name.endswith
 source = root / SOURCE_PATH
 original = source.read_bytes()
 variant = os.environ.get('QWEN_T32_FP32_VARIANT', 'fp32')
-assert variant in ('baseline', 'fp32', 'output-only')
+assert variant in ('baseline', 'fp32', 'output-only', 'stats-only')
 candidate = original if variant == 'baseline' else patched_bytes(original, variant=variant)
 report = dict(stage='prepared', base_binaries=binaries,
               variant=variant,

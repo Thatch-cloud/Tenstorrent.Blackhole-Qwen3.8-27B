@@ -6,6 +6,13 @@ import t32_attention_fp32_patch as candidate
 
 
 class PatchTests(unittest.TestCase):
+    def test_stats_only_preserves_bf16_partial_outputs(self):
+        source = (candidate.BEFORE + '\n    tt::DataFormat stats_df = im_df;\n').encode()
+        with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(source).hexdigest()):
+            result = candidate.patched_bytes(source, variant='stats-only')
+        self.assertIn(b'tt::DataFormat stats_df = im_df;\n    im_df = tt::DataFormat::Float16_b;', result)
+        self.assertIn(candidate.AFTER.encode(), result)
+
     def test_only_intermediate_format_changes(self):
         source = ('before\n' + candidate.BEFORE + '\n    tt::DataFormat stats_df = im_df;\nafter\n').encode()
         with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(source).hexdigest()):
