@@ -52,6 +52,20 @@ copy without this change would leave zero-prefix rollback reading stale storage.
 Ten host tests cover geometry, composition, cleanup, and publication ordering;
 the combined composition and publication still need device validation.
 
+Zero-prefix publication subsequently passed 120 logical-tensor checks in TTsim,
+one layer on both chips: stale entries, eager execution, and refreshed captured
+replays. All histories, native state, refreshed entries, and checkpoints matched
+the independent expectation. Exit 0 and source digests unchanged; padding was not
+audited by this particular probe. Report
+`/opt/ttsim/results/20260911T012509Z-409-gdn-native-zero-probe.json`, SHA256
+`9c662740c8396a41ab1e25e0656bd9034c39ce4af9bd664c5c910aecbeb42660`.
+
+`NativeSlotState` now provides an unselected T16 adapter. It refuses execution
+without explicit paired-publication binding, skips the per-layer snapshot only
+for commit-only T16, and keeps the existing adapter for other widths. This is not
+yet wired into CI or serving. Complete composition device testing and matched
+full-request audits remain necessary.
+
 - TTsim: compare compact-copy control against native-slot candidate, including
   exact outputs, every retained prefix, and FP32 bridge on both chips.
 - Poison all seven inactive slots and change active slot zero between captured
