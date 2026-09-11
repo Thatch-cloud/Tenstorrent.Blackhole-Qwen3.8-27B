@@ -57,6 +57,12 @@ BF16 output is not automatically equivalent to the native fused epilogue. For a
 wider drafter/verifier, require trained-model compatibility and full accepted-prefix
 continuation, not padded or unverified extra draft tokens. Compare qualifying
 candidates against the existing combined control, with both no-copy flags off.
+
+The previously image-blocked captured gate/up test is now complete:
+run 34553944965 gives a 4.13–4.94% projection trace latency reduction at T1/T8/T32,
+with exact comparisons. This is a modest component win, not a combined TG result.
+T16 captured timing and all-layer target integration remain untested.
+[Captured gate/up evidence](captured-gate-up-2026-09-11.md).
 [Score-layout evidence](dspark-score-layout-2026-09-11.md) /
 [Coding screen and repeat](coding-screen-2026-09-10.md).
 
