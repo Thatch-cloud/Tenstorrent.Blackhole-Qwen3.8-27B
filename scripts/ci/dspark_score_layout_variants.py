@@ -32,22 +32,22 @@ def validate_route(value, arm):
         raise ValueError('Complete learned hardware audit digest required')
 
 
-def summarize_variants(requests):
+def summarize_variants(requests, *, policies=POLICIES, schedule=SCHEDULE, route=validate_route, candidate='scores'):
     from dspark_request_experiment import summarize
 
-    if [(value.get('arm'), value.get('instrumented_timing')) for value in requests] != list(SCHEDULE):
+    if [(value.get('arm'), value.get('instrumented_timing')) for value in requests] != list(schedule):
         raise ValueError('Two audits followed by complete A/B/B/A timed requests required')
     signatures = {}
     for value in requests:
         arm = value['arm']
         draft = value.get('dspark', {})
-        if (draft.get('native_attention') is not POLICIES[arm]['native_attention']
+        if (draft.get('native_attention') is not policies[arm]['native_attention']
                 or draft.get('proposal_trace') is not True or value.get('commit_only_gdn') is not True
                 or value['prompt_tokens'] != requests[0]['prompt_tokens']
                 or value['emitted'] != requests[0]['emitted']
                 or any(value.get(name) is not True for name in ('exact', 'state_exact', 'inactive_exact'))):
             raise ValueError('Matched exact target outputs/state and declared attention backend required')
-        validate_route(value, arm)
+        route(value, arm)
         signature = proposal_signature(value)
         if arm in signatures and signatures[arm] != signature:
             raise ValueError('Each backend must reproduce its audited proposals and acceptance')
@@ -61,10 +61,10 @@ def summarize_variants(requests):
             if value.get('gdn_verify_checks') != [dict(position=block['position'], rows=block['rows'], unchanged=True)
                     for block in blocks]:
                 raise ValueError('Every verifier must preserve GDN until publication')
-    if signatures['control'] != signatures['scores']:
+    if signatures['control'] != signatures[candidate]:
         raise ValueError('Score-layout change must preserve proposals and acceptance across arms')
-    arms = {arm: summarize([value for value in requests if value['arm'] == arm]) for arm in POLICIES}
-    return dict(arms=arms, order=[arm for arm, audit in SCHEDULE],
-        committed_tg_change_percent=100 * (arms['scores']['committed_tg'] / arms['control']['committed_tg'] - 1),
+    arms = {arm: summarize([value for value in requests if value['arm'] == arm]) for arm in policies}
+    return dict(arms=arms, order=[arm for arm, audit in schedule],
+        committed_tg_change_percent=100 * (arms[candidate]['committed_tg'] / arms['control']['committed_tg'] - 1),
         timing_boundary='Complete decode loops including copies, verification, publication, readback and stalls',
         held_out_coding_quality=False, serving_qualified=False)

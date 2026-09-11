@@ -136,7 +136,10 @@ def main():
     parser.add_argument('--mlp-down', action='store_true')
     parser.add_argument('--mlp-equal-footprint', action='store_true')
     parser.add_argument('--score-layout', action='store_true')
+    parser.add_argument('--banked-proposal', action='store_true')
     options = parser.parse_args()
+    if options.banked_proposal and not options.score_layout:
+        raise ValueError('Banked comparison requires score layout in both arms')
     if options.score_layout and (not options.request or not options.target_attention_variants
             or options.mlp_down or options.mlp_equal_footprint or options.profile_drafter):
         raise ValueError('Score layout requires an isolated matched target-attention request suite')
@@ -198,6 +201,10 @@ def main():
         if options.score_layout:
             from dspark_score_layout_hardware_gate import qualify as qualify_scores
             request_gate['request_prerequisites']['score_layout'] = qualify_scores(Path(__file__).parent)
+        if options.banked_proposal:
+            from dspark_banked_gate import qualify as qualify_banks
+            request_gate['request_prerequisites']['banked_proposal'] = qualify_banks(
+                Path(__file__).with_name('dspark-banked-trace-simulator.json'), Path(__file__).parent)
         gate['sources'].update(request_gate['sources'])
         gate['request_prerequisites'] = request_gate['request_prerequisites']
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
@@ -361,7 +368,7 @@ def main():
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants, mlp_down=options.mlp_down,
                 mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
-                score_layout=options.score_layout)
+                score_layout=options.score_layout, banked_proposal=options.banked_proposal)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']

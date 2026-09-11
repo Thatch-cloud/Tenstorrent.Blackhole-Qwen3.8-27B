@@ -1,0 +1,2022 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Synthetic real-device trace/bank lifetime diagnostic, not learned drafting or throughput.",
+  "sources": {
+    "dspark-banked-trace-probe.py": "965c9739667ea49e6fd9c5d2e563905bfe3dfad103ed4bbe72492a8a27a65069",
+    "dspark_banked_proposal.py": "8a61fb96c3ebb88593a88994ddb4ddda0a049763b9b435dd8d5474df08471d51",
+    "dspark_prepared_proposal.py": "03bfdb7d8f79a8e266a436bff71d6f8487ca2c1b19bf7c77f69459f9a085f533",
+    "dspark_history.py": "8d8b9d886a5024d5a5eb7098f6ee07b1ef0f07be652fb66bb9fd7793cb9df70c",
+    "dspark_fixed_inputs.py": "ef246b2de160a4f1e8c72066b95d5509f839575fb14b4c2a236b3bd913fecfd2",
+    "dspark_wide_target.py": "288a1dd706ee0ae356cbf4d3996bb4033e6dc1e6af62bb290abfce353778af88",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  },
+  "checks": [
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "bank_checks": [
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 0,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 1,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 2,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": 3,
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 0,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "ordinal": "after_close",
+      "bank": 1,
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "learned_model_executed": false,
+  "hardware_qualified": false,
+  "serving_qualified": false,
+  "stage": "complete",
+  "replay_counts": [
+    2,
+    2
+  ],
+  "eager_replay_checks": [
+    {
+      "position": 31,
+      "tensors": 6,
+      "exact": true
+    },
+    {
+      "position": 32,
+      "tensors": 6,
+      "exact": true
+    },
+    {
+      "position": 33,
+      "tensors": 6,
+      "exact": true
+    },
+    {
+      "position": 34,
+      "tensors": 6,
+      "exact": true
+    }
+  ],
+  "sources_after": {
+    "dspark-banked-trace-probe.py": "965c9739667ea49e6fd9c5d2e563905bfe3dfad103ed4bbe72492a8a27a65069",
+    "dspark_banked_proposal.py": "8a61fb96c3ebb88593a88994ddb4ddda0a049763b9b435dd8d5474df08471d51",
+    "dspark_prepared_proposal.py": "03bfdb7d8f79a8e266a436bff71d6f8487ca2c1b19bf7c77f69459f9a085f533",
+    "dspark_history.py": "8d8b9d886a5024d5a5eb7098f6ee07b1ef0f07be652fb66bb9fd7793cb9df70c",
+    "dspark_fixed_inputs.py": "ef246b2de160a4f1e8c72066b95d5509f839575fb14b4c2a236b3bd913fecfd2",
+    "dspark_wide_target.py": "288a1dd706ee0ae356cbf4d3996bb4033e6dc1e6af62bb290abfce353778af88",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  }
+}
