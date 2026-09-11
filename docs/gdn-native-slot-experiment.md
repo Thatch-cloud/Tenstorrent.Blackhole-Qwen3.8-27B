@@ -2,6 +2,20 @@
 
 Status: synthetic recurrence simulator comparison passed; no integrated or hardware qualification.
 
+The full projected GDN composition has now also passed TTsim: 84 output/history
+comparisons and 144 input-preservation comparisons, including fresh eager controls
+and three refreshed captured replays on both chips. Exit 0, clean close, and
+unchanged current source hashes. This includes convolution/gates, recurrence,
+normalization, and every retained prefix; it still uses synthetic inputs, not a
+learned complete coding request.
+
+Report `/opt/ttsim/results/20260911T013306Z-409-gdn-native-projected-probe.json`,
+SHA256 `ebfb378a45327665675aee5aabef910c506156f83aed7d8eeb5d94e0bc4a5070`.
+The projected-composition and zero-publication reports are retained under
+`scripts/ci/gdn-native-{projected,zero}-simulator.json` for independent CI admission.
+Next is the reversible verifier/publication scope and matched complete-request
+hardware comparison, keeping all other combined-runtime choices identical.
+
 ## Simulator result
 
 The source-corrected run completed cleanly on 11 September, exit status 0.
