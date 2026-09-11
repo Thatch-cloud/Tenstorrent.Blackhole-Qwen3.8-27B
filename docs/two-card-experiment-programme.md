@@ -17,9 +17,12 @@ Both runs preserve the same outputs, target state and draft acceptance. The
 The current roughly 108 ms whole cycle still needs to reach 55 ms at 11 committed
 tokens/block. Do not present this fusion as resolving the 200-TG target.
 
-Next acceptance gate: unchanged combined fusion runtime on the untuned
-stable-unique task, run 34586808967. This is a task-specific correctness and
-performance screen, not a broad held-out quality certification. Subsequent
+The unchanged combined fusion runtime passes independent validation on
+stable-unique (34586808967, PP3298.34 / CTX4096 / TG119.57, four functional
+cases) and run-length encoding (34587483522, PP3311.14 / CTX4096 / TG121.68,
+four functional cases). Rotate-right run 34588114930 is still in progress.
+These are task-specific correctness and performance screens, not broad held-out
+quality certification. Subsequent
 performance work must address the larger projection/recurrence costs; preserve
 the already rejected no-copy, small-tile and DRAM-conversion findings below.
 Details and artifact hashes: [combined fusion evidence](captured-gate-up-2026-09-11.md).
