@@ -101,6 +101,10 @@ on:
         description: CPU-only experimental 31-query Markov feedback, synthetic vocabulary gate
         type: boolean
         default: false
+      simulator_t32_attention:
+        description: CPU-only experimental T32 folded target attention replay
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -125,6 +129,12 @@ jobs:
         shell: bash
         run: |
           test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+          if [ "${{ inputs.simulator_t32_attention }}" = true ]; then
+            test "${{ inputs.simulator_only }}" = true
+            test "${{ inputs.simulator_t32_markov }}" = false
+            test "${{ inputs.simulator_fusion_t16 }}" = false
+            test "${{ inputs.fabric_link_probe }}" = false
+          fi
           if [ "${{ inputs.simulator_t32_markov }}" = true ]; then
             test "${{ inputs.simulator_only }}" = true
             test "${{ inputs.simulator_fusion_t16 }}" = false
@@ -216,7 +226,7 @@ jobs:
         shell: bash
         env:
           QWEN_LEARNED_STACK: '1'
-          QWEN_SIM_CASE: ${{ inputs.simulator_t32_markov && 't32-markov' || inputs.simulator_fusion_t16 && (inputs.simulator_target_math && 'fusion-t16-target' || 'fusion-t16') || inputs.learned_stack && 'stack' || 'shortlist' }}
+          QWEN_SIM_CASE: ${{ inputs.simulator_t32_attention && 't32-attention' || inputs.simulator_t32_markov && 't32-markov' || inputs.simulator_fusion_t16 && (inputs.simulator_target_math && 'fusion-t16-target' || 'fusion-t16') || inputs.learned_stack && 'stack' || 'shortlist' }}
           QWEN_CCL_LAZY_BUILD: ${{ inputs.fabric_link_probe && '1' || '0' }}
         run: timeout -k 30 9600 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
