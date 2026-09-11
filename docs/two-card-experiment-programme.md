@@ -57,6 +57,13 @@ bank rejection, capture-failure cleanup and no-copy borrowed-bank execution.
 These are mocked host checks, not a device or combined-performance pass.
 Two-trace allocation lifetime, cross-trace overwrite controls and real changed-bank
 replay still need device validation before combined A/B admission.
+`dspark-banked-trace-probe.py` now runs the actual banked wrapper and TTNN traces
+in the two-chip simulator, substituting explicit clone operations for learned
+draft math. It changes both complete banks and anchors, selects bank order 0/1/1/0,
+compares all ten outputs and both borrowed banks, then checks storage after close.
+This isolates trace routing/lifetime only; it cannot qualify learned proposal math
+or establish a speedup. The first run is `qwen-banked-trace-20260911.service`,
+bounded to 900 seconds. No combined hardware route is enabled by this probe alone.
 No runtime change is enabled yet. Allocation must still finish before capture;
 double trace/output storage and setup costs must be measured, not ignored.
 
