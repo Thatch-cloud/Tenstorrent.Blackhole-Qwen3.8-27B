@@ -1,5 +1,6 @@
 """Lossless target-publication bridge for a parallel learned DFlash2 proposer."""
 
+from contextlib import nullcontext
 
 TARGET_TAPS = (5, 19, 33, 47, 61)
 
@@ -60,13 +61,17 @@ class DFlashRequestRuntime:
         publication = None
         try:
             if prefix:
-                features = self.engine.verified_features_for_publication(ticket)
-                if self.validate_features is not None:
-                    self.validate_features(features, prefix, self.position)
-                publication = self.drafter.prepare_publication(features, prefix, position=self.position)
-            self.engine.publish(prefix)
+                with self.publication_stage('features', prefix):
+                    features = self.engine.verified_features_for_publication(ticket)
+                    if self.validate_features is not None:
+                        self.validate_features(features, prefix, self.position)
+                with self.publication_stage('prepare_history', prefix):
+                    publication = self.drafter.prepare_publication(features, prefix, position=self.position)
+            with self.publication_stage('publish_target', prefix):
+                self.engine.publish(prefix)
             if publication is not None:
-                self.drafter.commit_publication(publication)
+                with self.publication_stage('commit_history', prefix):
+                    self.drafter.commit_publication(publication)
             if self.drafter.position != self.position + prefix:
                 raise ValueError('Drafter and target feature frontiers diverged')
             self.position += prefix
@@ -78,3 +83,6 @@ class DFlashRequestRuntime:
             if publication is not None:
                 self.drafter.discard_publication(publication)
             raise
+
+    def publication_stage(self, name, prefix):
+        return nullcontext()

@@ -100,6 +100,14 @@ concurrently because the workflow
 concurrency group retains only one pending run. This screen uses no experimental
 batched-publication kernel and does not change serving defaults.
 
+The next revision records host-wall/process-CPU duration and Python GC pauses for
+feature access, drafter-history preparation, target publication and history commit.
+It adds no device fences and does not disable GC or alter kernels. Device work may
+be charged to a later synchronization; these are host-stage boundaries, not device
+kernel durations. The diagnostics are inside measured request time and must be
+labelled instrumented. Transaction failure/discard and prefix-zero tests remain
+mandatory; all 47 focused tests and retained request simulator prerequisites pass.
+
 ## Stable unique: completed
 
 Hardware run `34458413589`, source `348c61b`, passes all six matched requests

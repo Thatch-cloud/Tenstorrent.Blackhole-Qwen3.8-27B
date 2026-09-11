@@ -218,6 +218,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             replay_count = 1 + sum(block['rows'] > 1 for block in result['blocks'])
             if len(proposal_checks) != (replay_count if audit_features else 0):
                 raise AssertionError('Every changing-input proposal replay and warmup must pass its eager audit')
+        result['publication_diagnostics'] = dict(records=runtime.publication_diagnostics.records,
+            scope='Host wall and process CPU with GC pauses; no added device fences; timing includes instrumentation')
         result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
             history_checks=history_checks,
