@@ -38,6 +38,17 @@ Report SHA256: `74696c102735f26f9191a955dc5c3df7287afd5ff0f1309b31b10b4b2469b7d1
 
 ## Earlier component timing
 
+### Untuned coding screen
+
+[Stable-unique run 34586808967](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34586808967)
+passes independent source/request validation and four isolated functional cases,
+including unchanged inputs. At CTX4096 / one stream, control PP/TG is
+3298.23 / 118.02; fusion PP/TG is 3298.34 / 119.57. Both accept 98/120 drafts
+and commit 104 timed tokens. This task-specific result does not replace the
+merge-intervals baseline or establish broad held-out coding quality.
+
+Report SHA256: `fd93f1c3c9fb01ace53a3551f528976907190f5f7a52b7dca00da9c170dd20ae`.
+
 [Run 34553944965](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34553944965)
 completed the previously blocked captured-fusion test on revision
 `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`.
