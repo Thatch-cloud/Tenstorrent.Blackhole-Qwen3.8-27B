@@ -94,7 +94,11 @@ def mapping(pairs_per_worker=7):
 
 
 class FusedProjection:
-    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7, *, token_rows=1, source_root=Path('/opt/tt-metal')):
+    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7, *, token_rows=1,
+                 source_root=Path('/opt/tt-metal'), math_approx_mode=False):
+        if type(math_approx_mode) is not bool:
+            raise ValueError('Explicit boolean math approximation mode required')
+        self.math_approx_mode = math_approx_mode
         if type(token_rows) is not int or token_rows not in (1, 2, 4, 8, 16, 32):
             raise ValueError('Explicit single-tile token row count required')
         self.token_rows = token_rows
@@ -113,6 +117,7 @@ class FusedProjection:
                                             for filename in ("fused_1d_input.cpp", "fused_1d_weights.cpp")},
                              workers=len(self.workers), grid=[11, self.rows], pairs_per_worker=pairs_per_worker, k_block=8,
                              intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,
+                             math_approx_mode=math_approx_mode,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")
 
     def __call__(self, value):
@@ -169,7 +174,7 @@ class FusedProjection:
                 writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles]
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
-                fp32_dest_acc_en=True, math_approx_mode=False)
+                fp32_dest_acc_en=True, math_approx_mode=self.math_approx_mode)
             unpack_modes = [ttnn.UnpackToDestMode.Default] * 64
             unpack_modes[5] = ttnn.UnpackToDestMode.UnpackToDestFp32
             compute_config.unpack_to_dest_mode.extend(unpack_modes)

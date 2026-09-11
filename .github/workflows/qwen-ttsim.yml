@@ -6,7 +6,7 @@ on:
       suite:
         description: Simulator correctness only; no hardware timing
         type: choice
-        options: [fusion-t16, stack, shortlist]
+        options: [fusion-t16, fusion-t16-target, stack, shortlist]
         default: fusion-t16
 
 permissions:

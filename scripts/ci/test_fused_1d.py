@@ -5,6 +5,19 @@ from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping, nati
 
 
 class Fused1DTests(unittest.TestCase):
+    def test_target_math_is_explicit_and_recorded_without_changing_default(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            candidate = FusedProjection(None, None, token_rows=16, math_approx_mode=True)
+            self.assertIs(control.math_approx_mode, False)
+            self.assertIs(candidate.math_approx_mode, True)
+            self.assertIs(candidate.manifest['math_approx_mode'], True)
+            self.assertEqual(candidate.compute, control.compute)
+        for invalid in (0, 1, None, 'true'):
+            with self.assertRaisesRegex(ValueError, 'boolean math'):
+                FusedProjection(None, None, math_approx_mode=invalid)
+
     def test_control_fuses_silu_before_gate_output_rounding(self):
         operations = Mock()
         operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.side_effect = lambda **options: options

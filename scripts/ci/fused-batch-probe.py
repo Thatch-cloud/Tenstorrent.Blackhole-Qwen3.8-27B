@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--timing', action='store_true')
     parser.add_argument('--trace-replay', action='store_true')
     parser.add_argument('--trace-t16', action='store_true')
+    parser.add_argument('--target-math', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, options.hardware)
     if options.trace_t16 and not options.trace_replay:
@@ -52,6 +53,7 @@ def main():
     manifest, weights = load_mlp(options.fixture)
     gate, up, packed = pair_pack(weights['layers.0.mlp.gate_proj.weight'], weights['layers.0.mlp.up_proj.weight'])
     report = dict(passed=False, scope=__doc__, fixture=manifest, checks=[],
+        math_approx_mode=options.target_math,
         backend='hardware' if options.hardware else 'simulator', timings=[],
         timing_scope='Eager paired ABBA projection calls including dispatch and allocation; excludes uploads, validation and deallocation; not traced or full-model latency',
         precision='BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality')
@@ -126,7 +128,7 @@ def main():
         report['phase'] = 'weight_checks_passed'
         options.output.write_text(json.dumps(report, indent=2))
         kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi,
-            math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)
+            math_approx_mode=options.target_math, fp32_dest_acc_en=True, packer_l1_acc=True)
         report['control_epilogue'] = 'Native gate linear fused SILU before BF16 pack; separate BF16 up; BF16 multiply'
         for rows in (1, 2, 4, 8, 16, 32):
             generator = torch.Generator().manual_seed(3891 + rows)
@@ -136,7 +138,7 @@ def main():
             options.output.write_text(json.dumps(report, indent=2))
             expected = native_gate_up_control(ttnn, inputs, device_gate, device_up, kernel, owned)
             operation = FusedProjection(mesh, device_packed, pairs_per_worker=3, token_rows=rows,
-                source_root=os.environ['TT_METAL_HOME'])
+                source_root=os.environ['TT_METAL_HOME'], math_approx_mode=options.target_math)
             report['phase'] = 'fused_projection'
             options.output.write_text(json.dumps(report, indent=2))
             actual = operation(inputs)

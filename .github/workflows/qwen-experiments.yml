@@ -89,6 +89,10 @@ on:
         description: CPU-only T16 fusion; requires simulator_only and learned-attention
         type: boolean
         default: false
+      simulator_target_math:
+        description: Target-native math mode; requires simulator_fusion_t16
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -113,6 +117,13 @@ jobs:
         shell: bash
         run: |
           test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+          if [ "${{ inputs.simulator_target_math }}" = true ]; then
+            test "${{ inputs.simulator_fusion_t16 }}" = true
+          fi
+          if [ "${{ inputs.simulator_fusion_t16 }}" = true ]; then
+            test "${{ inputs.simulator_only }}" = true
+            test "${{ inputs.fabric_link_probe }}" = false
+          fi
           if [ "${{ inputs.weight_packets }}" = true ]; then
             test "${{ inputs.suite }}" = tensix-stream-mlp-16
             test "${{ inputs.simulator_only }}" = false
@@ -191,7 +202,7 @@ jobs:
         shell: bash
         env:
           QWEN_LEARNED_STACK: '1'
-          QWEN_SIM_CASE: ${{ inputs.simulator_fusion_t16 && 'fusion-t16' || inputs.learned_stack && 'stack' || 'shortlist' }}
+          QWEN_SIM_CASE: ${{ inputs.simulator_fusion_t16 && (inputs.simulator_target_math && 'fusion-t16-target' || 'fusion-t16') || inputs.learned_stack && 'stack' || 'shortlist' }}
           QWEN_CCL_LAZY_BUILD: ${{ inputs.fabric_link_probe && '1' || '0' }}
         run: timeout -k 30 9600 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
