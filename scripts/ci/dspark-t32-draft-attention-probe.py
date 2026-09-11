@@ -149,6 +149,7 @@ def main():
         precise_reciprocal=os.environ.get('QWEN_T32_PRECISE_RECIP') == '1',
         fp32_build=build_evidence(root),
         explicit_pack_transition=os.environ.get('QWEN_T32_EXPLICIT_PACK') == '1',
+        numerator_tap=os.environ.get('QWEN_T32_NUMERATOR_TAP') == '1',
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None
@@ -238,8 +239,8 @@ def main():
                     report['input_checks'].append(dict(mode=mode, ordinal=ordinal, case=case, chip=chip, name=name, exact=exact_input))
                     if not exact_input:
                         raise AssertionError('Fixed-storage attention mutates a borrowed input')
-                if not passed:
-                    raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
+            if any(entry['passed'] is not True for entry in report[mode + '_checks']):
+                raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
 
         for case in range(2):
             progress(f'eager_{case}')

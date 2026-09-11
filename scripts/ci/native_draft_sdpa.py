@@ -65,6 +65,22 @@ def replacements():
     }
 #endif'''
         result['compute_common.hpp'] += ((before, after),)
+    if os.environ.get('QWEN_T32_NUMERATOR_TAP') == '1':
+        if (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
+            raise ValueError('Numerator tap is simulator-only and not a correctness candidate')
+        before = '            mul_block_bcast_cols<Sq_chunk_t, vDHt, false, false>(alias_mm2_prev_out, alias_prev_sum, cb_out);'
+        after = '''#if defined(QWEN_DRAFT_EXP_APPROX)
+            if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+                copy_block(alias_mm2_prev_out, cb_out, out_chunk_tiles);
+                CircularBuffer(alias_prev_sum).pop_front(Sq_chunk_t);
+            } else {
+''' + before + '''
+            }
+#else
+''' + before + '''
+#endif'''
+        result['compute_common.hpp'] += ((before, after),)
     return result
 
 
