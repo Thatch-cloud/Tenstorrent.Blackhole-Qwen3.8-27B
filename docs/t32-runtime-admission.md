@@ -54,6 +54,7 @@ complete learned proposal or a throughput measurement.
 | 34644680369 | Retain failed tensor and audit failing-chip inputs | Both assembled KV tensors and all six inputs exact on both chips |
 | 34645764708 | Rebuild with FP32 partial-output and statistics buffers | 227 numerical failures on chip 0; rejected |
 | 34647839458 | Matched rebuild without FP32 buffers | Both first-eager output hashes exactly match original baseline; original three chip-1 failures remain |
+| 34648932728 | FP32 partial outputs, BF16 statistics | 63,488 failures on chip 0 (all 31 live rows across 16 heads); max absolute error 16.7873; rejected |
 
 The observed values are -44.75 versus approximately -44.295 in the FP32
 reference, narrowly outside the unchanged `rtol=.01, atol=.01` bound. Neither
@@ -70,6 +71,9 @@ the FP32 variant is `761e78b2b951d34435696de20b1de2a05316f7cc1165de5f2055e3d84c3
 Neither is numerically qualified. A preliminary CPU truncation model reproduces
 the failing scalar but is not proof of the native rounding cause. Simply widening
 both buffer classes is demonstrably not a fix for this fixture.
+Widening partial outputs alone also fails substantially. This is evidence against
+changing circular-buffer formats without auditing the intervening mixed-format
+math and unpack/pack transitions; it is not a reason to relax numerical bounds.
 
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
 `t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
