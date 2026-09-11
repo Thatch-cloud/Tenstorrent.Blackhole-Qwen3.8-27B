@@ -62,7 +62,9 @@ class PreparedDSparkProposal:
             self.bindings = [addresses(self.operations, value) for value in self.input_values()]
             warm = self.output_owner()
             try:
-                self.expected_warmup = self.read_tokens(execute(device, self.inputs, self.history, warm.retain)['tokens'])
+                warm_outputs = execute(device, self.inputs, self.history, warm.retain)
+                self.expected_warmup = self.read_tokens(warm_outputs['tokens'])
+                self.expected_capture = self.snapshot(warm_outputs) if audit else None
             finally:
                 warm.release()
             if not defer_capture:
@@ -72,6 +74,8 @@ class PreparedDSparkProposal:
             raise
 
     def capture(self):
+        import torch
+
         if self.closed or self.device.closed or self.trace is not None or self.output_scope is not None:
             raise ValueError('One capture for a live prepared proposal required')
         try:
@@ -81,6 +85,11 @@ class PreparedDSparkProposal:
             self.operations.execute_trace(self.mesh, self.trace, cq_id=0, blocking=True)
             if self.read_tokens(self.outputs['tokens']) != self.expected_warmup:
                 raise AssertionError('Prepared proposal capture differs from its fixed-layout eager warmup')
+            if self.expected_capture is not None:
+                if any(not torch.equal(actual, expected) for actual, expected in
+                        zip(self.snapshot(self.outputs), self.expected_capture, strict=True)):
+                    raise AssertionError('Prepared proposal capture hidden states or logits differ from eager warmup')
+                self.expected_capture = None
         except BaseException:
             self.close()
             raise
@@ -166,6 +175,7 @@ class PreparedDSparkProposal:
         if self.closed:
             return
         self.closed = True
+        self.expected_capture = None
         self.operations.synchronize_device(self.mesh)
         if self.trace is not None:
             self.operations.release_trace(self.mesh, self.trace)

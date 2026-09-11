@@ -107,6 +107,20 @@ class PreparedProposalTests(unittest.TestCase):
             proposal.propose(30, 31)
         proposal.close()
 
+    def test_initial_capture_detects_changed_logits_with_identical_tokens(self):
+        proposal = prepared.PreparedDSparkProposal(self.device, 10, audit=True, defer_capture=True)
+        original_replay = self.operations.execute_trace.side_effect
+
+        def corrupt_logits(*args, **options):
+            original_replay(*args, **options)
+            self.outputs['logits'].value.add_(1)
+
+        self.operations.execute_trace.side_effect = corrupt_logits
+        with self.assertRaisesRegex(AssertionError, 'hidden states or logits'):
+            proposal.capture()
+        self.assertTrue(proposal.closed)
+        self.operations.release_trace.assert_called_once_with(self.device.mesh, 71)
+
     def test_input_rebinding_pending_history_and_unqualified_count_fail(self):
         proposal = prepared.PreparedDSparkProposal(self.device, 10)
         for count in (True, 0, 32):
