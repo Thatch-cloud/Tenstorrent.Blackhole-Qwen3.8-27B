@@ -43,6 +43,15 @@ banks and swaps their roles on commit.
 Experiment: capture one proposal trace per bank and select the trace bound to the
 currently committed bank, instead of copying the entire bank into a third bank.
 Retain identical kernels, complete two-chip token comparisons and host inputs.
+The opt-in `dspark_banked_proposal.py` prototype now borrows both history-owned
+banks, captures one proposal per bank, selects only the committed bank and rejects
+foreign, overlapping or rebound storage. The original prepared class retains its
+copying behavior through two extracted hooks; no request route selects the new
+class. Nineteen host tests cover original behavior, bank switching, pending/foreign
+bank rejection, capture-failure cleanup and no-copy borrowed-bank execution.
+These are mocked host checks, not a device or combined-performance pass.
+Two-trace allocation lifetime, cross-trace overwrite controls and real changed-bank
+replay still need device validation before combined A/B admission.
 No runtime change is enabled yet. Allocation must still finish before capture;
 double trace/output storage and setup costs must be measured, not ignored.
 

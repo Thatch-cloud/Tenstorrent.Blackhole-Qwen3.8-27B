@@ -58,8 +58,7 @@ class PreparedDSparkProposal:
                     layout=self.operations.ROW_MAJOR_LAYOUT if integer else self.operations.TILE_LAYOUT,
                     device=self.mesh, mesh_mapper=self.operations.ReplicateTensorToMesh(self.mesh),
                     memory_config=self.operations.DRAM_MEMORY_CONFIG))
-            self.history = tuple(tuple(self.input_scope.retain(self.operations.clone(value,
-                memory_config=self.operations.DRAM_MEMORY_CONFIG)) for value in pair) for pair in device.history.layers)
+            self.history = self.allocate_history()
             self.bindings = [addresses(self.operations, value) for value in self.input_values()]
             warm = self.output_owner()
             try:
@@ -78,6 +77,14 @@ class PreparedDSparkProposal:
 
     def input_values(self):
         return [*self.inputs.values(), *leaves(self.history)]
+
+    def allocate_history(self):
+        return tuple(tuple(self.input_scope.retain(self.operations.clone(value,
+            memory_config=self.operations.DRAM_MEMORY_CONFIG)) for value in pair) for pair in self.device.history.layers)
+
+    def update_history(self):
+        for actual, destination in zip(leaves(self.device.history.layers), leaves(self.history), strict=True):
+            self.operations.copy(actual, destination)
 
     def output_owner(self):
         return TensorScope(self.operations, [*self.borrowed, *self.input_values()])
@@ -105,8 +112,7 @@ class PreparedDSparkProposal:
             payload = operations.from_torch(value, dtype=destination.dtype, layout=destination.layout,
                 mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
             operations.copy_host_to_device_tensor(payload, destination)
-        for actual, destination in zip(leaves(device.history.layers), leaves(self.history), strict=True):
-            operations.copy(actual, destination)
+        self.update_history()
 
     def snapshot(self, outputs):
         import torch
