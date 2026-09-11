@@ -20,8 +20,43 @@ baseline or establish the 200 TG target.
 The complete three-task screen now passes its 13 functional cases. Latest combined
 TG is 114.43 stable-unique, 113.29 run-length encoding and 83.86 rotate-right, all
 CTX4096 / one stream. Do not pool these different tasks or erase earlier stalls.
-Next admit the no-copy runtime candidate through bank-lifetime and changed-input
-checks, then compare the complete runtime against the existing composed control.
+Both no-copy candidates have now completed simulator admission and matched
+combined hardware testing. Neither improves end-to-end TG; neither is promoted.
+
+| Completed comparison, CTX4096 / one stream | Control TG | Candidate TG | Decision |
+| --- | ---: | ---: | --- |
+| Bank-bound DSpark history, run 34547542628 | 100.13 | 100.17 | Neutral; setup worse |
+| Direct native GDN state, run 34552817569 | 99.73 | 99.42 | No throughput gain; verifier saves only 0.74 ms/block |
+
+Both arms of these comparisons include fused score layout. These controls must
+not be confused with the earlier unfused-score controls. Each comparison uses
+matched emitted tokens and acceptance; do not pool different revisions or tasks.
+Detailed evidence: [banked history](dspark-banked-runtime-admission.md) and
+[native GDN state](gdn-native-slot-experiment.md).
+
+### Decision after the no-copy experiments
+
+The latest control averages 11 committed tokens per block and a 110.26 ms full
+cycle: approximately 28 ms drafting, 69.23 ms verification/readback, and 11.91 ms
+selection/publication. At that acceptance rate, 200 TG requires a 55 ms *whole*
+cycle. Even eliminating drafting entirely would leave verification alone above
+the budget. Conversely, improving acceptance alone cannot close the gap at the
+current cycle time: even 16 committed tokens per block would yield only about
+145 TG if cost stayed fixed. These are diagnostic bounds, not predicted results.
+
+Stop spending primary experiment time on history copies or isolated norm/scatter
+changes. The next substantive candidate must attack projection/recurrence cost or
+the amount of accepted output per verification, and ultimately both may be needed.
+Before implementing another projection layout, account for the already rejected
+small-tile MLP (+4.70% latency) and full DRAM-sharded MLP conversion overhead.
+Do not repeat either unchanged or sum their isolated timings into a TG claim.
+
+For a proposed fused gate/up projection, admission must preserve gate SiLU's
+existing placement and rounding: concatenating weights and applying SiLU after
+BF16 output is not automatically equivalent to the native fused epilogue. For a
+wider drafter/verifier, require trained-model compatibility and full accepted-prefix
+continuation, not padded or unverified extra draft tokens. Compare qualifying
+candidates against the existing combined control, with both no-copy flags off.
 [Score-layout evidence](dspark-score-layout-2026-09-11.md) /
 [Coding screen and repeat](coding-screen-2026-09-10.md).
 
@@ -36,7 +71,7 @@ checks, then compare the complete runtime against the existing composed control.
 | Memory-format tuning | Account for weights, KV, recurrent state, retained speculative histories, traces and scratch | Use actual TT allocation/format evidence; no TPU HBM calculator or arbitrary 0.98 utilization assumption |
 | Compilation reuse | Reuse exact source/runtime/shape-keyed caches and separate cold setup from warmed execution | Report cold setup independently; never count capture/compile artifacts as steady decode gains |
 
-### Next combined-runtime candidate: bank-bound proposal traces
+### Historical candidate design: bank-bound proposal traces
 
 Source inspection of `PreparedDSparkProposal.update` finds ten complete history
 copies before every proposal replay. For the 4096-context / 256-output-capacity
