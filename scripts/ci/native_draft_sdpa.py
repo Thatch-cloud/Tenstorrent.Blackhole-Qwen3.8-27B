@@ -102,6 +102,13 @@ def replacements():
                 CircularBuffer(alias_mm2_prev_out).pop_front(out_chunk_tiles);'''
             after = after.replace(numerator, inverse_sum)
         result['compute_common.hpp'] += ((before, after),)
+    if os.environ.get('QWEN_T32_SFPU_SUM') == '1':
+        if (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
+            raise ValueError('Experimental SFPU sum is simulator-only')
+        from t32_attention_sum_patch import substitutions
+
+        result['compute_common.hpp'] += substitutions()
     return result
 
 

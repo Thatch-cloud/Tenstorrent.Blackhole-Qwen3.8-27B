@@ -25,7 +25,7 @@ FULL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FULL)
 SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark-t32-draft-attention-probe.py', 'dspark_t32_inputs.py', 'dspark_t32_attention.py',
     'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 't32_ci_runtime.py',
-    't32-attention-fp32-build.sh', 't32_attention_fp32_patch.py', 'sdpa_graft_build.py',
+    't32-attention-fp32-build.sh', 't32_attention_fp32_patch.py', 't32_attention_sum_patch.py', 'sdpa_graft_build.py',
     '../../optimisation/sim/sdpa-graft-registration.patch'))))
 CAPACITY, PROPOSALS = 4384, 31
 POSITIONS = (4096, 4109)
@@ -151,6 +151,7 @@ def main():
         explicit_pack_transition=os.environ.get('QWEN_T32_EXPLICIT_PACK') == '1',
         numerator_tap=os.environ.get('QWEN_T32_NUMERATOR_TAP') == '1',
         inverse_sum_tap=os.environ.get('QWEN_T32_NUMERATOR_TAP') == '2',
+        sfpu_sum=os.environ.get('QWEN_T32_SFPU_SUM') == '1',
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None
