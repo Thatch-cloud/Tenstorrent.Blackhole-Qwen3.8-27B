@@ -19,15 +19,16 @@ def append_queries(operations, history, queries, retain, *, position, proposals=
 
 
 def execute(operations, mesh, query, key, value, mask, owned, *, context_rows,
-        proposals=31, mask_validated=False):
+        proposals=31, mask_validated=False, key_chunk_size=64):
     padded = geometry(context_rows, proposals)[-1][1]
-    if mesh is None or not isinstance(owned, list) or mask_validated is not True:
+    if (mesh is None or not isinstance(owned, list) or mask_validated is not True
+            or type(key_chunk_size) is not int or key_chunk_size not in (32, 64)):
         raise ValueError('Explicit mesh, validated full-history mask and caller ownership required')
     validate_attention(operations, query, key, value, mask)
     if key.shape[2] != padded:
         raise ValueError('Complete padded history plus 31 query keys required')
     for tensor in (query, key, value, mask):
         require_tensor(operations, tensor, tuple(tensor.shape), operations.bfloat16)
-    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=64)
+    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=key_chunk_size)
     owned.append(output)
     return output

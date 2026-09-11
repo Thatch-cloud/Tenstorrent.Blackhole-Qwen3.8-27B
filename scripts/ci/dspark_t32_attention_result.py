@@ -19,12 +19,14 @@ def coverage(report, field, columns, expected, flag):
     return records
 
 
-def validate(report):
+def validate(report, *, key_chunk_size=64):
+    if type(key_chunk_size) is not int or key_chunk_size not in (32, 64):
+        raise ValueError('Explicit supported key chunk size required')
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('backend') != 'simulator'
             or report.get('capacity') != 4384 or report.get('proposal_rows') != 31
             or list(report.get('positions', [])) != [4096, 4109]
-            or report.get('key_chunk_size') != 64
+            or report.get('key_chunk_size') != key_chunk_size
             or report.get('numerical_tolerances') != dict(rtol=.01, atol=.01)
             or report.get('target_integrated') is not False or report.get('committed_tg') is not None):
         raise ValueError('Complete isolated T32 drafter attention result required')

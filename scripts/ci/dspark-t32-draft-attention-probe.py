@@ -126,6 +126,7 @@ def controls(patterns, expected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--key-chunk-size', type=int, choices=(32, 64), default=64)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     kernel_audit = run_precise_probe(__file__)
@@ -141,7 +142,7 @@ def main():
     report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__,
         positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
         sources=source_hashes(), native_sources=fingerprints(root),
-        kernel_audit=kernel_audit, key_chunk_size=64, resources_before=snapshot(),
+        kernel_audit=kernel_audit, key_chunk_size=options.key_chunk_size, resources_before=snapshot(),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         **{name: [] for name in COUNTS})
     owned, transient = [], []
@@ -191,7 +192,8 @@ def main():
             values = append_queries(ttnn, inputs['history_value'], inputs['query_value'], retain,
                 position=CAPACITY, proposals=PROPOSALS)
             attention = execute(ttnn, mesh, inputs['query'], keys, values, inputs['mask'], transient,
-                context_rows=CAPACITY, proposals=PROPOSALS, mask_validated=True)
+                context_rows=CAPACITY, proposals=PROPOSALS, mask_validated=True,
+                key_chunk_size=options.key_chunk_size)
             return dict(attention=attention, key=keys, value=values)
 
         def audit(output, mode, ordinal, case):

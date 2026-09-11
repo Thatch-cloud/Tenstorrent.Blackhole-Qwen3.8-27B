@@ -55,6 +55,12 @@ class ResultTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate(self.report)
 
+    def test_32_key_result_requires_explicit_policy(self):
+        self.report['key_chunk_size'] = 32
+        with self.assertRaises(ValueError):
+            validate(self.report)
+        self.assertFalse(validate(self.report, key_chunk_size=32)['full_request_qualified'])
+
     def test_nonfinite_error_rejected(self):
         self.report['eager_checks'][0]['max_abs'] = float('nan')
         with self.assertRaises(ValueError):

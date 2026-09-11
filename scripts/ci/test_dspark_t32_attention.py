@@ -45,6 +45,11 @@ class T32AttentionTests(unittest.TestCase):
         self.assertIs(actual, output)
         self.assertEqual(owned, [output])
         native.assert_called_once_with(operations, query, keys, keys, mask, key_chunk_size=64)
+        with patch('dspark_t32_attention.require_tensor', require_tensor), \
+                patch('dspark_t32_attention.draft_sdpa', return_value=output) as native:
+            execute(operations, SimpleNamespace(), query, keys, keys, mask, [],
+                    context_rows=4384, mask_validated=True, key_chunk_size=32)
+        native.assert_called_once_with(operations, query, keys, keys, mask, key_chunk_size=32)
 
     def test_wrong_width_or_unvalidated_mask_never_dispatches(self):
         with patch('dspark_t32_attention.draft_sdpa') as native:
