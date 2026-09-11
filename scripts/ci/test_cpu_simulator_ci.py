@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -6,6 +7,17 @@ import unittest
 
 
 class CpuSimulatorCiTests(unittest.TestCase):
+    def test_dispatch_stays_within_input_limit_and_t32_is_explicit(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        inputs = workflow.split('    inputs:', 1)[1].split('\npermissions:', 1)[0]
+        names = re.findall(r'^      ([a-z_][a-z0-9_]*):$', inputs, re.MULTILINE)
+        self.assertLessEqual(len(names), 25)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn('simulator_t32', names)
+        self.assertIn('options: [none, t32-markov, t32-markov-learned, t32-attention]', inputs)
+        self.assertNotIn('simulator_t32_learned', names)
+
     def test_dedicated_fusion_workflow_is_serialized_and_cpu_only(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / '.github/workflows/qwen-ttsim.yml').read_text()
