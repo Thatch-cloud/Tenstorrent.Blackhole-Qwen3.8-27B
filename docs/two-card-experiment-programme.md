@@ -20,7 +20,10 @@ tokens/block. Do not present this fusion as resolving the 200-TG target.
 The unchanged combined fusion runtime passes independent validation on
 stable-unique (34586808967, PP3298.34 / CTX4096 / TG119.57, four functional
 cases) and run-length encoding (34587483522, PP3311.14 / CTX4096 / TG121.68,
-four functional cases). Rotate-right run 34588114930 is still in progress.
+four functional cases). Rotate-right run 34588114930 also passes independent
+validation: PP3369.42 / CTX4096 / TG84.71 versus 82.58 control, five functional
+cases. All 13 small functional cases pass; draft acceptance ranges from 55.24%
+on rotate-right to 81.67% on the other two tasks.
 These are task-specific correctness and performance screens, not broad held-out
 quality certification. Subsequent
 performance work must address the larger projection/recurrence costs; preserve

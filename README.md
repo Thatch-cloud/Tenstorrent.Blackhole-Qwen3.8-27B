@@ -17,11 +17,12 @@ All results use **CTX 4096, one stream / batch 1**; TG counts committed tokens.
 | Merge intervals, repeat | 3354.98 | 100.47 | **101.88** | Exact tokens/state |
 | Stable unique | 3298.34 | 118.02 | **119.57** | 4/4 functional cases |
 | Run-length encoding | 3311.14 | 117.72 | **121.68** | 4/4 functional cases |
+| Rotate right | 3369.42 | 82.58 | **84.71** | 5/5 functional cases |
 
 These are matched, independently validated full-request comparisons, not kernel
 estimates. The merge-intervals gain repeats at **1.4–2.0%**. Setup-inclusive latency
 is worse in these comparisons; 121.68 TG is task-specific, not a general coding
-rate. Rotate-right validation is pending. Neither 200 TG nor long-context scaling
+rate. All 13 small functional cases pass. Neither 200 TG nor long-context scaling
 is established. [Run evidence and limitations](docs/captured-gate-up-2026-09-11.md).
 
 #### Previous screen (without gate/up fusion)

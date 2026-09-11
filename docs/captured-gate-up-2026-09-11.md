@@ -58,6 +58,16 @@ task, not a higher result for the merge-intervals benchmark.
 
 Report SHA256: `a47e3e80ccd7836f177a0577e4cf2a359d442847deab623b73d63a7ac1350988`.
 
+[Rotate-right 34588114930](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34588114930)
+passes independent validation of 743 sources, complete request recomputation and
+five isolated functional cases. Control PP/CTX/TG is 3341.64 / 4096 / 82.58;
+fusion is 3369.42 / 4096 / 84.71. Each arm commits 128 timed tokens and accepts
+116/210 drafts (55.24%). Setup-inclusive mean is 5645.17 versus 5649.14 ms.
+The three-task screen now passes all 13 functional cases, but its task-dependent
+84.71–121.68 TG does not qualify the 200-TG objective or broad coding quality.
+
+Report SHA256: `a13d5b6f73246506095a27bed405fd32b0114ce432964c0b227b733a70f1d99d`.
+
 [Run 34553944965](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34553944965)
 completed the previously blocked captured-fusion test on revision
 `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`.
