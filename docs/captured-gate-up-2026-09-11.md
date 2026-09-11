@@ -35,8 +35,10 @@ and present it as measured end-to-end improvement.
 
 ## Target integration admission
 
-The T16 captured simulator extension is now running; it is not a pass yet.
-It retains the original T1/T8/T32 checks and adds changing-input T16 replay.
+The T16 captured simulator extension retains the original T1/T8/T32 checks
+and adds changing-input T16 replay. The local run passed T16 replay but was
+deliberately stopped before full completion to free the developer PC.
+The full test has moved to [CPU-only CI](ttsim-ci.md); it is not a pass yet.
 
 Source inspection found an additional numerical-mode admission gap. The probe's
 native control and `FusedProjection` explicitly use `math_approx_mode=False`.
