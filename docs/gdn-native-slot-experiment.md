@@ -36,6 +36,22 @@ new device fence is inserted. These are source-level properties, not device proo
 
 ## Required before combined testing
 
+Native convolution windows also passed a separate real TTsim comparison: 64
+window checks against independent CPU indexing and 72 immutable-input checks,
+including all inactive rows and refreshed captured inputs on both chips.
+Report `/opt/ttsim/results/20260911T011906Z-431-gdn-native-windows-probe.json`, SHA256
+`d2b309cfa5e3374b4846b32cc62912b1f9c20dea26f30298c841e512d7a16776`, exit 0,
+current sources unchanged.
+
+The complete projected GDN composition now exists in
+`gdn_native_slot_projected.py`, but is not selected by the verifier.
+`gdn_native_slot_publication.py` preserves prefix-zero behavior by refreshing the
+compact entry *inside the zero-prefix publication callback* before the original
+DMA operation. Positive prefixes skip this refresh. Simply removing the entry
+copy without this change would leave zero-prefix rollback reading stale storage.
+Ten host tests cover geometry, composition, cleanup, and publication ordering;
+the combined composition and publication still need device validation.
+
 - TTsim: compare compact-copy control against native-slot candidate, including
   exact outputs, every retained prefix, and FP32 bridge on both chips.
 - Poison all seven inactive slots and change active slot zero between captured
