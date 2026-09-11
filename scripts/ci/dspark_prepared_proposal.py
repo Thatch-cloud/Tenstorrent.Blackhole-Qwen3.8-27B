@@ -34,8 +34,8 @@ def execute(device, inputs, history, retain):
 
 
 class PreparedDSparkProposal:
-    def __init__(self, device, anchor, *, audit=False):
-        if (type(audit) is not bool or device.closed or device.history.pending is not None
+    def __init__(self, device, anchor, *, audit=False, defer_capture=False):
+        if (type(audit) is not bool or type(defer_capture) is not bool or device.closed or device.history.pending is not None
                 or not hasattr(device.history, 'capacity') or device.max_drafts not in (7, 15)):
             raise ValueError('Idle fixed-bank drafter and explicit capture audit policy required')
         self.device, self.operations, self.mesh = device, device.operations, device.mesh
@@ -62,14 +62,24 @@ class PreparedDSparkProposal:
             self.bindings = [addresses(self.operations, value) for value in self.input_values()]
             warm = self.output_owner()
             try:
-                expected = self.read_tokens(execute(device, self.inputs, self.history, warm.retain)['tokens'])
+                self.expected_warmup = self.read_tokens(execute(device, self.inputs, self.history, warm.retain)['tokens'])
             finally:
                 warm.release()
+            if not defer_capture:
+                self.capture()
+        except BaseException:
+            self.close()
+            raise
+
+    def capture(self):
+        if self.closed or self.device.closed or self.trace is not None or self.output_scope is not None:
+            raise ValueError('One capture for a live prepared proposal required')
+        try:
             self.output_scope = self.output_owner()
             self.trace, self.outputs = capture_operation(self.operations, self.mesh,
-                lambda: execute(device, self.inputs, self.history, self.output_scope.retain))
+                lambda: execute(self.device, self.inputs, self.history, self.output_scope.retain))
             self.operations.execute_trace(self.mesh, self.trace, cq_id=0, blocking=True)
-            if self.read_tokens(self.outputs['tokens']) != expected:
+            if self.read_tokens(self.outputs['tokens']) != self.expected_warmup:
                 raise AssertionError('Prepared proposal capture differs from its fixed-layout eager warmup')
         except BaseException:
             self.close()
@@ -132,6 +142,8 @@ class PreparedDSparkProposal:
     def propose(self, anchor, count):
         import torch
 
+        if self.trace is None:
+            raise ValueError('Proposal trace must be captured before replay')
         if type(count) is not int or not 1 <= count <= self.device.max_drafts:
             raise ValueError('Bounded actual proposal count required')
         self.update(anchor)

@@ -18,6 +18,19 @@ class FakeTensor:
 
 
 class PreparedProposalTests(unittest.TestCase):
+    def test_deferred_capture_does_not_allocate_inputs_after_trace(self):
+        proposal = prepared.PreparedDSparkProposal(self.device, 10, defer_capture=True)
+        self.capture.assert_not_called()
+        allocated = self.operations.from_torch.call_count
+        with self.assertRaisesRegex(ValueError, 'captured'):
+            proposal.propose(20, 7)
+        proposal.capture()
+        self.assertEqual(self.operations.from_torch.call_count, allocated)
+        self.capture.assert_called_once()
+        with self.assertRaisesRegex(ValueError, 'One capture'):
+            proposal.capture()
+        proposal.close()
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

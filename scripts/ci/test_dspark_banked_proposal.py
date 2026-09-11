@@ -14,9 +14,11 @@ class BankedProposalTests(unittest.TestCase):
 
     def test_bank_selection_swaps_without_copy_or_rebinding(self):
         device, banks = self.fixture()
-        traces = [SimpleNamespace(checks=[], propose=Mock(return_value=(11, 12)), close=Mock()) for bank in banks]
+        traces = [SimpleNamespace(checks=[], propose=Mock(return_value=(11, 12)), close=Mock(), capture=Mock()) for bank in banks]
         with patch.object(banked, 'addresses', side_effect=lambda operations, value: (id(value), id(value))), \
-                patch.object(banked, 'BoundProposal', side_effect=traces):
+                patch.object(banked, 'BoundProposal', side_effect=traces) as constructor:
+            for trace in traces:
+                trace.capture.side_effect = lambda: self.assertEqual(constructor.call_count, 2)
             candidate = banked.BankedDSparkProposal(device, 10)
             self.assertEqual(candidate.propose(10, 2), (11, 12))
             device.history.layers, device.history.spare_layers = banks[1], banks[0]
@@ -34,6 +36,7 @@ class BankedProposalTests(unittest.TestCase):
             candidate.close()
             for trace in traces:
                 trace.close.assert_called_once()
+                trace.capture.assert_called_once()
             self.assertFalse(device.closed)
 
     def test_aliases_rejected_and_second_capture_failure_closes_first(self):

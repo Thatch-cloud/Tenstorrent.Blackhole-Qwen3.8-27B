@@ -15,13 +15,13 @@ def binding(operations, bank):
 
 
 class BoundProposal(PreparedDSparkProposal):
-    def __init__(self, device, anchor, bank, *, audit):
+    def __init__(self, device, anchor, bank, *, audit, defer_capture=False):
         self.bank = bank
         self.bank_binding = binding(device.operations, bank)
         if self.bank_binding not in tuple(binding(device.operations, value)
                 for value in (device.history.layers, device.history.spare_layers)):
             raise ValueError('Trace must borrow an existing history-owned bank')
-        super().__init__(device, anchor, audit=audit)
+        super().__init__(device, anchor, audit=audit, defer_capture=defer_capture)
 
     def allocate_history(self):
         return self.bank
@@ -46,7 +46,9 @@ class BankedDSparkProposal:
         self.replay_counts = [0, 0]
         try:
             for bank in self.banks:
-                self.proposals.append(BoundProposal(device, anchor, bank, audit=audit))
+                self.proposals.append(BoundProposal(device, anchor, bank, audit=audit, defer_capture=True))
+            for proposal in self.proposals:
+                proposal.capture()
         except BaseException:
             self.close()
             raise

@@ -64,6 +64,15 @@ compares all ten outputs and both borrowed banks, then checks storage after clos
 This isolates trace routing/lifetime only; it cannot qualify learned proposal math
 or establish a speedup. The first run is `qwen-banked-trace-20260911.service`,
 bounded to 900 seconds. No combined hardware route is enabled by this probe alone.
+That first run completed with 80 exact output and 200 exact borrowed-bank checks,
+two replays per bank and clean closure (report SHA256
+`cba6f79951f67423bab5a70fda2c2d831b6124ba5df2e6f6e4a34ce1cab602ab`).
+It also warned about allocations after the first trace. The wrapper now prepares
+both banks' persistent inputs and eager warmups before capturing either trace;
+the original single-trace path keeps immediate capture by default. Twenty focused
+host tests and existing kernel prerequisites pass, including explicit constructor
+ordering. The revised simulator run is `qwen-banked-trace-ordered-20260911.service`.
+The earlier pass does not qualify this revised source or real learned execution.
 No runtime change is enabled yet. Allocation must still finish before capture;
 double trace/output storage and setup costs must be measured, not ignored.
 
