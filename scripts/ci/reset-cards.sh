@@ -40,6 +40,18 @@ for container in json.load(sys.stdin):
 print("Running-container access preflight passed; no containers stopped")
 '
 fi
+holders_tool=$(command -v fuser || true)
+test -n "$holders_tool"
+holders_prefix=()
+if [ "$(id -u)" != 0 ]; then holders_prefix=(sudo -n); fi
+holders_status=0
+"${holders_prefix[@]}" "$holders_tool" -v /dev/tenstorrent/0 /dev/tenstorrent/2 \
+    > experiment-results/card-reset-open-holders.txt 2>&1 || holders_status=$?
+if [ "$holders_status" != 1 ] || [ -s experiment-results/card-reset-open-holders.txt ]; then
+    cat experiment-results/card-reset-open-holders.txt
+    echo 'Refusing reset: device holders exist or full host holder inspection failed'
+    exit 1
+fi
 smi=$(command -v tt-smi || true)
 if [ -z "$smi" ] && [ -x /home/thatch/.local/bin/tt-smi ]; then smi=/home/thatch/.local/bin/tt-smi; fi
 if [ -z "$smi" ]; then
