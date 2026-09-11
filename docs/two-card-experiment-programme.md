@@ -11,8 +11,8 @@ The next candidate amortizes target verification over up to 31 draft queries /
 | --- | --- |
 | Synthetic 31-query Markov feedback | Simulator pass, independently verified, run 34589904935 |
 | T32 folded target attention | Simulator pass, independently verified, run 34590151457 |
-| Learned full-vocabulary feedback | Simulator run 34590621276 active |
-| 31-query drafter attention | Simulator run 34591332709 pending behind learned feedback |
+| Learned full-vocabulary feedback | Simulator pass, independently verified, run 34590621276; synthetic base logits |
+| 31-query drafter attention | SFPU denominator reduction passes eager/replay, run 34653659471; 46 source hashes verified |
 | Cached layer, embedding/logits, trace and publication | Implemented experimentally; host checks only |
 | T32 target gate/up fusion | Exact retained T32 simulator manifest reused; scope host-tested |
 | Complete T32 request and coding screen | Not run; device-state and combined PP/CTX/TG admission still required |
@@ -22,6 +22,15 @@ attention/runtime/fusion/CI tests). This does not establish device numerical
 correctness. Keep the validated T16 baseline and serving defaults unchanged.
 Do not assume acceptance or cycle time scales linearly with block width.
 Runtime pins and simulator results: [T32 admission](t32-runtime-admission.md).
+
+Next integration gates: run the existing `optimisation/sim/gdn-multitoken.py`
+commit-only/continuation probe at 32 rows, covering all 33 accepted prefixes;
+then exercise the complete captured T32 proposal with learned layers and shared
+target head. The current `full_dspark_request.py` still constructs the T16
+drafter with 15 proposals. Its runtime, feature publication and verifier width
+must move together in an explicit experimental path before a matched hardware
+request comparison. Do not treat the isolated attention pass as full-request
+admission. Captured T32 construction now requires the validated attention kernel.
 
 ### Latest combined fusion result
 
