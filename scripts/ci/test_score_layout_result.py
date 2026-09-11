@@ -3,10 +3,34 @@ import io
 import tarfile
 import unittest
 
-from score_layout_result import EXTRA_SOURCES, request_diagnostics, validate_sources
+from score_layout_result import EXTRA_SOURCES, publication_attribution, request_diagnostics, validate_sources
 
 
 class ScoreLayoutSourceTests(unittest.TestCase):
+    def test_complete_publication_attribution_and_rejection_controls(self):
+        import copy
+        stages = ('features', 'prepare_history', 'publish_target', 'commit_history')
+        request = dict(blocks=[dict(position=4096, committed=11, select_commit_ms=8)],
+            publication_diagnostics=dict(records=[dict(position=4096, prefix=11, stage=stage,
+                passed=True, host_ms=1, process_cpu_ms=2, gc_pauses=[]) for stage in stages]))
+        self.assertEqual(publication_attribution(request), request['publication_diagnostics'])
+        self.assertIsNone(publication_attribution({}))
+        for mutation in ('missing', 'prefix', 'nan', 'gc', 'outside'):
+            changed = copy.deepcopy(request)
+            records = changed['publication_diagnostics']['records']
+            if mutation == 'missing':
+                records.pop()
+            elif mutation == 'prefix':
+                records[0]['prefix'] = 12
+            elif mutation == 'nan':
+                records[0]['host_ms'] = float('nan')
+            elif mutation == 'gc':
+                records[0]['gc_pauses'] = [dict(generation=2, duration_ms=10)]
+            else:
+                changed['blocks'][0]['select_commit_ms'] = 3
+            with self.assertRaises(ValueError):
+                publication_attribution(changed)
+
     def test_host_diagnostics_recomputed_and_absence_preserved(self):
         from request_host_health import summarize
         request = dict(arm='control', instrumented_timing=False, committed_decode_tokens=52,

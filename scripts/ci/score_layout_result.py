@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -33,6 +34,30 @@ def validate_sources(report, snapshot):
     return len(expected)
 
 
+def publication_attribution(request):
+    diagnostics = request.get('publication_diagnostics')
+    if diagnostics is None:
+        return None
+    records = diagnostics['records']
+    expected = [(block['position'], block['committed'], stage) for block in request['blocks']
+        for stage in ('features', 'prepare_history', 'publish_target', 'commit_history')]
+    if [(record['position'], record['prefix'], record['stage']) for record in records] != expected:
+        raise ValueError('Complete ordered publication stages for every committed block required')
+    for record in records:
+        values = [record['host_ms'], record['process_cpu_ms'],
+            *(pause['duration_ms'] for pause in record['gc_pauses'])]
+        if (record.get('passed') is not True or any(type(value) not in (int, float)
+                or not math.isfinite(value) or value < 0 for value in values)
+                or any(type(pause['generation']) is not int or pause['generation'] not in (0, 1, 2)
+                    for pause in record['gc_pauses'])
+                or sum(pause['duration_ms'] for pause in record['gc_pauses']) > record['host_ms'] + .001):
+            raise ValueError('Successful finite stage timings and contained GC pauses required')
+    for index, block in enumerate(request['blocks']):
+        if sum(record['host_ms'] for record in records[index * 4:index * 4 + 4]) > block['select_commit_ms'] + .001:
+            raise ValueError('Publication stage times exceed the enclosing commit interval')
+    return diagnostics
+
+
 def request_diagnostics(requests):
     from request_host_health import summarize
 
@@ -43,7 +68,8 @@ def request_diagnostics(requests):
             raise ValueError('Recorded host diagnostics must match independent counter recomputation')
         result.append(dict(ordinal=ordinal, arm=request['arm'], audit=request['instrumented_timing'],
             committed_tokens=request['committed_decode_tokens'], decode_ms=request['decode_ms'],
-            prefill_ms=request['prefill_ms'], host_health=health))
+            prefill_ms=request['prefill_ms'], host_health=health,
+            publication=publication_attribution(request)))
     return result
 
 
