@@ -72,6 +72,7 @@ def replacements():
         before = '            mul_block_bcast_cols<Sq_chunk_t, vDHt, false, false>(alias_mm2_prev_out, alias_prev_sum, cb_out);'
         after = '''#if defined(QWEN_DRAFT_EXP_APPROX)
             if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+                reconfig_data_format_srca(alias_mm2_prev_out);
                 copy_block(alias_mm2_prev_out, cb_out, out_chunk_tiles);
                 CircularBuffer(alias_prev_sum).pop_front(Sq_chunk_t);
             } else {
