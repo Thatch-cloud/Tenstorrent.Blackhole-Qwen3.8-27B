@@ -31,6 +31,7 @@ remain unqualified. No serving defaults change.
 | 34590151457 | T32 folded target attention at CTX4096 | 8 replay, 24 distinct mask-bundle and 4 KV-integrity checks pass against native B1 |
 | 34590621276 | Learned full-vocabulary, 31-query Markov | 124 eager and 186 replay comparisons pass; immutable probe sources verified |
 | 34653659471 | T32 drafter attention with FP32 SFPU denominator reduction | 4 eager, 4 exact replay, 48 input and 16 layout checks pass; 46 source hashes verified |
+| 34654732582 | T32 commit-only GDN and continuation | 33 prefix, 33 continuation, 33 pre-commit checks and one stale-state control pass; 20 source hashes verified |
 
 Both exit cleanly with zero status; recorded probe sources match their immutable
 CI revisions (`cab5126` and `8e90139`). Markov report SHA256:
@@ -64,8 +65,8 @@ reference, narrowly outside the unchanged `rtol=.01, atol=.01` bound. Neither
 chunk-size reduction nor the precise reciprocal is a demonstrated fix.
 Simple CPU rounding diagnostics also do not reproduce the simulator output;
 they are not a bit-accurate native-kernel model and do not rule out intermediate
-precision loss. The drafter attention gate remains failed, with no hardware
-promotion or T32 throughput claim.
+precision loss. These variants failed; the subsequent denominator reduction fix
+below passes the component gate, without hardware promotion or a T32 throughput claim.
 
 The matched rebuild isolates the FP32-intermediate regression from build effects.
 Its runtime binary SHA256 is
@@ -97,10 +98,22 @@ Independent validation checks zero exit status, report coverage and all 46 probe
 source hashes against the immutable CI revision. Report SHA256:
 `9bb6b5c8f65627efddccfa88e0c9453f9719bb7b0c65714217050257a8032941`.
 This qualifies the tested attention component only. Complete captured drafting,
-every-prefix target state, coding quality and combined PP/CTX/TG remain pending.
+full-request target state, coding quality and combined PP/CTX/TG remain pending.
+
+### T32 commit-state result
+
+Run 34654732582 (`9193afd`) passes all accepted prefixes 0 through 32,
+including two-token continuation, unchanged state before commitment and a
+detected stale-state control. Exit status is zero and all 20 recorded source
+hashes match the immutable revision, unchanged before and after simulation.
+Report SHA256: `4a29010fbcc8b0ff456ce0b156370a2f3791ed496a1762a2f212a5019a2c439d`.
+
+This is slow-dispatch exactness against serial T1 of the same kernel, not an
+independent native oracle, complete model correctness or a performance result.
+Complete captured learned drafting and full-request integration remain next.
 
 Dispatch uses `simulator_t32` with values `none`, `t32-markov`,
-`t32-markov-learned`, `t32-attention` or `t32-draft-attention`, avoiding GitHub's
+`t32-markov-learned`, `t32-attention`, `t32-draft-attention` or `t32-commit`, avoiding GitHub's
 25-input limit. These CPU-only jobs have a 16-CPU quota and 64 GiB memory limit;
 they do not mount the cards or measure hardware speed.
 
