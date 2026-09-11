@@ -16,9 +16,22 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         parameters, layer_weights, predecessor, successor, rotary, prefill, decode,
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
-        target_attention_t16=False, score_layout=False, score_layout_evidence=None):
+        target_attention_t16=False, score_layout=False, score_layout_evidence=None,
+        banked_proposal=False, banked_proposal_evidence=None):
     import torch
     from full_request import measure_request
+    bank_evidence = None
+    if type(banked_proposal) is not bool or (banked_proposal and not (
+            proposal_trace and commit_only_gdn and native_attention and target_attention_t16 and not profile_verifier)):
+        raise ValueError('Banked proposals require the combined traced native-drafter folded-target experiment')
+    if banked_proposal:
+        from pathlib import Path
+        from dspark_banked_gate import qualify as qualify_banks
+        if banked_proposal_evidence is None:
+            raise ValueError('Banked proposal simulator evidence required')
+        bank_evidence = qualify_banks(banked_proposal_evidence, Path(__file__).parent)
+    elif banked_proposal_evidence is not None:
+        raise ValueError('Bank evidence requires explicit banked proposal selection')
     if type(score_layout) is not bool or (score_layout and not (
             proposal_trace and commit_only_gdn and native_attention and target_attention_t16 and not profile_verifier)):
         raise ValueError('Score layout requires the distinct traced native-drafter folded-target experiment')
@@ -167,6 +180,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if proposal_trace:
             from dspark_prepared_proposal import TracedDSparkDevice
             implementation = TracedDSparkDevice
+        if banked_proposal:
+            from dspark_banked_device import BankedDSparkDevice
+            implementation = BankedDSparkDevice
         drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15,
             **(dict(native_attention=True) if native_attention else {}),
@@ -232,6 +248,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
         if observer is not None:
             result['verifier_profile'] = observer.summary()
+        if banked_proposal:
+            result['dspark']['banked_proposal'] = dict(evidence=bank_evidence,
+                replay_counts=list(proposal_device.prepared.replay_counts),
+                scope='Combined request candidate; not a serving-default change')
         result['instrumented_timing'] = audit_features
         if audit_features:
             result['committed_tokens_per_second'] = None

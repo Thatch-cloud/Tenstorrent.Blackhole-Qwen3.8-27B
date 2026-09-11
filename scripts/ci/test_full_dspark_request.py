@@ -88,6 +88,32 @@ class FullDSparkRequestTests(unittest.TestCase):
                 eos_ids=(99,), audit_features=audit, max_new_tokens=65,
                 proposal_trace=proposal_trace, commit_only_gdn=commit_only_gdn, **experiment_options)
 
+    def test_banked_candidate_selects_device_and_reports_replay_counts(self):
+        self.score_scope()
+        self.drafter.prepared.replay_counts = [2, 1]
+        with patch('dspark_banked_gate.qualify', return_value={'scope': 'synthetic'}) as gate, \
+                patch('dspark_banked_device.BankedDSparkDevice', return_value=self.drafter) as candidate:
+            result = self.measure(proposal_trace=True, commit_only_gdn=True, native_attention=True,
+                target_attention_t16=True, banked_proposal=True, banked_proposal_evidence='report.json')
+        gate.assert_called_once_with('report.json', Path(request.__file__).parent)
+        candidate.assert_called_once()
+        self.traced_device.assert_not_called()
+        self.device.assert_not_called()
+        self.assertEqual(result['dspark']['banked_proposal']['replay_counts'], [2, 1])
+        self.drafter.prepare_trace.assert_called_once_with(17, audit=False)
+        self.drafter.close.assert_called_once()
+
+    def test_banked_selection_requires_combined_runtime_and_simulator_evidence(self):
+        for options in (dict(banked_proposal='1'), dict(banked_proposal=True),
+                dict(banked_proposal_evidence='unused.json'),
+                dict(banked_proposal=True, proposal_trace=True, commit_only_gdn=True,
+                    native_attention=True, target_attention_t16=True)):
+            with self.assertRaises(ValueError):
+                self.measure(**options)
+        self.base_prefill.assert_not_called()
+        self.device.assert_not_called()
+        self.traced_device.assert_not_called()
+
     def score_scope(self):
         for target in ('target_t16_attention_gate.qualify', 'target_t16_attention_gate.validate_request_option',
                 'dspark_native_fixed_gate.qualify', 'native_draft_sdpa.audit_active_kernel'):
