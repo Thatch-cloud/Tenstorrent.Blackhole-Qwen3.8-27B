@@ -16,7 +16,7 @@ from gdn_multitoken_conv import addresses, release_owned
 
 SOURCES = ('dspark-t32-markov-probe.py', 'dspark_t32_markov.py', 'dspark_projection.py', 'dspark_markov_device.py', 'dspark_markov.py', 'dspark_intake.py',
     'dspark_markov_fixture.py', 'attention_batch.py', 'gdn_multitoken_conv.py',
-    'dspark_native_reference.py', 'dspark_t32_reference.py', 'projection_rounding.py')
+    'dspark_native_reference.py', 'dspark_t32_reference.py', 'dspark_t32_weights.py', 'projection_rounding.py')
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 BINARY_SHA256 = {
@@ -53,7 +53,9 @@ def source_hashes():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--fixture', type=Path)
+    weights = parser.add_mutually_exclusive_group()
+    weights.add_argument('--fixture', type=Path)
+    weights.add_argument('--checkpoint', type=Path)
     parser.add_argument('--native-reference', action='store_true',
         help='Separate approximate proposal policy; exact grouped-product oracle, not FP32 replacement qualification')
     options = parser.parse_args()
@@ -62,9 +64,14 @@ def main():
     import ttnn
 
     generator = torch.Generator().manual_seed(38256)
-    if options.fixture:
-        from dspark_markov_fixture import load_fixture
-        fixture, predecessor, successor = load_fixture(options.fixture)
+    learned = options.fixture is not None or options.checkpoint is not None
+    if learned:
+        if options.checkpoint is not None:
+            from dspark_t32_weights import load_checkpoint
+            fixture, predecessor, successor = load_checkpoint(options.checkpoint)
+        else:
+            from dspark_markov_fixture import load_fixture
+            fixture, predecessor, successor = load_fixture(options.fixture)
         vocabulary, steps = 248320, 31
     else:
         vocabulary, steps = 64, 31
@@ -74,8 +81,8 @@ def main():
         fixture = None
     patterns = [(torch.tensor([[[[anchor]]]], dtype=torch.int64),
         torch.randn((1, 1, steps, vocabulary), generator=generator) / 8)
-        for anchor in (1596 if options.fixture else 2, vocabulary - 1)]
-    if not options.fixture:
+        for anchor in (1596 if learned else 2, vocabulary - 1)]
+    if not learned:
         patterns.append((torch.zeros((1, 1, 1, 1), dtype=torch.int64), torch.zeros((1, 1, steps, vocabulary))))
     root = Path(os.environ['TT_METAL_HOME'])
     report = dict(passed=False, closed_cleanly=False, backend='simulator', vocabulary=vocabulary, proposals=steps,

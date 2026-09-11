@@ -19,10 +19,15 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
-if [ "${QWEN_SIM_CASE:-stack}" = t32-markov ]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
+    weight_flags=()
+    if [ "$QWEN_SIM_CASE" = t32-markov-learned ]; then
+        weight_flags=(--checkpoint /dspark-model.safetensors)
+    fi
+    python3 -B -m unittest test_dspark_t32_weights test_dspark_t32_reference
     status=0
     timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-markov-probe.py \
-        --native-reference --output /experiment/results/t32-markov.json || status=$?
+        --native-reference "${weight_flags[@]}" --output /experiment/results/t32-markov.json || status=$?
     printf '%s\n' "$status" > /experiment/results/t32-markov.exit-status
     exit "$status"
 fi

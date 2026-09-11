@@ -28,6 +28,23 @@ def complete_report():
 
 
 class T32ResultTests(unittest.TestCase):
+    def test_learned_coverage_requires_explicit_manifest_and_policy(self):
+        from dspark_markov_fixture import expected_manifest
+
+        report = complete_report()
+        report.update(vocabulary=248320, fixture=expected_manifest())
+        report['eager_checks'] = [entry for entry in report['eager_checks'] if entry['pattern'] < 2]
+        report['replay_checks'] = [dict(entry, pattern=0 if entry['repetition'] == 2 else entry['pattern'])
+            for entry in report['replay_checks'] if entry['repetition'] < 3]
+        report['input_checks'] = [entry for entry in report['input_checks']
+            if entry['ordinal'] < (2 if entry['phase'] == 'eager' else 3)]
+        self.assertEqual(validate(report, learned=True)['eager_queries'], 124)
+        with self.assertRaises(ValueError):
+            validate(report)
+        report['fixture'] = {}
+        with self.assertRaises(ValueError):
+            validate(report, learned=True)
+
     def test_complete_coverage_is_synthetic_only(self):
         result = validate(complete_report())
         self.assertEqual(result['eager_queries'], 186)
