@@ -37,7 +37,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32
     if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
         python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
         export QWEN_T32_FP32_BUILD=1
-        export QWEN_T32_FP32_VARIANT=baseline
+        export QWEN_T32_FP32_VARIANT=output-only
         bash /experiment-scripts/ci/t32-attention-fp32-build.sh
     fi
     python3 - <<'PY'

@@ -21,3 +21,10 @@ class PatchTests(unittest.TestCase):
         source = (candidate.BEFORE * 2).encode()
         with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(source).hexdigest()), self.assertRaises(ValueError):
             candidate.patched_bytes(source)
+
+    def test_output_only_retains_bf16_statistics(self):
+        source = (candidate.BEFORE + '\n    tt::DataFormat stats_df = im_df;\n').encode()
+        with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(source).hexdigest()):
+            result = candidate.patched_bytes(source, variant='output-only')
+        self.assertIn(candidate.AFTER.encode(), result)
+        self.assertIn(b'tt::DataFormat stats_df = tt::DataFormat::Float16_b;', result)

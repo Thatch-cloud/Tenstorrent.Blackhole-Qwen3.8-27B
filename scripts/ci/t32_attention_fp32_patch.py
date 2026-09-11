@@ -16,9 +16,17 @@ AFTER = '''    const bool t32_draft_fp32_intermediates =
         tt::DataFormat::Float32 : tt::DataFormat::Float16_b;'''
 
 
-def patched_bytes(source):
+def patched_bytes(source, *, variant='fp32'):
+    if variant not in ('fp32', 'output-only'):
+        raise ValueError('Explicit FP32 intermediate variant required')
     if hashlib.sha256(source).hexdigest() != SOURCE_SHA256:
         raise ValueError('Exact pinned SDPA program factory required')
     if source.count(BEFORE.encode()) != 1:
         raise ValueError('Unique intermediate format anchor required')
-    return source.replace(BEFORE.encode(), AFTER.encode())
+    result = source.replace(BEFORE.encode(), AFTER.encode())
+    if variant == 'output-only':
+        before = b'    tt::DataFormat stats_df = im_df;'
+        if result.count(before) != 1:
+            raise ValueError('Unique statistics format anchor required')
+        result = result.replace(before, b'    tt::DataFormat stats_df = tt::DataFormat::Float16_b;')
+    return result

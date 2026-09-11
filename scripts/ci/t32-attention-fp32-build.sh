@@ -21,11 +21,9 @@ binaries = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
 assert binaries == {name: value for name, value in PINS.items() if name.endswith('.so')}
 source = root / SOURCE_PATH
 original = source.read_bytes()
-candidate = patched_bytes(original)
 variant = os.environ.get('QWEN_T32_FP32_VARIANT', 'fp32')
-assert variant in ('baseline', 'fp32')
-if variant == 'baseline':
-    candidate = original
+assert variant in ('baseline', 'fp32', 'output-only')
+candidate = original if variant == 'baseline' else patched_bytes(original, variant=variant)
 report = dict(stage='prepared', base_binaries=binaries,
               variant=variant,
               original_factory=hashlib.sha256(original).hexdigest(),

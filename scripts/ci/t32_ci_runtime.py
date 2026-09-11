@@ -30,10 +30,12 @@ def build_evidence(root):
     binaries = {name: digest(root / name) for name in base}
     candidate = '12e5cc308f777ebf01bbfd5b48fee71335af916eead62763e0db8953c720972e'
     variant = os.environ.get('QWEN_T32_FP32_VARIANT', 'fp32')
-    if variant not in ('baseline', 'fp32'):
+    if variant not in ('baseline', 'fp32', 'output-only'):
         raise ValueError('Explicit baseline or FP32 build required')
     if variant == 'baseline':
         candidate = SOURCE_SHA256
+    elif variant == 'output-only':
+        candidate = '4114b4b145a08865b0604e2cd415dc661ffee8a4e8f9c6c4c24ce102dbf8d72a'
     if (report.get('stage') != 'built' or report.get('base_binaries') != base
             or report.get('variant', 'fp32') != variant
             or report.get('original_factory') != SOURCE_SHA256
