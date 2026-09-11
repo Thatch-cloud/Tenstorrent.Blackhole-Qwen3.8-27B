@@ -148,6 +148,7 @@ def main():
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         precise_reciprocal=os.environ.get('QWEN_T32_PRECISE_RECIP') == '1',
         fp32_build=build_evidence(root),
+        explicit_pack_transition=os.environ.get('QWEN_T32_EXPLICIT_PACK') == '1',
         **{name: [] for name in COUNTS})
     owned, transient = [], []
     mesh = trace = None

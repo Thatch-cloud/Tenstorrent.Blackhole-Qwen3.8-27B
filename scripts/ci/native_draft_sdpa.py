@@ -53,6 +53,18 @@ def replacements():
             raise ValueError('Experimental reciprocal is simulator-only')
         result['compute_common.hpp'] += ((ORIGINAL_RECIP_INIT, PRECISE_RECIP_INIT),
                                         (ORIGINAL_RECIP, PRECISE_RECIP))
+    if os.environ.get('QWEN_T32_EXPLICIT_PACK') == '1':
+        if (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
+            raise ValueError('Experimental pack transition is simulator-only')
+        before = '    sub_init(in0_cb, in1_cb);\n    exp_tile_init<EXP_APPROX_MODE>();'
+        after = before + '''
+#if defined(QWEN_DRAFT_EXP_APPROX)
+    if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+        pack_reconfig_data_format(out_cb);
+    }
+#endif'''
+        result['compute_common.hpp'] += ((before, after),)
     return result
 
 
