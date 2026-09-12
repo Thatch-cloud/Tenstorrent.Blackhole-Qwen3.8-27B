@@ -7,7 +7,10 @@ from gdn_multitoken_conv import addresses
 
 
 class PreparedHistoryProjection:
-    def __init__(self, operations, mesh, collectives, parameters, layer_weights, features, tables):
+    def __init__(self, operations, mesh, collectives, parameters, layer_weights, features, tables, *, audit=False):
+        if type(audit) is not bool:
+            raise ValueError('Explicit projection audit policy required')
+        self.audit, self.checks = audit, []
         self.operations, self.mesh, self.collectives = operations, mesh, collectives
         self.parameters, self.layer_weights = parameters, tuple(layer_weights)
         self.trace, self.closed, self.outputs = None, False, ()
@@ -23,8 +26,9 @@ class PreparedHistoryProjection:
                 memory_config=operations.DRAM_MEMORY_CONFIG)) for value in (*features, *tables))
             warm = self.owner()
             try:
-                self.execute(warm.retain)
+                warm_outputs = self.execute(warm.retain)
                 operations.synchronize_device(mesh)
+                expected = self.snapshot(warm_outputs) if audit else None
             finally:
                 warm.release()
             self.output_scope = self.owner()
@@ -33,6 +37,8 @@ class PreparedHistoryProjection:
             self.binding_tensors = [*self.borrowed, *self.inputs, *leaves(self.outputs)]
             self.bindings = [addresses(operations, value) for value in self.binding_tensors]
             operations.execute_trace(mesh, self.trace, cq_id=0, blocking=True)
+            if expected is not None:
+                self.compare(expected)
         except BaseException:
             self.close()
             raise
@@ -58,8 +64,43 @@ class PreparedHistoryProjection:
             raise AssertionError('Captured history projection bindings moved')
         for source, destination in zip((*features, *tables), self.inputs, strict=True):
             self.operations.copy(source, destination)
+        expected = None
+        if self.audit:
+            scope = self.owner()
+            try:
+                expected = self.snapshot(self.execute(scope.retain))
+            finally:
+                scope.release()
         self.operations.execute_trace(self.mesh, self.trace, cq_id=0, blocking=True)
+        if expected is not None:
+            self.compare(expected)
         return self.outputs
+
+    def snapshot(self, outputs):
+        import torch
+
+        if len(outputs) != 5 or any(len(pair) != 2 for pair in outputs):
+            raise AssertionError('All five complete projected K/V pairs required')
+        self.operations.synchronize_device(self.mesh)
+        result = []
+        for tensor in leaves(outputs):
+            shards = self.operations.get_device_tensors(tensor)
+            if len(shards) != 2:
+                raise AssertionError('Both projection output shards required')
+            for shard in shards:
+                value = self.operations.to_torch(shard).clone()
+                if tuple(value.shape) != (1, 4, 32, 128) or not torch.isfinite(value).all():
+                    raise AssertionError('Complete finite fixed32 projection output required')
+                result.append(value)
+        return tuple(result)
+
+    def compare(self, expected):
+        import torch
+
+        actual = self.snapshot(self.outputs)
+        if any(not torch.equal(value, reference) for value, reference in zip(actual, expected, strict=True)):
+            raise AssertionError('Captured history projection differs from eager execution')
+        self.checks.append(dict(tensors=len(actual), exact=True))
 
     def close(self):
         if self.closed:

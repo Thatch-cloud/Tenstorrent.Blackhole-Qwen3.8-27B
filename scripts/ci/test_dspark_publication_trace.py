@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import torch
+
 from dspark_publication_trace import PreparedHistoryProjection
 
 
@@ -22,6 +24,8 @@ class PublicationTraceTests(unittest.TestCase):
             synchronize_device=Mock(), deallocate=Mock(), release_trace=Mock(), recording=False, commands=[])
         operations.clone = Mock(side_effect=lambda value, **kwargs: Tensor(value.shape[-1], value.value))
         operations.copy = Mock(side_effect=lambda source, destination: setattr(destination, 'value', source.value))
+        operations.get_device_tensors = lambda tensor: (tensor, tensor)
+        operations.to_torch = lambda tensor: torch.full((1, 4, 32, 128), tensor.value, dtype=torch.bfloat16)
 
         def begin(*args, **kwargs):
             operations.recording = True
@@ -56,10 +60,24 @@ class PublicationTraceTests(unittest.TestCase):
                 patch('dspark_history.addresses', side_effect=address):
             yield operations, features, tables, parameters, layers, projection
 
-    def build(self, fixture):
+    def build(self, fixture, **options):
         operations, features, tables, parameters, layers, projection = fixture
         return PreparedHistoryProjection(operations, SimpleNamespace(shape=(1, 2)), None,
-            parameters, layers, features, tables)
+            parameters, layers, features, tables, **options)
+
+    def test_audit_detects_corrupted_replay(self):
+        with self.fixture() as fixture:
+            operations, features, tables, parameters, layers, projection = fixture
+            prepared = self.build(fixture, audit=True)
+            try:
+                features[0].value = 9
+                prepared.project(features, tables)
+                self.assertEqual(prepared.checks, [dict(tensors=20, exact=True)] * 2)
+                operations.commands.append(lambda: setattr(prepared.outputs[4][1], 'value', -999))
+                with self.assertRaisesRegex(AssertionError, 'differs from eager'):
+                    prepared.project(features, tables)
+            finally:
+                prepared.close()
 
     def test_changed_features_and_tables_replay_without_projection_dispatch(self):
         with self.fixture() as fixture:
