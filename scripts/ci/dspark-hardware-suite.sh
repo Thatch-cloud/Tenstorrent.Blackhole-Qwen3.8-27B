@@ -51,6 +51,7 @@ if [ "$mode" = request-target-attention ]; then
             if [ "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1 ]; then
                 report_name=dspark-captured-publication-request-hardware
                 request_options+=(--captured-publication --max-new-tokens 65)
+                export QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1
             fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then

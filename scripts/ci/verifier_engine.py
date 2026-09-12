@@ -287,6 +287,7 @@ class VerifierEngine:
             return predictions, dict(input_ms=(staged - started) * 1000,
                 verify_readback_ms=(finished - staged) * 1000,
                 binding_validation_ms=(started - binding_started) * 1000,
+                singleton_position_uploads=getattr(bucket['fixture'], 'last_singleton_uploads', None),
                 blocking_trace_host_ms=trace_ms,
                 replay_checks_sync_ms=(replay_finished - staged) * 1000 - trace_ms,
                 output_readback_host_ms=(finished - replay_finished) * 1000)

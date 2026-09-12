@@ -25,6 +25,8 @@ def host_inputs(tokens, start, rope_dim, theta):
 
 
 def stage_inputs(fixture, tokens, start):
+    import os
+    from verifier_position_policy import requires_singletons
     operations, model = fixture.operations, fixture.model
     validate_tokens(tokens, fixture.rows, start, model.args.vocab_size, fixture.pages.shape[1] * 64)
     replay_reader = getattr(fixture, 'replay_reader', None)
@@ -37,8 +39,10 @@ def stage_inputs(fixture, tokens, start):
               (fixture.positions, positions, operations.int32, operations.ROW_MAJOR_LAYOUT),
               (fixture.cos, cos, operations.bfloat16, operations.TILE_LAYOUT),
               (fixture.sin, sin, operations.bfloat16, operations.TILE_LAYOUT)]
-    values.extend((destination, positions[index:index + 1], operations.int32, operations.ROW_MAJOR_LAYOUT)
-                  for index, destination in enumerate(fixture.singleton_positions))
+    stage_singletons = requires_singletons(fixture, os.environ.get('QWEN_SKIP_UNUSED_SINGLETON_POSITIONS', '0'))
+    if stage_singletons:
+        values.extend((destination, positions[index:index + 1], operations.int32, operations.ROW_MAJOR_LAYOUT)
+                      for index, destination in enumerate(fixture.singleton_positions))
     if replay_reader is not None:
         import torch
         words = torch.zeros(8, dtype=torch.int32)
@@ -67,3 +71,4 @@ def stage_inputs(fixture, tokens, start):
         raise
     if replay_reader is not None:
         replay_reader.start = start
+    fixture.last_singleton_uploads = fixture.rows if stage_singletons else 0

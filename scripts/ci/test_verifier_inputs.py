@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -8,6 +8,16 @@ from verifier_inputs import host_inputs, stage_inputs, validate_tokens
 
 
 class InputTests(unittest.TestCase):
+    def test_unused_singletons_skip_only_their_copies(self):
+        fixture = self.fixture()
+        with patch('verifier_position_policy.requires_singletons', return_value=False):
+            stage_inputs(fixture, [7, 8], 16383)
+        self.assertEqual(fixture.operations.copy_host_to_device_tensor.call_count, 4)
+        self.assertEqual(fixture.last_singleton_uploads, 0)
+        fixture.operations.synchronize_device.assert_called_once_with('mesh')
+        positions = fixture.operations.copy_host_to_device_tensor.call_args_list[1].args[0]
+        self.assertEqual(positions.tolist(), [16383, 16384])
+
     def test_host_metadata_shapes_and_rotary_zero(self):
         for rows in (1, 2, 4, 8, 16, 32):
             tokens, positions, cos, sin = host_inputs(list(range(rows)), 0, 64, 1000000)
