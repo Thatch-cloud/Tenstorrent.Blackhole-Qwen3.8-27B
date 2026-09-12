@@ -23,6 +23,7 @@ queries, not padding. Fixture negative controls pass on both host shards.
 | FP32 statistics only | 34724444926 | Chip 0: 30,720 failures; max error 17.85616 |
 | Statistics plus explicit pack-format transition | 34724923953 | Chip 0 passes; chip 1 still has 256 failures |
 | Above plus nonlegacy reciprocal | 34725385866 | Same 256 failures; max error 0.54706 |
+| Pack fix plus accurate correction exponential | 34726258186 | Byte-identical to 34724923953 on both compared chips; same 256 failures |
 
 These are failed numerical trials, not accepted optimizations. The rebuilt
 control reproduces the prebuilt baseline exactly. Adding the missing explicit
@@ -62,6 +63,16 @@ reciprocal so the comparator is run 34724923953, not the failed reciprocal
 trial. Record both exponential headers in the runtime fingerprint. Host tests
 verify scope restoration and the transformation matches pinned native sources;
 only the unchanged simulator numerical/replay matrix can qualify the change.
+
+Result: run 34726258186 failed eager case 0. Both output hashes exactly match
+34724923953. Do not promote this correction swap or infer a speed improvement.
+
+An additional CPU truncation hypothesis produces a different failure signature:
+on case 0/chip 1, truncating partial/running BF16 output gives 30,417 failures
+and maximum error 1.70295; also truncating statistics gives 30,617 failures and
+1.77983. Neither matches the simulator's 256 failures. The diagnostic retains
+these as hypotheses, not assertions about actual packer rounding. Distinguish
+rounding/storage behavior with stage evidence before another precision change.
 
 ## Source-backed precision scope
 

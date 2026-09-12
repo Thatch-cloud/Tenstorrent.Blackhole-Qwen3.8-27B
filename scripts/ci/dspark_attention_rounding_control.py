@@ -10,8 +10,14 @@ import torch
 import dspark_full_attention
 
 
+def bf16_storage(value, truncate=False):
+    if truncate:
+        return ((value.contiguous().view(torch.int32) >> 16) << 16).view(torch.float32)
+    return value.bfloat16().float()
+
+
 def online_attention(query, key, value, mask, *, round_output=False, round_probability=False,
-        round_statistics=False, truncate_scale=False):
+        round_statistics=False, truncate_scale=False, truncate_storage=False):
     scale = torch.tensor(128 ** -.5)
     if truncate_scale:
         scale = ((scale.view(torch.int32) >> 16) << 16).view(torch.float32)
@@ -23,19 +29,19 @@ def online_attention(query, key, value, mask, *, round_output=False, round_proba
         scores = scores + mask[:, :, :, start:start + 64]
         updated = torch.maximum(maximum, scores.amax(-1, keepdim=True))
         if round_statistics:
-            updated = updated.bfloat16().float()
+            updated = bf16_storage(updated, truncate_storage)
         correction = ((maximum - updated) * scale).exp()
         if round_statistics:
-            correction = correction.bfloat16().float()
+            correction = bf16_storage(correction, truncate_storage)
         probability = ((scores - updated) * scale).exp()
         if round_probability:
-            probability = probability.bfloat16().float()
+            probability = bf16_storage(probability, truncate_storage)
         partial = probability @ value[:, :, start:start + 64]
         if round_output:
-            partial = partial.bfloat16().float()
+            partial = bf16_storage(partial, truncate_storage)
         numerator = numerator * correction + partial
         if round_output:
-            numerator = numerator.bfloat16().float()
+            numerator = bf16_storage(numerator, truncate_storage)
         denominator = denominator * correction + probability.sum(-1, keepdim=True)
         maximum = updated
     return (numerator / denominator).bfloat16().float()
@@ -60,14 +66,18 @@ def main():
                     (False, True, False, False), (True, True, False, False),
                     (False, False, True, False), (True, False, True, False),
                     (False, False, False, True), (True, False, True, True))
-                for round_output, round_probability, round_statistics, truncate_scale in variants:
+                variants = tuple((*variant, False) for variant in variants) + (
+                    (True, False, False, True, True), (True, False, True, True, True))
+                for round_output, round_probability, round_statistics, truncate_scale, truncate_storage in variants:
                     actual = online_attention(query, key, value, mask,
                         round_output=round_output, round_probability=round_probability,
-                        round_statistics=round_statistics, truncate_scale=truncate_scale)
+                        round_statistics=round_statistics, truncate_scale=truncate_scale,
+                        truncate_storage=truncate_storage)
                     failed = ~torch.isclose(actual, expected, rtol=.01, atol=.01)
                     records.append(dict(case=case, chip=chip, round_output=round_output,
                         round_probability=round_probability, round_statistics=round_statistics,
-                        truncate_scale=truncate_scale, failed=int(failed.sum()),
+                        truncate_scale=truncate_scale, truncate_storage=truncate_storage,
+                        failed=int(failed.sum()),
                         max_abs=float((actual - expected).abs().max())))
                     if not any((round_output, round_probability, round_statistics, truncate_scale)) and failed.any():
                         raise AssertionError('FP32 online-softmax CPU control failed')

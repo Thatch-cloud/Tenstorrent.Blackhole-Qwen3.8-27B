@@ -4,10 +4,17 @@ import unittest
 
 import torch
 
-from dspark_attention_rounding_control import online_attention
+from dspark_attention_rounding_control import bf16_storage, online_attention
 
 
 class OnlineAttentionTests(unittest.TestCase):
+    def test_truncation_differs_from_round_to_nearest(self):
+        values = torch.tensor([1.007, -1.007, float('-inf')])
+        truncated = bf16_storage(values, truncate=True)
+        self.assertEqual(truncated[:2].tolist(), [1., -1.])
+        self.assertEqual(bf16_storage(values)[:2].tolist(), [1.0078125, -1.0078125])
+        self.assertTrue(torch.isneginf(truncated[2]))
+
     def test_masked_chunks_and_changing_maximum(self):
         generator = torch.Generator().manual_seed(383928)
         query = torch.randn(1, 2, 3, 128, generator=generator)
