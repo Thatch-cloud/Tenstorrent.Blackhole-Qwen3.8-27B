@@ -79,8 +79,8 @@ def fixtures():
         values = dict(query=query.clone(), history_key=key.clone(), history_value=value.clone(),
             query_key=query_key.clone(), query_value=query_value.clone(), mask=fixed_mask(position, CAPACITY, PROPOSALS))
         if case:
-            values['history_key'][:, :, 4096:position] = 9
-            values['history_value'][:, :, 4096:position] = 128
+            values['history_key'][:, :, POSITIONS[0]:position] = 9
+            values['history_value'][:, :, POSITIONS[0]:position] = 128
         for name in ('history_key', 'history_value'):
             values[name][:, :, position:] = 8192
         for name in ('query_key', 'query_value'):
