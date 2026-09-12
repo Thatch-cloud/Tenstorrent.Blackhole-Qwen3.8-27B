@@ -13,6 +13,33 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def test_captured_publication_installs_before_proposal_and_closes_before_drafter(self):
+        events = []
+
+        @contextmanager
+        def install():
+            events.append('publication')
+            try:
+                yield
+            finally:
+                events.append('restore')
+
+        arm = SimpleNamespace(install=install, projection=SimpleNamespace(checks=[]))
+        self.drafter.prepare_trace.side_effect = lambda *args, **kwargs: events.append('proposal')
+        self.drafter.close.side_effect = lambda: events.append('close')
+        with patch('dspark_publication_scope.CapturedPublicationArm', return_value=arm) as constructor:
+            result = self.measure(proposal_trace=True, commit_only_gdn=True, captured_publication=True)
+        constructor.assert_called_once_with(self.drafter.history, audit=False)
+        self.assertEqual(events, ['publication', 'proposal', 'restore', 'close'])
+        self.assertTrue(result['captured_publication']['enabled'])
+
+    def test_captured_publication_rejects_incompatible_modes_before_prefill(self):
+        for options in (dict(captured_publication=1), dict(captured_publication=True),
+                dict(captured_publication=True, proposal_trace=True, commit_only_gdn=True, history_profile=True)):
+            with self.assertRaisesRegex(ValueError, 'Captured publication'):
+                self.measure(**options)
+        self.base_prefill.assert_not_called()
+
     def test_history_profile_is_explicit_and_reported(self):
         observer = SimpleNamespace(records=[dict(stage='history_total', host_ms=1)],
             install=Mock(return_value=nullcontext()))
