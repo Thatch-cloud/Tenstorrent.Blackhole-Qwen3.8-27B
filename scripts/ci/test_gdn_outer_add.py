@@ -15,7 +15,8 @@ class OuterAddTests(unittest.TestCase):
         self.assertIn(candidate.FUSED, result)
         self.assertIn(candidate.HELPER, result)
         self.assertNotIn('POP(cb_outer, kv)', result)
-        self.assertIn('add_binary_tile(1, 0, 0)', result)
+        self.assertIn('add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, tile, 0)', result)
+        self.assertNotIn('add_binary_tile', result)
         self.assertEqual(result.count('tile_regs_acquire();'), 1)
         self.assertEqual(result.count('pack_tile(0, output, tile);'), 1)
 

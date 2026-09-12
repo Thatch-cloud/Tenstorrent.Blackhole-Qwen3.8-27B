@@ -29,3 +29,12 @@ This candidate does not include the paired-copy experiment. That prior change
 did not improve the measured blocking trace. The combined reference remains the
 native T16 path, approximately 105–106 committed TG at CTX 4096 for the current
 merge-intervals request. The 200 TG single-stream objective is unchanged.
+
+## FPU destination-reuse retry
+
+Read-only source export **34697363596** confirms the pinned API provides
+`add_reuse_dest_init` and `add_reuse_dest_tiles`. The revised candidate uses
+`DEST_TO_SRCB`: decayed state remains operand A and the outer product held in DST
+becomes operand B. This removes the SFPU add and the second register copy from
+the failed candidate. It still avoids the outer-product CB write/read. Exactness
+must be re-established in the simulator; the source inspection alone is not proof.

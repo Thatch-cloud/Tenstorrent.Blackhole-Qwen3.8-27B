@@ -15,11 +15,8 @@ HELPER = '''void outer_add(uint32_t delta, uint32_t key, uint32_t state, uint32_
             mul_bcast_cols_init(delta, key);
             tile_regs_acquire();
             mul_tiles_bcast_cols(delta, key, value_tile, key_tile, 0);
-            reconfig_data_format_srca(state);
-            copy_tile_to_dst_init_short(state);
-            copy_tile(state, tile, 1);
-            add_binary_tile_init();
-            add_binary_tile(1, 0, 0);
+            add_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state);
+            add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, tile, 0);
             tile_regs_commit();
             tile_regs_wait();
             pack_tile(0, output, tile);
@@ -48,8 +45,6 @@ FUSED = '''        outer_add(cb_vread, cb_kcol, cb_sdec, cb_snew, Kt, Vt);
 
 
 def transform(source):
-    source = replace_once(source, '#include "api/compute/eltwise_binary.h"',
-        '#include "api/compute/eltwise_binary.h"\n#include "api/compute/eltwise_binary_sfpu.h"')
     source = replace_once(source, 'void kernel_main() {', HELPER + 'void kernel_main() {')
     return replace_once(source, ORIGINAL, FUSED)
 
