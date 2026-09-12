@@ -1,7 +1,7 @@
 # Shared block Q/K normalization
 
-Status: compute/dataflow generators and eight-head program builder implemented
-and host-checked. Simulator comparison and model integration remain unqualified.
+Status: standalone shared normalization passes the simulator. The recurrence
+consumer source is implemented but full recurrence/model integration remains unqualified.
 
 ## Why change direction?
 
@@ -69,3 +69,23 @@ The program builder uses eight workers per chip and caller-owned, distinct
 mesh size or input/output aliasing. Nine host tests check extraction, head/page
 mapping, face boundaries and scratch ownership. Device compilation, numerical
 comparison, trace replay and integration into recurrence are still required.
+
+## Standalone simulator result
+
+Run **34700729931**, revision `a78107a`, passes 16 exact block-versus-serial
+comparisons, 8 input-immutability checks and 16 independent head/scale/epsilon
+sanity checks. Both chips close cleanly; changed-input replay changes outputs.
+All 744 recorded source hashes and check matrices were independently verified.
+This establishes normalization only, not the recurrence or model.
+
+Report SHA256:
+`9c52a907b5c347d579a69cc352958091c6e3933c3e0c6e8c01e41113e1014777`.
+
+The recurrence consumer caches four FP32 Q tiles and four K tiles per worker,
+then gathers each token into the existing normalized-Q/K rings. It reuses the
+now-dead Q/K conversion scratch, retaining the original buffer capacities.
+Only Q/K input addresses/accessors change; V, gates, initial state, output/prefix
+writers and norm/gate remain native. Source extraction removes the duplicate
+normalization chain, not any state arithmetic. The next required gate must run
+preparation and recurrence together on persistent buffers and compare every
+state prefix, output and FP32 bridge with the unchanged reference.
