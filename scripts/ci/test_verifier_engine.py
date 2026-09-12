@@ -200,6 +200,11 @@ class EngineLifecycleTests(unittest.TestCase):
             self.assertEqual(session.emitted, [0])
             self.assertEqual(engine.phase, 'verified')
             self.assertGreaterEqual(timing['input_ms'], 0)
+            self.assertGreaterEqual(timing['binding_validation_ms'], 0)
+            for name in ('blocking_trace_host_ms', 'replay_checks_sync_ms', 'output_readback_host_ms'):
+                self.assertGreaterEqual(timing[name], 0)
+            self.assertAlmostEqual(timing['verify_readback_ms'], sum(timing[name] for name in
+                ('blocking_trace_host_ms', 'replay_checks_sync_ms', 'output_readback_host_ms')))
             decision = session.commit('request', ticket, predictions, engine.publish)
             self.assertEqual(decision.emitted, (1, 2, 0, 1))
             self.assertEqual(session.committed_decode_tokens, 4)

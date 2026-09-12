@@ -251,11 +251,18 @@ class VerifierEngine:
         self.pending_key = key
         bucket = self.buckets[key]
         try:
+            binding_started = time.perf_counter()
             self.validate_bindings()
             started = time.perf_counter()
             stage_inputs(bucket['fixture'], ticket.tokens, ticket.position)
             staged = time.perf_counter()
-            operation = lambda: self.operations.execute_trace(self.mesh, bucket['trace'], cq_id=0, blocking=True)
+            trace_ms = 0.0
+            def operation():
+                nonlocal trace_ms
+                trace_started = time.perf_counter()
+                result = self.operations.execute_trace(self.mesh, bucket['trace'], cq_id=0, blocking=True)
+                trace_ms += (time.perf_counter() - trace_started) * 1000
+                return result
             if bucket['first'] or bucket['fixture'].retained is None:
                 operation()
                 self.operations.synchronize_device(self.mesh)
@@ -263,6 +270,7 @@ class VerifierEngine:
                 bucket['fixture'].retained.replay(operation)
             if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
+            replay_finished = time.perf_counter()
             logits, ids = bucket['output']
             tensor = logits if ids is None else ids
             parts = self.operations.get_device_tensors(tensor)
@@ -277,7 +285,11 @@ class VerifierEngine:
             bucket['first'] = False
             self.phase = 'verified'
             return predictions, dict(input_ms=(staged - started) * 1000,
-                                      verify_readback_ms=(finished - staged) * 1000)
+                verify_readback_ms=(finished - staged) * 1000,
+                binding_validation_ms=(started - binding_started) * 1000,
+                blocking_trace_host_ms=trace_ms,
+                replay_checks_sync_ms=(replay_finished - staged) * 1000 - trace_ms,
+                output_readback_host_ms=(finished - replay_finished) * 1000)
         except BaseException:
             self.phase = 'failed'
             self.session.fail_verification(self.session.request_id, ticket)
