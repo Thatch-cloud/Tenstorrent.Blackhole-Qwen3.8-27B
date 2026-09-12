@@ -59,16 +59,32 @@ def main():
             raise AssertionError('Both chips required')
         return [ttnn.to_torch(shard).clone() for shard in shards]
     def check(control, candidate, host, mode):
+        mismatches = []
         for operand, (reference, observed) in enumerate(zip(control, candidate, strict=True)):
             for chip, (expected, actual) in enumerate(zip(read(reference), read(observed), strict=True)):
                 if not torch.isfinite(expected).all() or not torch.equal(expected, actual):
-                    raise AssertionError(f'Output mismatch {mode=} {operand=} {chip=}')
+                    difference = (expected.float() - actual.float()).abs()
+                    mask = expected != actual
+                    indices = mask.flatten().nonzero().flatten()[:8]
+                    diagnostic = dict(mode=mode, operand=operand, chip=chip, shape=list(expected.shape),
+                        mismatches=int(mask.sum()), elements=expected.numel(),
+                        finite_expected=bool(torch.isfinite(expected).all()),
+                        finite_actual=bool(torch.isfinite(actual).all()),
+                        max_abs=float(difference.max()), mean_abs=float(difference.mean()),
+                        prefix_mismatches=mask.reshape(16, -1).sum(dim=1).tolist(),
+                        first_indices=indices.tolist(), expected=expected.flatten()[indices].float().tolist(),
+                        actual=actual.flatten()[indices].float().tolist())
+                    mismatches.append(diagnostic)
+                    report.setdefault('numerical_failures', []).append(diagnostic)
+                    continue
                 report['checks'].append(dict(mode=mode, operand=operand, chip=chip, exact=True))
         for operand, (tensor, expected) in enumerate(zip(inputs, host, strict=True)):
             for chip, (actual, reference) in enumerate(zip(read(tensor), expected.chunk(2, dim=0), strict=True)):
                 if not torch.equal(actual, reference):
                     raise AssertionError(f'Input mutation {mode=} {operand=} {chip=}')
                 report['immutable_checks'].append(dict(mode=mode, operand=operand, chip=chip, exact=True))
+        if mismatches:
+            raise AssertionError(f'{len(mismatches)} output/state/bridge comparisons failed exactness in {mode}')
     try:
         save('open')
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576,

@@ -2,6 +2,12 @@
 
 Status: numerical candidate only. No performance claim or hardware admission.
 
+Initial simulator run **34696989003** compiled successfully but failed the first
+eager gated-output comparison on chip 0. Devices closed cleanly. The failure
+does not yet identify rounding versus dataflow as the cause. A diagnostic retry
+records differences for both chips, all prefix states and the FP32 bridge before
+rejecting the candidate. Exactness is not relaxed; no hardware test is admitted.
+
 | Question | Experiment |
 |---|---|
 | What changes? | Compute each outer-product tile, add its decayed-state tile in destination registers, then pack once |
