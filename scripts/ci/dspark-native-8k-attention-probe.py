@@ -67,6 +67,7 @@ def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
     directory = root / 'ttnn/cpp/ttnn/operations/transformer/sdpa'
     sources = [path.relative_to(root) for path in directory.rglob('*')
         if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h')]
+    sources.append(Path('tt_metal/hw/ckernels/blackhole/metal/llk_api/experimental/llk_sfpu/ckernel_sfpu_sdpa.h'))
     if not sources:
         raise ValueError('Native SDPA sources required')
     result = {str(path): digest(root / path) for path in sorted(

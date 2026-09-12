@@ -16,7 +16,9 @@ def scoped_stats_pack():
 
     def replacements():
         substitutions = original()
-        substitutions['compute_common.hpp'] += ((BEFORE, AFTER),)
+        substitutions['compute_common.hpp'] += ((BEFORE, AFTER),
+            ('        MATH((recip_tile_first_column(0)));',
+             '        MATH((recip_tile_first_column<false>(0)));'))
         return substitutions
 
     with patch.object(native_draft_sdpa, 'replacements', replacements):
