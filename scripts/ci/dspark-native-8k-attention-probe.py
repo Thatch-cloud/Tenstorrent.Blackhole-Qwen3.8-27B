@@ -26,7 +26,7 @@ SPEC.loader.exec_module(FULL)
 NATIVE_SPEC = importlib.util.spec_from_file_location('native_attention_gate', Path(__file__).with_name('dspark-attention-probe.py'))
 NATIVE = importlib.util.module_from_spec(NATIVE_SPEC)
 NATIVE_SPEC.loader.exec_module(NATIVE)
-SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
+SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
     'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 'dspark-attention-probe.py'))))
 CAPACITY, PROPOSALS = 8448, 15
 POSITIONS = (8192, 8433)
@@ -320,13 +320,14 @@ def run():
 
 
 def main():
+    from dspark_stats_pack import scoped_stats_pack
     from unittest.mock import patch
     import dspark_full_attention
     import sim_memory_budget
     root = Path(os.environ['TT_METAL_HOME'])
     print(json.dumps(dict(stage='runtime_identity', binaries={name: digest(root / name)
         for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')})), flush=True)
-    with patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY), \
+    with scoped_stats_pack(), patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY), \
             patch.object(NATIVE, 'digest', digest), \
             patch.object(NATIVE, 'fingerprints', runner_fingerprints), \
             patch.object(sim_memory_budget, 'MEMORY_MAX', 64 * 1024 ** 3), \
