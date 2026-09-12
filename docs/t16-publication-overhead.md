@@ -133,3 +133,26 @@ quality qualification. Retain the supported context-ladder acceptance step;
 do not extrapolate this CTX4096 result to long context or multiple streams.
 
 Report SHA256: `2451fe1ab0470f5a1b82d376d7b6a5d95a1997ca9a46b9d3bb42938fc4bf9ec4`.
+
+### Stable-unique coding screen
+
+Run **34679998171**, unchanged revision `b09450f`, also passes. Its paired
+summary was independently recomputed with unchanged request/native source
+snapshots. One stream, CTX4096:
+
+| Runtime | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: |
+| Combined fusion control | 3344.86 | 119.25 |
+| Captured publication | 3361.97 | 126.33 |
+
+TG improves 5.94%; both arms commit 104 tokens with 98/120 accepted drafts
+(81.67%) across two timed requests. Candidate setup-inclusive time is 5487.57
+ms versus 5552.69 ms control. This is a short task-specific sample, not a
+sustained long-generation throughput claim.
+
+CI did not execute functional coding tests. Independent local execution of the
+inspected generated function passes four cases: empty input, interleaved
+duplicates, negative/zero values and identical values. All preserve the input.
+This small screen is not broad held-out coding-quality certification.
+
+Report SHA256: `9bd2c13d26e44859a108203519f7330d2332b8132e020c15b5423a17b642f4a8`.
