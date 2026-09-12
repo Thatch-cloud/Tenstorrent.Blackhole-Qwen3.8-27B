@@ -5,9 +5,25 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from dspark_hardware_gate import digest
 from dspark_fp32_intermediates import SOURCE, SOURCE_SHA256, ANCHOR, REPLACEMENT, transform
+from sdpa_graft_build import audit as audit_registrations, implementation_sources
+
+
+def restore_registrations(root):
+    evidence = audit_registrations(root)
+    directory = root / 'ttnn/cpp/ttnn/operations/transformer'
+    registration = directory / 'sources.cmake'
+    source = registration.read_bytes()
+    anchor = b'set(TTNN_OP_TRANSFORMER_SRCS\n'
+    if source.count(anchor) != 1:
+        raise ValueError('Unique transformer registration anchor required')
+    additions = ''.join('    ' + name + '\n' for name in implementation_sources()).encode()
+    registration.write_bytes(source.replace(anchor, anchor + additions))
+    evidence['source_after'] = digest(registration)
+    return evidence
 
 
 def validate_manifest(root, output):
@@ -27,6 +43,17 @@ def validate_manifest(root, output):
         raise ValueError('Both binary paths must contain the rebuilt library')
     if any(digest(root / name) != value for name, value in binaries.items()):
         raise ValueError('Rebuilt binary changed')
+    registration = report.get('registration', {})
+    directory = root / 'ttnn/cpp/ttnn/operations/transformer'
+    if digest(directory / 'sources.cmake') != registration.get('source_after'):
+        raise ValueError('Rebuilt operation registration changed')
+    if set(registration.get('implementation_sources', {})) != set(implementation_sources()):
+        raise ValueError('Complete transformer implementations required')
+    for name, value in registration['implementation_sources'].items():
+        if digest(directory / name) != value:
+            raise ValueError('Registered operation implementation changed')
+    if report.get('import_passed') is not True:
+        raise ValueError('Rebuilt TTNN import check required')
     for name in ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py'):
         if report.get('builders', {}).get(name) != digest(Path(__file__).with_name(name)):
             raise ValueError('Factory builder changed')
@@ -53,6 +80,7 @@ def main():
             ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py')},
         jobs=8, timeout_seconds=1800, device_access=False)
     try:
+        report['registration'] = restore_registrations(root)
         factory.write_bytes(candidate)
         report['source_after'] = digest(factory)
         subprocess.run(['ninja', '-C', str(root / 'build_Release'), '-j', '8', 'ttnncpp'],
@@ -63,6 +91,10 @@ def main():
         report['binaries_after'] = {name: digest(root / name) for name in binaries}
         if factory.read_bytes() != candidate:
             raise ValueError('Factory source changed during build')
+        subprocess.run([sys.executable, '-c',
+            'import ttnn; assert callable(ttnn.transformer.attn_decode_prep); '
+            'assert callable(ttnn.transformer.scaled_dot_product_attention)'], check=True, timeout=60)
+        report['import_passed'] = True
         report['passed'] = True
     finally:
         output.write_text(json.dumps(report, indent=2) + '\n')
