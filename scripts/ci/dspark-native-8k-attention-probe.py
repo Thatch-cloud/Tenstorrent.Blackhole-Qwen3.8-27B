@@ -10,7 +10,8 @@ from attention_batch import capture_operation
 from dspark_cached_layer import append_queries
 from dspark_fixed_inputs import fixed_mask, validate_fixed_mask
 from dspark_full_attention import geometry
-from dspark_native_full_attention import execute
+from dspark_full_attention import validate_inputs
+from draft_attention import draft_sdpa
 from native_draft_sdpa import run_precise_probe
 from dspark_hardware_gate import digest
 from dspark_projection import tensor_digest
@@ -32,6 +33,16 @@ POSITIONS = (8192, 8433)
 REPLAYS = (1, 0)
 NAMES = ('query', 'history_key', 'history_value', 'query_key', 'query_value', 'mask')
 COUNTS = dict(eager_checks=4, replay_checks=4, input_checks=48, layout_checks=16, fixture_controls=8, stale_controls=2)
+
+
+def execute(operations, mesh, query, key, value, mask, owned, *, context_rows,
+        proposals, mask_validated=False):
+    if mesh is None or not isinstance(owned, list):
+        raise ValueError('Explicit mesh and caller-owned attention output required')
+    validate_inputs(operations, query, key, value, mask, context_rows, proposals, mask_validated)
+    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=32)
+    owned.append(output)
+    return output
 
 
 def source_hashes():
@@ -148,7 +159,7 @@ def run():
         positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
         sources=source_hashes(), native_sources=NATIVE.fingerprints(root,
             packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True),
-        kernel_audit=kernel_audit, key_chunk_size=64, resources_before=snapshot(bounded=True),
+        kernel_audit=kernel_audit, key_chunk_size=32, resources_before=snapshot(bounded=True),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         **{name: [] for name in COUNTS})
     owned, transient = [], []
