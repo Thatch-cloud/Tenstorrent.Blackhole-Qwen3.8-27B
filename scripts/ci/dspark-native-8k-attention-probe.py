@@ -26,7 +26,7 @@ SPEC.loader.exec_module(FULL)
 NATIVE_SPEC = importlib.util.spec_from_file_location('native_attention_gate', Path(__file__).with_name('dspark-attention-probe.py'))
 NATIVE = importlib.util.module_from_spec(NATIVE_SPEC)
 NATIVE_SPEC.loader.exec_module(NATIVE)
-SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
+SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
     'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 'dspark-attention-probe.py'))))
 CAPACITY, PROPOSALS = 8448, 15
 POSITIONS = (8192, 8433)
@@ -266,6 +266,31 @@ def run():
                     report['input_checks'].append(dict(mode=mode, ordinal=ordinal, case=case, chip=chip, name=name, exact=exact_input))
                     if not exact_input:
                         raise AssertionError('Fixed-storage attention mutates a borrowed input')
+
+        from dspark_attention_value_diagnostics import KINDS, diagnostic_fixture
+        report['value_diagnostics'] = []
+        for kind in KINDS:
+            progress('value_diagnostic_' + kind)
+            update(0)
+            fixture = diagnostic_fixture(patterns[0], kind, POSITIONS[0], PROPOSALS)
+            for name in ('history_value', 'query_value'):
+                payload = upload(fixture[name], name, False)
+                ttnn.copy_host_to_device_tensor(payload, inputs[name])
+            ttnn.synchronize_device(mesh)
+            output = run()
+            ttnn.synchronize_device(mesh)
+            for chip in range(2):
+                actual = ttnn.to_torch(ttnn.get_device_tensors(output['attention'])[chip]).float()[:, :, :PROPOSALS]
+                golden = reference(fixture, chip)[:, :, :PROPOSALS]
+                close = torch.isclose(actual, golden, rtol=.01, atol=.01)
+                report['value_diagnostics'].append(dict(kind=kind, chip=chip,
+                    qualification=False, finite=bool(torch.isfinite(actual).all()),
+                    failed_elements=int((~close).sum()), max_abs=float((actual - golden).abs().max()),
+                    actual_by_head_row=actual[0, :, :, 0].tolist(),
+                    expected_by_head_row=golden[0, :, :, 0].tolist(),
+                    channel_spread=float((actual.amax(-1) - actual.amin(-1)).max())))
+            release_owned(ttnn, transient)
+            transient.clear()
 
         for case in range(2):
             progress(f'eager_{case}')

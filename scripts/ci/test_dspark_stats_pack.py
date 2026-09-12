@@ -3,7 +3,7 @@
 import unittest
 
 import native_draft_sdpa
-from dspark_stats_pack import BEFORE, AFTER, CORRECTION_BEFORE, CORRECTION_AFTER, scoped_stats_pack
+from dspark_stats_pack import BEFORE, AFTER, scoped_stats_pack
 
 
 class StatsPackTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class StatsPackTests(unittest.TestCase):
                 changed = native_draft_sdpa.replacements()
                 self.assertEqual(changed['sdpa.cpp'], baseline['sdpa.cpp'])
                 self.assertEqual(changed['compute_common.hpp'],
-                    baseline['compute_common.hpp'] + ((BEFORE, AFTER), (CORRECTION_BEFORE, CORRECTION_AFTER)))
+                    baseline['compute_common.hpp'] + ((BEFORE, AFTER),))
                 self.assertNotIn('recip_tile_first_column<false>', str(changed))
                 raise RuntimeError('scope exit')
         self.assertIs(native_draft_sdpa.replacements, original)
