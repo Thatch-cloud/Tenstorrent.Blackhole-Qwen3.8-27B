@@ -10,7 +10,11 @@ The next candidate amortizes target verification over up to 31 draft queries /
 It retains actual prefill capture, native-token comparison, feature publication
 audits and 32-row verifier routing. Its first integration configuration uses
 native target attention and full state history, not T16-only optimisations.
-The request/runtime/admission regression passes 27 host tests. This is wiring
+The loaded-model runner now selects a single audited T32 request, preserves the
+active SFPU attention kernel and rejects mixed T16 experiment flags. Its result
+gate requires a real 32-row verification plus all feature/replay checks; simulator
+timings cannot become a hardware throughput claim.
+The request/runtime/admission regression passes 31 host tests. This is wiring
 evidence, not a simulator pass or a new throughput result.
 
 | Prerequisite | Current evidence |
