@@ -18,9 +18,13 @@ REPLACEMENT = '''    const bool qwen_draft_fp32_intermediates =
     tt::DataFormat stats_df = im_df;'''
 
 
-def transform(source):
+def transform(source, *, enabled=True):
+    if type(enabled) is not bool:
+        raise ValueError('Explicit factory variant selection required')
     if not isinstance(source, bytes) or hashlib.sha256(source).hexdigest() != SOURCE_SHA256:
         raise ValueError('Exact pinned SDPA factory required')
     if source.count(ANCHOR.encode()) != 1:
         raise ValueError('Unique intermediate-format anchor required')
-    return source.replace(ANCHOR.encode(), REPLACEMENT.encode())
+    replacement = REPLACEMENT if enabled else REPLACEMENT.replace(
+        'qwen_draft_fp32_intermediates =\n', 'qwen_draft_fp32_intermediates = false &&\n')
+    return source.replace(ANCHOR.encode(), replacement.encode())

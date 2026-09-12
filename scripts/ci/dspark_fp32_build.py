@@ -32,10 +32,15 @@ def validate_manifest(root, output):
     if report.get('passed') is not True or report.get('source_before') != SOURCE_SHA256:
         raise ValueError('Completed pinned factory rebuild required')
     source = (root / SOURCE).read_bytes()
-    if source.count(REPLACEMENT.encode()) != 1:
+    enabled = report.get('factory_enabled')
+    if type(enabled) is not bool:
+        raise ValueError('Explicit factory variant evidence required')
+    replacement = REPLACEMENT if enabled else REPLACEMENT.replace(
+        'qwen_draft_fp32_intermediates =\n', 'qwen_draft_fp32_intermediates = false &&\n')
+    if source.count(replacement.encode()) != 1:
         raise ValueError('Unique rebuilt factory variant required')
-    original = source.replace(REPLACEMENT.encode(), ANCHOR.encode())
-    if transform(original) != source or digest(root / SOURCE) != report.get('source_after'):
+    original = source.replace(replacement.encode(), ANCHOR.encode())
+    if transform(original, enabled=enabled) != source or digest(root / SOURCE) != report.get('source_after'):
         raise ValueError('Rebuilt factory differs from exact transformation')
     expected = {'build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'}
     binaries = report.get('binaries_after', {})
@@ -72,9 +77,13 @@ def main():
         raise ValueError('Fresh build manifest required')
     factory = root / SOURCE
     before = factory.read_bytes()
-    candidate = transform(before)
+    control = os.environ.get('QWEN_DRAFT_FP32_CONTROL', '0')
+    if control not in ('0', '1'):
+        raise ValueError('Explicit rebuilt control flag required')
+    enabled = control == '0'
+    candidate = transform(before, enabled=enabled)
     binaries = ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')
-    report = dict(passed=False, source_before=digest(factory),
+    report = dict(passed=False, factory_enabled=enabled, source_before=digest(factory),
         binaries_before={name: digest(root / name) for name in binaries},
         builders={name: digest(Path(__file__).with_name(name)) for name in
             ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py')},

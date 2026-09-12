@@ -6,6 +6,13 @@ import dspark_fp32_intermediates as candidate
 
 
 class FactoryTests(unittest.TestCase):
+    def test_rebuilt_control_forces_original_formats(self):
+        original = candidate.ANCHOR.encode()
+        with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(original).hexdigest()):
+            changed = candidate.transform(original, enabled=False)
+        self.assertIn(b'qwen_draft_fp32_intermediates = false &&', changed)
+        self.assertIn(b': tt::DataFormat::Float16_b;', changed)
+
     def test_only_format_block_changes(self):
         original = ('before\n' + candidate.ANCHOR + '\nafter').encode()
         with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(original).hexdigest()):
