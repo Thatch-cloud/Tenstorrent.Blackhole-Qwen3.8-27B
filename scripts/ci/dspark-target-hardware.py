@@ -253,6 +253,9 @@ def main():
         gate['sampling_link_sources'] = sampling_link_audit(root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
     native = native_fingerprints(root, dict(native_sources=gate['native_reference']))
     require_compatible_native(native, gate['native_reference'], require_built_library=not options.preflight)
+    if options.request:
+        from dspark_context_selection import request_context, validate_history_capacity
+        validate_history_capacity(request_context(), options.max_new_tokens)
     from transformers import AutoConfig, AutoTokenizer
     from models.demos.blackhole.qwen36.tt.qwen36_vllm import Qwen36ForCausalLM
     config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)

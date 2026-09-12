@@ -2,11 +2,18 @@ import os
 import unittest
 from unittest.mock import patch
 
-from dspark_context_selection import request_context
+from dspark_context_selection import request_context, validate_history_capacity
 from target_t16_attention_gate import validate_request_option
 
 
 class ContextTests(unittest.TestCase):
+    def test_output_headroom_is_part_of_capacity(self):
+        validate_history_capacity(4096, 256)
+        validate_history_capacity(7936, 256)
+        for context, output in ((8192, 256), (7937, 256), (8192, 2), (4096, True)):
+            with self.subTest(context=context, output=output), self.assertRaises(ValueError):
+                validate_history_capacity(context, output)
+
     def test_default(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(request_context(), 4096)
