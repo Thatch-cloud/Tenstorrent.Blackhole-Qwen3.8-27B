@@ -55,6 +55,7 @@ if [ "$mode" = request-target-attention ]; then
                 export QWEN_GDN_OUTPUT_L1_EXPERIMENT=0
                 export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
                 export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
+                export QWEN_GDN_OUTER_ADD_EXPERIMENT=1
             fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then

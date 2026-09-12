@@ -19,9 +19,19 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
-        gdn_copy_pairs=False):
+        gdn_copy_pairs=False, gdn_outer_add=False):
     import torch
     from full_request import measure_request
+    if type(gdn_outer_add) is not bool or (gdn_outer_add and (gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or not (
+            captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
+        raise ValueError('Outer-add fusion requires the isolated combined runtime')
+    outer_audit = outer_admission = None
+    if gdn_outer_add:
+        import os
+        from pathlib import Path
+        from gdn_outer_add_gate import qualify
+        outer_admission = qualify(Path(__file__).with_name('gdn-outer-add.json'),
+            Path(__file__).parent, os.environ['TT_METAL_HOME'])
     if type(gdn_copy_pairs) is not bool or (gdn_copy_pairs and (gdn_output_l1 or gdn_output_grid or not (
             captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
         raise ValueError('Copy pairs require the combined runtime without other GDN candidates')
@@ -264,6 +274,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
 
     observer = native_slot_arm = fusion_arm = None
     try:
+        if gdn_outer_add:
+            from gdn_outer_add_scope import scoped_outer_add
+            outer_audit = score_scope.enter_context(scoped_outer_add(outer_admission))
         if gdn_copy_pairs:
             from gdn_copy_pairs_scope import scoped_copy_pairs
             copy_audit = score_scope.enter_context(scoped_copy_pairs(copy_admission))
@@ -341,6 +354,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
         score_scope.close()
+        if outer_audit is not None:
+            result['gdn_outer_add'] = outer_audit
         if copy_audit is not None:
             result['gdn_copy_pairs'] = copy_audit
         if output_arm is not None:
