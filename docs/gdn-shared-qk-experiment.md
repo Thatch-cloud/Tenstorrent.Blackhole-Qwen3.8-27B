@@ -1,7 +1,7 @@
 # Shared block Q/K normalization
 
-Status: compute-source generator implemented and host-checked; dataflow,
-simulator comparison and hardware integration remain unimplemented/unqualified.
+Status: compute/dataflow generators and eight-head program builder implemented
+and host-checked. Simulator comparison and model integration remain unqualified.
 
 ## Why change direction?
 
@@ -54,3 +54,18 @@ could otherwise pop a buffer before the compute's wait and deadlock. All waits
 on compute-owned scratch remain. Five host tests cover the source transform,
 ownership rule, coordinate mapping, and invalid inputs. Extraction from the
 actual pinned source also passes. This is not compilation or numerical evidence.
+
+## Dataflow implementation
+
+The block reader uses full-page BF16 reads and clears inactive token rows before
+normalization. The serial reference caches the same eight Q/K pages, gathers
+one token into row zero, and uses exactly the same compute chain. Its writer
+assembles every normalized token into distinct FP32 scratch before full-page
+writes. No sub-page accessor DMA is used, following the pinned reader's known
+restriction. Writes drain before buffers are released.
+
+The program builder uses eight workers per chip and caller-owned, distinct
+`[1,16,1024]` FP32 query/key outputs. It rejects wrong shape, dtype, placement,
+mesh size or input/output aliasing. Nine host tests check extraction, head/page
+mapping, face boundaries and scratch ownership. Device compilation, numerical
+comparison, trace replay and integration into recurrence are still required.
