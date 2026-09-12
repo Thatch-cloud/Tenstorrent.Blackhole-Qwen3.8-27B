@@ -2,6 +2,33 @@
 
 ## Matched short-output combined runtime - 2026-09-12
 
+### Unused position upload removal
+
+Run **34691992781**, revision **b37a76e**, passes all six exact output, recurrent
+state and inactive-slot checks. Output remains identical to run 34691332718.
+All 756 recorded source hashes and pooled candidate TG independently verified.
+
+| Combined publication runtime | CTX | Streams | PP tok/s | Committed TG tok/s |
+| --- | --- | --- | --- | --- |
+| Original metadata staging | 4096 | 1 | 1568.33 | 51.46 |
+| Skip proven-unused singleton positions | 4096 | 1 | 1865.03 | 57.67 |
+
+Both use 128 total timed committed tokens and 110/188 accepted/proposed tokens.
+TG increases 12.1% across these separate runs, not an interleaved staging A/B.
+All twelve timed 16-row blocks record zero singleton uploads; smaller buckets
+retain their required 4/2/1 uploads. Mean 16-row staging falls from 29.14 to
+8.68 ms. Across all widths, staging falls from 22.25 to 9.31 ms and cycle time
+from 138.14 to 123.25 ms. Blocking trace time remains 61.63 ms.
+
+The optimisation is explicit opt-in and retains packed cache positions, audit
+inputs, signature checks and synchronization. No numerical kernels or serving
+defaults change. This is a useful combined-runtime improvement, not 200 TG or
+broad coding-quality acceptance. Next target: the blocking target trace and
+33.63 ms drafting stage, rather than the sub-millisecond output readback.
+
+Report SHA256:
+`56aac72d48fe97fad70caf008f24fb7cec133700c3b0308c67c2fdaa8a07dfdd`.
+
 ### Verification cost breakdown
 
 Follow-up **34691332718** at **63034a3** passes all six exact output/state checks.
