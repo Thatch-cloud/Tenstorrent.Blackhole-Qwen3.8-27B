@@ -2,7 +2,6 @@
 
 from pathlib import Path
 import hashlib
-import os
 
 
 def source_hashes():
@@ -16,13 +15,6 @@ def validate_ticket(start, rows, capacity, *, short_context=False):
     if any(type(value) is not int for value in (start, rows, capacity)):
         raise ValueError('Integer replay geometry required')
     minimum, maximum = (256, 768) if short_context else (4096, 16640)
-    if os.environ.get('QWEN_CONTEXT_LADDER_SIM') == '1':
-        if (os.environ.get('QWEN_SIM_ONLY') != '1' or short_context
-                or os.environ.get('QWEN_HARDWARE_TESTS') == '1' or os.environ.get('QWEN_CARDS_ALLOCATED') == '1'):
-            raise ValueError('Experimental context ladder is simulator-only')
-        if capacity not in tuple(context + 256 for context in (2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144)):
-            raise ValueError('Explicit context-ladder capacity required')
-        minimum, maximum = 2304, 262400
     if not 1 <= rows <= 32 or capacity < minimum or capacity > maximum or capacity % 256:
         raise ValueError('Bounded long-context native chunk family required')
     if short_context and rows != 8:
