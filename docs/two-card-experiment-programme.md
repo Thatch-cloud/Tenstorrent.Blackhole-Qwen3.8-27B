@@ -1,5 +1,26 @@
 # Qwen3.8-27B: two-card experiment programme
 
+## T32 combined hardware correctness - 2026-09-12
+
+Run **34688141901** passes the actual two-card request at CTX4096:
+
+| Check | Result |
+| --- | --- |
+| Draft / verifier width | 31 / 32 rows |
+| Committed decode tokens | 64, exact against native target |
+| Accepted / proposed draft tokens | 55 / 158 (34.8%) |
+| Recurrent state and inactive slots | Exact |
+| Feature publication and changed-input replay | All required audits pass |
+| PP / TG | Not measured: heavily instrumented correctness run |
+
+The artifact summary was independently recomputed and all 828 recorded source
+files verified against the candidate. Report SHA256:
+`ce5c97174e5cc52a16ac257e12621eed5d17382f5da4f8c781fb895b196c4b95`.
+This is not broad coding-quality or serving acceptance. Next: uninstrumented
+combined-runtime measurement, then compare against the optimised T16 baseline.
+Full-model simulation is no longer required: use simulation for changed numerical
+kernels and hardware for complete requests. Simulator run 34687005174 was cancelled.
+
 ## Combined-runtime tuning priorities - 2026-09-11
 
 ### T32 integration work in progress
