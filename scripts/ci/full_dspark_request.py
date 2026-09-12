@@ -18,9 +18,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False):
+        history_profile=False, captured_publication=False):
     import torch
     from full_request import measure_request
+    if type(captured_publication) is not bool or (captured_publication and (
+            not proposal_trace or not commit_only_gdn or banked_proposal or history_profile or profile_verifier)):
+        raise ValueError('Captured publication requires the traced commit-only request without competing history profiles')
+    publication_arm = None
     if type(history_profile) is not bool or (history_profile and banked_proposal):
         raise ValueError('Explicit history attribution requires the standard fixed-history request path')
     history_observer = None
@@ -187,7 +191,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         drafter.propose(seed, 15)
 
     def factory():
-        nonlocal drafter, runtime, proposal_device, score_arm
+        nonlocal drafter, runtime, proposal_device, score_arm, publication_arm
         status('project_full_prefill_history', context=len(prompt))
         implementation = DSparkDevice
         if proposal_trace:
@@ -201,6 +205,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             **(dict(native_attention=True) if native_attention else {}),
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         proposal_device = drafter
+        if captured_publication:
+            from dspark_publication_scope import CapturedPublicationArm
+            status('capture_history_projection_before_verifier_allocation')
+            publication_arm = CapturedPublicationArm(proposal_device.history, audit=audit_features)
+            score_scope.enter_context(publication_arm.install())
         if history_observer is not None:
             score_scope.enter_context(history_observer.install(proposal_device.history))
         if score_layout:
@@ -260,6 +269,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 raise AssertionError('Every changing-input proposal replay and warmup must pass its eager audit')
         result['publication_diagnostics'] = dict(records=runtime.publication_diagnostics.records,
             scope='Host wall and process CPU with GC pauses; no added device fences; timing includes instrumentation')
+        if publication_arm is not None:
+            result['captured_publication'] = dict(enabled=True,
+                checks=list(publication_arm.projection.checks),
+                scope='Captured learned feature projection with transactional fixed history; full request costs retained')
         if history_observer is not None:
             result['history_publication_profile'] = dict(records=list(history_observer.records),
                 scope='Nested host-wall timers; total includes projection and bank assembly; no added fences; not device-kernel timing')

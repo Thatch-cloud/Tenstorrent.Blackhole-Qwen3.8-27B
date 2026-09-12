@@ -11,6 +11,77 @@ import test_dspark_history as fixtures
 
 
 class StableHistoryTests(unittest.TestCase):
+    def test_captured_adapter_pads_features_and_restores_hook_on_failure(self):
+        from dspark_publication_scope import CapturedPublicationArm
+
+        cache = self.cache(position=32, capacity=128)
+        cache.rotary = SimpleNamespace(tables=Mock(side_effect=lambda position, rows:
+            (torch.full((1, 1, rows, 128), position, dtype=torch.bfloat16),
+             torch.full((1, 1, rows, 128), -position, dtype=torch.bfloat16))))
+        outputs = self.projected(start=32, rows=32)
+
+        def project(features, tables):
+            for value in features:
+                self.assertEqual(tuple(value.shape), (1, 1, 32, 2560))
+                self.assertEqual(torch.count_nonzero(value[..., 16:, :]), 0)
+            self.assertTrue(torch.all(tables[0][..., :3, :] == 32))
+            self.assertTrue(torch.all(tables[0][..., 3:, :] == 1))
+            self.assertTrue(torch.all(tables[1][..., :3, :] == -32))
+            self.assertEqual(torch.count_nonzero(tables[1][..., 3:, :]), 0)
+            return outputs
+
+        projection = SimpleNamespace(operations=self.operations, mesh=self.mesh, outputs=outputs,
+            closed=False, project=Mock(side_effect=project), close=Mock())
+        try:
+            with patch('dspark_publication_scope.PreparedHistoryProjection', return_value=projection), \
+                    patch('dspark_publication_scope.require_tensor', side_effect=fixtures.require_tensor), \
+                    patch('dspark_captured_publication.require_tensor', side_effect=fixtures.require_tensor):
+                arm = CapturedPublicationArm(cache, audit=True)
+                with self.assertRaisesRegex(RuntimeError, 'request failed'):
+                    with arm.install():
+                        publication = cache.prepare_publication(fixtures.features(32, 3, 16), 3, position=32)
+                        cache.discard_publication(publication)
+                        raise RuntimeError('request failed')
+                self.assertNotIn('prepare_publication', vars(cache))
+                projection.close.assert_called_once()
+                self.assertEqual(cache.position, 32)
+                self.assertIsNone(cache.pending)
+                self.assertEqual(cache.rotary.tables.call_args_list[-1].args, (32, 3))
+        finally:
+            cache.close()
+
+    def test_captured_prefix_publication_preserves_transaction_and_borrowed_outputs(self):
+        from dspark_captured_publication import prepare
+
+        cache = self.cache(position=32, capacity=128)
+        try:
+            with patch('dspark_captured_publication.require_tensor', side_effect=fixtures.require_tensor):
+                for prefix, commit in ((1, False), (15, True), (32, True)):
+                    position = cache.position
+                    outputs = self.projected(start=position, rows=32)
+                    identities = {fixtures.identity(value) for value in leaves(outputs)}
+                    projection = SimpleNamespace(operations=self.operations, mesh=self.mesh,
+                        project=Mock(return_value=outputs))
+                    previous = tuple(value.clone() for value in leaves(cache.layers))
+                    publication = prepare(cache, projection, (), (), prefix, position=position)
+                    self.assertEqual(cache.position, position)
+                    for value, golden in zip(leaves(cache.layers), previous, strict=True):
+                        self.assertTrue(torch.equal(value, golden))
+                    with self.assertRaises(ValueError):
+                        prepare(cache, projection, (), (), prefix, position=position)
+                    self.assertEqual(projection.project.call_count, 1)
+                    if commit:
+                        cache.commit_publication(publication)
+                    else:
+                        cache.discard_publication(publication)
+                    for value, golden in zip(leaves(cache.layers),
+                            leaves(self.projected(start=0, rows=cache.position)), strict=True):
+                        self.assertTrue(torch.equal(value[..., :cache.position, :], golden))
+                        self.assertEqual(torch.count_nonzero(value[..., cache.position:, :]), 0)
+                    self.assertTrue(identities.isdisjoint(self.operations.deallocated))
+        finally:
+            cache.close()
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

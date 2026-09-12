@@ -19,6 +19,19 @@ score_layout=${QWEN_DSPARK_SCORE_LAYOUT:-0}
 banked_proposal=${QWEN_DSPARK_BANKED_PROPOSAL:-0}
 native_slot=${QWEN_DSPARK_NATIVE_SLOT:-0}
 fusion=${QWEN_DSPARK_FUSION_T16:-0}
+publication=${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}
+[[ "$publication" = 0 || "$publication" = 1 ]]
+publication_report=''
+if [ "$publication" = 1 ]; then
+    test "$fusion" = 1
+    test "$mode" = request-target-attention
+    test "$history_profile" = 0
+    evidence=$(mktemp -d "$RUNNER_TEMP/qwen-publication-evidence.XXXXXX")
+    gh run download 34677941763 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34677941763 --dir "$evidence"
+    publication_report="$evidence/t32-publication.json"
+    printf '%s  %s\n' 4bd749d6381cb7e1f5be69276d5a5011c9e6cfa7c30182b44dd09f3d1b115914 "$publication_report" | sha256sum -c -
+fi
 [[ "$fusion" = 0 || "$fusion" = 1 ]]
 if [ "$fusion" = 1 ]; then test "$score_layout" = 1; test "$native_slot" = 0; test "$banked_proposal" = 0; fi
 [[ "$native_slot" = 0 || "$native_slot" = 1 ]]
@@ -110,6 +123,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_BANKED_PROPOSAL=$banked_proposal" \
     -e "QWEN_DSPARK_NATIVE_SLOT=$native_slot" \
     -e "QWEN_DSPARK_FUSION_T16=$fusion" \
+    -e "QWEN_DSPARK_CAPTURED_PUBLICATION=$publication" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \
@@ -119,6 +133,9 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "$publication" = 1 ]; then
+    docker cp "$publication_report" "$test_id:/experiment-scripts/ci/dspark-publication-simulator.json"
+fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
     docker cp speculative-decoding "$test_id:/speculative-decoding"
