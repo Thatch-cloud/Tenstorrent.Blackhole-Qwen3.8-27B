@@ -2,6 +2,51 @@
 
 ## T32 combined hardware correctness - 2026-09-12
 
+### Folded attention result and decision
+
+Run **34689543028** passes one full-request hardware audit and two timed
+requests. All three preserve exact target output, recurrent state and inactive
+slots. The timed requests commit 128 tokens in total; acceptance stays 110/316
+(34.8%). All 828 source hashes match the candidate and remain unchanged after
+execution; committed TG was independently recomputed from total decode time.
+
+| Combined runtime | CTX | Streams | PP tok/s | Committed TG tok/s |
+| --- | --- | --- | --- | --- |
+| T32 native attention, commit-only | 4096 | 1 | 2036.11 | 36.22 |
+| T32 folded attention, commit-only | 4096 | 1 | 1638.13 | 36.56 |
+
+These are separate runs, not an interleaved comparison. The 0.9% TG difference
+does not establish a meaningful improvement; PP is lower in the folded run.
+Setup-inclusive request time averages 16.58 seconds. No serving promotion or
+broad coding-quality acceptance is claimed.
+
+| Mean host stage per timed block | Native ms | Folded ms |
+| --- | --- | --- |
+| Draft | 61.19 | 62.34 |
+| Input/state preparation | 28.81 | 34.92 |
+| Verify/readback | 81.47 | 72.97 |
+| Selection/publication | 24.38 | 23.85 |
+| Whole cycle | 196.25 | 194.43 |
+
+The 18 timed blocks commit 7.11 tokens per block on average. At that acceptance,
+200 TG requires an average cycle of **35.56 ms**, not 194.43 ms. Even removing
+the entire selection/publication stage would only imply about **41.7 TG**;
+removing all drafting time would imply about **53.8 TG**. These are arithmetic
+upper-bound estimates assuming everything else stays fixed, not measurements.
+The host stages are not isolated device-kernel timings.
+
+**Decision:** do not treat longer drafts as an accepted speed improvement.
+Before investing further in T32-only composition, obtain a matched short-output
+comparison against the qualified combined T16 publication runtime: same coding
+prompt, CTX4096, output limit, fresh audit and two uninstrumented repeats.
+Then select the faster complete runtime for the next optimisation. Retained
+component simulator evidence remains the numerical-kernel gate; do not repeat
+full-model simulator loading. Captured publication is still a possible T32
+candidate, but cannot by itself recover the target throughput.
+
+Report SHA256:
+`e5520ce10f913d9d38c3525e0107e046e4eb9950d775fefec8e983ebd3b56c88`.
+
 ### First timed T32 integration baseline
 
 Commit-only follow-up **34689060295** passes the fresh audit and both timed

@@ -132,6 +132,7 @@ def main():
     parser.add_argument('--profile-drafter', action='store_true')
     parser.add_argument('--history-profile', action='store_true')
     parser.add_argument('--captured-publication', action='store_true')
+    parser.add_argument('--max-new-tokens', type=int, default=None)
     parser.add_argument('--norm-scatter-variants', action='store_true')
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
@@ -142,6 +143,10 @@ def main():
     parser.add_argument('--native-slot-gdn', action='store_true')
     parser.add_argument('--fused-t16-mlp', action='store_true')
     options = parser.parse_args()
+    from dspark_request_limit import request_limit
+    request_limit(options.max_new_tokens)
+    if options.max_new_tokens is not None and not options.request:
+        parser.error('An output budget requires full-request mode')
     if options.captured_publication:
         if (not options.request or not options.target_attention_variants or not options.score_layout
                 or not options.fused_t16_mlp or options.history_profile or options.profile_verifier
@@ -391,7 +396,8 @@ def main():
                 mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
                 history_profile=options.history_profile, captured_publication=options.captured_publication,
                 score_layout=options.score_layout, banked_proposal=options.banked_proposal,
-                native_slot_gdn=options.native_slot_gdn, fused_t16_mlp=options.fused_t16_mlp)
+                native_slot_gdn=options.native_slot_gdn, fused_t16_mlp=options.fused_t16_mlp,
+                max_new_tokens=options.max_new_tokens)
             if coding_task != 'merge_intervals':
                 checks = report['request_checks']
                 emitted = checks[0]['emitted']
