@@ -8,20 +8,26 @@ HELPER = '''void outer_add(uint32_t delta, uint32_t key, uint32_t state, uint32_
                uint32_t key_tiles, uint32_t value_tiles) {
     cb_reserve_back(output, key_tiles * value_tiles);
     pack_reconfig_data_format(output);
-    for (uint32_t key_tile = 0; key_tile < key_tiles; ++key_tile) {
-        for (uint32_t value_tile = 0; value_tile < value_tiles; ++value_tile) {
-            const uint32_t tile = key_tile * value_tiles + value_tile;
-            reconfig_data_format(delta, key);
-            mul_bcast_cols_init(delta, key);
-            tile_regs_acquire();
-            mul_tiles_bcast_cols(delta, key, value_tile, key_tile, 0);
-            add_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state);
-            add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, tile, 0);
-            tile_regs_commit();
-            tile_regs_wait();
-            pack_tile(0, output, tile);
-            tile_regs_release();
+    const uint32_t tiles = key_tiles * value_tiles;
+    for (uint32_t first = 0; first < tiles; first += 2) {
+        const uint32_t count = tiles - first < 2 ? tiles - first : 2;
+        reconfig_data_format(delta, key);
+        mul_bcast_cols_init(delta, key);
+        tile_regs_acquire();
+        for (uint32_t slot = 0; slot < count; ++slot) {
+            const uint32_t tile = first + slot;
+            mul_tiles_bcast_cols(delta, key, tile % value_tiles, tile / value_tiles, slot);
         }
+        add_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state);
+        for (uint32_t slot = 0; slot < count; ++slot) {
+            add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, first + slot, slot);
+        }
+        tile_regs_commit();
+        tile_regs_wait();
+        for (uint32_t slot = 0; slot < count; ++slot) {
+            pack_tile(slot, output, first + slot);
+        }
+        tile_regs_release();
     }
     cb_push_back(output, key_tiles * value_tiles);
 }

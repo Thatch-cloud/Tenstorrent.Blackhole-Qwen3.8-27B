@@ -15,10 +15,18 @@ class OuterAddTests(unittest.TestCase):
         self.assertIn(candidate.FUSED, result)
         self.assertIn(candidate.HELPER, result)
         self.assertNotIn('POP(cb_outer, kv)', result)
-        self.assertIn('add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, tile, 0)', result)
+        self.assertIn('add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(state, first + slot, slot)', result)
         self.assertNotIn('add_binary_tile', result)
         self.assertEqual(result.count('tile_regs_acquire();'), 1)
-        self.assertEqual(result.count('pack_tile(0, output, tile);'), 1)
+        self.assertEqual(result.count('pack_tile(slot, output, first + slot);'), 1)
+
+    def test_pair_schedule_preserves_outer_coordinates_and_tail(self):
+        for key_tiles, value_tiles in ((4, 1), (3, 1), (4, 4)):
+            count = key_tiles * value_tiles
+            tiles = [first + slot for first in range(0, count, 2)
+                     for slot in range(min(2, count - first))]
+            self.assertEqual([(tile // value_tiles, tile % value_tiles) for tile in tiles],
+                             [(key, value) for key in range(key_tiles) for value in range(value_tiles)])
 
     def test_changed_or_duplicate_chain_fails(self):
         for source in (self.source() + candidate.ORIGINAL,

@@ -79,3 +79,13 @@ attribution must establish the executed trace's actual kernel costs.
 
 Hardware report SHA256:
 `a02a333de7d8471ed4dc706a41b873543e33f98dfa0bca44ffa77426adf8b1e3`.
+
+## Two-tile arithmetic setup candidate
+
+The next revision computes two outer-product tiles before switching to FPU
+destination-reuse addition, then packs both. This halves multiply/add setup and
+register handoff groups for the four-tile recurrence partition, retaining tile
+order, operand order and conversion boundaries. Only two destination slots are
+used; an odd tile count has an explicit tail. This is a new numerical candidate:
+the prior simulator report must reject its changed source until a fresh pass.
+No hardware admission or speed gain is claimed for this revision yet.
