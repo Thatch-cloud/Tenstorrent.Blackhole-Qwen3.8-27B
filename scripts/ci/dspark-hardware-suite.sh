@@ -48,6 +48,10 @@ if [ "$mode" = request-target-attention ]; then
         if [ "${QWEN_DSPARK_FUSION_T16:-0}" = 1 ]; then
             report_name=dspark-fusion-request-hardware
             request_options+=(--fused-t16-mlp)
+            if [ "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1 ]; then
+                report_name=dspark-captured-publication-request-hardware
+                request_options+=(--captured-publication)
+            fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
             report_name=dspark-native-slot-request-hardware

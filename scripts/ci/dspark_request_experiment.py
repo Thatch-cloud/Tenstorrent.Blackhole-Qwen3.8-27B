@@ -138,9 +138,13 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False):
+        history_profile=False, captured_publication=False):
     import torch
     from full_dspark_request import measure_dspark_request
+    if type(captured_publication) is not bool or (captured_publication and (
+            not target_attention_variants or not score_layout or not fused_t16_mlp
+            or history_profile or banked_proposal or native_slot_gdn or profile_drafter or profile_verifier or mlp_down)):
+        raise ValueError('Captured publication requires matched fused score-layout requests without other candidates')
     if type(history_profile) is not bool or (history_profile and (not target_attention_variants
             or banked_proposal or profile_drafter or profile_verifier)):
         raise ValueError('History attribution requires the combined target-attention request without other profilers')
@@ -262,6 +266,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from dspark_fusion_variants import SCHEDULE, POLICIES, summarize_variants
         from fused_t16_admission import qualify_simulator
         report['fusion_simulator_evidence'] = qualify_simulator()
+    if captured_publication:
+        from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
     if mlp_down:
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down
@@ -330,7 +336,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms'][
-            'fusion' if fused_t16_mlp else 'direct' if native_slot_gdn else 'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
+            'publication' if captured_publication else 'fusion' if fused_t16_mlp else 'direct' if native_slot_gdn else 'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

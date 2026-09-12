@@ -131,6 +131,7 @@ def main():
     parser.add_argument('--profile-verifier', action='store_true')
     parser.add_argument('--profile-drafter', action='store_true')
     parser.add_argument('--history-profile', action='store_true')
+    parser.add_argument('--captured-publication', action='store_true')
     parser.add_argument('--norm-scatter-variants', action='store_true')
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
@@ -381,7 +382,7 @@ def main():
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants, mlp_down=options.mlp_down,
                 mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
-                history_profile=options.history_profile,
+                history_profile=options.history_profile, captured_publication=options.captured_publication,
                 score_layout=options.score_layout, banked_proposal=options.banked_proposal,
                 native_slot_gdn=options.native_slot_gdn, fused_t16_mlp=options.fused_t16_mlp)
             if coding_task != 'merge_intervals':

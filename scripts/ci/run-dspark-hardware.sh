@@ -12,6 +12,9 @@ score_layout=${QWEN_DSPARK_SCORE_LAYOUT:-0}
 banked_proposal=${QWEN_DSPARK_BANKED_PROPOSAL:-0}
 native_slot=${QWEN_DSPARK_NATIVE_SLOT:-0}
 fusion=${QWEN_DSPARK_FUSION_T16:-0}
+publication=${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}
+[[ "$publication" = 0 || "$publication" = 1 ]]
+if [ "$publication" = 1 ]; then test "$fusion" = 1; test "$mode" = request-target-attention; fi
 [[ "$fusion" = 0 || "$fusion" = 1 ]]
 if [ "$fusion" = 1 ]; then test "$score_layout" = 1; test "$native_slot" = 0; test "$banked_proposal" = 0; fi
 [[ "$native_slot" = 0 || "$native_slot" = 1 ]]
@@ -102,6 +105,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_BANKED_PROPOSAL=$banked_proposal" \
     -e "QWEN_DSPARK_NATIVE_SLOT=$native_slot" \
     -e "QWEN_DSPARK_FUSION_T16=$fusion" \
+    -e "QWEN_DSPARK_CAPTURED_PUBLICATION=$publication" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \

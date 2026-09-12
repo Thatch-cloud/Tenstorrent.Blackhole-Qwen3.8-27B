@@ -45,6 +45,10 @@ on:
         description: Qualified target T16 fusion versus combined control; requires dspark_score_layout
         type: boolean
         default: false
+      dspark_captured_publication:
+        description: Compare captured history projection; requires score layout and T16 fusion
+        type: boolean
+        default: false
       dspark_mlp_footprint:
         description: Give both MLP request arms resident sharded down weights; requires dspark_mlp_down
         type: boolean
@@ -194,6 +198,7 @@ jobs:
           QWEN_DSPARK_BANKED_PROPOSAL: ${{ inputs.dspark_banked_proposal && '1' || '0' }}
           QWEN_DSPARK_NATIVE_SLOT: ${{ inputs.dspark_native_slot && '1' || '0' }}
           QWEN_DSPARK_FUSION_T16: ${{ inputs.dspark_fusion_t16 && '1' || '0' }}
+          QWEN_DSPARK_CAPTURED_PUBLICATION: ${{ inputs.dspark_captured_publication && '1' || '0' }}
           QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
           QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
