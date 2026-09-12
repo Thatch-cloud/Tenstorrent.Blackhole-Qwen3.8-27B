@@ -88,7 +88,8 @@ def main():
                 ttnn.synchronize_device(mesh)
                 ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
                 compare(references[index], output, 'replay_' + str(index))
-        report['native_configuration_unchanged'] = tuple(program.compute_with_storage_grid_size) == (11, 3)
+        native_grid = program.compute_with_storage_grid_size
+        report['native_configuration_unchanged'] = (native_grid.x, native_grid.y) == (11, 3)
         report['sources_after'] = hashes()
         if report['sources_after'] != report['sources'] or len(report['checks']) != 12:
             raise AssertionError('Complete unchanged-source matrix required')

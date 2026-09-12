@@ -6,7 +6,7 @@ from output_projection_grid import widen
 
 class OutputGridTests(unittest.TestCase):
     def configuration(self):
-        return SimpleNamespace(compute_with_storage_grid_size=(11, 3), in0_block_w=8,
+        return SimpleNamespace(compute_with_storage_grid_size=SimpleNamespace(x=11, y=3), in0_block_w=8,
             out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=5,
             fuse_batch=True, fused_activation=None, mcast_in0=True)
 
@@ -18,7 +18,7 @@ class OutputGridTests(unittest.TestCase):
         self.assertEqual(candidate.per_core_N, 3)
         for name in vars(original).keys() - {'compute_with_storage_grid_size', 'per_core_N'}:
             self.assertEqual(getattr(candidate, name), getattr(original, name))
-        self.assertEqual(original.compute_with_storage_grid_size, (11, 3))
+        self.assertEqual((original.compute_with_storage_grid_size.x, original.compute_with_storage_grid_size.y), (11, 3))
 
     def test_unqualified_geometry_rejected(self):
         for name, value in (('per_core_M', 2), ('per_core_N', 4), ('out_subblock_w', 2),

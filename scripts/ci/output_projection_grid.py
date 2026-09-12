@@ -6,7 +6,8 @@ import math
 def widen(operations, original, *, output_width=5120, grid=(11, 6)):
     if output_width != 5120 or grid != (11, 6):
         raise ValueError('Only the declared 5120-column, 11x6 experiment is supported')
-    if (tuple(original.compute_with_storage_grid_size) != (11, 3)
+    native_grid = original.compute_with_storage_grid_size
+    if ((native_grid.x, native_grid.y) != (11, 3)
             or original.per_core_M != 1 or original.per_core_N != 5
             or original.out_subblock_h != 1 or original.out_subblock_w != 1
             or original.mcast_in0 is not True or original.fuse_batch is not True
