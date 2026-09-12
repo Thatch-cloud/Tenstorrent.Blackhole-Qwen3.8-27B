@@ -2,6 +2,35 @@
 
 ## Matched short-output combined runtime - 2026-09-12
 
+### GDN output placement: exact, no meaningful gain
+
+Simulator **34693525557** passes twelve exact eager/replay comparisons for one
+synthetic local projection on both chips. The native helper and four experiment
+sources are pinned; this does not independently qualify the collective.
+
+Matched combined hardware **34693837683**, revision **b453f33**, passes both
+audits and all four timed requests. Both arms retain fusion, captured publication
+and reduced position staging; only GDN partial-output placement differs.
+All 763 recorded source hashes, exact output/state checks and both pooled TG
+values were independently verified. All 48 candidate layers engage and restore.
+
+| Partial output | PP | CTX | Streams | Committed TG | Mean setup-inclusive ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native DRAM | 3325.53 | 4096 | 1 | 105.64 | 5875.02 |
+| L1 candidate | 3324.68 | 4096 | 1 | 106.46 | 6289.65 |
+
+Each arm commits 242 timed tokens and accepts 222/330 drafts. TG differs by
+only 0.77%; blocking target trace changes from 68.01 to 67.89 ms. This does not
+establish a meaningful throughput win, while setup-inclusive latency is worse.
+The experimental default returns to native placement. Keep the source-pinned
+candidate for reproducibility, but prioritize larger projection/recurrence costs
+rather than repeating this transfer-only comparison. No serving change.
+
+Hardware report SHA256:
+`2d64f79a3c9211248096ad148a48b54614f9c4b5d61d8606f4b94325ac7ff94e`.
+Simulator report SHA256:
+`7b874af8e9f092cca0a84c134cb19da560c41aa8524bd76a2de539f3c9fae52e`.
+
 ### Longer-output confirmation
 
 Run **34692629032**, revision **d290531**, uses a 256-token budget and stops at
