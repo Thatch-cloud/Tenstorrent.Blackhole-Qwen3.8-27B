@@ -54,3 +54,26 @@ changes the next investigation: attribute outer validation, tensor ownership
 and cleanup, including host/GC pauses, before claiming full-bank copies dominate.
 These are host-wall measurements with no extra device fences, not isolated
 kernel timings. Preserve both repeats; do not cherry-pick the faster request.
+
+## GC follow-up: run 34675539551
+
+Revision `0c08f72bc6b584be38b772aef633b3ab7b3c6d43` passes and closes cleanly.
+The four non-audit requests retain exact output, target and inactive state.
+Fusion summary: PP1946.41 / CTX4096 / committed TG93.43, one stream,
+222/330 accepted drafts and 242 committed tokens. This is not a new speed record.
+Report SHA256: `fdf62e95fa3e0a9d436ee7a88db660a56eef210692de3a4ed9132a0dad920081`.
+
+| Fusion repeat | Projection ms/cycle | Bank assembly ms/cycle | History total ms/cycle | GC within history ms/cycle |
+| --- | ---: | ---: | ---: | ---: |
+| First | 11.131 | 3.268 | 15.423 | 0.0119 |
+| Second | 9.707 | 3.367 | 13.948 | 0.0082 |
+
+GC was observed, not disabled. It is negligible in this run; the previous
+81.97 ms unclassified spike did not recur, so this does not explain that older
+event. Process CPU time within history averages 14.842 and 13.329 ms/cycle.
+Prioritize captured feature projection over blanket GC changes or assuming
+bank copies dominate. The current projection builds and uploads rotary tables,
+dispatches shared feature projection and all ten learned K/V projections, then
+synchronizes for each accepted prefix. A captured path must keep inputs and
+outputs at stable addresses, preserve rounding and accepted-prefix masking,
+and prove changed-position replay plus rollback before hardware comparison.
