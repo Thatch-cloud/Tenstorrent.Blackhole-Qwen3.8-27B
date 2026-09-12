@@ -8,6 +8,13 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ### Latest verified short-output screen
 
+**Longer-output confirmation:** run **34692629032** measures **PP 3230.00 /
+CTX4096 / TG 103.62**, one stream, two timed EOS-ended responses of 121 tokens
+each. All six audit/timing requests preserve exact target output and state.
+This is not a measured gain over the historical 106.75 TG result, nor broad
+coding-quality certification. Different output lengths and run conditions must
+not be pooled with the short screen below.
+
 One coding stream, batch 1, two P150A cards. **PP** is prompt-processing tok/s,
 **CTX** is input tokens, and **TG** is committed output tok/s, including drafting,
 verification, transfers and publication. These are offline runtime tests, not
@@ -22,8 +29,7 @@ streaming endpoint measurements. Each timed request commits 64 output tokens.
 Exact target output, recurrent state and inactive slots pass. T16 staging drops
 from 29.14 to 8.68 ms per full-width block; target trace execution remains the
 largest measured cost. Cross-run comparisons are not interleaved A/B tests.
-The 64-token screen is not complete-function quality acceptance. Longer-output
-confirmation is pending in run **34692629032**; no new context ladder or concurrent
+The 64-token screen is not complete-function quality acceptance. No new context ladder or concurrent
 batch result is claimed. [Details and hashes](docs/two-card-experiment-programme.md).
 
 ### Earlier combined-runtime coding screen

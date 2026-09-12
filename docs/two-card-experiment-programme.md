@@ -2,6 +2,29 @@
 
 ## Matched short-output combined runtime - 2026-09-12
 
+### Longer-output confirmation
+
+Run **34692629032**, revision **d290531**, uses a 256-token budget and stops at
+EOS after 121 committed tokens in every request. All six output/state/inactive
+checks pass. All 756 source hashes, EOS endings and pooled candidate TG were
+independently verified. The candidate commits 242 timed tokens, accepts 222/330
+drafts and measures **PP 3230.00 / CTX4096 / TG 103.62**, one stream. Interleaved
+eager-publication control measures 101.17 TG. Setup-inclusive candidate latency
+averages 6.76 seconds.
+
+Mean candidate block: draft 27.52 ms, input staging 1.62 ms, blocking target trace
+67.63 ms, selection/publication 8.00 ms, whole cycle 106.11 ms. At eleven committed
+tokens per block, 200 TG needs a 55 ms cycle; the blocking verifier alone exceeds
+that. Target computation remains the priority.
+
+Do not call the jump from the 64-token screen a kernel speedup: output length,
+acceptance and bucket mix differ, while PP and host staging also vary materially.
+The historical longer-output publication result was 106.75 TG, so a new record
+has not been established. EOS completion is not a functional coding test.
+
+Report SHA256:
+`56e3a3ec10a2ffb246407159e29bef4b7f89b6809dc9ef512a80a6fedd2a1510`.
+
 ### Unused position upload removal
 
 Run **34691992781**, revision **b37a76e**, passes all six exact output, recurrent
