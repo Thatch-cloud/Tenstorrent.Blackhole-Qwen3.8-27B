@@ -41,6 +41,16 @@ admission. Captured T32 construction now requires the validated attention kernel
 
 ### Next acceptance, context ladder and history-preserving merge
 
+The separate T16 attention ladder prerequisite passes CTX2048 in simulator run
+34680471500 (revision `29b4322`, capacity2304): eight native/replay comparisons,
+16 mask checks, four KV preservation checks, two stale controls and eight mask
+poison controls. Exit0 and clean close; recorded source hashes match the revision
+and remain unchanged. Report SHA256:
+`d2aa3060240ca1125eb79922d0e56994486046c1b66f854ee0b14b76d5d6b8a6`.
+This is attention-component evidence only. The full request's CTX4096 guard
+remains unchanged until explicit context-specific admission is integrated;
+there is no CTX2048 PP/TG measurement yet.
+
 After the next combined-runtime candidate passes correctness and coding checks,
 compare the accepted candidate against its matched baseline on both P150A cards.
 Use one stream first; report batch/concurrent-stream results separately.
