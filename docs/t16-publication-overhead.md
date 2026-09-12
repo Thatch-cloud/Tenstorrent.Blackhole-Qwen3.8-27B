@@ -94,3 +94,20 @@ not an independent model oracle, accepted-prefix publication/rollback,
 coexisting target traces or combined-request performance. Next integrate the
 captured outputs with the existing transactional history banks, preserving
 prefix slicing and borrowed-output lifetime before the paired hardware run.
+
+### Transaction simulator pass
+
+Run **34677941763**, revision `abc23a8`, passes with clean exit 0. Captured
+learned projection matches eager output across six 20-shard comparisons.
+The bank adapter passes a 15-row commit at 4096, a one-row discard at 4111,
+and a 32-row commit at the unchanged 4111 frontier. Checks compare complete
+active/prepared banks and preserve their allocation addresses. All 803 source
+hashes match the revision and before/after snapshots; runtime fingerprints
+remain unchanged.
+
+Report SHA256: `4bd749d6381cb7e1f5be69276d5a5011c9e6cfa7c30182b44dd09f3d1b115914`.
+
+Initial history and feature taps remain synthetic; learned projection weights
+are real. This is not full-request admission or a TG measurement. The next
+gate is opt-in full-request integration with target-derived features and
+coexisting target/proposal traces, followed by matched hardware PP/CTX/TG.
