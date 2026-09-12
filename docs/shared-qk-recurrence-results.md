@@ -2,9 +2,10 @@
 
 ## Status
 
-The complete synthetic pipeline passes numerical simulation. It is not yet
-qualified on hardware and has no measured performance gain. Serving defaults
-are unchanged; the single-stream target remains 200 committed tokens/s.
+The complete synthetic pipeline passes numerical simulation and its first
+matched full-request hardware comparison. The small improvement needs a repeat
+before acceptance. Serving defaults are unchanged; the target remains 200
+committed tokens/s for one stream.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
@@ -14,7 +15,28 @@ are unchanged; the single-stream target remains 200 committed tokens/s.
 | Input preservation | 48 comparisons | Unchanged |
 | Trace replay | Changed seeds 1, 2, then original seed 0 | Pass |
 | Provenance | 752 source hashes checked against local sources and pinned runtime export | Match |
-| Combined-request hardware PP / CTX / TG | Not run for this candidate | Pending |
+| Combined-request hardware | CI 34702027898, revision `4b3f90b` | Exact; small timing improvement |
+
+## First hardware result
+
+| Runtime | PP tokens/s | CTX | Committed TG tokens/s | Mean verifier trace ms |
+| --- | ---: | ---: | ---: | ---: |
+| Native combined runtime | 3291.48 | 4096 | 105.14 | 68.00 |
+| Shared Q/K combined runtime | 3330.21 | 4096 | 107.15 | 66.81 |
+
+Single stream, T16 verifier, 15 draft queries. Each arm has two timed requests
+and one separate instrumented audit. Each timed response commits 121 tokens;
+acceptance is 222/330 across each arm. This is not a long-context or held-out
+coding-quality result.
+
+TG improves 1.91%; verifier trace drops 1.19 ms. Draft time also drops from
+28.43 to 27.37 ms, so not all TG improvement can be attributed to this kernel.
+The candidate constructs 96 three-stage pipelines per request and releases
+its retained preparation buffers. All six requests pass token/state/inactive
+checks; 801 script hashes match. A repeat is required before promotion.
+
+Hardware report SHA256:
+`d2a4ee5c29b50accb741c0d18e4e08370d89e49252f35790153d220e90aee766`.
 
 The candidate computes Q/K normalization once per shared head for a T16 block,
 then feeds the existing recurrence and normalization/gating stages. The probe
