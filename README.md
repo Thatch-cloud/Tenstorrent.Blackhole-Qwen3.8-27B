@@ -27,6 +27,11 @@ trace time worsens slightly, so this is not a demonstrated kernel speedup and
 the candidate remains disabled. Serving defaults are unchanged.
 [Experiment and acceptance gates](docs/gdn-copy-pairs-experiment.md).
 
+The subsequent **FPU outer-add fusion** also passes full-request exactness:
+**PP 3330.16 / CTX 4096 / TG 106.07** versus 104.44 TG control in run
+**34697917056**. Blocking trace time does not improve, so it remains disabled.
+[Fusion results](docs/gdn-outer-add-experiment.md).
+
 ### Earlier short-output screen
 
 **Longer-output confirmation:** run **34692629032** measures **PP 3230.00 /

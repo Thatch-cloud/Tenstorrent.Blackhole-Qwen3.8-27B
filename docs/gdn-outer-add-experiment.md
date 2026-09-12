@@ -1,7 +1,7 @@
 # GDN outer-product/state-add fusion
 
-Status: FPU destination-reuse variant passes simulator exactness. Full-request
-hardware comparison remains pending; no performance claim.
+Status: simulator and full-request exactness pass. No demonstrated trace speedup;
+candidate disabled while the native combined runtime remains the reference.
 
 Initial simulator run **34696989003** compiled successfully but failed the first
 eager gated-output comparison on chip 0. Devices closed cleanly. The failure
@@ -53,3 +53,29 @@ Retained report SHA256:
 numerical dependency, including the pinned arithmetic API headers. The SFPU
 variant remains rejected. The next measurement must compare complete requests
 with all accepted runtime features, not an isolated recurrence timing claim.
+
+## Complete-request hardware result
+
+Run **34697917056**, revision `b12c10c`, one stream / batch 1, CTX 4096.
+Each arm has one audit and two timed EOS-ended responses, 121 committed tokens
+per response. Instrumented audit times are excluded from TG.
+
+| Arm | PP tok/s | CTX | Committed TG | Blocking trace ms/block | Draft ms/block |
+|---|---:|---:|---:|---:|---:|
+| Native recurrence | 3313.36 | 4096 | 104.44 | 68.011 | 28.925 |
+| FPU outer-add fusion | 3330.16 | 4096 | 106.07 | 68.101 | 27.653 |
+
+The 1.56% TG increase does not establish a recurrence speedup: blocking trace
+time worsens by 0.090 ms while drafting improves by 1.272 ms/block. Setup-inclusive
+latency also worsens, from 6103.89 to 6150.25 ms/request. Do not promote this as an
+additive kernel gain or a new performance milestone.
+
+All six requests pass exact output, recurrent-state and inactive-slot checks.
+Timed arms each commit 242 tokens and accept 222/330 proposals. Each candidate
+request records 96 modified T16 program constructions and clean scope restoration.
+All 786 script source hashes and both pooled TG values were independently checked.
+Program construction evidence is not a per-kernel device profile; further
+attribution must establish the executed trace's actual kernel costs.
+
+Hardware report SHA256:
+`a02a333de7d8471ed4dc706a41b873543e33f98dfa0bca44ffa77426adf8b1e3`.
