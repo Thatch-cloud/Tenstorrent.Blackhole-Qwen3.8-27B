@@ -138,7 +138,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False):
+        history_profile=False, captured_publication=False, max_new_tokens=None):
+    from dspark_request_limit import request_limit
+    output_limit = request_limit(max_new_tokens,
+        short_default=target_attention_variants or combined_variants or profile_drafter or profile_verifier)
     import torch
     from full_dspark_request import measure_dspark_request
     if type(captured_publication) is not bool or (captured_publication and (
@@ -285,6 +288,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if profile_verifier or profile_drafter:
         schedule = (('native', True),)
     report['coding_context'], report['request_checks'] = context, []
+    report['request_output_limit'] = output_limit
     report['sampler_links'] = 4
     control_warmed = False
     with sampler_links(sampler.tt_sampling, 4):
@@ -306,7 +310,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter or profile_verifier else 257, **POLICIES[arm],
+                    eos_ids=eos, audit_features=audit, max_new_tokens=output_limit, **POLICIES[arm],
                     **(dict(profile_verifier=True) if profile_verifier else {}),
                     **(dict(history_profile=True) if history_profile else {}),
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))

@@ -50,7 +50,7 @@ if [ "$mode" = request-target-attention ]; then
             request_options+=(--fused-t16-mlp)
             if [ "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1 ]; then
                 report_name=dspark-captured-publication-request-hardware
-                request_options+=(--captured-publication)
+                request_options+=(--captured-publication --max-new-tokens 65)
             fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
