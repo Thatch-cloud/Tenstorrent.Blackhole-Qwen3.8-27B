@@ -271,6 +271,17 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['fusion_simulator_evidence'] = qualify_simulator()
     if captured_publication:
         from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
+        shared_flag = os.environ.get('QWEN_GDN_SHARED_QK_EXPERIMENT', '0')
+        if shared_flag not in ('0', '1'):
+            raise ValueError('Explicit shared-Q/K experiment flag required')
+        if shared_flag == '1':
+            if any(os.environ.get(name) == '1' for name in (
+                    'QWEN_GDN_OUTER_ADD_EXPERIMENT', 'QWEN_GDN_COPY_PAIRS_EXPERIMENT',
+                    'QWEN_GDN_OUTPUT_L1_EXPERIMENT', 'QWEN_GDN_OUTPUT_GRID_EXPERIMENT',
+                    'QWEN_COMBINED_TRACE_PROFILE')):
+                raise ValueError('Shared Q/K must be isolated from other candidates')
+            from gdn_shared_qk_variants import SCHEDULE, POLICIES, summarize_variants
+            report['comparison_axis'] = 'Native versus shared Q/K preparation and recurrence; complete combined runtime'
         if os.environ.get('QWEN_GDN_OUTER_ADD_EXPERIMENT') == '1':
             if any(os.environ.get(name) == '1' for name in (
                     'QWEN_GDN_COPY_PAIRS_EXPERIMENT', 'QWEN_GDN_OUTPUT_L1_EXPERIMENT', 'QWEN_GDN_OUTPUT_GRID_EXPERIMENT')):

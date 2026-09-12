@@ -19,7 +19,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
-        gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False):
+        gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False):
     import torch
     from full_request import measure_request
     if type(combined_profile) is not bool or (combined_profile and not (
@@ -29,6 +29,17 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     if type(gdn_outer_add) is not bool or (gdn_outer_add and (gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or not (
             captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
         raise ValueError('Outer-add fusion requires the isolated combined runtime')
+    shared_audit = shared_admission = None
+    if type(gdn_shared_qk) is not bool or (gdn_shared_qk and (
+            gdn_outer_add or gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or combined_profile or not (
+            captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
+        raise ValueError('Shared Q/K requires the isolated combined runtime')
+    if gdn_shared_qk:
+        import os
+        from pathlib import Path
+        from gdn_shared_qk_gate import qualify
+        shared_admission = qualify(Path(__file__).with_name('gdn-shared-recurrence.json'),
+            Path(__file__).parent, os.environ['TT_METAL_HOME'])
     outer_audit = outer_admission = None
     if gdn_outer_add:
         import os
@@ -278,6 +289,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
 
     observer = native_slot_arm = fusion_arm = None
     try:
+        if gdn_shared_qk:
+            from gdn_shared_qk_scope import scoped_shared_qk
+            shared_audit = score_scope.enter_context(scoped_shared_qk(operations, shared_admission))
         if gdn_outer_add:
             from gdn_outer_add_scope import scoped_outer_add
             outer_audit = score_scope.enter_context(scoped_outer_add(outer_admission))
@@ -358,6 +372,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
         score_scope.close()
+        if shared_audit is not None:
+            result['gdn_shared_qk'] = shared_audit
         if outer_audit is not None:
             result['gdn_outer_add'] = outer_audit
         if copy_audit is not None:

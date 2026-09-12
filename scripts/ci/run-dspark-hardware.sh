@@ -46,6 +46,11 @@ if [ "$publication" = 1 ]; then
     printf '%s  %s\n' 14d9fa6ae9b2e5ec0674d5b846f382c141e38ee73fa423ddb82a8ac73258bd99 "$copy_evidence/gdn-copy-pairs.json" | sha256sum -c -
     test "$(cat "$copy_evidence/gdn-copy-pairs.exit-status")" = 0
     outer_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-outer-add.XXXXXX")
+    shared_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-shared-qk.XXXXXX")
+    gh run download 34701425373 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34701425373 --dir "$shared_evidence"
+    printf '%s  %s\n' a155b893786f68ac36b4f040454892df683a0da0c3aa0b22b898697b22241ffe "$shared_evidence/gdn-shared-recurrence.json" | sha256sum -c -
+    test "$(cat "$shared_evidence/gdn-shared-recurrence.exit-status")" = 0
     gh run download 34699176210 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34699176210 --dir "$outer_evidence"
     printf '%s  %s\n' 036be9bbfa0c8de8e5f0415beb2d5d6447a5755ac894e6e0cd6ba238d4eada52 "$outer_evidence/gdn-outer-add.json" | sha256sum -c -
@@ -159,6 +164,7 @@ if [ "$publication" = 1 ]; then
     docker cp "$grid_evidence/gdn-output-grid.json" "$test_id:/experiment-scripts/ci/gdn-output-grid.json"
     docker cp "$copy_evidence/gdn-copy-pairs.json" "$test_id:/experiment-scripts/ci/gdn-copy-pairs.json"
     docker cp "$outer_evidence/gdn-outer-add.json" "$test_id:/experiment-scripts/ci/gdn-outer-add.json"
+    docker cp "$shared_evidence/gdn-shared-recurrence.json" "$test_id:/experiment-scripts/ci/gdn-shared-recurrence.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then

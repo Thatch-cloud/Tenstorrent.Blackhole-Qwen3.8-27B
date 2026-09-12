@@ -56,6 +56,7 @@ if [ "$mode" = request-target-attention ]; then
                 export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
                 export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
                 export QWEN_GDN_OUTER_ADD_EXPERIMENT=0
+                export QWEN_GDN_SHARED_QK_EXPERIMENT=1
                 export QWEN_COMBINED_TRACE_PROFILE=0
             fi
         fi
