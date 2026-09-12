@@ -15,6 +15,7 @@ from t32_hardware_kernel import installed, request_admission
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--timed', action='store_true', help='Run two timing repeats only after a fresh full audit')
     for name in ('checkpoint', 'config', 'target', 'output', 'evidence'):
         parser.add_argument('--' + name, type=Path, required=True)
     options = parser.parse_args()

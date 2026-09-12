@@ -61,7 +61,7 @@ def run_request(options, rotary, admission, *, hardware=False):
     from dspark_request_experiment import run_loaded_requests
 
     report = dict(passed=False, closed_cleanly=False,
-        scope='Actual audited T32 hardware request; no timing qualification' if hardware else __doc__,
+        scope='T32 hardware request with fresh audit and optional timed repeats; not serving qualification' if hardware else __doc__,
         backend='hardware' if hardware else 'simulator',
         streams=1, context=4096, proposals=31, pp=None, committed_tg=None,
         hardware_qualified=False, attention=admission, sources=sources(), resources_before=snapshot())
@@ -112,10 +112,11 @@ def run_request(options, rotary, admission, *, hardware=False):
         layer_weights = [{name: parameters[f'layers.{index}.{name}'] for name in SPECIFICATIONS} for index in range(5)]
         run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
             layer_weights, predecessor, successor, rotary, report, progress,
-            prompt=prompt, context=context, t32_request=True)
+            prompt=prompt, context=context, t32_request=True, t32_timed=hardware and getattr(options, 'timed', False))
         if hardware:
             summary = report['request_summary']
-            summary['full_request_hardware_exact'] = summary.pop('full_request_simulator_exact')
+            if 'full_request_simulator_exact' in summary:
+                summary['full_request_hardware_exact'] = summary.pop('full_request_simulator_exact')
         report['passed'] = True
     except BaseException as error:
         report.update(passed=False, error=f'{type(error).__name__}: {error}')

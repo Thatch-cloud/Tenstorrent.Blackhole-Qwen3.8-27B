@@ -2,10 +2,29 @@ from copy import deepcopy
 import unittest
 from unittest.mock import patch
 
-from dspark_request_experiment import run_loaded_requests, summarize_t32_simulator
+from dspark_request_experiment import run_loaded_requests, summarize_t32_simulator, summarize_t32_timed
 
 
 class T32RequestSummaryTests(unittest.TestCase):
+    def test_timed_summary_pools_only_exact_noninstrumented_repeats(self):
+        audit = self.record()
+        audit.update(prompt_tokens=list(range(4096)), length=4096, commit_only_gdn=False)
+        records = [audit]
+        for milliseconds in (500, 1500):
+            timed = deepcopy(audit)
+            timed.update(instrumented_timing=False, committed_tokens_per_second=32000 / milliseconds,
+                decode_ms=milliseconds, prefill_ms=1000, prefill_setup_decode_ms=milliseconds + 2000,
+                feature_setup_ms=500, engine_setup_ms=500, proposed=62, accepted=30)
+            timed['dspark'].update(audit_features=False, feature_checks=[], proposal_checks=[])
+            records.append(timed)
+        summary = summarize_t32_timed(records)
+        self.assertEqual(summary['committed_tg'], 32)
+        self.assertEqual(summary['pp'], 4096)
+        self.assertEqual((summary['verifier_rows'], summary['draft_queries']), (32, 31))
+        records[2]['dspark']['proposals'] = 15
+        with self.assertRaises(ValueError):
+            summarize_t32_timed(records)
+
     def test_loaded_schedule_checks_admission_before_model_access(self):
         with patch('t32_attention_admission.require_active', side_effect=ValueError('simulator required')) as gate:
             with self.assertRaisesRegex(ValueError, 'simulator required'):
