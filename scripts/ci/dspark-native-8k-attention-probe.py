@@ -219,6 +219,16 @@ def run():
                     sha256=checksum, expected_sha256=tensor_digest(golden), failed_elements=int((~close).sum()),
                     max_abs=float((actual.float() - golden).abs().max())))
                 if not passed:
+                    difference = (actual.float() - golden).abs()
+                    indices = (~close).nonzero()[:16]
+                    report.setdefault('numerical_failures', []).append(dict(
+                        mode=mode, case=case, chip=chip, shape=list(actual.shape),
+                        failed_by_head_row=(~close).sum(dim=-1).tolist(),
+                        max_abs_by_head_row=difference.amax(dim=-1).tolist(),
+                        first_indices=indices.tolist(),
+                        actual=[float(actual[tuple(index)]) for index in indices.tolist()],
+                        expected=[float(golden[tuple(index)]) for index in indices.tolist()],
+                        finite=bool(torch.isfinite(actual).all())))
                     raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
                 for name in ('key', 'value'):
                     actual_layout = ttnn.to_torch(ttnn.get_device_tensors(output[name])[chip])
