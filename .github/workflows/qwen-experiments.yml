@@ -109,6 +109,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: qwen-two-p150a-exclusive
@@ -199,6 +200,7 @@ jobs:
           QWEN_DSPARK_NATIVE_SLOT: ${{ inputs.dspark_native_slot && '1' || '0' }}
           QWEN_DSPARK_FUSION_T16: ${{ inputs.dspark_fusion_t16 && '1' || '0' }}
           QWEN_DSPARK_CAPTURED_PUBLICATION: ${{ inputs.dspark_captured_publication && '1' || '0' }}
+          GH_TOKEN: ${{ github.token }}
           QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
           QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
