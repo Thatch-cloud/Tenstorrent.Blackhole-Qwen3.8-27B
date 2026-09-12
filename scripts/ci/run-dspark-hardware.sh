@@ -47,6 +47,11 @@ if [ "$publication" = 1 ]; then
     test "$(cat "$copy_evidence/gdn-copy-pairs.exit-status")" = 0
     outer_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-outer-add.XXXXXX")
     shared_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-shared-qk.XXXXXX")
+    attention_8k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-attention-8k.XXXXXX")
+    gh run download 34703126782 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34703126782 --dir "$attention_8k_evidence"
+    printf '%s  %s\n' 1a60ca077425c671ea9e4b30ddf0490700382d835b7aee3327d320c2ce8b83cd "$attention_8k_evidence/target-t16-attention-8k.json" | sha256sum -c -
+    test "$(cat "$attention_8k_evidence/target-t16-attention-8k.exit-status")" = 0
     gh run download 34701425373 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34701425373 --dir "$shared_evidence"
     printf '%s  %s\n' a155b893786f68ac36b4f040454892df683a0da0c3aa0b22b898697b22241ffe "$shared_evidence/gdn-shared-recurrence.json" | sha256sum -c -
@@ -165,6 +170,7 @@ if [ "$publication" = 1 ]; then
     docker cp "$copy_evidence/gdn-copy-pairs.json" "$test_id:/experiment-scripts/ci/gdn-copy-pairs.json"
     docker cp "$outer_evidence/gdn-outer-add.json" "$test_id:/experiment-scripts/ci/gdn-outer-add.json"
     docker cp "$shared_evidence/gdn-shared-recurrence.json" "$test_id:/experiment-scripts/ci/gdn-shared-recurrence.json"
+    docker cp "$attention_8k_evidence/target-t16-attention-8k.json" "$test_id:/experiment-scripts/ci/target-t16-attention-8k.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
