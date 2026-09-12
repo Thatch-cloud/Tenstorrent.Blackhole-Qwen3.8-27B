@@ -17,9 +17,16 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         live_digest, kv_digest, inactive_digest, eos_ids, audit_features=False, max_new_tokens=257,
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
-        banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False):
+        banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
+        history_profile=False):
     import torch
     from full_request import measure_request
+    if type(history_profile) is not bool or (history_profile and banked_proposal):
+        raise ValueError('Explicit history attribution requires the standard fixed-history request path')
+    history_observer = None
+    if history_profile:
+        from history_publication_profile import HistoryPublicationProfile
+        history_observer = HistoryPublicationProfile()
     if type(fused_t16_mlp) is not bool or (fused_t16_mlp and not (
             proposal_trace and commit_only_gdn and native_attention and target_attention_t16
             and score_layout and not profile_verifier and not native_slot_gdn and not banked_proposal)):
@@ -194,6 +201,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             **(dict(native_attention=True) if native_attention else {}),
             history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
         proposal_device = drafter
+        if history_observer is not None:
+            score_scope.enter_context(history_observer.install(proposal_device.history))
         if score_layout:
             from dspark_score_layout_scope import ScoreLayoutArm
             score_arm = ScoreLayoutArm(proposal_device, hardware_audit=score_layout_evidence)
@@ -251,6 +260,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 raise AssertionError('Every changing-input proposal replay and warmup must pass its eager audit')
         result['publication_diagnostics'] = dict(records=runtime.publication_diagnostics.records,
             scope='Host wall and process CPU with GC pauses; no added device fences; timing includes instrumentation')
+        if history_observer is not None:
+            result['history_publication_profile'] = dict(records=list(history_observer.records),
+                scope='Nested host-wall timers; total includes projection and bank assembly; no added fences; not device-kernel timing')
         result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
             history_checks=history_checks,
