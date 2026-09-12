@@ -98,3 +98,22 @@ The next run is the matched combined-runtime comparison with profiling disabled.
 
 Two-tile report SHA256:
 `036be9bbfa0c8de8e5f0415beb2d5d6447a5755ac894e6e0cd6ba238d4eada52`.
+
+Two-tile hardware run **34699539483**, revision `7a0cebc`, passes all six exact
+output/state/inactive-slot audits but loses performance. Both timed arms commit
+242 tokens, accepting 222/330 proposals at CTX 4096, one stream / batch 1.
+
+| Arm | PP tok/s | CTX | Committed TG | Blocking trace ms/block |
+|---|---:|---:|---:|---:|
+| Native | 3297.73 | 4096 | 106.47 | 68.017 |
+| Two-tile FPU fusion | 3330.38 | 4096 | 106.16 | 68.329 |
+
+TG changes by -0.29%; trace time worsens by 0.312 ms. Draft times are nearly
+identical, 26.899 versus 26.910 ms/block. Candidate requests record 96 transformed
+program constructions with restoration. All 786 script hashes and pooled TG
+were independently verified. The candidate is disabled; stop pursuing this
+outer-add scheduling family on these results rather than adding more marginal
+variants without a new hypothesis.
+
+Report SHA256:
+`505107525002495208fb128a6814be2b69049c760d9e1c2ee3282c5886806b55`.
