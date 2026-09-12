@@ -37,8 +37,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
+memory_options=()
+if [[ "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention ]]; then memory_options=(--memory-swap 64g); fi
 container=$(docker create --network none --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit 4096 --memory 64g --cpus 16 --shm-size 8g \
+    "${memory_options[@]}" \
     --mount "type=bind,src=$assets,dst=/simulator-assets,readonly" \
     "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \

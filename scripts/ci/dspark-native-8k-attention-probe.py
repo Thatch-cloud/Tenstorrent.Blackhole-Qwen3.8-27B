@@ -271,7 +271,14 @@ def run():
 def main():
     from unittest.mock import patch
     import dspark_full_attention
-    with patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY):
+    import sim_memory_budget
+    root = Path(os.environ['TT_METAL_HOME'])
+    print(json.dumps(dict(stage='runtime_identity', binaries={name: digest(root / name)
+        for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')})), flush=True)
+    with patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY), \
+            patch.object(NATIVE, 'digest', digest), \
+            patch.object(sim_memory_budget, 'MEMORY_MAX', 64 * 1024 ** 3), \
+            patch.object(sim_memory_budget, 'SWAP_MAX', 0):
         run()
 
 
