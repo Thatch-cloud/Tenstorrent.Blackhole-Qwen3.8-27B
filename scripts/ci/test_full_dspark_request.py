@@ -13,6 +13,19 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def test_history_profile_is_explicit_and_reported(self):
+        observer = SimpleNamespace(records=[dict(stage='history_total', host_ms=1)],
+            install=Mock(return_value=nullcontext()))
+        with patch('history_publication_profile.HistoryPublicationProfile', return_value=observer):
+            result = self.measure(history_profile=True)
+        observer.install.assert_called_once_with(self.drafter.history)
+        self.assertEqual(result['history_publication_profile']['records'], observer.records)
+
+    def test_history_profile_rejects_implicit_truthy_values(self):
+        with self.assertRaisesRegex(ValueError, 'Explicit history attribution'):
+            self.measure(history_profile=1)
+        self.base_prefill.assert_not_called()
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

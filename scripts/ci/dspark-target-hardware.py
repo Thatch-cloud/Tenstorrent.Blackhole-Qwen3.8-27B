@@ -130,6 +130,7 @@ def main():
     parser.add_argument('--native-attention-variants', action='store_true')
     parser.add_argument('--profile-verifier', action='store_true')
     parser.add_argument('--profile-drafter', action='store_true')
+    parser.add_argument('--history-profile', action='store_true')
     parser.add_argument('--norm-scatter-variants', action='store_true')
     parser.add_argument('--target-attention-variants', action='store_true')
     parser.add_argument('--combined-variants', action='store_true')
@@ -140,6 +141,9 @@ def main():
     parser.add_argument('--native-slot-gdn', action='store_true')
     parser.add_argument('--fused-t16-mlp', action='store_true')
     options = parser.parse_args()
+    if options.history_profile and (not options.request or not options.target_attention_variants
+            or options.banked_proposal or options.profile_drafter or options.profile_verifier):
+        parser.error('History attribution requires the combined target-attention request without other profilers or banked drafting')
     if options.fused_t16_mlp and (not options.score_layout or options.native_slot_gdn or options.banked_proposal):
         parser.error('Fusion requires score layout without native-slot or banked candidates')
     if options.native_slot_gdn and (not options.score_layout or options.banked_proposal):
@@ -377,6 +381,7 @@ def main():
                 target_attention_variants=options.target_attention_variants,
                 combined_variants=options.combined_variants, mlp_down=options.mlp_down,
                 mlp_equal_footprint=options.mlp_equal_footprint, profile_drafter=options.profile_drafter,
+                history_profile=options.history_profile,
                 score_layout=options.score_layout, banked_proposal=options.banked_proposal,
                 native_slot_gdn=options.native_slot_gdn, fused_t16_mlp=options.fused_t16_mlp)
             if coding_task != 'merge_intervals':

@@ -83,6 +83,11 @@ if [ "$mode" = request-verifier-profile ]; then
         request_options=(--request --profile-drafter)
     fi
 fi
+if [ "${QWEN_DSPARK_HISTORY_PROFILE:-0}" = 1 ]; then
+    test "$mode" = request-target-attention
+    request_options+=(--history-profile)
+    report_name=dspark-history-profile-hardware
+fi
 python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
