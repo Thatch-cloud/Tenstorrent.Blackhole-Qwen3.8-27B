@@ -14,7 +14,40 @@ neither has complete replay coverage. The 64-key diagnostic has finite output
 near -46 versus FP32 reference near -45.46 in an affected row. These are live
 queries, not padding. Fixture negative controls pass on both host shards.
 
-## Source-backed next experiment
+## Precision experiments
+
+| Configuration | CI run | Numerical outcome |
+| --- | --- | --- |
+| FP32 statistics and output intermediates | 34723541474 | Chip 0: 15,843 failures; max error 0.92117 |
+| Rebuilt native control | 34723984465 | Exact original output hashes; same 256 failures |
+| FP32 statistics only | 34724444926 | Chip 0: 30,720 failures; max error 17.85616 |
+| Statistics plus explicit pack-format transition | 34724923953 | Chip 0 passes; chip 1 still has 256 failures |
+| Above plus nonlegacy reciprocal | 34725385866 | Same 256 failures; max error 0.54706 |
+
+These are failed numerical trials, not accepted optimizations. The rebuilt
+control reproduces the prebuilt baseline exactly. Adding the missing explicit
+pack-format transition removes the large mixed-format regression, but does not
+resolve the original error. The reciprocal change is not a solution.
+
+## CPU rounding control
+
+`scripts/ci/dspark_attention_rounding_control.py` runs online softmax with 64-key
+chunks against the same FP32 reference, two fixtures and both host shards.
+It tests FP32 intermediates, BF16 partial/running output rounding, BF16
+probability rounding, and both rounding options together. The expanded control
+also follows native ordering (unscaled maximum, then scaled subtraction), BF16
+maximum/correction storage, and truncation of the scale to its upper 16 bits.
+All 32 comparisons pass the unchanged tolerance. On the failing simulator shard
+(case 0, chip 1), even combined output/statistics rounding and truncated scaling
+has maximum absolute error 0.38304, below that row's relative tolerance.
+
+This CPU-only check takes seconds and loads no model weights or device. It
+does **not** emulate Tensix instructions or qualify a kernel. The tested
+rounding mechanisms alone do not reproduce the simulator failure. Next isolate
+native score scaling, maximum subtraction and exponential arithmetic rather
+than dispatch another reciprocal or chunk-size trial.
+
+## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination
 accumulation is enabled, but keeps `im_df` and `stats_df` in BF16. Thus the
@@ -26,9 +59,8 @@ Local factory source matches the failed CI report exactly:
 Relevant definitions are around lines 704-718 of
 `ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp`.
 
-Stop blind chunk-size changes. Next test an isolated draft-only FP32 statistics
-and intermediate-buffer factory variant, checking L1 footprint and unpack-format
-assumptions first. Keep target attention and serving defaults unchanged. Require
+Stop blind chunk-size changes. The isolated draft-only FP32 variants above
+failed; do not promote them. Keep target attention and serving defaults unchanged. Require
 the existing negative controls, full accuracy matrix, exact changed-input trace
 replay and clean resource teardown before any full-request hardware trial.
 
