@@ -30,6 +30,11 @@ if [ "$publication" = 1 ]; then
     gh run download 34677941763 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34677941763 --dir "$evidence"
     publication_report="$evidence/t32-publication.json"
+    output_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-output-l1.XXXXXX")
+    gh run download 34693525557 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34693525557 --dir "$output_evidence"
+    printf '%s  %s\n' 7b874af8e9f092cca0a84c134cb19da560c41aa8524bd76a2de539f3c9fae52e "$output_evidence/gdn-output-l1.json" | sha256sum -c -
+    test "$(cat "$output_evidence/gdn-output-l1.exit-status")" = 0
     printf '%s  %s\n' 4bd749d6381cb7e1f5be69276d5a5011c9e6cfa7c30182b44dd09f3d1b115914 "$publication_report" | sha256sum -c -
 fi
 [[ "$fusion" = 0 || "$fusion" = 1 ]]
@@ -135,6 +140,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
 docker cp scripts "$test_id:/experiment-scripts"
 if [ "$publication" = 1 ]; then
     docker cp "$publication_report" "$test_id:/experiment-scripts/ci/dspark-publication-simulator.json"
+    docker cp "$output_evidence/gdn-output-l1.json" "$test_id:/experiment-scripts/ci/gdn-output-l1.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then

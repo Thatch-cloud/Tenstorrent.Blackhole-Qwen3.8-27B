@@ -271,6 +271,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['fusion_simulator_evidence'] = qualify_simulator()
     if captured_publication:
         from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
+        if os.environ.get('QWEN_GDN_OUTPUT_L1_EXPERIMENT') == '1':
+            from gdn_output_l1_variants import SCHEDULE, POLICIES, summarize_variants
+            report['comparison_axis'] = 'GDN partial output DRAM versus L1; both arms use captured publication'
     if mlp_down:
         from dspark_mlp_down_variants import SCHEDULE, POLICIES, summarize_variants
         from dram_mlp_down_scope import scoped_down

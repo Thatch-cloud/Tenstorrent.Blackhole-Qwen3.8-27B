@@ -18,9 +18,19 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False):
+        history_profile=False, captured_publication=False, gdn_output_l1=False):
     import torch
     from full_request import measure_request
+    if type(gdn_output_l1) is not bool or (gdn_output_l1 and not (
+            captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn)):
+        raise ValueError('GDN L1 output requires the explicit combined publication runtime')
+    output_arm = output_admission = None
+    if gdn_output_l1:
+        import os
+        from pathlib import Path
+        from gdn_output_l1_gate import qualify
+        output_admission = qualify(Path(__file__).with_name('gdn-output-l1.json'),
+            Path(__file__).parent, os.environ['TT_METAL_HOME'])
     if type(captured_publication) is not bool or (captured_publication and (
             not proposal_trace or not commit_only_gdn or banked_proposal or history_profile or profile_verifier)):
         raise ValueError('Captured publication requires the traced commit-only request without competing history profiles')
@@ -234,6 +244,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
 
     observer = native_slot_arm = fusion_arm = None
     try:
+        if gdn_output_l1:
+            from gdn_output_l1_scope import GDNOutputL1Arm
+            from models.demos.blackhole.qwen36.tt.tp_common import matmul_1d_decode
+            output_arm = GDNOutputL1Arm(operations, model, matmul_1d_decode)
+            score_scope.enter_context(output_arm.install())
         if fused_t16_mlp:
             from fused_t16_scope import FusedT16Arm
             from models.tt_transformers.tt.ccl import tt_all_reduce
@@ -298,6 +313,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['kind'] = 'Full-history DSpark coding-request pilot; not held-out coding quality'
         result['qualification'] = __doc__
         score_scope.close()
+        if output_arm is not None:
+            result['gdn_output_l1'] = dict(hits=list(output_arm.hits), restored=not output_arm.active,
+                admission=output_admission)
         if fusion_arm is not None:
             result['fused_t16_mlp'] = fusion_arm.audit
         if native_slot_arm is not None:

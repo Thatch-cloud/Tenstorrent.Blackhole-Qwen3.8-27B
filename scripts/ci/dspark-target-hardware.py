@@ -154,6 +154,10 @@ def main():
             parser.error('Captured publication requires the isolated combined fusion request')
         from dspark_publication_gate import qualify as qualify_publication
         qualify_publication(Path(__file__).with_name('dspark-publication-simulator.json'), Path(__file__).parent)
+        if os.environ.get('QWEN_GDN_OUTPUT_L1_EXPERIMENT') == '1':
+            from gdn_output_l1_gate import qualify as qualify_output
+            qualify_output(Path(__file__).with_name('gdn-output-l1.json'), Path(__file__).parent,
+                os.environ['TT_METAL_HOME'])
     if options.history_profile and (not options.request or not options.target_attention_variants
             or options.banked_proposal or options.profile_drafter or options.profile_verifier):
         parser.error('History attribution requires the combined target-attention request without other profilers or banked drafting')
