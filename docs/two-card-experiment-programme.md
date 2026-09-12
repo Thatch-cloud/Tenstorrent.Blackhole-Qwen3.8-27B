@@ -2,6 +2,32 @@
 
 ## Matched short-output combined runtime - 2026-09-12
 
+### Verification cost breakdown
+
+Follow-up **34691332718** at **63034a3** passes all six exact output/state checks.
+Its combined publication arm measures PP **1568.33**, CTX **4096**, TG **51.46**,
+with unchanged 110/188 acceptance and 128 timed committed tokens. All 754 source
+hashes and pooled candidate TG independently verified.
+
+| Host interval, mean per candidate block | ms |
+| --- | --- |
+| Blocking trace call | 61.63 |
+| Replay checks, synchronization and wrapper overhead | 2.79 |
+| Output readback and host conversion | 0.52 |
+| Binding validation before staging | 0.38 |
+| Input staging | 22.25 |
+
+Blocking trace time includes host dispatch/wait and is not a device-only profile.
+Input staging averages 29.14 ms for 16 rows, 12.23 for four, 7.51 for two and
+5.64 for one. Trace call averages respectively 67.92, 53.52, 48.54 and 45.04 ms.
+Do not prioritize argmax readback removal: its measured cost is small here.
+Next inspect the per-row metadata uploads and target trace work; preserve cache
+writer position correctness and explicit synchronization until dependency
+evidence and the full-request audit justify a change.
+
+Report SHA256:
+`ef193ae06f1a5afd53f6703ac599805c06938b9e721fce34aa3e1153a05a8351`.
+
 Hardware run **34690758890**, revision **b2f6801**, passes all six requests
 (one audit and two timed repeats per T16 arm). The prompt and all emitted tokens
 also match T32 run 34689543028 exactly. Each timed request commits 64 tokens.
