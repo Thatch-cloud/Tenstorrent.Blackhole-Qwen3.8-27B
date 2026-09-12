@@ -14,8 +14,8 @@ REPLACEMENT = '''    const bool qwen_draft_fp32_intermediates =
         !is_causal && compute_use_provided_mask && !is_chunked &&
         !use_attention_sink && !is_windowed && !use_streaming_compute &&
         fp32_dest_acc_en && !exp_approx_mode;
-    tt::DataFormat im_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
-    tt::DataFormat stats_df = im_df;'''
+    tt::DataFormat im_df = tt::DataFormat::Float16_b;
+    tt::DataFormat stats_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32 : im_df;'''
 
 
 def transform(source, *, enabled=True):

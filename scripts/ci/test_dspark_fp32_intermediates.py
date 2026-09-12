@@ -11,7 +11,12 @@ class FactoryTests(unittest.TestCase):
         with patch.object(candidate, 'SOURCE_SHA256', hashlib.sha256(original).hexdigest()):
             changed = candidate.transform(original, enabled=False)
         self.assertIn(b'qwen_draft_fp32_intermediates = false &&', changed)
-        self.assertIn(b': tt::DataFormat::Float16_b;', changed)
+        self.assertIn(b'tt::DataFormat im_df = tt::DataFormat::Float16_b;', changed)
+        self.assertIn(b': im_df;', changed)
+
+    def test_candidate_preserves_output_intermediate_format(self):
+        self.assertIn('tt::DataFormat im_df = tt::DataFormat::Float16_b;', candidate.REPLACEMENT)
+        self.assertIn('stats_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32 : im_df;', candidate.REPLACEMENT)
 
     def test_only_format_block_changes(self):
         original = ('before\n' + candidate.ANCHOR + '\nafter').encode()

@@ -83,7 +83,7 @@ def main():
     enabled = control == '0'
     candidate = transform(before, enabled=enabled)
     binaries = ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')
-    report = dict(passed=False, factory_enabled=enabled, source_before=digest(factory),
+    report = dict(passed=False, precision_variant='stats-only', factory_enabled=enabled, source_before=digest(factory),
         binaries_before={name: digest(root / name) for name in binaries},
         builders={name: digest(Path(__file__).with_name(name)) for name in
             ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py')},

@@ -39,7 +39,7 @@ PY
             export QWEN_SIM_BOUNDED_MEMORY=1
             mkdir -p /optimisation
             ln -s /simulator-support /optimisation/sim
-            export QWEN_DRAFT_FP32_CONTROL=1
+            export QWEN_DRAFT_FP32_CONTROL=0
             timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
         fi
