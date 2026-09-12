@@ -271,6 +271,11 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['fusion_simulator_evidence'] = qualify_simulator()
     if captured_publication:
         from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
+        if os.environ.get('QWEN_GDN_OUTPUT_GRID_EXPERIMENT') == '1':
+            if os.environ.get('QWEN_GDN_OUTPUT_L1_EXPERIMENT') == '1':
+                raise ValueError('Only one GDN output experiment may be selected')
+            from gdn_output_grid_variants import SCHEDULE, POLICIES, summarize_variants
+            report['comparison_axis'] = 'GDN output grid 11x3 versus 11x6; both arms use native DRAM placement'
         if os.environ.get('QWEN_GDN_OUTPUT_L1_EXPERIMENT') == '1':
             from gdn_output_l1_variants import SCHEDULE, POLICIES, summarize_variants
             report['comparison_axis'] = 'GDN partial output DRAM versus L1; both arms use captured publication'

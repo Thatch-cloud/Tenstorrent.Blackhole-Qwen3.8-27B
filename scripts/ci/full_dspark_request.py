@@ -18,13 +18,22 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, gdn_output_l1=False):
+        history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False):
     import torch
     from full_request import measure_request
+    if type(gdn_output_grid) is not bool or (gdn_output_grid and (gdn_output_l1 or not (
+            captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
+        raise ValueError('GDN grid requires the combined runtime without a competing placement candidate')
     if type(gdn_output_l1) is not bool or (gdn_output_l1 and not (
             captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn)):
         raise ValueError('GDN L1 output requires the explicit combined publication runtime')
     output_arm = output_admission = None
+    if gdn_output_grid:
+        import os
+        from pathlib import Path
+        from gdn_output_grid_gate import qualify
+        output_admission = qualify(Path(__file__).with_name('gdn-output-grid.json'),
+            Path(__file__).parent, os.environ['TT_METAL_HOME'])
     if gdn_output_l1:
         import os
         from pathlib import Path
@@ -244,6 +253,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
 
     observer = native_slot_arm = fusion_arm = None
     try:
+        if gdn_output_grid:
+            from gdn_output_grid_scope import GDNOutputGridArm
+            from models.demos.blackhole.qwen36.tt.tp_common import matmul_1d_decode
+            output_arm = GDNOutputGridArm(operations, model, matmul_1d_decode)
+            score_scope.enter_context(output_arm.install())
         if gdn_output_l1:
             from gdn_output_l1_scope import GDNOutputL1Arm
             from models.demos.blackhole.qwen36.tt.tp_common import matmul_1d_decode
@@ -314,7 +328,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         result['qualification'] = __doc__
         score_scope.close()
         if output_arm is not None:
-            result['gdn_output_l1'] = dict(hits=list(output_arm.hits), restored=not output_arm.active,
+            result['gdn_output_grid' if gdn_output_grid else 'gdn_output_l1'] = dict(hits=list(output_arm.hits), restored=not output_arm.active,
                 admission=output_admission)
         if fusion_arm is not None:
             result['fused_t16_mlp'] = fusion_arm.audit
