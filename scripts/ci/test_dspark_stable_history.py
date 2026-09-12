@@ -11,6 +11,38 @@ import test_dspark_history as fixtures
 
 
 class StableHistoryTests(unittest.TestCase):
+    def test_captured_prefix_publication_preserves_transaction_and_borrowed_outputs(self):
+        from dspark_captured_publication import prepare
+
+        cache = self.cache(position=32, capacity=128)
+        try:
+            with patch('dspark_captured_publication.require_tensor', side_effect=fixtures.require_tensor):
+                for prefix, commit in ((1, False), (15, True), (32, True)):
+                    position = cache.position
+                    outputs = self.projected(start=position, rows=32)
+                    identities = {fixtures.identity(value) for value in leaves(outputs)}
+                    projection = SimpleNamespace(operations=self.operations, mesh=self.mesh,
+                        project=Mock(return_value=outputs))
+                    previous = tuple(value.clone() for value in leaves(cache.layers))
+                    publication = prepare(cache, projection, (), (), prefix, position=position)
+                    self.assertEqual(cache.position, position)
+                    for value, golden in zip(leaves(cache.layers), previous, strict=True):
+                        self.assertTrue(torch.equal(value, golden))
+                    with self.assertRaises(ValueError):
+                        prepare(cache, projection, (), (), prefix, position=position)
+                    self.assertEqual(projection.project.call_count, 1)
+                    if commit:
+                        cache.commit_publication(publication)
+                    else:
+                        cache.discard_publication(publication)
+                    for value, golden in zip(leaves(cache.layers),
+                            leaves(self.projected(start=0, rows=cache.position)), strict=True):
+                        self.assertTrue(torch.equal(value[..., :cache.position, :], golden))
+                        self.assertEqual(torch.count_nonzero(value[..., cache.position:, :]), 0)
+                    self.assertTrue(identities.isdisjoint(self.operations.deallocated))
+        finally:
+            cache.close()
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
