@@ -38,6 +38,27 @@ def source_hashes():
     return {name: digest(Path(__file__).parent / name) for name in SOURCES}
 
 
+def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
+    from native_draft_sdpa import audit_active_kernel
+    if packer_compat is not True or precise_native is not True:
+        raise ValueError('Explicit compatible packer and precise native kernel required')
+    audit_active_kernel(root)
+    binaries = {
+        'build_Release/lib/_ttnncpp.so': 'f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3',
+        'build_Release/ttnn/_ttnncpp.so': 'd6c53113a104719a442b4d4a9ec2b344cdd0e00daa1e4d907afb9c13d1e531d9',
+    }
+    directory = root / 'ttnn/cpp/ttnn/operations/transformer/sdpa'
+    sources = [path.relative_to(root) for path in directory.rglob('*')
+        if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h')]
+    if not sources:
+        raise ValueError('Native SDPA sources required')
+    result = {str(path): digest(root / path) for path in sorted(
+        [Path(NATIVE.PACKER), *map(Path, binaries), *sources])}
+    if result[NATIVE.PACKER] != NATIVE.COMPAT_PACKER or any(result[name] != value for name, value in binaries.items()):
+        raise ValueError('Pinned CI simulator binaries and compatible packer required')
+    return result
+
+
 def fixtures():
     import torch
 
@@ -277,6 +298,7 @@ def main():
         for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')})), flush=True)
     with patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY), \
             patch.object(NATIVE, 'digest', digest), \
+            patch.object(NATIVE, 'fingerprints', runner_fingerprints), \
             patch.object(sim_memory_budget, 'MEMORY_MAX', 64 * 1024 ** 3), \
             patch.object(sim_memory_budget, 'SWAP_MAX', 0):
         run()
