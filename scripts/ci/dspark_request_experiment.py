@@ -304,7 +304,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
 
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
+    combined_profile = os.environ.get('QWEN_COMBINED_TRACE_PROFILE', '0')
+    if combined_profile not in ('0', '1'):
+        raise ValueError('Explicit binary combined profile switch required')
+    combined_profile = combined_profile == '1'
+    if combined_profile and (not captured_publication or profile_verifier or profile_drafter or history_profile):
+        raise ValueError('Combined attribution requires the isolated publication runtime')
     schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants else tuple(('eager', audit) for audit in (True, False, False))
+    if combined_profile:
+        schedule = (('publication', True),)
     if profile_verifier or profile_drafter:
         schedule = (('native', True),)
     report['coding_context'], report['request_checks'] = context, []
@@ -332,6 +340,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
                     eos_ids=eos, audit_features=audit, max_new_tokens=output_limit, **POLICIES[arm],
                     **(dict(profile_verifier=True) if profile_verifier else {}),
+                    **(dict(combined_profile=True) if combined_profile else {}),
                     **(dict(history_profile=True) if history_profile else {}),
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:
@@ -352,8 +361,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
-    if profile_verifier or profile_drafter:
+    if profile_verifier or profile_drafter or combined_profile:
         report.update(instrumented_timing=True, correctness_only=True,
+            combined_runtime_profile=combined_profile,
             profile_family='dspark-draft' if profile_drafter else 'dspark',
             ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15, pp=None, committed_tg=None)
         return

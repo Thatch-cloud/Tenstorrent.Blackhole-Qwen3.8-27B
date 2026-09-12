@@ -13,6 +13,13 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def test_combined_profile_rejects_partial_runtime_before_prefill(self):
+        for options in (dict(combined_profile=True), dict(combined_profile=1),
+                dict(combined_profile=True, proposal_trace=True, commit_only_gdn=True, captured_publication=True)):
+            with self.assertRaisesRegex(ValueError, 'Combined attribution'):
+                self.measure(**options)
+        self.base_prefill.assert_not_called()
+
     def test_captured_publication_installs_before_proposal_and_closes_before_drafter(self):
         events = []
 

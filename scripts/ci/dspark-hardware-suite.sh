@@ -56,6 +56,7 @@ if [ "$mode" = request-target-attention ]; then
                 export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
                 export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
                 export QWEN_GDN_OUTER_ADD_EXPERIMENT=0
+                export QWEN_COMBINED_TRACE_PROFILE=1
             fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
@@ -110,6 +111,9 @@ runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${requ
     --output "/experiment/results/$report_name.json")
 if [ "$mode" = request-verifier-profile ]; then
     runner=(bash /experiment-scripts/ci/dspark-request-profile.sh)
+fi
+if [ "${QWEN_COMBINED_TRACE_PROFILE:-0}" = 1 ]; then
+    runner=(bash /experiment-scripts/ci/dspark-combined-profile.sh)
 fi
 "${runner[@]}" 2>&1 | tee "/experiment/results/$report_name.log"
 status=${PIPESTATUS[0]}

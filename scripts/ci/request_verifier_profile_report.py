@@ -30,6 +30,9 @@ def validate_request(report, console, *, family='dflash2'):
             raise ValueError('One complete unchanged DSpark attribution request required')
         request = requests[0]
         draft = request.get('dspark', {})
+        if report.get('combined_runtime_profile') is True:
+            from dspark_publication_variants import validate_route as publication_route
+            publication_route(request, 'publication')
         if (request.get('length') != 4096 or request.get('lookup_max_rows') != 16
                 or any(request.get(key) is not True for key in ('exact', 'state_exact', 'inactive_exact',
                     'instrumented_timing', 'commit_only_gdn', 'norm_batch', 'native_sampling_rows'))

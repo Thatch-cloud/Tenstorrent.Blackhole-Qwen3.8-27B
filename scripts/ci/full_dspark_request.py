@@ -19,9 +19,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
-        gdn_copy_pairs=False, gdn_outer_add=False):
+        gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False):
     import torch
     from full_request import measure_request
+    if type(combined_profile) is not bool or (combined_profile and not (
+            audit_features and captured_publication and fused_t16_mlp and target_attention_t16
+            and commit_only_gdn and native_attention and proposal_trace and not profile_verifier)):
+        raise ValueError('Combined attribution requires the audited complete publication runtime')
     if type(gdn_outer_add) is not bool or (gdn_outer_add and (gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or not (
             captured_publication and fused_t16_mlp and target_attention_t16 and commit_only_gdn))):
         raise ValueError('Outer-add fusion requires the isolated combined runtime')
@@ -299,7 +303,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             from gdn_native_slot_scope import NativeSlotArm
             native_slot_arm = NativeSlotArm(operations, model)
             score_scope.enter_context(native_slot_arm.install())
-        if profile_verifier:
+        if profile_verifier or combined_profile:
             from request_verifier_profile import RequestVerifierProfile
             observer = RequestVerifierProfile(operations, model.mesh_device, full_rows=16,
                 target_attention_t16=target_attention_t16)
