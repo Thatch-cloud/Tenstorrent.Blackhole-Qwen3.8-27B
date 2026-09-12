@@ -10,6 +10,8 @@ class PreparedHistoryProjection:
     def __init__(self, operations, mesh, collectives, parameters, layer_weights, features, tables, *, audit=False):
         if type(audit) is not bool:
             raise ValueError('Explicit projection audit policy required')
+        if not {'fc.weight', 'hidden_norm.weight'} <= set(parameters):
+            raise ValueError('Learned feature projection and hidden normalization weights required')
         self.audit, self.checks = audit, []
         self.operations, self.mesh, self.collectives = operations, mesh, collectives
         self.parameters, self.layer_weights = parameters, tuple(layer_weights)

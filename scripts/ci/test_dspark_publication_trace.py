@@ -52,7 +52,7 @@ class PublicationTraceTests(unittest.TestCase):
 
         features = tuple(Tensor(2560, index) for index in range(5))
         tables = (Tensor(128, 10), Tensor(128, 20))
-        parameters = {'weight': Tensor(128)}
+        parameters = {'fc.weight': Tensor(128), 'hidden_norm.weight': Tensor(128)}
         layers = tuple({'weight': Tensor(128)} for index in range(5))
         address = lambda runtime, value: (value.address, value.address + 1)
         with patch('dspark_publication_trace.project_block', side_effect=project) as projection, \
@@ -106,12 +106,12 @@ class PublicationTraceTests(unittest.TestCase):
             try:
                 with self.assertRaises(ValueError):
                     prepared.project(features[:4], tables)
-                parameters['weight'].address += 100
+                parameters['fc.weight'].address += 100
                 with self.assertRaisesRegex(AssertionError, 'bindings moved'):
                     prepared.project(features, tables)
                 operations.copy.assert_not_called()
             finally:
-                parameters['weight'].address -= 100
+                parameters['fc.weight'].address -= 100
                 prepared.close()
 
     def test_capture_failure_releases_trace_and_all_owned_tensors(self):
@@ -123,6 +123,13 @@ class PublicationTraceTests(unittest.TestCase):
             released = [call.args[0] for call in operations.deallocate.call_args_list]
             self.assertEqual(len(released), 27)
             self.assertEqual(len({id(value) for value in released}), 27)
+
+    def test_missing_feature_weight_fails_before_device_allocation(self):
+        with self.fixture() as fixture:
+            del fixture[3]['fc.weight']
+            with self.assertRaisesRegex(ValueError, 'feature projection'):
+                self.build(fixture)
+            fixture[0].clone.assert_not_called()
 
 
 if __name__ == '__main__':

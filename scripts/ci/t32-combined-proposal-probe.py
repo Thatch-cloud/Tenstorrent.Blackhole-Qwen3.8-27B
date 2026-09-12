@@ -13,7 +13,7 @@ from dspark_layer import SPECIFICATIONS
 from dspark_rope_tables import DSparkRotary
 from dspark_t32_prepared import PreparedDSparkProposal
 from dspark_weights import VerifiedWeights
-from feature_projection import require_projection_environment
+from feature_projection import projection_shards, require_projection_environment
 from gdn_multitoken_conv import release_owned
 from native_draft_sdpa import run_precise_probe
 from sim_memory_budget import require_clean
@@ -76,6 +76,12 @@ def main():
         parameters = {}
         with VerifiedWeights(options.checkpoint) as reader:
             report['draft_weight_hashes'] = reader.fingerprints()
+            if options.publication_only:
+                progress('load_feature_projection')
+                shards = projection_shards(reader.tensor('fc.weight'))
+                parameters['fc.weight'] = upload(torch.stack(shards).unsqueeze(1), True)
+                parameters['hidden_norm.weight'] = upload(reader.tensor('hidden_norm.weight').reshape(1, 1, 1, 5120))
+                del shards
             for name in PARAMETERS:
                 progress('load_' + name)
                 value, sharded = pack_parameter(name, reader.tensor(name))
