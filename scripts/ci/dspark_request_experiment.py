@@ -137,9 +137,13 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         layer_weights, predecessor, successor, rotary, report, progress, *, prompt, context, variants=False,
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
-        profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False):
+        profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
+        history_profile=False):
     import torch
     from full_dspark_request import measure_dspark_request
+    if type(history_profile) is not bool or (history_profile and (not target_attention_variants
+            or banked_proposal or profile_drafter or profile_verifier)):
+        raise ValueError('History attribution requires the combined target-attention request without other profilers')
     from full_request import terminal_ids
     from gdn_snapshot import ActiveSnapshot
     from models.common.sampling.generator import SamplingGenerator
@@ -298,6 +302,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
                     eos_ids=eos, audit_features=audit, max_new_tokens=256 if target_attention_variants or combined_variants or profile_drafter or profile_verifier else 257, **POLICIES[arm],
                     **(dict(profile_verifier=True) if profile_verifier else {}),
+                    **(dict(history_profile=True) if history_profile else {}),
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit
