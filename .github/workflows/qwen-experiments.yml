@@ -100,7 +100,7 @@ on:
       simulator_t32:
         description: CPU-only T32 prerequisite; requires simulator_only
         type: choice
-        options: [none, t32-markov, t32-markov-learned, t32-attention, t32-draft-attention, t32-commit, t32-combined]
+        options: [none, t32-markov, t32-markov-learned, t32-attention, t32-draft-attention, t32-commit, t32-combined, t32-publication]
         default: none
 
 permissions:

@@ -31,6 +31,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint', 'config', 'target', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--publication-only', action='store_true')
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     run_precise_probe(__file__)
@@ -44,6 +45,9 @@ def main():
     report = dict(passed=False, closed_cleanly=False, scope=__doc__, context=4096, capacity=4384,
         proposals=31, learned_layers=5, full_request_qualified=False, numerical_oracle_qualified=False,
         attention=admission, sources=sources(), resources_before=snapshot(), checks=[])
+    if options.publication_only:
+        report.update(scope='Learned captured history projection with synthetic feature taps; no target request or TG',
+            proposals=0, publication_only=True)
     owned, mesh, prepared = [], None, None
 
     def progress(stage):
@@ -66,8 +70,9 @@ def main():
             owned.append(tensor)
             return tensor
 
-        progress('load_target_embedding_head')
-        target, report['target_weights'] = load_target(ttnn, mesh, options.target, owned)
+        if not options.publication_only:
+            progress('load_target_embedding_head')
+            target, report['target_weights'] = load_target(ttnn, mesh, options.target, owned)
         parameters = {}
         with VerifiedWeights(options.checkpoint) as reader:
             report['draft_weight_hashes'] = reader.fingerprints()
@@ -76,10 +81,36 @@ def main():
                 value, sharded = pack_parameter(name, reader.tensor(name))
                 parameters[name] = upload(value, sharded)
                 del value
-            predecessor = upload(reader.tensor('markov_head.markov_w1.weight').reshape(1, 1, 248320, 256), row_major=True)
-            successor = upload(reader.tensor('markov_head.markov_w2.weight').T.contiguous().reshape(1, 1, 256, 248320))
+            if not options.publication_only:
+                predecessor = upload(reader.tensor('markov_head.markov_w1.weight').reshape(1, 1, 248320, 256), row_major=True)
+                successor = upload(reader.tensor('markov_head.markov_w2.weight').T.contiguous().reshape(1, 1, 256, 248320))
         rotary = DSparkRotary(json.loads(options.config.read_text()))
         generator = torch.Generator().manual_seed(383932)
+        if options.publication_only:
+            from dspark_publication_trace import PreparedHistoryProjection
+
+            layers = tuple({name: parameters[f'layers.{layer}.{name}'] for name in SPECIFICATIONS}
+                for layer in range(5))
+            previous = None
+            for ordinal, position in enumerate((4096, 4111, 4128)):
+                progress('publication_projection_' + str(position))
+                features = tuple(upload((.1 * torch.randn(2, 1, 32, 2560,
+                    generator=generator)).bfloat16(), True) for tap in range(5))
+                tables = tuple(upload(value) for value in rotary.tables(position, 32))
+                if prepared is None:
+                    prepared = PreparedHistoryProjection(ttnn, mesh, collectives, parameters, layers,
+                        features, tables, audit=True)
+                else:
+                    prepared.project(features, tables)
+                actual = prepared.snapshot(prepared.outputs)
+                if previous is not None and all(torch.equal(left, right)
+                        for left, right in zip(actual, previous, strict=True)):
+                    raise AssertionError('Changed publication inputs produced entirely stale outputs')
+                previous = actual
+                report['checks'].append(dict(position=position, tensors=len(actual), exact=True))
+            report['replay_checks'] = prepared.checks
+            report['passed'] = True
+            return
         history = []
         for layer in range(5):
             pair = []
