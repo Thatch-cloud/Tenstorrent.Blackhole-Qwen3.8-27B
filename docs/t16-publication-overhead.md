@@ -32,3 +32,25 @@ stability. Do not attribute all 9.612 ms to copies without that measurement.
 Even eliminating the entire 11.438 ms bucket would only reduce this workload's
 107.97 ms mean cycle to about 96.53 ms; this alone cannot establish 200 tok/s.
 Keep verifier/drafter optimization and acceptance measurement in the programme.
+
+## Split hardware profile: run 34674716217
+
+Revision `2a692be236b510af5c6f741834b2dedf94752b25` completes cleanly;
+all six requests report exact output, target state and inactive state. The two
+non-audit fusion requests retain 222/330 accepted drafts and 242 committed tokens.
+Their combined PP2900.98 / CTX4096 / TG62.18 is a profiling-run result, not an
+improvement or serving qualification.
+
+| Non-audit fusion request | Projection ms/cycle | Bank assembly ms/cycle | Total history ms/cycle | Whole cycle ms |
+| --- | ---: | ---: | ---: | ---: |
+| First | 13.009 | 3.765 | 17.619 | 122.137 |
+| Second | 42.659 | 3.786 | 128.414 | 231.506 |
+
+Each row averages 11 cycles. Total history includes the two subintervals; do not
+add these columns together. Bank assembly is stable across these requests,
+whereas projection and the unclassified outer interval vary substantially.
+The second request has about 81.97 ms/cycle outside both subintervals. This
+changes the next investigation: attribute outer validation, tensor ownership
+and cleanup, including host/GC pauses, before claiming full-bank copies dominate.
+These are host-wall measurements with no extra device fences, not isolated
+kernel timings. Preserve both repeats; do not cherry-pick the faster request.
