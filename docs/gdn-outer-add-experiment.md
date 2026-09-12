@@ -1,6 +1,7 @@
 # GDN outer-product/state-add fusion
 
-Status: numerical candidate only. No performance claim or hardware admission.
+Status: FPU destination-reuse variant passes simulator exactness. Full-request
+hardware comparison remains pending; no performance claim.
 
 Initial simulator run **34696989003** compiled successfully but failed the first
 eager gated-output comparison on chip 0. Devices closed cleanly. The failure
@@ -38,3 +39,17 @@ Read-only source export **34697363596** confirms the pinned API provides
 becomes operand B. This removes the SFPU add and the second register copy from
 the failed candidate. It still avoids the outer-product CB write/read. Exactness
 must be re-established in the simulator; the source inspection alone is not proof.
+
+Simulator run **34697528864**, revision `93a13bd`, passes all 24 exact output,
+prefix-state and FP32-bridge comparisons, plus 48 input-immutability checks.
+Both chips close cleanly. The eager and changed-input replay matrices and all
+738 captured source hashes were independently verified against the worktree and
+pinned source export. This qualifies only the synthetic T16 operation.
+
+Retained report SHA256:
+`a2a90b18cc56c6c1e2acafc90e559b1890ddb9f13c2484505439f2f6306b81ca`.
+
+`gdn_outer_add_gate.py` rejects any other report, incomplete matrix or changed
+numerical dependency, including the pinned arithmetic API headers. The SFPU
+variant remains rejected. The next measurement must compare complete requests
+with all accepted runtime features, not an isolated recurrence timing claim.
