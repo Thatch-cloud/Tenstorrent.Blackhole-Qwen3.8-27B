@@ -14,7 +14,8 @@ The next candidate amortizes target verification over up to 31 draft queries /
 | Learned full-vocabulary feedback | Simulator pass, independently verified, run 34590621276; synthetic base logits |
 | 31-query drafter attention | SFPU denominator reduction passes eager/replay, run 34653659471; 46 source hashes verified |
 | T32 commit-only GDN state | Run 34654732582: all 33 prefixes, continuations and pre-commit invariants pass; 20 source hashes verified |
-| Cached layer, embedding/logits, trace and publication | Implemented experimentally; host checks only |
+| Complete captured T32 proposal | Simulator run 34660555430 passes learned layers, target embedding/head and changed-anchor replay; synthetic cached history |
+| T32 history publication in a complete request | Not device-qualified |
 | T32 target gate/up fusion | Exact retained T32 simulator manifest reused; scope host-tested |
 | Complete T32 request and coding screen | Not run; device-state and combined PP/CTX/TG admission still required |
 
@@ -24,12 +25,41 @@ correctness. Keep the validated T16 baseline and serving defaults unchanged.
 Do not assume acceptance or cycle time scales linearly with block width.
 Runtime pins and simulator results: [T32 admission](t32-runtime-admission.md).
 
-Next integration gate: exercise the complete captured T32 proposal with learned layers and shared
-target head. The current `full_dspark_request.py` still constructs the T16
+The complete captured proposal simulator gate passes at CTX4096 with 31 queries,
+five learned layers and the real target embedding/head. Two changed-anchor
+replays match eager execution. Report SHA256:
+`e90aa5715fe105a3722f75b17d933db8be89e79de6c79c9f994d761671566559`.
+Cached history is synthetic: this is neither an independent full numerical
+oracle nor a complete request or hardware throughput qualification.
+
+Next integration gate: complete target-bound T32 request correctness and matched
+hardware measurement. The current `full_dspark_request.py` still constructs the T16
 drafter with 15 proposals. Its runtime, feature publication and verifier width
 must move together in an explicit experimental path before a matched hardware
 request comparison. Do not treat the isolated attention pass as full-request
 admission. Captured T32 construction now requires the validated attention kernel.
+
+### Next acceptance, context ladder and history-preserving merge
+
+After the next combined-runtime candidate passes correctness and coding checks,
+compare the accepted candidate against its matched baseline on both P150A cards.
+Use one stream first; report batch/concurrent-stream results separately.
+
+| Context ladder | Report for each supported point |
+| --- | --- |
+| 2K, 4K, 8K, 16K, 32K, 64K, 128K, 262K | PP tok/s, actual CTX tokens, committed TG tok/s, TTFT, intertoken latency, memory and draft acceptance |
+
+Keep prompts, output budgets, timing boundaries and runtime pins matched. Include
+repeats and correctness results; do not count rejected draft tokens as TG.
+The experimental drafter currently caps history capacity at 8192 tokens, including
+generation headroom. Larger ladder points need implementation and validation,
+not just a context flag; report unsupported points explicitly rather than
+silently truncating prompts or extrapolating throughput.
+
+After acceptance and the supported ladder, merge into `main` with a merge commit,
+not squash or rebase. Preserve the training pathway, all experiment commits and
+evidence records, tag the accepted runtime, then create a new optimisation branch
+from merged `main`. Serving defaults remain unchanged unless authorized.
 
 ### Latest combined fusion result
 
