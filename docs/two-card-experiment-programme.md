@@ -5,7 +5,13 @@
 ### T32 integration work in progress
 
 The next candidate amortizes target verification over up to 31 draft queries /
-32 verifier rows. It is not yet enabled in the full-request benchmark.
+32 verifier rows. The full-request function now has an explicit simulator-only
+`t32_request` route; CI invocation and device qualification are still pending.
+It retains actual prefill capture, native-token comparison, feature publication
+audits and 32-row verifier routing. Its first integration configuration uses
+native target attention and full state history, not T16-only optimisations.
+The request/runtime/admission regression passes 27 host tests. This is wiring
+evidence, not a simulator pass or a new throughput result.
 
 | Prerequisite | Current evidence |
 | --- | --- |

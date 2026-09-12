@@ -104,7 +104,7 @@ class FullDSparkRequestTests(unittest.TestCase):
                 self.drafter.propose.assert_not_called()
                 options['verifier_before_capture'](SimpleNamespace(initial=[]))
             self.assertEqual(options['feature_drafter_name'], 'dspark')
-            self.assertEqual(options['lookup_max_rows'], 16)
+            self.assertEqual(options['lookup_max_rows'], 32 if experiment_options.get('t32_request') else 16)
             self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
             self.assertIs(options['commit_only_gdn'], commit_only_gdn)
             self.assertIs(options['audit_commit_only_gdn'], audit and commit_only_gdn)
@@ -127,6 +127,39 @@ class FullDSparkRequestTests(unittest.TestCase):
                 prefill=self.base_prefill, decode=self.base_decode, live_digest=Mock(), kv_digest=Mock(), inactive_digest=Mock(),
                 eos_ids=(99,), audit_features=audit, max_new_tokens=65,
                 proposal_trace=proposal_trace, commit_only_gdn=commit_only_gdn, **experiment_options)
+
+    def test_t32_request_selects_wide_device_and_retains_feature_audit(self):
+        self.drafter.max_drafts = 31
+        with patch('t32_attention_admission.require_active', return_value={'full_request_qualified': False}) as gate, \
+                patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter) as candidate:
+            result = self.measure(audit=True, proposal_trace=True, native_attention=True, t32_request=True)
+        gate.assert_called_once_with()
+        self.assertEqual(candidate.call_args.kwargs['proposals'], 31)
+        self.traced_device.assert_not_called()
+        self.drafter.propose.assert_called_once_with(17, 31)
+        self.assertEqual(result['dspark']['verifier_rows'], 32)
+        self.assertEqual(result['dspark']['proposals'], 31)
+        self.assertEqual(len(result['dspark']['feature_checks']), 10)
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertFalse(result['dspark']['t32_integration']['admission']['full_request_qualified'])
+        self.drafter.close.assert_called_once()
+
+    def test_t32_request_rejects_unqualified_combinations_before_prefill(self):
+        for extra in (dict(t32_request=1), dict(audit=False), dict(commit_only_gdn=True),
+                dict(target_attention_t16=True), dict(score_layout=True), dict(fused_t16_mlp=True),
+                dict(captured_publication=True), dict(proposal_trace=False), dict(native_attention=False)):
+            options = dict(audit=True, proposal_trace=True, native_attention=True, t32_request=True)
+            options.update(extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'T32 request integration'):
+                self.measure(**options)
+        self.base_prefill.assert_not_called()
+
+    def test_t32_runtime_admission_failure_precedes_prefill(self):
+        with patch('t32_attention_admission.require_active', side_effect=ValueError('simulator required')):
+            with self.assertRaisesRegex(ValueError, 'simulator required'):
+                self.measure(audit=True, proposal_trace=True, native_attention=True, t32_request=True)
+        self.base_prefill.assert_not_called()
+        self.traced_device.assert_not_called()
 
     def test_banked_candidate_selects_device_and_reports_replay_counts(self):
         self.score_scope()
