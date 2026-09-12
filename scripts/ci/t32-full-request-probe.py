@@ -25,6 +25,10 @@ def sources():
         if path.suffix in ('.py', '.cpp', '.sh')}
 
 
+def load_rotary(path):
+    return DSparkRotary(json.loads(path.read_text()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint', 'config', 'target', 'output'):
@@ -36,6 +40,7 @@ def main():
     require_projection_environment(os.environ, False)
     if options.output.exists() or digest(options.config) != FILES['config.json'][1]:
         raise ValueError('Fresh output and pinned draft configuration required')
+    rotary = load_rotary(options.config)
     run_precise_probe(__file__)
     admission = require_active()
     import torch
@@ -95,7 +100,7 @@ def main():
             successor = upload(reader.tensor('markov_head.markov_w2.weight').T.contiguous().reshape(1, 1, 256, 248320))
         layer_weights = [{name: parameters[f'layers.{index}.{name}'] for name in SPECIFICATIONS} for index in range(5)]
         run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
-            layer_weights, predecessor, successor, DSparkRotary(options.config), report, progress,
+            layer_weights, predecessor, successor, rotary, report, progress,
             prompt=prompt, context=context, t32_request=True)
         report['passed'] = True
     except BaseException as error:

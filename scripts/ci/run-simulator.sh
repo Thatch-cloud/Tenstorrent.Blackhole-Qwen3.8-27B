@@ -12,6 +12,15 @@ kinds='attention convolution mlp stack selector'
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then kinds=''; fi
 mounts=()
+if [ "${QWEN_SIM_CASE:-stack}" = t32-request ]; then
+    volume=qwen-t32-simulator-weights-f1e9b1a6-1d4bf0f2
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+        test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.simulator-cache"}}' "$volume")" = true
+    else
+        docker volume create --label thatch.qwen.simulator-cache=true "$volume" >/dev/null
+    fi
+    mounts+=(--mount "type=volume,src=$volume,dst=/simulator-weight-cache")
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = t32-request ]]; then
     checkpoint="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/model.safetensors"
     test -f "$checkpoint"
@@ -57,6 +66,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     -e "QWEN_SIM_CONTEXT=${QWEN_SIM_CONTEXT:-2048}" \
+    -e TT_CACHE_PATH=/simulator-weight-cache/weights \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"

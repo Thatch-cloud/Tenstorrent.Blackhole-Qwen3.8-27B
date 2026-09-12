@@ -16,7 +16,14 @@ The loaded-model runner now selects a single audited T32 request, preserves the
 active SFPU attention kernel and rejects mixed T16 experiment flags. Its result
 gate requires a real 32-row verification plus all feature/replay checks; simulator
 timings cannot become a hardware throughput claim.
-The request/runtime/admission/CLI regression passes 33 host tests. This is wiring
+The first full-request simulator trial (34681360318) failed before prefill:
+the probe passed a path instead of parsed JSON to the drafter rotary constructor.
+All target/draft weights had already loaded; this was not a numerical failure.
+The fix validates rotary configuration before starting the runtime. A dedicated
+simulator weight-cache volume now preserves conversions across retries, separate
+from hardware caches. The failed trial peaked at 63.0 GiB resident and had 7.3 GiB
+swap in use at its final snapshot; no cgroup OOM was recorded.
+The request/runtime/admission/CLI regression passes 34 host tests. This is wiring
 evidence, not a simulator pass or a new throughput result.
 
 | Prerequisite | Current evidence |

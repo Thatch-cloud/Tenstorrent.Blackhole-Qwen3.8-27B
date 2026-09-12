@@ -1,4 +1,7 @@
 import os
+import ast
+import json
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -7,6 +10,23 @@ import unittest
 
 
 class T32RequestCLITests(unittest.TestCase):
+    def test_rotary_reads_json_before_runtime_or_model_startup(self):
+        from test_dspark_intake import configuration
+        probe = Path(__file__).with_name('t32-full-request-probe.py')
+        module = runpy.run_path(str(probe))
+        config = configuration()
+        config['max_position_embeddings'] = 262144
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'config.json'
+            path.write_text(json.dumps(config))
+            rotary = module['load_rotary'](path)
+            self.assertEqual(tuple(rotary.tables(4096, 31)[0].shape), (1, 1, 31, 128))
+        tree = ast.parse(probe.read_text())
+        calls = {node.func.id: node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('load_rotary', 'run_precise_probe')}
+        self.assertLess(calls['load_rotary'], calls['run_precise_probe'])
+
     def test_hardware_environment_is_rejected_before_loading_models(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'report.json'
