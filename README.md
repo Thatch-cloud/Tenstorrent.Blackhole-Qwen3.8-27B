@@ -6,7 +6,27 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ## Current position
 
-### Latest verified short-output screen
+### Latest complete-response comparison
+
+One stream / batch 1, CTX 4096. Each timed response commits 121 tokens and ends
+at EOS. TG includes drafting, verification, transfers and publication; setup is
+reported separately. These are offline runtime tests, not streaming endpoint tests.
+
+| Combined T16 runtime | PP tok/s | CTX tokens | Committed TG tok/s | Hardware run |
+| --- | ---: | ---: | ---: | --- |
+| Native GDN output grid (retained baseline) | **3331.48** | **4096** | **106.38** | 34694909047 |
+| Wider GDN output grid | 3237.06 | 4096 | 105.76 | 34694909047 |
+
+The wider grid loses 0.58% in this matched comparison and remains disabled.
+Both arms pass exact output/state checks across six audit/timing requests.
+This is not held-out coding-quality certification or a full context ladder.
+
+**In flight:** paired tile-copy register handoffs inside GDN, tested against this
+combined runtime in hardware run **34696377960**. The weight-free simulator passed;
+no hardware speed result is available yet. Serving defaults are unchanged.
+[Experiment and acceptance gates](docs/gdn-copy-pairs-experiment.md).
+
+### Earlier short-output screen
 
 **Longer-output confirmation:** run **34692629032** measures **PP 3230.00 /
 CTX4096 / TG 103.62**, one stream, two timed EOS-ended responses of 121 tokens
