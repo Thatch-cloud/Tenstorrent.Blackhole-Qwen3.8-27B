@@ -32,6 +32,12 @@ The subsequent **FPU outer-add fusion** also passes full-request exactness:
 **34697917056**. Blocking trace time does not improve, so it remains disabled.
 [Fusion results](docs/gdn-outer-add-experiment.md).
 
+**Where time goes:** the current combined T16 verifier takes about **68.7 ms**
+on each chip, with only **1.3 ms outside kernel intervals**. Major kernels use
+96–110 cores; the old 36-core figure does not describe the whole runtime.
+Recurrence and MLP/projection work dominate. This profile is not a TG benchmark.
+[Device attribution](docs/combined-trace-attribution.md).
+
 ### Earlier short-output screen
 
 **Longer-output confirmation:** run **34692629032** measures **PP 3230.00 /
