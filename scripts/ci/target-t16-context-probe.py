@@ -26,6 +26,7 @@ def main():
     if options.output.exists():
         parser.error('Fresh ladder report required')
     require_projection_environment(os.environ, options.hardware)
+    os.environ['QWEN_CONTEXT_LADDER_SIM'] = '1'
     import torch
     import ttnn
 
