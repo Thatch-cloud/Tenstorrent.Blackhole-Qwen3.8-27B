@@ -2,6 +2,25 @@
 
 ## T32 combined hardware correctness - 2026-09-12
 
+### First timed T32 integration baseline
+
+Run **34688574940** passes one fresh audit and two identical timed requests.
+This initial integration uses native target attention and full GDN state history;
+it does **not** yet include the faster T16 runtime's combined optimisations.
+
+| Streams | CTX | PP tok/s | Committed TG tok/s | Timed output | Acceptance |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 4096 | 2070.05 | 33.86 | 2 x 64 tokens | 34.8% |
+
+Mean timed cycle across 18 blocks: drafting **63.47 ms**, verifier input/state
+preparation **35.58 ms**, verify/readback **87.30 ms**, selection/publication
+**23.17 ms**, total **209.92 ms**. These are host stage timings, not isolated
+device kernel measurements. Mean setup-inclusive request time is **17.00 s**.
+No speed improvement or serving promotion is claimed. Next: integrate the
+simulator-tested T32 commit-only state path, then remeasure the combined request.
+All 828 source files verified and pooled summary independently recomputed.
+Report SHA256: `96d4880221c1416ee3655f87b6b2e5d1b26fe31fd1a76990734083c5a4c9ef05`.
+
 Run **34688141901** passes the actual two-card request at CTX4096:
 
 | Check | Result |
