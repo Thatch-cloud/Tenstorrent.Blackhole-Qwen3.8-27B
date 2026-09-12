@@ -80,6 +80,14 @@ PY
         printf '%s\n' "$status" > /experiment/results/t32-draft-attention.exit-status
         exit "$status"
     fi
+    if [ "$QWEN_SIM_CASE" = t32-context-attention ]; then
+        python3 -B -m unittest test_target_t16_context_cli
+        status=0
+        timeout -k 15 9000 python3 -u /experiment-scripts/ci/target-t16-context-probe.py \
+            --context "${QWEN_SIM_CONTEXT:-2048}" --output /experiment/results/t16-context-attention.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t16-context-attention.exit-status
+        exit "$status"
+    fi
     if [ "$QWEN_SIM_CASE" = t32-attention ]; then
         python3 -B -m unittest test_target_t32_attention_gate test_target_t16_attention_gate
         status=0
