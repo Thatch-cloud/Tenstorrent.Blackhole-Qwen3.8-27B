@@ -47,6 +47,22 @@ rounding mechanisms alone do not reproduce the simulator failure. Next isolate
 native score scaling, maximum subtraction and exponential arithmetic rather
 than dispatch another reciprocal or chunk-size trial.
 
+## Correction exponential trial
+
+The native first-column correction uses the degree-four polynomial when
+`EXP_APPROX_MODE` is false. The already-grafted probability-tile path instead
+uses `_ckernel_sfpu_exp_accurate_` with FP32 destination accumulation. The next
+synthetic simulator trial selects that accurate helper for the correction too,
+only for the existing draft signature. Counterintuitively, `true` in
+`exp_tile_first_column` selects this helper; it is not the fast approximate
+probability-tile path. This difference is a hypothesis, not a demonstrated bug.
+
+Keep FP32 statistics and explicit pack-format repair; restore the native
+reciprocal so the comparator is run 34724923953, not the failed reciprocal
+trial. Record both exponential headers in the runtime fingerprint. Host tests
+verify scope restoration and the transformation matches pinned native sources;
+only the unchanged simulator numerical/replay matrix can qualify the change.
+
 ## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination
