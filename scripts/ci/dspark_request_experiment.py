@@ -177,11 +177,13 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, t32_request=False, t32_timed=False):
+        history_profile=False, captured_publication=False, t32_request=False, t32_timed=False, t32_commit=False):
     import torch
     from full_dspark_request import measure_dspark_request
     if type(t32_timed) is not bool or (t32_timed and not t32_request):
         raise ValueError('Explicit T32 hardware timing selection required')
+    if type(t32_commit) is not bool or (t32_commit and not t32_request):
+        raise ValueError('Explicit T32 commit-only selection required')
     if type(t32_request) is not bool or (t32_request and any((variants, native_attention_variants,
             profile_verifier, norm_scatter_variants, target_attention_variants, combined_variants, mlp_down,
             mlp_equal_footprint, profile_drafter, score_layout, banked_proposal, native_slot_gdn,
@@ -192,6 +194,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['t32_attention_admission'] = require_active()
         if t32_timed and report['t32_attention_admission'].get('links', {}).get('backend') != 'hardware':
             raise ValueError('T32 timing requires admitted hardware')
+        if t32_commit:
+            from t32_commit_gate import qualify
+            report['t32_commit_evidence'] = qualify(Path(__file__).parent)
     if type(captured_publication) is not bool or (captured_publication and (
             not target_attention_variants or not score_layout or not fused_t16_mlp
             or history_profile or banked_proposal or native_slot_gdn or profile_drafter or profile_verifier or mlp_down)):
@@ -338,6 +343,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if t32_request:
         schedule = tuple(('t32', audit) for audit in ((True, False, False) if t32_timed else (True,)))
         POLICIES = {'t32': dict(t32_request=True, proposal_trace=True, native_attention=True)}
+        if t32_commit:
+            POLICIES['t32'].update(commit_only_gdn=True, t32_commit_evidence=Path(__file__).parent)
     report['coding_context'], report['request_checks'] = context, []
     report['sampler_links'] = 4
     control_warmed = False

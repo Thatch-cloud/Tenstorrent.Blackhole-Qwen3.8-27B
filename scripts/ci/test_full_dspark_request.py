@@ -144,6 +144,17 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertFalse(result['dspark']['t32_integration']['admission']['full_request_qualified'])
         self.drafter.close.assert_called_once()
 
+    def test_t32_commit_only_requires_and_records_retained_evidence(self):
+        self.drafter.max_drafts = 31
+        evidence = {'rows': 32, 'prefixes': 33, 'full_request_qualified': False}
+        with patch('t32_attention_admission.require_active', return_value={'full_request_qualified': False}), \
+                patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter), \
+                patch('t32_commit_gate.qualify', return_value=evidence) as gate:
+            result = self.measure(audit=True, proposal_trace=True, native_attention=True,
+                t32_request=True, commit_only_gdn=True, t32_commit_evidence='retained')
+        gate.assert_called_once_with('retained')
+        self.assertEqual(result['dspark']['t32_commit_evidence'], evidence)
+
     def test_t32_request_rejects_unqualified_combinations_before_prefill(self):
         for extra in (dict(t32_request=1), dict(audit=False), dict(commit_only_gdn=True),
                 dict(target_attention_t16=True), dict(score_layout=True), dict(fused_t16_mlp=True),

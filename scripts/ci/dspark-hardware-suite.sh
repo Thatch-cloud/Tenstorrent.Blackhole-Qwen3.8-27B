@@ -18,7 +18,7 @@ if [ "$mode" = request-t32 ]; then
     python3 /experiment-scripts/ci/dspark_runtime_cache.py
     status=0
     timeout -k 20 3000 python3 -u /experiment-scripts/ci/t32-hardware-request.py \
-        --timed \
+        --timed --commit-only \
         --checkpoint /dspark/model.safetensors --config /dspark/config.json \
         --target /models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
         --evidence /experiment-scripts/ci/t32-combined-simulator.json \

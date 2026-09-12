@@ -18,11 +18,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         proposal_trace=False, commit_only_gdn=False, native_attention=False, profile_verifier=False,
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, t32_request=False, t32_timing_evidence=None):
+        history_profile=False, captured_publication=False, t32_request=False, t32_timing_evidence=None,
+        t32_commit_evidence=None):
     import torch
     from full_request import measure_request
     if type(t32_request) is not bool or (t32_request and (
-            (not audit_features and t32_timing_evidence is None) or not proposal_trace or not native_attention or commit_only_gdn
+            (not audit_features and t32_timing_evidence is None) or not proposal_trace or not native_attention
+            or (commit_only_gdn and t32_commit_evidence is None)
             or target_attention_t16 or score_layout or banked_proposal or native_slot_gdn
             or fused_t16_mlp or history_profile or captured_publication or profile_verifier)):
         raise ValueError('T32 request integration requires audited simulator tracing without T16-only candidates or deferred state')
@@ -30,6 +32,12 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     if t32_request:
         from t32_attention_admission import require_active
         t32_admission = require_active()
+    commit_evidence = None
+    if t32_commit_evidence is not None:
+        if not t32_request or not commit_only_gdn:
+            raise ValueError('T32 commit evidence requires the explicit commit-only request')
+        from t32_commit_gate import qualify
+        commit_evidence = qualify(t32_commit_evidence)
     if t32_timing_evidence is not None:
         if not t32_request or audit_features or t32_admission.get('links', {}).get('backend') != 'hardware':
             raise ValueError('T32 timing requires hardware and a preceding audited request')
@@ -37,6 +45,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         summarize_t32_simulator([t32_timing_evidence])
         if t32_timing_evidence.get('prompt_tokens') != list(prompt):
             raise ValueError('T32 timing prompt differs from its audited request')
+        if t32_timing_evidence.get('commit_only_gdn', False) != commit_only_gdn:
+            raise ValueError('T32 timing state policy differs from its audited request')
     proposals = 31 if t32_request else 15
     verifier_rows = proposals + 1
     if type(captured_publication) is not bool or (captured_publication and (
@@ -314,6 +324,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if t32_request:
             result['dspark']['t32_integration'] = dict(admission=t32_admission,
                 scope='Experimental T32 request with native target attention and full state history; backend admission recorded separately')
+            result['dspark']['t32_commit_evidence'] = commit_evidence
         if observer is not None:
             result['verifier_profile'] = observer.summary()
         if banked_proposal:

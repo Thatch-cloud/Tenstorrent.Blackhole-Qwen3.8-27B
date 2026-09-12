@@ -16,6 +16,7 @@ from t32_hardware_kernel import installed, request_admission
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--timed', action='store_true', help='Run two timing repeats only after a fresh full audit')
+    parser.add_argument('--commit-only', action='store_true', help='Use simulator-qualified committed-prefix GDN publication')
     for name in ('checkpoint', 'config', 'target', 'output', 'evidence'):
         parser.add_argument('--' + name, type=Path, required=True)
     options = parser.parse_args()
@@ -25,6 +26,9 @@ def main():
     rotary = DSparkRotary(json.loads(options.config.read_text()))
     root = Path(os.environ['TT_METAL_HOME'])
     directory = Path(__file__).parent
+    if options.commit_only:
+        from t32_commit_gate import qualify
+        qualify(directory)
     with installed(root, options.evidence, directory) as evidence:
         with request_admission(root, evidence):
             spec = importlib.util.spec_from_file_location('t32_request_probe', directory / 't32-full-request-probe.py')

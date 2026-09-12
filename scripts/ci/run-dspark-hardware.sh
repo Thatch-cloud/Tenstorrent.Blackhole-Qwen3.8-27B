@@ -11,6 +11,11 @@ if [ "$mode" = request-t32 ]; then
         --name qwen-hardware-inventory-34660555430 --dir "$evidence"
     t32_report="$evidence/t32-combined.json"
     printf '%s  %s\n' e90aa5715fe105a3722f75b17d933db8be89e79de6c79c9f994d761671566559 "$t32_report" | sha256sum -c -
+    commit_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-t32-commit.XXXXXX")
+    gh run download 34654732582 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34654732582 --dir "$commit_evidence"
+    printf '%s  %s\n' 4a29010fbcc8b0ff456ce0b156370a2f3791ed496a1762a2f212a5019a2c439d "$commit_evidence/t32-commit.json" | sha256sum -c -
+    test "$(cat "$commit_evidence/t32-commit.exit-status")" = 0
 fi
 draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
 [[ "$draft_profile" = 0 || "$draft_profile" = 1 ]]
@@ -137,6 +142,8 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
 docker cp scripts "$test_id:/experiment-scripts"
 if [ "$mode" = request-t32 ]; then
     docker cp "$t32_report" "$test_id:/experiment-scripts/ci/t32-combined-simulator.json"
+    docker cp "$commit_evidence/t32-commit.json" "$test_id:/experiment-scripts/ci/t32-commit.json"
+    docker cp "$commit_evidence/t32-commit.exit-status" "$test_id:/experiment-scripts/ci/t32-commit.exit-status"
     docker cp speculative-decoding "$test_id:/speculative-decoding"
 fi
 if [ "$publication" = 1 ]; then
