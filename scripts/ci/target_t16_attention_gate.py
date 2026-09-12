@@ -16,6 +16,12 @@ def validate_request_option(enabled, *, rows, position, remaining, replay, norm_
         raise ValueError('Explicit T16 attention selection required')
     if not enabled:
         return
+    from dspark_context_selection import request_context
+    if request_context() == 8192:
+        from target_t16_attention_8k_gate import validate_request_option as validate_8k
+        return validate_8k(enabled, rows=rows, position=position, remaining=remaining,
+            replay=replay, norm_batch=norm_batch, native_sampling=native_sampling,
+            group_rows=group_rows, short_context=short_context)
     if (any(type(value) is not int for value in (rows, position, remaining, group_rows))
             or rows != 16 or position != 4096 or not 1 <= remaining <= 256
             or replay is not True or norm_batch is not True or native_sampling is not True
@@ -58,6 +64,10 @@ def validate(report, directory):
 
 
 def qualify(directory):
+    from dspark_context_selection import request_context
+    if request_context() == 8192:
+        from target_t16_attention_8k_gate import qualify as qualify_8k
+        return qualify_8k(directory)
     directory = Path(directory)
     path = directory / 'target-t16-attention-simulator.json'
     report = json.loads(path.read_text())

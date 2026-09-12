@@ -265,12 +265,14 @@ def main():
     if options.request:
         from coding_context_request import make_context_prompt
 
-        prompt, context = make_context_prompt(tokenizer, context_tokens=4096)
+        from dspark_context_selection import request_context
+        requested_context = request_context()
+        prompt, context = make_context_prompt(tokenizer, context_tokens=requested_context)
         if coding_task != 'merge_intervals':
             from coding_holdout_tasks import make_context_prompt as make_holdout
-            prompt, context = make_holdout(tokenizer, coding_task, context_tokens=4096)
-            if len(prompt) != 4096:
-                raise ValueError('Untuned folded-attention request requires exactly qualified CTX4096')
+            prompt, context = make_holdout(tokenizer, coding_task, context_tokens=requested_context)
+        if len(prompt) != requested_context:
+            raise ValueError('Request must match the explicitly selected context')
         prompts = [prompt]
     if options.preflight:
         options.output.write_text(json.dumps(dict(passed=True, scope='Target imports/config/tokenizer and component gates; no device execution',
