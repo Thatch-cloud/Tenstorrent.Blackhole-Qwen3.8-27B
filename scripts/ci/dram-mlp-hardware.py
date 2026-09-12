@@ -1,0 +1,258 @@
+"""Real-weight T16 MLP ABBA, including boundary conversions and native TP2 collective; not model TG."""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import runpy
+from pathlib import Path
+import statistics
+import time
+
+from attention_batch import capture_operation
+from feature_projection import require_projection_environment
+from gdn_multitoken_conv import addresses, release_owned
+from sampling_link_policy import audit
+from dram_mlp import execute
+from dram_sharded_projection import configurations
+from dram_mlp_gate import NATIVE_SOURCES, variant_sources, qualify
+from tensix_mlp_weight_views import tensor_spec, weight_views
+from tensix_mlp_profile import MlpTraceProfile, require_profile_mode
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--simulator-report', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--simulator-exit-status', type=Path, required=True)
+    parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--sharded-product', action='store_true')
+    parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--down-only', action='store_true')
+    options = parser.parse_args()
+    if options.down_only and (options.profile or options.sharded_product):
+        raise ValueError('Down-only comparison is separate from sharded-product profiling')
+    require_profile_mode(os.environ, options.profile)
+    require_projection_environment(os.environ, True)
+    native_root = Path(os.environ['TT_METAL_HOME'])
+    names = variant_sources(options.sharded_product, options.down_only)
+    operation = execute
+    if options.sharded_product:
+        from dram_mlp_sharded import execute as operation
+    if options.down_only:
+        from dram_mlp_down import execute as operation
+    sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
+    native_sources = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
+    prerequisite = json.loads(options.simulator_report.read_text())
+    report = dict(passed=False, closed_cleanly=False, backend='hardware', scope=__doc__, layer=0, rows=16, streams=1,
+        input='Replicated BF16 DRAM; both arms include native DRAM-to-L1 conversion',
+        precision='Unchanged BF4 gate/up, BF8 down, LoFi FP32 matmul accumulation with packer L1 accumulation',
+        seeds=[1659, 2670, 3781], repeats_per_sample=50, eager_checks=[], trace_checks=[], blocks=[],
+        sources=sources, native_sources=native_sources,
+        simulator_report_sha256=hashlib.sha256(options.simulator_report.read_bytes()).hexdigest(),
+        hardware_script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        collective_links=4, sharded_product=options.sharded_product, down_only=options.down_only,
+        timing_scope='Captured complete MLP including DRAM-to-L1 input, DRAM weight reads and native TP2 collective; upload, capture and validation excluded')
+    if options.profile:
+        from dram_mlp_profile_report import profile_sources
+        report.update(instrumented_timing=True, correctness_only=True, repeats_per_sample=1,
+            eligible_for_full_model_gate=False, profile_checks=[], input_checks=[],
+            profile_sources=profile_sources(Path(__file__).parent),
+            timing_scope='Instrumented operation attribution only; not latency qualification or TG')
+    try:
+        report['simulator_gate'] = qualify(prerequisite, sources, native_sources,
+            options.simulator_exit_status.read_text().strip(), hardware=True,
+            sharded=options.sharded_product, down=options.down_only)
+        report['fabric_sources'] = audit(native_root, os.environ)
+        runpy.run_path(str(Path(__file__).with_name('dram-projection-binding-check.py')), run_name='__main__')
+    except BaseException as error:
+        report['stage'] = 'preflight_failed'
+        report['error'] = f'{type(error).__name__}: {error}'
+        for name in NATIVE_SOURCES:
+            destination = options.output.parent / 'dram-mlp-native-sources' / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((native_root / name).read_bytes())
+        options.output.write_text(json.dumps(report, indent=2))
+        raise
+    if options.preflight:
+        report.update(stage='preflight_complete', preflight_passed=True)
+        options.output.write_text(json.dumps(report, indent=2))
+        print('MLP source preflight passed; no device opened', flush=True)
+        return
+    import torch
+    import ttnn
+    from models.demos.blackhole.qwen36.tests.test_factory import load_mlp_layer
+    from models.demos.blackhole.qwen36.tt.mlp import Qwen36MLP
+    from models.demos.blackhole.qwen36.tt.model_config import Qwen36ModelArgs
+    from models.tt_transformers.tt.ccl import TT_CCL, tt_all_reduce
+
+    mesh, persistent, transient, captured, traces = None, [], [], [], []
+    def retain(storage, value):
+        storage.append(value)
+        return value
+    def progress(stage):
+        report['stage'] = stage
+        options.output.write_text(json.dumps(report, indent=2))
+        print(stage, flush=True)
+    def read(value):
+        parts = ttnn.get_device_tensors(value)
+        if len(parts) != 2:
+            raise AssertionError('Both chip outputs required')
+        return [ttnn.to_torch(part).clone() for part in parts]
+    def exact(actual, expected):
+        return all(torch.equal(found.view(torch.int16), reference.view(torch.int16))
+            for found, reference in zip(actual, expected, strict=True))
+    try:
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=268435456)
+        mesh.enable_program_cache()
+        args = Qwen36ModelArgs(mesh, max_batch_size=16, max_seq_len=65536)
+        if (args.dim, args.hidden_dim, args.num_devices, args.decode_grid_w) != (5120, 17408, 2, 11):
+            raise ValueError('Pinned model and two-card worker grid required')
+        collectives = TT_CCL(mesh)
+        def four_links(cluster_axis=None):
+            if cluster_axis not in (None, 0, 1):
+                raise ValueError('Qualified pair collective axis required')
+            return 4
+        collectives.get_num_links = four_links
+        state = load_mlp_layer(args.CKPT_DIR, 0)
+        mlp = Qwen36MLP(mesh, state, None, args=args, tt_ccl=collectives)
+        del state
+        if not mlp._mlp_1d_decode or mlp._dram_sharded:
+            raise ValueError('Qualified interleaved 1D decode MLP required')
+        compute = mlp.compute_kernel_config_decode
+        if (compute.math_fidelity != ttnn.MathFidelity.LoFi
+                or not compute.fp32_dest_acc_en or not compute.packer_l1_acc):
+            raise ValueError('Unchanged native LoFi FP32 and packer L1 accumulation required')
+        weights = dict(gate=mlp.weights.w1, up=mlp.weights.w3, down=mlp.weights.w2)
+        candidate_weights = weights
+        if options.sharded_product:
+            candidate_weights, report['weight_views'] = weight_views(ttnn, weights)
+        mapper = ttnn.ReplicateTensorToMesh(mesh)
+        patterns = [torch.randn((1, 1, 16, 5120), generator=torch.Generator().manual_seed(seed)).bfloat16()
+            for seed in report['seeds']]
+        host_inputs = [ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper)
+            for value in patterns]
+        source = retain(persistent, ttnn.from_torch(patterns[0], device=mesh, dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
+        configs = {name: configurations(ttnn, mesh, name) for name in weights}
+        sharded = {name: (value if options.down_only and name != 'down'
+            else retain(persistent, ttnn.to_memory_config(value, configs[name]['weights'])))
+            for name, value in candidate_weights.items()}
+        if options.down_only:
+            configs['gate'] = dict(program=args.mlp_w1_decode_1d_progcfg)
+            configs['up'] = dict(program=args.mlp_w3_decode_1d_progcfg)
+        bindings = [addresses(ttnn, value) for value in persistent + list(weights.values())]
+        def forward(candidate, storage):
+            if not candidate:
+                return retain(storage, mlp.forward(source))
+            interleaved = retain(storage, ttnn.to_memory_config(source, ttnn.L1_MEMORY_CONFIG))
+            partial = operation(ttnn, interleaved, sharded, configs, compute,
+                lambda value: value)
+            return retain(storage, tt_all_reduce(partial, mesh, collectives, cluster_axis=0, dim=3,
+                topology=args.ccl_topology(), memory_config=ttnn.DRAM_MEMORY_CONFIG))
+        references = []
+        progress('weights_ready')
+        for pattern, host in enumerate(host_inputs):
+            ttnn.copy_host_to_device_tensor(host, source)
+            reference = read(forward(False, transient))
+            references.append(reference)
+            if not exact(read(forward(True, transient)), reference):
+                raise AssertionError(f'DRAM-sharded MLP differs from actual native forward at pattern={pattern}')
+            report['eager_checks'].extend(dict(pattern=pattern, chip=chip, exact=True) for chip in range(2))
+            ttnn.synchronize_device(mesh)
+            release_owned(ttnn, transient)
+            transient.clear()
+        if any(torch.equal(references[0][chip], references[1][chip]) for chip in range(2)):
+            raise AssertionError('Changed-input control must distinguish stale outputs on both chips')
+        outputs = []
+        for candidate in (False, True):
+            trace, output = capture_operation(ttnn, mesh, lambda candidate=candidate: forward(candidate, captured))
+            traces.append(trace)
+            outputs.append(output)
+        observer = MlpTraceProfile(ttnn, mesh, traces, rows=16) if options.profile else None
+        def timed(arm):
+            ttnn.execute_trace(mesh, traces[arm], cq_id=0, blocking=False)
+            ttnn.synchronize_device(mesh)
+            started = time.perf_counter()
+            for repeat in range(report['repeats_per_sample']):
+                ttnn.execute_trace(mesh, traces[arm], cq_id=0, blocking=False)
+            ttnn.synchronize_device(mesh)
+            elapsed = (time.perf_counter() - started) * 1000 / report['repeats_per_sample']
+            if not math.isfinite(elapsed) or elapsed <= 0:
+                raise AssertionError('Positive finite timing required')
+            return elapsed
+        for pattern, host in enumerate(host_inputs):
+            ttnn.copy_host_to_device_tensor(host, source)
+            for arm, trace in enumerate(traces):
+                if observer:
+                    observer.replay(arm, pattern, 'audit')
+                else:
+                    ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+                if not exact(read(outputs[arm]), references[pattern]):
+                    raise AssertionError('Changed-input trace differs from actual native forward')
+                report['trace_checks'].extend(dict(pattern=pattern, arm=arm, chip=chip, exact=True) for chip in range(2))
+            if observer:
+                for sample, arm in enumerate((0, 1, 1, 0)):
+                    observer.replay(arm, pattern, 'measurement', sample)
+                    if not exact(read(outputs[arm]), references[pattern]):
+                        raise AssertionError('Instrumented trace changed output')
+                    report['profile_checks'].extend(dict(pattern=pattern, sample=sample, chip=chip, exact=True)
+                        for chip in range(2))
+            for block in range(0 if observer else 3):
+                samples = []
+                for arm in (0, 1, 1, 0):
+                    samples.append(timed(arm))
+                    if not exact(read(outputs[arm]), references[pattern]):
+                        raise AssertionError('Timed trace changed output')
+                baseline = statistics.mean((samples[0], samples[3]))
+                candidate = statistics.mean(samples[1:3])
+                report['blocks'].append(dict(pattern=pattern, block=block, samples_ms=samples,
+                    control_ms=baseline, candidate_ms=candidate, ratio=baseline / candidate))
+            if bindings != [addresses(ttnn, value) for value in persistent + list(weights.values())]:
+                raise AssertionError('Persistent input, workspace or weight addresses changed')
+            if not exact(read(source), [patterns[pattern]] * 2):
+                raise AssertionError('MLP modified caller-owned input')
+            if observer:
+                report['input_checks'].append(dict(pattern=pattern, unchanged=True, bindings_stable=True))
+            progress(f'pattern_{pattern}_passed')
+        if observer:
+            report['profile'] = observer.summary()
+        else:
+            report['control_ms'] = statistics.mean(block['control_ms'] for block in report['blocks'])
+            report['candidate_ms'] = statistics.mean(block['candidate_ms'] for block in report['blocks'])
+            report['eligible_for_full_model_gate'] = all(block['ratio'] > 1.02 for block in report['blocks'])
+        if options.sharded_product:
+            report['native_weights_after'] = {name: tensor_spec(ttnn, value) for name, value in weights.items()}
+            if report['native_weights_after'] != {name: check['native'] for name, check in report['weight_views'].items()}:
+                raise AssertionError('Native weight metadata or buffers changed')
+    except BaseException as error:
+        report['error'] = f'{type(error).__name__}: {error}'
+        progress('failed')
+        raise
+    finally:
+        if mesh is not None:
+            try:
+                ttnn.synchronize_device(mesh)
+                for trace in traces:
+                    ttnn.release_trace(mesh, trace)
+                release_owned(ttnn, transient + captured + persistent)
+            finally:
+                ttnn.close_mesh_device(mesh)
+                report['closed_cleanly'] = True
+                progress('failed' if report.get('error') else 'closed')
+    report['sources_after'] = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
+    report['native_sources_after'] = {name: hashlib.sha256((native_root / name).read_bytes()).hexdigest() for name in NATIVE_SOURCES}
+    if report['sources_after'] != sources or report['native_sources_after'] != native_sources:
+        raise AssertionError('Hardware experiment sources changed')
+    if options.profile:
+        report['profile_sources_after'] = profile_sources(Path(__file__).parent)
+        if report['profile_sources_after'] != report['profile_sources']:
+            raise AssertionError('Profile instrumentation sources changed')
+    report['passed'] = True
+    progress('complete')
+
+
+if __name__ == '__main__':
+    main()

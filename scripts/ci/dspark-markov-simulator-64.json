@@ -1,0 +1,851 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "vocabulary": 64,
+  "proposals": 3,
+  "fixture": null,
+  "sources": {
+    "dspark-markov-probe.py": "502395e7ff8544e3a55fd6f8cb2f4c88c3c22e4f7b27538f0e523b842c1fe804",
+    "dspark_markov_device.py": "4e7ba3c4099e42c171ffef0729925b7e6f93a70759195f9d4b7215375df37bba",
+    "dspark_markov.py": "b89e82ab01cf98421034171ac13ca0f776b1600b3482a1af41cf63e08e7966bf",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources": {
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation.cpp": "df8ff12fccf399d3d8ead83d86b28d91f9db95068c9cb5ff861e4a8b6406b2ba",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation.hpp": "9c6cb7a4e59a2f01cb8ad96bc7779ede5a68f048f0c57bc4835d1d5039f8894a",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation_types.hpp": "0a420b812fc2981a76ab5a19c1e429b9c256c25e5ee6fa3a4e3c6fd33951541e",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_program_factory_common.cpp": "70d0548ea8ffe9b49461a265244336ec20746f4c2c433857bc9448c89f20425e",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_program_factory_common.hpp": "98d99b0ce61ce6b9c9b30d4dab957fc6ed6755ac6fd3b54ab8176c4a4846f71d",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_fused_program_factory.cpp": "7a819859a67f8f5583784221a369e2ae05aeb520f917e6c2ddc8c7c7e5dfe099",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_fused_program_factory.hpp": "2e81891b235c4c990d5bde9fb02e37d88cd4815fc5a5b42e30b685e330c0e8c4",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_rm_program_factory.cpp": "2f892684deeaaec76ebefc38a84dae518e77e097e520092cf9da43c022675d92",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_rm_program_factory.hpp": "a07879e68d382554c20f1f390180d18783ed5ed3c3c7055ae7fdf7794f3c6551",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_tilized_indices_program_factory.cpp": "5a5eb217233dce24f9543bfc5af89253f7b5345a80e14257ba440c0da87fe067",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_tilized_indices_program_factory.hpp": "b01fc39b948b8e3d4890e49a96692032014d8a1e01e2b570846019f5d6fe7e6b",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/compute/tilize_chunked.cpp": "d7491cc5fc947b78ce1659f6ebd8ccbaa2765ced832602887e4db4f964610dec",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embedding_ind_tilized.cpp": "9fc23720c72f2f7f82cf7a0d3dc561df94b3935b5153654f4d65d31e4b860dfb",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings.cpp": "118821499a48371c1a8b7b6ead44cd45f60d8a299a9ae3fe2c3920b33d2c1c4f",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_common.hpp": "6bd33b07cea63634a11cb2bfdc224d513b3b2f7639d43517fa03766e7f7ca17b",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_rm_writer_chunked.cpp": "4a8f2781c229c19e57769180baccf9a10870fcc2ec1368d878c1b8c44c3fd4e0",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_tilize.cpp": "cd31aed9d16dcd01d0f8525825e44fb3f2c8c1a02e66d49143874b57b383a399",
+    "ttnn/cpp/ttnn/operations/embedding/embedding.cpp": "5f0bd152e5c43a00d95626a283036874432da10ba4267ae0c1fd122b835dd2f8",
+    "ttnn/cpp/ttnn/operations/embedding/embedding.hpp": "154f6a8bd1a07feb5fca64f9e4cdc9ec27a2fdbee2a31858ae788f3fbc0681b5",
+    "ttnn/cpp/ttnn/operations/embedding/embedding_nanobind.cpp": "36bfd4f8b05782449072af2799c7c7e7737a4e2cc3f1a4e1c36ed975767139c8",
+    "ttnn/cpp/ttnn/operations/embedding/embedding_nanobind.hpp": "4ba7584eb016c75ce5be71e4c56fdc640830ffb2c472ef98ecae8230a5eb1c04",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config.cpp": "6e9aa89a31b9733c7d241e288673d1ff749ecd397196bd2af41b90956fe1296b",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config.hpp": "ecea1ea16091ad350f50ca538408752b82132b67ea7a1fe86ac7f5f8b25d64f9",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config_types.hpp": "a8f7a74dc51e3c0104cafb1c48ed26cfc7960c790335f55aaca3dc86bd460f6c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_program_factory.cpp": "88a137455459ed1ea921b4829730adad1bb8eb510c85daa73bd11db5765afd67",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_program_factory.hpp": "827c0fbf95f5d5a853dd0d7025c50b79c02a967a07c9d535c32dbd3e0aa20295",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_batched_hs_dram_sharded_program_factory.cpp": "cc45c007c1e225fe83b6a06292713da84a94e96a3dbeb23a988d5c6d63c906fb",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_batched_hs_dram_sharded_program_factory.hpp": "36c9167801007ab3cc291797b8b3ce21776e056db3b763fc4e4616cb28a52eb0",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.hpp": "403768276b4d155d925c9ed9ea06aa363edb0b317d3254503cb5b544d3a0d4d2",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_2d_program_factory.cpp": "f57cfde989740370e8c9a148f06cc76bf0906a883aed31706abd3d76e6fac024",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_2d_program_factory.hpp": "3265058634c9a264e8be7d03ef327ad00d59f8f28c33b471361f5a69e9ac3f62",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.hpp": "42143dc52f41487bc4970a8a57ff73392c6ae99c5c42d767d5c36e8201aaf932",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_optimized_program_factory.cpp": "2d1b85014258db576e20d1f840520052747d1f030d7d549527960c45af7099f7",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_optimized_program_factory.hpp": "ff882140e534f614d6d64089db102cb79b4404df7e7c0ed67fda26986e6ec644",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm.cpp": "0d15d0c084c3b6b02d6b81a7a99f578ebe91c261ecd70e3dfa6f0e6cd2a769ec",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp": "2fa39e9691935803f62ac00e4acb2712087a03f9dce8ba3f62d584d1def106bc",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm.cpp": "1ac075c295a1395719f64dfc04a547601fd77930c0f65808e597c6a3559c28de",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation_gathered.cpp": "ea79f611cb66a0e0eeee38ae21554e93248b3ad4843d1e8cd88065a9522d6986",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_8bank_output_tiles_partitioned.cpp": "b4c8d87a616a21933911a55c5ff36eaa176b55b7b839d96cc4873ef1b8b3653c",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout.cpp": "8f7ba50ef11a62f22b2bc9505e671815f73b2ba5660a86d8e23dfb0dc60c04aa",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0.cpp": "407ed832d3cf079b6cdfb0963ff43019ee0a866cbc43e09da8985f85ebedee3e",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_receiver.cpp": "3cafe648c754d5dd68a8c5b62e04aa8b7d2f717a166c573e6012169c90f42fc0",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_ring_all_gather.cpp": "c9f055cd59face26fe86da478e244f82e88b8aa7a39c6ecd97084c976451bc2f",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_dram_sharded.cpp": "803a5b3fd39ffe0b43c6ed2c68e5f8025c7585c9544ae7cfc490143007c536a2",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_dram_sharded_height.cpp": "028d09fea27c68cfe8d8c845482d766b0bdc6b6d6ff073d38d2e1916b1cdc524",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_padding.cpp": "b0d94f7980382e810c1e11ed9cb6de17f729dd5238672e00b799c6f608ef29ce",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_receiver_padding_block_sharded.cpp": "898dcdb6287bc8919988c3de6aaa06ce6d3e1e510a94cc44d4811448e298904c",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_receiver_writer_padding.cpp": "eda10ab0aff52d4ff60f7d08471c1aa10b528f36c52271cd0c685cbef3e61f15",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_ring_all_gather.cpp": "f70494cf591654f6c71a21b235a3585484b3c79655fc92a5cd9c8554b2168b09",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_dram_sharded.cpp": "156e02c78935acceaf214cfd6c59c00ee28a4135b1b58c38ea41ec1a614ea245",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_dram_sharded_height.cpp": "37d89e6684ca263e00b8b2e10532c1e0502fea3aee532a8ec00b7a99b713cd82",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_writer_padding.cpp": "86ce5ffac79eb48e660532b7182c487b1b359bc1c6e0f5dd629666879970c101",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_writer_bmm_tile_layout_in1.cpp": "885f44d09ae1c0445b0eb31f3dd211f1cc3b3ad920ddef7c3a38e329e494e4f0",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/writer_bmm_tile_layout.cpp": "69627d1690fc8b89e46eb1044165b3eb67e677f19aee30c33f9a1802b2981972",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp": "453771665b1421d6f10fd5dc42ff2ac3c5d18422933e8bd4989d68a22a2e5ff6",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_1d_type.hpp": "ae737db5fd01cccc90c45b091b901291e5d31100ac2a7ed6b229969e9fba7265",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation.cpp": "d9bb587e26bb20abc634135412ff355ed8688507825270f9e9cf2423a4097b81",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation.hpp": "894ec203a82b0c4c20ecfbaf411b8948b5b8aa2531fa840d91ca890ba2fe1d1d",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation_types.hpp": "9c2911c565b8fc876087041aca78a944b9e841db43370b6a8d6ca73713b4c487",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/factory/sparse_matmul_multicore_reuse_mcast_1d_optimized.cpp": "ba25c662b5b5486cf09e02d44e34ac7ffc742206aea2383a9e0d0cef720f9a46",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/factory/sparse_matmul_multicore_reuse_mcast_1d_optimized.hpp": "81961d1fe2464d978892b96ad8d28bd1b30797124ec919fd33132683191a1e16",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation.cpp": "005e7881351c32222ce180b45c812f4239d7da2c2979dc300faf00b84fac614c",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation.hpp": "ac01ed6d4a670f74ce5b9ee6ac5a6f4d90ab0d814a64f5fba3c6a7234831b208",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation_types.hpp": "2752fae686c473a898f9e55ae301eebfe6f7f4824e9135f3826847602e6236cb",
+    "ttnn/cpp/ttnn/operations/matmul/device/utilities/matmul_utilities.cpp": "e0ef12dbaabac6f8f8b415eeda78e84b4eddb929f95b5ac79ee6a2740a9c2183",
+    "ttnn/cpp/ttnn/operations/matmul/device/utilities/matmul_utilities.hpp": "e689d8fa37522267c1a1c825e7d928610146c94ab6303191b0b8e40c72bed9dc",
+    "ttnn/cpp/ttnn/operations/matmul/matmul.cpp": "a6e437395467a7fe065e890bec7c6a91545c68e44161531798cf0450948cab36",
+    "ttnn/cpp/ttnn/operations/matmul/matmul.hpp": "8620732d09863eda6461aa2d7f4c9e8479abc6c31b08ecb425fea11feecf0a6b",
+    "ttnn/cpp/ttnn/operations/matmul/matmul_nanobind.cpp": "3f2ba576e81973196ec010987d7953adbfa504a2d98a1e80fe58bbac731cc528",
+    "ttnn/cpp/ttnn/operations/matmul/matmul_nanobind.hpp": "c48e41a0b6f6fa447521365da19fa5d8b75ef304ad16f42b45293730afa75fcd",
+    "ttnn/cpp/ttnn/operations/matmul/shared_with_host/activation_type.hpp": "3a3f52c120f3c87917e83e14c01191123b19c829aeac57dee26226224422196e",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax.cpp": "73a457dc378a0543fe4c089c1d034cbc0d7a600e1d39ad718f12708e29eab926",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax.hpp": "4a7875c2a3336520747fc0ce1e507b080d5a659ea67fd507481b959cc1fcf970",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax_nanobind.cpp": "89ede46b8ace4b42b54cfc4be819a6adce9128c485c4ab174035ff995d229d4f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax_nanobind.hpp": "1c6a8dccbf8c08a4a2432f092f02653432575aedc7510ac516026378d1884ac1",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation.cpp": "cfa66d66657e64751ec7dc38cbc308dd9d5d3825dabc2c25b6c74a961417269e",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation.hpp": "c8204cdcdd5e1e9cc8fbd69f5e1eb5328f7a4991e284526dfc1e5c9e5b715169",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation_types.hpp": "b1a3950a0cd16df328e5aa1071c2144b99bcc380cffabf9c521b2effa019840a",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_multi_core_program_factory.cpp": "689ef0a73cf55a311c9b4be71c46ad6e76b3a0ce49fa98eec4d09478f495d8e2",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_device_operation.cpp": "0602d66bbe2049b265d4f921585f381701c6b206453399ee1a9fa18b166fd08d",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_device_operation.hpp": "5829bc5b43b71fcab16741f9aab54264d2d119bc0a1d2f14bb8cc80e3919f858",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_program_factory.cpp": "55626e4d24702abe173c74e767a39377445d0c8d9663678ec0f6c30abf3d6254",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_single_core_program_factory.cpp": "ce311f704b6c4d00af7bc0d089846769ffc6a1bdf8eaf4e0e88245bc611011bf",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_utils.hpp": "c5f44e2122469bf8cb4d4ef5dcbc0170c076e6a3ca4e6780eb803dc70936af10",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_common.hpp": "147189ffba45ca88ac7ff406c23313b23a8a815550402328269bca8d987778ed",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_nc_compute.cpp": "cecc417ef6dfbdc619f836571933971d13c8767a2bcd121e04d6ffde22c9709f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_tile_h_col.hpp": "3b97b38086afa72f5bfbe8c1733dfc8bb87d6f8fb7a86948ecf11fe2edc18275",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_tile_layout.hpp": "49f34062bff3178ab6d2b2dcdd2f14b42d78714139528249f9ba1229baa77c41",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_interleaved.cpp": "3492ca99058a583a038e9024cce4fc199cf033c86b3ffdb9826644a4d8bc689a",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_interleaved_multicore.cpp": "d052ffcc892705b4dd4186bdd2a90ba99d047bcf75b4c84bf4eda08922d0fea0",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_nc.cpp": "b72440885fb8c2fb42abd78f9662d0ad890a46f7c67e61d604bf088329d73cdc",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_tile_layout.cpp": "d7a950ed9615fd998e18e43ef272cc3dbf859193b8c15d1d4e99ecf48f6be171",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_tile_layout_h.cpp": "48fbddcbe1822e361fd852437b0f6bd0eb497c06e7459b41bd7b4211dd78e14f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/writer_argmax_nc.cpp": "0cc63885aa5b510af1d518f5157517b84419ee3973a228bb544490f0dad475eb"
+  },
+  "scope": "Simulator-only full-vocabulary Markov feedback gate; replicated heads, synthetic base logits, no target model.",
+  "target_integrated": false,
+  "eligible_for_hardware": false,
+  "accuracy_policy": "FP32 bias and sum; no SGLang BF16 bitwise claim",
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "step": 0,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 17
+    },
+    {
+      "pattern": 0,
+      "step": 1,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 36
+    },
+    {
+      "pattern": 0,
+      "step": 2,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 51
+    },
+    {
+      "pattern": 0,
+      "step": 0,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 17
+    },
+    {
+      "pattern": 0,
+      "step": 1,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 36
+    },
+    {
+      "pattern": 0,
+      "step": 2,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 51
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 24
+    },
+    {
+      "pattern": 1,
+      "step": 1,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 55
+    },
+    {
+      "pattern": 1,
+      "step": 2,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 16
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 24
+    },
+    {
+      "pattern": 1,
+      "step": 1,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 55
+    },
+    {
+      "pattern": 1,
+      "step": 2,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 16
+    },
+    {
+      "pattern": 2,
+      "step": 0,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    },
+    {
+      "pattern": 2,
+      "step": 1,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    },
+    {
+      "pattern": 2,
+      "step": 2,
+      "chip": 0,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    },
+    {
+      "pattern": 2,
+      "step": 0,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    },
+    {
+      "pattern": 2,
+      "step": 1,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    },
+    {
+      "pattern": 2,
+      "step": 2,
+      "chip": 1,
+      "token_exact": true,
+      "full_vocabulary_close": true,
+      "max_abs": 0.0,
+      "token": 0
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 0,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 1,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 2,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 0,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 1,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 2,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 0,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 1,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 2,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 0,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 1,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 2,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 0,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 1,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 2,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 0,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 1,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "step": 2,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 0,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 1,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 2,
+      "chip": 0,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 0,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 1,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "step": 2,
+      "chip": 1,
+      "token_and_scores_exact": true,
+      "bindings_stable": true
+    }
+  ],
+  "input_checks": [
+    {
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "eager",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 0,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 0,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 1,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 1,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 2,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 2,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 3,
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 3,
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 3,
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "replay",
+      "ordinal": 3,
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "weight_checks": [
+    {
+      "phase": "before",
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "before",
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "before",
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "before",
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "after",
+      "tensor": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "after",
+      "tensor": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "phase": "after",
+      "tensor": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "phase": "after",
+      "tensor": 1,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "stale_controls": [
+    {
+      "chip": 0,
+      "missing_update_detected": true
+    },
+    {
+      "chip": 1,
+      "missing_update_detected": true
+    }
+  ],
+  "stage": "complete",
+  "native_sources_after": {
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation.cpp": "df8ff12fccf399d3d8ead83d86b28d91f9db95068c9cb5ff861e4a8b6406b2ba",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation.hpp": "9c6cb7a4e59a2f01cb8ad96bc7779ede5a68f048f0c57bc4835d1d5039f8894a",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_device_operation_types.hpp": "0a420b812fc2981a76ab5a19c1e429b9c256c25e5ee6fa3a4e3c6fd33951541e",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_program_factory_common.cpp": "70d0548ea8ffe9b49461a265244336ec20746f4c2c433857bc9448c89f20425e",
+    "ttnn/cpp/ttnn/operations/embedding/device/embedding_program_factory_common.hpp": "98d99b0ce61ce6b9c9b30d4dab957fc6ed6755ac6fd3b54ab8176c4a4846f71d",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_fused_program_factory.cpp": "7a819859a67f8f5583784221a369e2ae05aeb520f917e6c2ddc8c7c7e5dfe099",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_fused_program_factory.hpp": "2e81891b235c4c990d5bde9fb02e37d88cd4815fc5a5b42e30b685e330c0e8c4",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_rm_program_factory.cpp": "2f892684deeaaec76ebefc38a84dae518e77e097e520092cf9da43c022675d92",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_rm_program_factory.hpp": "a07879e68d382554c20f1f390180d18783ed5ed3c3c7055ae7fdf7794f3c6551",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_tilized_indices_program_factory.cpp": "5a5eb217233dce24f9543bfc5af89253f7b5345a80e14257ba440c0da87fe067",
+    "ttnn/cpp/ttnn/operations/embedding/device/embeddings_tilized_indices_program_factory.hpp": "b01fc39b948b8e3d4890e49a96692032014d8a1e01e2b570846019f5d6fe7e6b",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/compute/tilize_chunked.cpp": "d7491cc5fc947b78ce1659f6ebd8ccbaa2765ced832602887e4db4f964610dec",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embedding_ind_tilized.cpp": "9fc23720c72f2f7f82cf7a0d3dc561df94b3935b5153654f4d65d31e4b860dfb",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings.cpp": "118821499a48371c1a8b7b6ead44cd45f60d8a299a9ae3fe2c3920b33d2c1c4f",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_common.hpp": "6bd33b07cea63634a11cb2bfdc224d513b3b2f7639d43517fa03766e7f7ca17b",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_rm_writer_chunked.cpp": "4a8f2781c229c19e57769180baccf9a10870fcc2ec1368d878c1b8c44c3fd4e0",
+    "ttnn/cpp/ttnn/operations/embedding/device/kernels/dataflow/embeddings_tilize.cpp": "cd31aed9d16dcd01d0f8525825e44fb3f2c8c1a02e66d49143874b57b383a399",
+    "ttnn/cpp/ttnn/operations/embedding/embedding.cpp": "5f0bd152e5c43a00d95626a283036874432da10ba4267ae0c1fd122b835dd2f8",
+    "ttnn/cpp/ttnn/operations/embedding/embedding.hpp": "154f6a8bd1a07feb5fca64f9e4cdc9ec27a2fdbee2a31858ae788f3fbc0681b5",
+    "ttnn/cpp/ttnn/operations/embedding/embedding_nanobind.cpp": "36bfd4f8b05782449072af2799c7c7e7737a4e2cc3f1a4e1c36ed975767139c8",
+    "ttnn/cpp/ttnn/operations/embedding/embedding_nanobind.hpp": "4ba7584eb016c75ce5be71e4c56fdc640830ffb2c472ef98ecae8230a5eb1c04",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config.cpp": "6e9aa89a31b9733c7d241e288673d1ff749ecd397196bd2af41b90956fe1296b",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config.hpp": "ecea1ea16091ad350f50ca538408752b82132b67ea7a1fe86ac7f5f8b25d64f9",
+    "ttnn/cpp/ttnn/operations/matmul/device/config/matmul_program_config_types.hpp": "a8f7a74dc51e3c0104cafb1c48ed26cfc7960c790335f55aaca3dc86bd460f6c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_program_factory.cpp": "88a137455459ed1ea921b4829730adad1bb8eb510c85daa73bd11db5765afd67",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_program_factory.hpp": "827c0fbf95f5d5a853dd0d7025c50b79c02a967a07c9d535c32dbd3e0aa20295",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_batched_hs_dram_sharded_program_factory.cpp": "cc45c007c1e225fe83b6a06292713da84a94e96a3dbeb23a988d5c6d63c906fb",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_batched_hs_dram_sharded_program_factory.hpp": "36c9167801007ab3cc291797b8b3ce21776e056db3b763fc4e4616cb28a52eb0",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.hpp": "403768276b4d155d925c9ed9ea06aa363edb0b317d3254503cb5b544d3a0d4d2",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_2d_program_factory.cpp": "f57cfde989740370e8c9a148f06cc76bf0906a883aed31706abd3d76e6fac024",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_2d_program_factory.hpp": "3265058634c9a264e8be7d03ef327ad00d59f8f28c33b471361f5a69e9ac3f62",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.hpp": "42143dc52f41487bc4970a8a57ff73392c6ae99c5c42d767d5c36e8201aaf932",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_optimized_program_factory.cpp": "2d1b85014258db576e20d1f840520052747d1f030d7d549527960c45af7099f7",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_optimized_program_factory.hpp": "ff882140e534f614d6d64089db102cb79b4404df7e7c0ed67fda26986e6ec644",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm.cpp": "0d15d0c084c3b6b02d6b81a7a99f578ebe91c261ecd70e3dfa6f0e6cd2a769ec",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_fused_activation.hpp": "2fa39e9691935803f62ac00e4acb2712087a03f9dce8ba3f62d584d1def106bc",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm.cpp": "1ac075c295a1395719f64dfc04a547601fd77930c0f65808e597c6a3559c28de",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation_gathered.cpp": "ea79f611cb66a0e0eeee38ae21554e93248b3ad4843d1e8cd88065a9522d6986",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_8bank_output_tiles_partitioned.cpp": "b4c8d87a616a21933911a55c5ff36eaa176b55b7b839d96cc4873ef1b8b3653c",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout.cpp": "8f7ba50ef11a62f22b2bc9505e671815f73b2ba5660a86d8e23dfb0dc60c04aa",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0.cpp": "407ed832d3cf079b6cdfb0963ff43019ee0a866cbc43e09da8985f85ebedee3e",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_receiver.cpp": "3cafe648c754d5dd68a8c5b62e04aa8b7d2f717a166c573e6012169c90f42fc0",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_ring_all_gather.cpp": "c9f055cd59face26fe86da478e244f82e88b8aa7a39c6ecd97084c976451bc2f",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_dram_sharded.cpp": "803a5b3fd39ffe0b43c6ed2c68e5f8025c7585c9544ae7cfc490143007c536a2",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_dram_sharded_height.cpp": "028d09fea27c68cfe8d8c845482d766b0bdc6b6d6ff073d38d2e1916b1cdc524",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_padding.cpp": "b0d94f7980382e810c1e11ed9cb6de17f729dd5238672e00b799c6f608ef29ce",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in0_sender_receiver_padding_block_sharded.cpp": "898dcdb6287bc8919988c3de6aaa06ce6d3e1e510a94cc44d4811448e298904c",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_receiver_writer_padding.cpp": "eda10ab0aff52d4ff60f7d08471c1aa10b528f36c52271cd0c685cbef3e61f15",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_ring_all_gather.cpp": "f70494cf591654f6c71a21b235a3585484b3c79655fc92a5cd9c8554b2168b09",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_dram_sharded.cpp": "156e02c78935acceaf214cfd6c59c00ee28a4135b1b58c38ea41ec1a614ea245",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_dram_sharded_height.cpp": "37d89e6684ca263e00b8b2e10532c1e0502fea3aee532a8ec00b7a99b713cd82",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_bmm_tile_layout_in1_sender_writer_padding.cpp": "86ce5ffac79eb48e660532b7182c487b1b359bc1c6e0f5dd629666879970c101",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/reader_writer_bmm_tile_layout_in1.cpp": "885f44d09ae1c0445b0eb31f3dd211f1cc3b3ad920ddef7c3a38e329e494e4f0",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/writer_bmm_tile_layout.cpp": "69627d1690fc8b89e46eb1044165b3eb67e677f19aee30c33f9a1802b2981972",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp": "453771665b1421d6f10fd5dc42ff2ac3c5d18422933e8bd4989d68a22a2e5ff6",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_1d_type.hpp": "ae737db5fd01cccc90c45b091b901291e5d31100ac2a7ed6b229969e9fba7265",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation.cpp": "d9bb587e26bb20abc634135412ff355ed8688507825270f9e9cf2423a4097b81",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation.hpp": "894ec203a82b0c4c20ecfbaf411b8948b5b8aa2531fa840d91ca890ba2fe1d1d",
+    "ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation_types.hpp": "9c2911c565b8fc876087041aca78a944b9e841db43370b6a8d6ca73713b4c487",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/factory/sparse_matmul_multicore_reuse_mcast_1d_optimized.cpp": "ba25c662b5b5486cf09e02d44e34ac7ffc742206aea2383a9e0d0cef720f9a46",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/factory/sparse_matmul_multicore_reuse_mcast_1d_optimized.hpp": "81961d1fe2464d978892b96ad8d28bd1b30797124ec919fd33132683191a1e16",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation.cpp": "005e7881351c32222ce180b45c812f4239d7da2c2979dc300faf00b84fac614c",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation.hpp": "ac01ed6d4a670f74ce5b9ee6ac5a6f4d90ab0d814a64f5fba3c6a7234831b208",
+    "ttnn/cpp/ttnn/operations/matmul/device/sparse/sparse_matmul_device_operation_types.hpp": "2752fae686c473a898f9e55ae301eebfe6f7f4824e9135f3826847602e6236cb",
+    "ttnn/cpp/ttnn/operations/matmul/device/utilities/matmul_utilities.cpp": "e0ef12dbaabac6f8f8b415eeda78e84b4eddb929f95b5ac79ee6a2740a9c2183",
+    "ttnn/cpp/ttnn/operations/matmul/device/utilities/matmul_utilities.hpp": "e689d8fa37522267c1a1c825e7d928610146c94ab6303191b0b8e40c72bed9dc",
+    "ttnn/cpp/ttnn/operations/matmul/matmul.cpp": "a6e437395467a7fe065e890bec7c6a91545c68e44161531798cf0450948cab36",
+    "ttnn/cpp/ttnn/operations/matmul/matmul.hpp": "8620732d09863eda6461aa2d7f4c9e8479abc6c31b08ecb425fea11feecf0a6b",
+    "ttnn/cpp/ttnn/operations/matmul/matmul_nanobind.cpp": "3f2ba576e81973196ec010987d7953adbfa504a2d98a1e80fe58bbac731cc528",
+    "ttnn/cpp/ttnn/operations/matmul/matmul_nanobind.hpp": "c48e41a0b6f6fa447521365da19fa5d8b75ef304ad16f42b45293730afa75fcd",
+    "ttnn/cpp/ttnn/operations/matmul/shared_with_host/activation_type.hpp": "3a3f52c120f3c87917e83e14c01191123b19c829aeac57dee26226224422196e",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax.cpp": "73a457dc378a0543fe4c089c1d034cbc0d7a600e1d39ad718f12708e29eab926",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax.hpp": "4a7875c2a3336520747fc0ce1e507b080d5a659ea67fd507481b959cc1fcf970",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax_nanobind.cpp": "89ede46b8ace4b42b54cfc4be819a6adce9128c485c4ab174035ff995d229d4f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/argmax_nanobind.hpp": "1c6a8dccbf8c08a4a2432f092f02653432575aedc7510ac516026378d1884ac1",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation.cpp": "cfa66d66657e64751ec7dc38cbc308dd9d5d3825dabc2c25b6c74a961417269e",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation.hpp": "c8204cdcdd5e1e9cc8fbd69f5e1eb5328f7a4991e284526dfc1e5c9e5b715169",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_device_operation_types.hpp": "b1a3950a0cd16df328e5aa1071c2144b99bcc380cffabf9c521b2effa019840a",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_multi_core_program_factory.cpp": "689ef0a73cf55a311c9b4be71c46ad6e76b3a0ce49fa98eec4d09478f495d8e2",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_device_operation.cpp": "0602d66bbe2049b265d4f921585f381701c6b206453399ee1a9fa18b166fd08d",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_device_operation.hpp": "5829bc5b43b71fcab16741f9aab54264d2d119bc0a1d2f14bb8cc80e3919f858",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_nc_program_factory.cpp": "55626e4d24702abe173c74e767a39377445d0c8d9663678ec0f6c30abf3d6254",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_single_core_program_factory.cpp": "ce311f704b6c4d00af7bc0d089846769ffc6a1bdf8eaf4e0e88245bc611011bf",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/argmax_utils.hpp": "c5f44e2122469bf8cb4d4ef5dcbc0170c076e6a3ca4e6780eb803dc70936af10",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_common.hpp": "147189ffba45ca88ac7ff406c23313b23a8a815550402328269bca8d987778ed",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_nc_compute.cpp": "cecc417ef6dfbdc619f836571933971d13c8767a2bcd121e04d6ffde22c9709f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_tile_h_col.hpp": "3b97b38086afa72f5bfbe8c1733dfc8bb87d6f8fb7a86948ecf11fe2edc18275",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/argmax_tile_layout.hpp": "49f34062bff3178ab6d2b2dcdd2f14b42d78714139528249f9ba1229baa77c41",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_interleaved.cpp": "3492ca99058a583a038e9024cce4fc199cf033c86b3ffdb9826644a4d8bc689a",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_interleaved_multicore.cpp": "d052ffcc892705b4dd4186bdd2a90ba99d047bcf75b4c84bf4eda08922d0fea0",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_nc.cpp": "b72440885fb8c2fb42abd78f9662d0ad890a46f7c67e61d604bf088329d73cdc",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_tile_layout.cpp": "d7a950ed9615fd998e18e43ef272cc3dbf859193b8c15d1d4e99ecf48f6be171",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/reader_argmax_tile_layout_h.cpp": "48fbddcbe1822e361fd852437b0f6bd0eb497c06e7459b41bd7b4211dd78e14f",
+    "ttnn/cpp/ttnn/operations/reduction/argmax/device/kernels/writer_argmax_nc.cpp": "0cc63885aa5b510af1d518f5157517b84419ee3973a228bb544490f0dad475eb"
+  },
+  "sources_after": {
+    "dspark-markov-probe.py": "502395e7ff8544e3a55fd6f8cb2f4c88c3c22e4f7b27538f0e523b842c1fe804",
+    "dspark_markov_device.py": "4e7ba3c4099e42c171ffef0729925b7e6f93a70759195f9d4b7215375df37bba",
+    "dspark_markov.py": "b89e82ab01cf98421034171ac13ca0f776b1600b3482a1af41cf63e08e7966bf",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  }
+}

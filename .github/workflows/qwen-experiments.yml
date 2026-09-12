@@ -6,15 +6,110 @@ on:
       suite:
         description: Test selection (hardware opens both cards; serving must be stopped)
         type: choice
-        options: [inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, sampling-kernel, sampling, sampling-extended]
+        options: [dram-mlp-sharded, dram-mlp, dspark-combined-request, dspark-target-attention-request, dspark-norm-scatter-request, dspark-verifier-profile, dspark-native-attention-request, dspark-request-variants, dspark-request, dspark-target, dspark-backbone, full-dflash-native-proposal-request, full-dflash-target-links-request, full-dflash-live-query-request, live-qk, tiny-mlp, tensix-stream-mlp, tensix-stream-mlp-profile, tensix-stream-mlp-16, full-dflash-verifier-profile, full-dflash-kv-projection-request, full-dflash-kv-cache-request, full-dflash-8k-request, full-dflash-4k-request, full-dflash-convolution-request, full-dflash-commit-request, full-dflash-trace-request, full-dflash-wide-trace-request, full-dflash-wide-request, full-dflash-request, full-mtp-request, learned-mlp, learned-attention, learned-convolution, feature-projection-full, feature-projection, inventory, hardware, model-inventory, gdn-source, baseline, interleave, interleave-diagnostic, interleave-mixed, profile, model-profile, verifier-profile, mlp-sweep, mlp-packing, mlp-fusion, projection-1d, full-model-fusion, full-prefix, target-feature-prefill, target-features, target-feature-batch, target-feature-replay, target-feature-prefix, full-batch, full-coding-cost, full-compact-gdn, full-gdn-input-reuse, full-gdn-row-clones, full-gdn-row-layout, full-gdn-device-loop, full-norm-batch, full-attention-groups, full-attention-dma, full-attention-parallel, full-attention-tree, full-attention-tree-replay, full-attention-replay, full-attention-mask-once, full-attention-engine, full-attention-engine-wide, full-norm-replay, full-norm-selection, full-norm-engine, full-verifier-replay, full-verifier-selection, full-verifier-engine, full-batch-attribution, attention-batch, attention-timing, attention-groups, attention-group-layer, attention-group-dma, attention-dma-layer, attention-parallel-groups, attention-mask-replay, attention-replay, attention-tree-scratch, attention-tree-parallel, attention-tree-layer, attention-tree-replay, gdn-prefix, gdn-block, gdn-active, gdn-direct, gdn-inplace, gdn-inplace-timing, gdn-checkpoint-cost, gdn-checkpoint-dma, gdn-multitoken, gdn-multitoken-norm, gdn-value-split, gdn-value-split-timing, gdn-value-split-prefetch, gdn-value-split-norm-batch, gdn-norm-batch-layer, gdn-multitoken-conv, device-readback, device-recovery, sampling-kernel, sampling, sampling-extended]
         default: inventory
+      recover_runtime:
+        description: Inventory only; recover exact pinned image by verified registry digest, without card access
+        type: boolean
+        default: false
+      dram_mlp_profile:
+        description: Operation attribution only for dram-mlp-sharded; never qualifies throughput
+        type: boolean
+        default: false
+      dram_mlp_down:
+        description: Native gate/up/product with DRAM-sharded down only; dram-mlp suite
+        type: boolean
+        default: false
+      dspark_coding_task:
+        description: Untuned coding task for the matched target-attention request suite only
+        type: choice
+        options: [merge_intervals, stable_unique_v1, run_length_encode_v1, rotate_right_v1]
+        default: merge_intervals
+      dspark_mlp_down:
+        description: Qualified down-only MLP versus native with folded target attention; target-attention request suite only
+        type: boolean
+        default: false
+      dspark_score_layout:
+        description: Native versus fused Markov score layout; target-attention request suite only
+        type: boolean
+        default: false
+      dspark_banked_proposal:
+        description: Compare copied versus bank-bound history with fused scores in both arms; requires dspark_score_layout
+        type: boolean
+        default: false
+      dspark_native_slot:
+        description: Compare copied versus direct native GDN state; requires dspark_score_layout and no banked drafting
+        type: boolean
+        default: false
+      dspark_fusion_t16:
+        description: Qualified target T16 fusion versus combined control; requires dspark_score_layout
+        type: boolean
+        default: false
+      dspark_captured_publication:
+        description: Compare captured history projection; requires score layout and T16 fusion
+        type: boolean
+        default: false
+      dspark_mlp_footprint:
+        description: Give both MLP request arms resident sharded down weights; requires dspark_mlp_down
+        type: boolean
+        default: false
+      dspark_draft_profile:
+        description: Attribute captured drafter operations instead of verifier; dspark-verifier-profile suite only
+        type: boolean
+        default: false
+      weight_packets:
+        description: Fixed single-packet weight reads; sixteen-producer MLP suite only, requires its own simulator evidence
+        type: boolean
+        default: false
       cards_allocated:
         description: Operator confirms both cards allocated exclusively for this run
         type: boolean
         default: false
+      coding_request:
+        description: One short non-repeated coding task; full-norm-engine only
+        type: boolean
+        default: false
+      lookup_cap_abba:
+        description: Compare lookup T32 versus T8 cap; requires coding_request and full-norm-engine
+        type: boolean
+        default: false
+      fabric_link_probe:
+        description: Sampler/link ABBA; learned-attention selects isolated native CCL fix build and collective gate (simulator_only supported)
+        type: boolean
+        default: false
+      reset_authorized:
+        description: Explicit approval for one reset of the two allocated cards (recovery suite only)
+        type: boolean
+        default: false
+      prefix_zero_reuse:
+        description: Opt-in prefix-copy experiment, full-attention-tree suite only
+        type: boolean
+        default: false
+      learned_stack:
+        description: Opt-in five-layer learned gate, learned-attention suite only
+        type: boolean
+        default: false
+      simulator_only:
+        description: CPU-only learned-attention suite; learned_stack selects five-layer gate, otherwise MTP shortlist gate
+        type: boolean
+        default: false
+      simulator_fusion_t16:
+        description: CPU-only T16 fusion; requires simulator_only and learned-attention
+        type: boolean
+        default: false
+      simulator_target_math:
+        description: Target-native math mode; requires simulator_fusion_t16
+        type: boolean
+        default: false
+      simulator_t32:
+        description: CPU-only T32 prerequisite; requires simulator_only
+        type: choice
+        options: [none, t32-markov, t32-markov-learned, t32-attention, t32-draft-attention, t32-commit, t32-combined, t32-publication, t32-context-attention]
+        default: none
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: qwen-two-p150a-exclusive
@@ -22,26 +117,116 @@ concurrency:
 
 jobs:
   inventory:
+    env:
+      QWEN_CODING_REQUEST: ${{ inputs.coding_request && '1' || '0' }}
+      QWEN_LOOKUP_CAP_ABBA: ${{ inputs.lookup_cap_abba && '1' || '0' }}
+      QWEN_FABRIC_LINK_PROBE: ${{ inputs.fabric_link_probe && '1' || '0' }}
+      QWEN_PREFIX_ZERO_REUSE: ${{ inputs.prefix_zero_reuse && '1' || '0' }}
+      QWEN_LEARNED_STACK: ${{ inputs.learned_stack && '1' || '0' }}
+      QWEN_SIM_ONLY: ${{ inputs.simulator_only && '1' || '0' }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Verify dedicated host
         shell: bash
         run: |
           test "$RUNNER_NAME" = "thatch-build-amd64-02-cp-temp"
+          if [ "${{ inputs.simulator_t32 }}" != none ]; then
+            test "${{ inputs.simulator_only }}" = true
+            test "${{ inputs.simulator_fusion_t16 }}" = false
+            test "${{ inputs.fabric_link_probe }}" = false
+          fi
+          if [ "${{ inputs.simulator_target_math }}" = true ]; then
+            test "${{ inputs.simulator_fusion_t16 }}" = true
+          fi
+          if [ "${{ inputs.simulator_fusion_t16 }}" = true ]; then
+            test "${{ inputs.simulator_only }}" = true
+            test "${{ inputs.fabric_link_probe }}" = false
+          fi
+          if [ "${{ inputs.weight_packets }}" = true ]; then
+            test "${{ inputs.suite }}" = tensix-stream-mlp-16
+            test "${{ inputs.simulator_only }}" = false
+          fi
+          if [ "${{ inputs.simulator_only }}" = true ]; then
+            test "${{ inputs.suite }}" = learned-attention
+            test "${{ inputs.reset_authorized }}" = false
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Recover exact pinned runtime without device access
+        if: inputs.suite == 'inventory' && inputs.recover_runtime
+        shell: bash
+        env:
+          REGISTRY_USER: ${{ secrets.THATCH_REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.THATCH_REGISTRY_PASSWORD }}
+        run: |
+          mkdir -p experiment-results
+          if [ -n "$REGISTRY_USER" ] || [ -n "$REGISTRY_PASSWORD" ]; then
+            test -n "$REGISTRY_USER" && test -n "$REGISTRY_PASSWORD"
+            config=$(mktemp -d "$RUNNER_TEMP/qwen-registry.XXXXXX")
+            trap 'rm -rf -- "$config"' EXIT
+            export DOCKER_CONFIG="$config"
+            printf '%s' "$REGISTRY_PASSWORD" | timeout 60 docker login zot.thatch.local:5000 --username "$REGISTRY_USER" --password-stdin
+          fi
+          unset REGISTRY_USER REGISTRY_PASSWORD
+          timeout -k 15 1980 python3 -u scripts/ci/recover_runtime.py 2>&1 | tee experiment-results/runtime-recovery.log
       - name: Read-only inventory
         if: inputs.suite == 'inventory'
         shell: bash
         run: bash scripts/ci/qwen-inventory.sh
+      - name: Authorized two-card reset
+        if: inputs.suite == 'device-recovery'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RESET_AUTHORIZED: ${{ inputs.reset_authorized && '1' || '0' }}
+        run: timeout -k 15 300 bash scripts/ci/reset-cards.sh
+      - name: Post-reset transfer health
+        if: success() && inputs.suite == 'device-recovery'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: device-readback
+        run: timeout -k 30 300 bash scripts/ci/run-baseline.sh
+      - name: DSpark backbone, target-bound proposal or full-request integration
+        if: inputs.suite == 'dspark-combined-request' || inputs.suite == 'dspark-target-attention-request' || inputs.suite == 'dspark-norm-scatter-request' || inputs.suite == 'dspark-verifier-profile' || inputs.suite == 'dspark-native-attention-request' || inputs.suite == 'dspark-backbone' || inputs.suite == 'dspark-target' || inputs.suite == 'dspark-request' || inputs.suite == 'dspark-request-variants'
+        shell: bash
+        env:
+          QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
+          QWEN_DSPARK_MLP_DOWN: ${{ inputs.dspark_mlp_down && '1' || '0' }}
+          QWEN_DSPARK_SCORE_LAYOUT: ${{ inputs.dspark_score_layout && '1' || '0' }}
+          QWEN_DSPARK_BANKED_PROPOSAL: ${{ inputs.dspark_banked_proposal && '1' || '0' }}
+          QWEN_DSPARK_NATIVE_SLOT: ${{ inputs.dspark_native_slot && '1' || '0' }}
+          QWEN_DSPARK_FUSION_T16: ${{ inputs.dspark_fusion_t16 && '1' || '0' }}
+          QWEN_DSPARK_CAPTURED_PUBLICATION: ${{ inputs.dspark_captured_publication && '1' || '0' }}
+          GH_TOKEN: ${{ github.token }}
+          QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
+          QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_DSPARK_MODE: ${{ inputs.suite == 'dspark-combined-request' && 'request-combined' || inputs.suite == 'dspark-target-attention-request' && 'request-target-attention' || inputs.suite == 'dspark-norm-scatter-request' && 'request-norm-scatter' || inputs.suite == 'dspark-verifier-profile' && 'request-verifier-profile' || inputs.suite == 'dspark-native-attention-request' && 'request-native-attention' || inputs.suite == 'dspark-request-variants' && 'request-variants' || inputs.suite == 'dspark-request' && 'request' || inputs.suite == 'dspark-target' && 'target' || 'backbone' }}
+        run: timeout -k 30 5100 bash scripts/ci/run-dspark-hardware.sh
       - name: Hardware correctness gates
         if: inputs.suite == 'hardware'
         shell: bash
         env:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
         run: timeout 2400 bash scripts/ci/run-hardware.sh
+      - name: Learned projection numerical diagnostic
+        if: ${{ !inputs.simulator_only && (inputs.suite == 'learned-mlp' || inputs.suite == 'learned-attention' || inputs.suite == 'learned-convolution' || inputs.suite == 'feature-projection' || inputs.suite == 'feature-projection-full') }}
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout -k 30 ${{ inputs.learned_stack && '7000' || '4800' }} bash scripts/ci/run-baseline.sh
+      - name: CPU-only draft simulator
+        if: inputs.simulator_only && inputs.suite == 'learned-attention'
+        shell: bash
+        env:
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: ${{ inputs.simulator_t32 != 'none' && inputs.simulator_t32 || inputs.simulator_fusion_t16 && (inputs.simulator_target_math && 'fusion-t16-target' || 'fusion-t16') || inputs.learned_stack && 'stack' || 'shortlist' }}
+          QWEN_CCL_LAZY_BUILD: ${{ inputs.fabric_link_probe && '1' || '0' }}
+        run: timeout -k 30 9600 bash scripts/ci/run-simulator.sh
       - name: Model runtime discovery
         if: inputs.suite == 'model-inventory'
         shell: bash
@@ -64,6 +249,13 @@ jobs:
           QWEN_BOUNDARY_DIAGNOSTICS: ${{ inputs.suite == 'interleave-diagnostic' && '1' || '0' }}
           QWEN_INTERLEAVE_MIXED: ${{ inputs.suite == 'interleave-mixed' && '1' || '0' }}
         run: timeout 6600 bash scripts/ci/run-interleave.sh
+      - name: Matched T8 verifier attribution
+        if: inputs.suite == 'verifier-profile'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: verifier-profile
+        run: timeout 6600 bash scripts/ci/run-baseline.sh
       - name: Layer attribution profiles
         if: inputs.suite == 'profile' || inputs.suite == 'model-profile'
         shell: bash
@@ -85,6 +277,13 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 2400 bash scripts/ci/run-baseline.sh
+      - name: Full-model exact fusion gate
+        if: inputs.suite == 'full-model-fusion'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: full-model-fusion
+        run: timeout 3300 bash scripts/ci/run-baseline.sh
       - name: Full-model host versus device sampling
         if: inputs.suite == 'sampling' || inputs.suite == 'sampling-extended'
         shell: bash
@@ -92,6 +291,114 @@ jobs:
           QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
           QWEN_RUN_MODE: ${{ inputs.suite }}
         run: timeout 4800 bash scripts/ci/run-baseline.sh
+      - name: Full-model prefix correctness and verification cost
+        if: inputs.suite == 'full-dflash-live-query-request' || inputs.suite == 'full-dflash-verifier-profile' || inputs.suite == 'full-dflash-kv-projection-request' || inputs.suite == 'full-dflash-kv-cache-request' || inputs.suite == 'full-dflash-8k-request' || inputs.suite == 'full-dflash-4k-request' || inputs.suite == 'full-dflash-convolution-request' || inputs.suite == 'full-dflash-commit-request' || inputs.suite == 'full-dflash-trace-request' || inputs.suite == 'full-dflash-wide-trace-request' || inputs.suite == 'full-dflash-wide-request' || inputs.suite == 'full-dflash-request' || inputs.suite == 'full-mtp-request' || inputs.suite == 'target-feature-prefill' || inputs.suite == 'target-feature-prefix' || inputs.suite == 'target-feature-replay' || inputs.suite == 'target-feature-batch' || inputs.suite == 'target-features' || inputs.suite == 'full-prefix' || inputs.suite == 'full-batch' || inputs.suite == 'full-coding-cost' || inputs.suite == 'full-compact-gdn' || inputs.suite == 'full-gdn-input-reuse' || inputs.suite == 'full-gdn-row-clones' || inputs.suite == 'full-gdn-row-layout' || inputs.suite == 'full-gdn-device-loop' || inputs.suite == 'full-norm-batch' || inputs.suite == 'full-norm-replay' || inputs.suite == 'full-norm-selection' || inputs.suite == 'full-norm-engine' || inputs.suite == 'full-verifier-replay' || inputs.suite == 'full-verifier-selection' || inputs.suite == 'full-verifier-engine' || inputs.suite == 'full-attention-groups' || inputs.suite == 'full-attention-dma' || inputs.suite == 'full-attention-parallel' || inputs.suite == 'full-attention-replay' || inputs.suite == 'full-attention-mask-once' || inputs.suite == 'full-attention-engine'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout 5100 bash scripts/ci/run-baseline.sh
+      - name: Complete native-proposal attention request comparison
+        if: inputs.suite == 'full-dflash-native-proposal-request'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: full-dflash-native-proposal-request
+        run: timeout 5100 bash scripts/ci/run-baseline.sh
+      - name: Complete target-model two-versus-four-link request comparison
+        if: inputs.suite == 'full-dflash-target-links-request'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: full-dflash-target-links-request
+        run: timeout 5100 bash scripts/ci/run-baseline.sh
+      - name: Simulator-qualified streamed MLP hardware comparison
+        if: inputs.suite == 'tensix-stream-mlp'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: tensix-stream-mlp
+        run: timeout 3600 bash scripts/ci/run-baseline.sh
+      - name: Simulator-qualified DRAM-sharded MLP hardware comparison
+        if: inputs.suite == 'dram-mlp' || inputs.suite == 'dram-mlp-sharded'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+          QWEN_DRAM_MLP_PROFILE: ${{ inputs.dram_mlp_profile && '1' || '0' }}
+          QWEN_DRAM_MLP_DOWN: ${{ inputs.dram_mlp_down && '1' || '0' }}
+        run: timeout 3600 bash scripts/ci/run-baseline.sh
+      - name: Simulator-qualified small-tile MLP hardware comparison
+        if: inputs.suite == 'tiny-mlp'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: tiny-mlp
+        run: timeout 3600 bash scripts/ci/run-baseline.sh
+      - name: Exact native versus streamed MLP device attribution
+        if: inputs.suite == 'tensix-stream-mlp-profile'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: tensix-stream-mlp-profile
+        run: timeout 3600 bash scripts/ci/run-baseline.sh
+      - name: Simulator-qualified sixteen-producer MLP hardware comparison
+        if: inputs.suite == 'tensix-stream-mlp-16'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: tensix-stream-mlp-16
+          QWEN_TENSIX_PACKET_READS: ${{ inputs.weight_packets && '1' || '0' }}
+        run: timeout 3600 bash scripts/ci/run-baseline.sh
+      - name: Simulator-qualified live-query attention hardware comparison
+        if: inputs.suite == 'live-qk'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: live-qk
+        run: timeout 1500 bash scripts/ci/run-baseline.sh
+      - name: Bounded full-model stage attribution
+        if: inputs.suite == 'full-batch-attribution'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: full-batch-attribution
+        run: timeout 2100 bash scripts/ci/run-baseline.sh
+      - name: Attention shared-page batched decode prerequisite
+        if: inputs.suite == 'attention-batch' || inputs.suite == 'attention-timing' || inputs.suite == 'attention-groups' || inputs.suite == 'attention-group-layer' || inputs.suite == 'attention-group-dma' || inputs.suite == 'attention-dma-layer' || inputs.suite == 'attention-parallel-groups' || inputs.suite == 'attention-mask-replay' || inputs.suite == 'attention-replay'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout 2100 bash scripts/ci/run-baseline.sh
+      - name: Disposable native SDPA scratch build and exact microbenchmark
+        if: inputs.suite == 'attention-tree-scratch' || inputs.suite == 'attention-tree-parallel' || inputs.suite == 'attention-tree-layer'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout 4200 bash scripts/ci/run-baseline.sh
+      - name: Disposable compact-scratch replay gate
+        if: inputs.suite == 'attention-tree-replay'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: attention-tree-replay
+        run: timeout 5100 bash scripts/ci/run-baseline.sh
+      - name: Disposable compact-scratch full-model attention gate
+        if: inputs.suite == 'full-attention-tree' || inputs.suite == 'full-attention-tree-replay' || inputs.suite == 'full-attention-engine-wide'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout 7000 bash scripts/ci/run-baseline.sh
+      - name: GDN exact prefix and rollback prerequisite
+        if: inputs.suite == 'gdn-prefix' || inputs.suite == 'gdn-block' || inputs.suite == 'gdn-active' || inputs.suite == 'gdn-direct' || inputs.suite == 'gdn-inplace' || inputs.suite == 'gdn-inplace-timing' || inputs.suite == 'gdn-checkpoint-cost' || inputs.suite == 'gdn-checkpoint-dma' || inputs.suite == 'gdn-multitoken' || inputs.suite == 'gdn-value-split' || inputs.suite == 'gdn-value-split-timing' || inputs.suite == 'gdn-value-split-prefetch' || inputs.suite == 'gdn-value-split-norm-batch' || inputs.suite == 'gdn-norm-batch-layer' || inputs.suite == 'gdn-multitoken-norm' || inputs.suite == 'gdn-multitoken-conv' || inputs.suite == 'device-readback'
+        shell: bash
+        env:
+          QWEN_CARDS_ALLOCATED: ${{ inputs.cards_allocated && '1' || '0' }}
+          QWEN_RUN_MODE: ${{ inputs.suite }}
+        run: timeout 2100 bash scripts/ci/run-baseline.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

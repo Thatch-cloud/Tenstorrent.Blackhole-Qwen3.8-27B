@@ -1,0 +1,299 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "hardware",
+  "scope": "Real-weight T16 MLP ABBA, including boundary conversions and native TP2 collective; not model TG.",
+  "layer": 0,
+  "rows": 16,
+  "streams": 1,
+  "input": "Replicated BF16 DRAM; both arms include native DRAM-to-L1 conversion",
+  "precision": "Unchanged BF4 gate/up, BF8 down, LoFi FP32 matmul accumulation with packer L1 accumulation",
+  "seeds": [
+    1659,
+    2670,
+    3781
+  ],
+  "repeats_per_sample": 50,
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "trace_checks": [
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "arm": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "arm": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "arm": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "pattern": 2,
+      "arm": 1,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "blocks": [
+    {
+      "pattern": 0,
+      "block": 0,
+      "samples_ms": [
+        0.3356125019490719,
+        0.3216904168948531,
+        0.32163521740585566,
+        0.335351899266243
+      ],
+      "control_ms": 0.33548220060765743,
+      "candidate_ms": 0.3216628171503544,
+      "ratio": 1.042962328004618
+    },
+    {
+      "pattern": 0,
+      "block": 1,
+      "samples_ms": [
+        0.33475330099463463,
+        0.32149164006114006,
+        0.32141423784196377,
+        0.3353830985724926
+      ],
+      "control_ms": 0.3350681997835636,
+      "candidate_ms": 0.3214529389515519,
+      "ratio": 1.042355378290891
+    },
+    {
+      "pattern": 0,
+      "block": 2,
+      "samples_ms": [
+        0.33469350077211857,
+        0.32173002138733864,
+        0.3214830392971635,
+        0.3348236996680498
+      ],
+      "control_ms": 0.3347586002200842,
+      "candidate_ms": 0.32160653034225106,
+      "ratio": 1.0408949092664157
+    },
+    {
+      "pattern": 1,
+      "block": 0,
+      "samples_ms": [
+        0.33484707586467266,
+        0.322076641023159,
+        0.3220778377726674,
+        0.3348201001062989
+      ],
+      "control_ms": 0.3348335879854858,
+      "candidate_ms": 0.3220772393979132,
+      "ratio": 1.0396064888391963
+    },
+    {
+      "pattern": 1,
+      "block": 1,
+      "samples_ms": [
+        0.33509028144180775,
+        0.3217746363952756,
+        0.32117881812155247,
+        0.33485767897218466
+      ],
+      "control_ms": 0.3349739802069962,
+      "candidate_ms": 0.32147672725841403,
+      "ratio": 1.041985163478825
+    },
+    {
+      "pattern": 1,
+      "block": 2,
+      "samples_ms": [
+        0.33474510069936514,
+        0.32152722124010324,
+        0.3214180376380682,
+        0.33480510115623474
+      ],
+      "control_ms": 0.33477510092779994,
+      "candidate_ms": 0.3214726294390857,
+      "ratio": 1.0413797949515164
+    },
+    {
+      "pattern": 2,
+      "block": 0,
+      "samples_ms": [
+        0.33412350341677666,
+        0.32129182014614344,
+        0.3212782181799412,
+        0.33424888271838427
+      ],
+      "control_ms": 0.33418619306758046,
+      "candidate_ms": 0.3212850191630423,
+      "ratio": 1.0401549189506132
+    },
+    {
+      "pattern": 2,
+      "block": 1,
+      "samples_ms": [
+        0.33435190096497536,
+        0.3217644430696964,
+        0.321335019543767,
+        0.3348176972940564
+      ],
+      "control_ms": 0.3345847991295159,
+      "candidate_ms": 0.3215497313067317,
+      "ratio": 1.0405382637696867
+    },
+    {
+      "pattern": 2,
+      "block": 2,
+      "samples_ms": [
+        0.3343531023710966,
+        0.3212524391710758,
+        0.3213200159370899,
+        0.3343208972364664
+      ],
+      "control_ms": 0.3343369998037815,
+      "candidate_ms": 0.32128622755408287,
+      "ratio": 1.0406203911977576
+    }
+  ],
+  "sources": {
+    "dram-mlp-down-probe.py": "14e5d20f252f69f0a878494642a67f097435d46a05d1d9ce7ee1d2196dd661e5",
+    "dram_mlp_down.py": "9ac073cac7d927f6dfcf0648c11de177f14dc20e38ffe48e34bb5a92589849c5",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9"
+  },
+  "native_sources": {
+    "models/demos/blackhole/qwen36/tt/tp_common.py": "5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181"
+  },
+  "simulator_report_sha256": "54961d1d288fbf46534cfef6a14c02c64f069ae8001197f8091979bc6c81da64",
+  "hardware_script_sha256": "a757db68299c159c0cd564afe370d2f9b3a1499512667012d46040089683c95f",
+  "collective_links": 4,
+  "sharded_product": false,
+  "down_only": true,
+  "timing_scope": "Captured complete MLP including DRAM-to-L1 input, DRAM weight reads and native TP2 collective; upload, capture and validation excluded",
+  "simulator_gate": {
+    "passed": true,
+    "scope": "T16 complete local MLP only; hardware collective and timing still required",
+    "eager_checks": 4,
+    "replay_checks": 6
+  },
+  "fabric_sources": {
+    "tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto": "e5d25de80648816ed8305960cb4ea1c887a8157d595d348719bc3b5ade6f8682",
+    "models/common/modules/tt_ccl.py": "ec24c3abd732a1b8c4dff836b992892ac35917e529843cdb3772cf2ae064bedd",
+    "models/common/sampling/tt_sampling.py": "d3d32ea9370e7f51f771f13f44e6aa06429299d64e08d3ae9a3793271a55d730"
+  },
+  "stage": "complete",
+  "control_ms": 0.3347777401924961,
+  "candidate_ms": 0.3215410956181586,
+  "eligible_for_full_model_gate": true,
+  "sources_after": {
+    "dram-mlp-down-probe.py": "14e5d20f252f69f0a878494642a67f097435d46a05d1d9ce7ee1d2196dd661e5",
+    "dram_mlp_down.py": "9ac073cac7d927f6dfcf0648c11de177f14dc20e38ffe48e34bb5a92589849c5",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9"
+  },
+  "native_sources_after": {
+    "models/demos/blackhole/qwen36/tt/tp_common.py": "5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181"
+  }
+}

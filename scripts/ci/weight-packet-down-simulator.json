@@ -1,0 +1,814 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator-only compressed-weight transport; no matmul, bandwidth or TG claim.",
+  "geometry": {
+    "projection": "down",
+    "blocks": 34,
+    "rows": 8704,
+    "width": 5120,
+    "dtype": "bfloat8_b",
+    "receivers": 80,
+    "tile_bytes": 1088,
+    "per_receiver": 2,
+    "key_block_tiles": 8,
+    "page_bytes": 17408,
+    "coordinates": [
+      [
+        0,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        4,
+        0
+      ],
+      [
+        5,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        7,
+        0
+      ],
+      [
+        8,
+        0
+      ],
+      [
+        9,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        1
+      ],
+      [
+        2,
+        1
+      ],
+      [
+        3,
+        1
+      ],
+      [
+        4,
+        1
+      ],
+      [
+        5,
+        1
+      ],
+      [
+        6,
+        1
+      ],
+      [
+        7,
+        1
+      ],
+      [
+        8,
+        1
+      ],
+      [
+        9,
+        1
+      ],
+      [
+        10,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        2
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        4,
+        2
+      ],
+      [
+        5,
+        2
+      ],
+      [
+        6,
+        2
+      ],
+      [
+        7,
+        2
+      ],
+      [
+        8,
+        2
+      ],
+      [
+        9,
+        2
+      ],
+      [
+        10,
+        2
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        3
+      ],
+      [
+        4,
+        3
+      ],
+      [
+        5,
+        3
+      ],
+      [
+        6,
+        3
+      ],
+      [
+        7,
+        3
+      ],
+      [
+        8,
+        3
+      ],
+      [
+        9,
+        3
+      ],
+      [
+        10,
+        3
+      ],
+      [
+        0,
+        4
+      ],
+      [
+        1,
+        4
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        5,
+        4
+      ],
+      [
+        6,
+        4
+      ],
+      [
+        7,
+        4
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        9,
+        4
+      ],
+      [
+        10,
+        4
+      ],
+      [
+        0,
+        5
+      ],
+      [
+        1,
+        5
+      ],
+      [
+        2,
+        5
+      ],
+      [
+        3,
+        5
+      ],
+      [
+        4,
+        5
+      ],
+      [
+        5,
+        5
+      ],
+      [
+        6,
+        5
+      ],
+      [
+        7,
+        5
+      ],
+      [
+        8,
+        5
+      ],
+      [
+        9,
+        5
+      ],
+      [
+        10,
+        5
+      ],
+      [
+        0,
+        6
+      ],
+      [
+        1,
+        6
+      ],
+      [
+        2,
+        6
+      ],
+      [
+        3,
+        6
+      ],
+      [
+        4,
+        6
+      ],
+      [
+        5,
+        6
+      ],
+      [
+        6,
+        6
+      ],
+      [
+        7,
+        6
+      ],
+      [
+        8,
+        6
+      ],
+      [
+        9,
+        6
+      ],
+      [
+        10,
+        6
+      ],
+      [
+        0,
+        7
+      ],
+      [
+        1,
+        7
+      ],
+      [
+        2,
+        7
+      ]
+    ],
+    "mapping": [
+      [
+        [
+          0,
+          9
+        ],
+        [
+          0,
+          16,
+          32,
+          48,
+          64
+        ]
+      ],
+      [
+        [
+          1,
+          9
+        ],
+        [
+          1,
+          17,
+          33,
+          49,
+          65
+        ]
+      ],
+      [
+        [
+          2,
+          9
+        ],
+        [
+          2,
+          18,
+          34,
+          50,
+          66
+        ]
+      ],
+      [
+        [
+          3,
+          9
+        ],
+        [
+          3,
+          19,
+          35,
+          51,
+          67
+        ]
+      ],
+      [
+        [
+          4,
+          9
+        ],
+        [
+          4,
+          20,
+          36,
+          52,
+          68
+        ]
+      ],
+      [
+        [
+          5,
+          9
+        ],
+        [
+          5,
+          21,
+          37,
+          53,
+          69
+        ]
+      ],
+      [
+        [
+          6,
+          9
+        ],
+        [
+          6,
+          22,
+          38,
+          54,
+          70
+        ]
+      ],
+      [
+        [
+          7,
+          9
+        ],
+        [
+          7,
+          23,
+          39,
+          55,
+          71
+        ]
+      ],
+      [
+        [
+          0,
+          8
+        ],
+        [
+          8,
+          24,
+          40,
+          56,
+          72
+        ]
+      ],
+      [
+        [
+          1,
+          8
+        ],
+        [
+          9,
+          25,
+          41,
+          57,
+          73
+        ]
+      ],
+      [
+        [
+          2,
+          8
+        ],
+        [
+          10,
+          26,
+          42,
+          58,
+          74
+        ]
+      ],
+      [
+        [
+          3,
+          8
+        ],
+        [
+          11,
+          27,
+          43,
+          59,
+          75
+        ]
+      ],
+      [
+        [
+          4,
+          8
+        ],
+        [
+          12,
+          28,
+          44,
+          60,
+          76
+        ]
+      ],
+      [
+        [
+          5,
+          8
+        ],
+        [
+          13,
+          29,
+          45,
+          61,
+          77
+        ]
+      ],
+      [
+        [
+          6,
+          8
+        ],
+        [
+          14,
+          30,
+          46,
+          62,
+          78
+        ]
+      ],
+      [
+        [
+          7,
+          8
+        ],
+        [
+          15,
+          31,
+          47,
+          63,
+          79
+        ]
+      ]
+    ],
+    "full_projection": true,
+    "producers": 16
+  },
+  "operand_scope": "Two synthetic compressed weight patterns, independent data on each chip",
+  "sources": {
+    "tensix-weight-stream-probe.py": "afec631a523725050ea1559bc8c266a5b8047f87e8a6cf4de09bba90b870d613",
+    "tensix_weight_stream.py": "af186c2e2a9a3e8391ef8c33861ba221767755a98c05385268b1f69c990e4aa2",
+    "tensix_weight_packet.py": "b0e3243144e9aa020b76e9f197a3551d7b922d45ae94b7756736663f0200d75e",
+    "tensix_weight_packet_reader.cpp": "d5d55a2d15c09f893cc9a67fdf66f0bda22f6d7c5568d18b056b438b9e768300",
+    "tensix_weight_stream_reader.cpp": "733e58d5ef414069d3b67ce1d0058225e008aff9b72e8b37ed2f5cb087a2233b",
+    "tensix_weight_stream_writer.cpp": "e0f811a6779a3be2bd5b6e240ab0a0111864269272e623cfd0db518516d90e06",
+    "tensix_weight_stream_sink.cpp": "46884e2838f65859b76bd188c4d1b64aef94b4483d33fb0087fbc61aa878a34a",
+    "tensix_weight_stream_raw.cpp": "5a1f387a487107a42c2913d9de7c621265652483ddb7fd9ddb95c78cd1bb5bfc",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources": {
+    "tt_metal/hw/inc/api/remote_circular_buffer.h": "b1654602508e59ae24a4b5db2aae91c862886b770b163ed28b7cfd20590a1f10",
+    "tt_metal/hw/inc/api/dataflow/dataflow_api.h": "0288b90d5f179ad4db02e3a6a48c31010f74f56b4fec8a1c15ea9cfaaa0025ee",
+    "tt_metal/hw/inc/api/tensor/tensor_accessor.h": "5ec270017985e1ccf40f90ec845276006b999cc83c9db6369c50f046233d5a3b",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/impl/buffers/global_circular_buffer.cpp": "a96e53bb1143e6c9fdb51e713afcc3e039c479a6338f58c1dc69af8ef19f2310",
+    "ttnn/core/global_circular_buffer.cpp": "38bc98ca0c32f37e8c694f47dced22a42fa2d503cb512d46e88fd42695ea3f0c",
+    "ttnn/cpp/ttnn-nanobind/program_descriptors.cpp": "43218ce7e48584373bef0fb8cc2706f8a0d0161e03de17ae7fa9f12b5cdb64a3"
+  },
+  "arm_policies": [
+    "generic",
+    "single-packet"
+  ],
+  "target_integrated": false,
+  "eligible_for_hardware": false,
+  "reader_engagements": [
+    {
+      "tile_bytes": 1088,
+      "block_rows": 8,
+      "receiver_columns": 2,
+      "total_columns": 160
+    },
+    {
+      "tile_bytes": 1088,
+      "block_rows": 8,
+      "receiver_columns": 2,
+      "total_columns": 160
+    }
+  ],
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_packed_words": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    }
+  ],
+  "negative_controls": [
+    {
+      "arm": 0,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 0,
+      "chip": 1,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 1,
+      "stale_detected": true
+    }
+  ],
+  "stage": "complete",
+  "sources_after": {
+    "tensix-weight-stream-probe.py": "afec631a523725050ea1559bc8c266a5b8047f87e8a6cf4de09bba90b870d613",
+    "tensix_weight_stream.py": "af186c2e2a9a3e8391ef8c33861ba221767755a98c05385268b1f69c990e4aa2",
+    "tensix_weight_packet.py": "b0e3243144e9aa020b76e9f197a3551d7b922d45ae94b7756736663f0200d75e",
+    "tensix_weight_packet_reader.cpp": "d5d55a2d15c09f893cc9a67fdf66f0bda22f6d7c5568d18b056b438b9e768300",
+    "tensix_weight_stream_reader.cpp": "733e58d5ef414069d3b67ce1d0058225e008aff9b72e8b37ed2f5cb087a2233b",
+    "tensix_weight_stream_writer.cpp": "e0f811a6779a3be2bd5b6e240ab0a0111864269272e623cfd0db518516d90e06",
+    "tensix_weight_stream_sink.cpp": "46884e2838f65859b76bd188c4d1b64aef94b4483d33fb0087fbc61aa878a34a",
+    "tensix_weight_stream_raw.cpp": "5a1f387a487107a42c2913d9de7c621265652483ddb7fd9ddb95c78cd1bb5bfc",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_sources_after": {
+    "tt_metal/hw/inc/api/remote_circular_buffer.h": "b1654602508e59ae24a4b5db2aae91c862886b770b163ed28b7cfd20590a1f10",
+    "tt_metal/hw/inc/api/dataflow/dataflow_api.h": "0288b90d5f179ad4db02e3a6a48c31010f74f56b4fec8a1c15ea9cfaaa0025ee",
+    "tt_metal/hw/inc/api/tensor/tensor_accessor.h": "5ec270017985e1ccf40f90ec845276006b999cc83c9db6369c50f046233d5a3b",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181",
+    "build_Release/lib/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "build_Release/ttnn/_ttnncpp.so": "d2652fc01a6836b4d567a788a9c11d8f6cb238bb480bbf68d0e32ee4037c3e24",
+    "tt_metal/impl/buffers/global_circular_buffer.cpp": "a96e53bb1143e6c9fdb51e713afcc3e039c479a6338f58c1dc69af8ef19f2310",
+    "ttnn/core/global_circular_buffer.cpp": "38bc98ca0c32f37e8c694f47dced22a42fa2d503cb512d46e88fd42695ea3f0c",
+    "ttnn/cpp/ttnn-nanobind/program_descriptors.cpp": "43218ce7e48584373bef0fb8cc2706f8a0d0161e03de17ae7fa9f12b5cdb64a3"
+  }
+}

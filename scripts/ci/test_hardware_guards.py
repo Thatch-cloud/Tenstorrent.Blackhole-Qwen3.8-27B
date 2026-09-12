@@ -28,6 +28,14 @@ class HardwareGuardTests(unittest.TestCase):
                                ["--suite", "audit", "--output", "/tmp/unused-qwen-guard.json"])
         self.assertIn("Explicit hardware authorization", error)
 
+    def test_gdn_prefix_gate_requires_explicit_authorization(self):
+        error = self.run_guard(Path(__file__).with_name("gdn-prefix.py"), [])
+        self.assertIn("Explicit hardware allocation", error)
+
+    def test_full_prefix_gate_requires_explicit_authorization(self):
+        error = self.run_guard(Path(__file__).with_name("full-prefix.py"), [])
+        self.assertIn("Explicit hardware allocation", error)
+
     def test_prefill_hardware_gate_requires_explicit_authorization(self):
         script = Path(__file__).resolve().parents[2] / "optimisation/sim/prefill-state.py"
         self.assertIn("Hardware requires explicit authorization", self.run_guard(script, ["--hardware"]))
@@ -35,6 +43,25 @@ class HardwareGuardTests(unittest.TestCase):
     def test_prefill_default_cannot_fall_back_to_hardware(self):
         script = Path(__file__).resolve().parents[2] / "optimisation/sim/prefill-state.py"
         self.assertIn("Simulator required", self.run_guard(script, [], TT_METAL_SIMULATOR=""))
+
+    def test_prefix_copy_requires_explicit_backend(self):
+        script = Path(__file__).resolve().parents[2] / 'optimisation/sim/gdn-prefix-copy.py'
+        self.assertIn('Dedicated slow-dispatch simulator required',
+            self.run_guard(script, [], TT_METAL_SIMULATOR=''))
+        self.assertIn('Explicit allocation and non-simulated hardware required',
+            self.run_guard(script, ['--hardware'], TT_METAL_SLOW_DISPATCH_MODE=''))
+
+    def test_draft_head_probe_cannot_fall_back_to_hardware(self):
+        script = Path(__file__).with_name('draft-head-probe.py')
+        self.assertIn('Simulator required unless --hardware is explicitly selected',
+            self.run_guard(script, ['--output', '/tmp/unused-head-probe.json'],
+                TT_METAL_SIMULATOR='', TT_METAL_SLOW_DISPATCH_MODE=''))
+
+    def test_fused_batch_probe_cannot_fall_back_to_hardware(self):
+        script = Path(__file__).with_name('fused-batch-probe.py')
+        self.assertIn('Simulator required unless --hardware is explicitly selected',
+            self.run_guard(script, ['--fixture', '/tmp/unused-fixture', '--output', '/tmp/unused-fused-probe.json'],
+                TT_METAL_SIMULATOR='', TT_METAL_SLOW_DISPATCH_MODE=''))
 
     def allocation_probe(self, device_count=2):
         spec = importlib.util.spec_from_file_location("device_owners", Path(__file__).with_name("device-owners.py"))

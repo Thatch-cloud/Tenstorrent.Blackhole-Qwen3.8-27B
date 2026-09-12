@@ -31,6 +31,19 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 checker.analyze(rows, 7, 3)
 
+    def test_core_groups_keep_distinct_program_geometries(self):
+        rows = self.rows()
+        rows += [dict(row, **{'CORE COUNT': '39', 'DEVICE KERNEL DURATION [ns]': '250'}) for row in self.rows()]
+        groups = checker.analyze(rows, 7, 3)[0]['operation_core_groups']
+        self.assertEqual([(group['core_count'], group['median_summed_kernel_ns'], group['operations_per_replay'])
+            for group in groups], [('39', 250, 1), ('32', 100, 1)])
+
+    def test_changed_core_group_is_rejected_despite_stable_total_count(self):
+        rows = self.rows()
+        rows[-1]['CORE COUNT'] = '39'
+        with self.assertRaisesRegex(AssertionError, 'core-count coverage'):
+            checker.analyze(rows, 7, 3)
+
     def test_drop_warning_scope_requires_explicit_boundaries(self):
         clean = "QWEN_PROFILE_MEASURE_BEGIN\nstep\nQWEN_PROFILE_MEASURE_END"
         self.assertEqual(checker.measured_log("markers were dropped\n" + clean), 1)

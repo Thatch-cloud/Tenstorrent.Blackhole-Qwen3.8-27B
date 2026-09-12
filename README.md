@@ -1,287 +1,519 @@
-# Qwen3.5 / 3.6 / 3.8-27B on two Tenstorrent Blackhole cards
+# Qwen3.8-27B on two Tenstorrent Blackhole cards
 
-Running Tenstorrent's `qwen36` model on a **2-card** Blackhole p150a mesh, with a
-working OpenAI-compatible vLLM endpoint — including the fixes and configuration it
-took to get there.
+Two-card inference and kernel experiments for fast, reliable coding responses.
+**Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
+Experimental paths are opt-in; serving defaults remain unchanged.
 
-Upstream documents this model family at **4 and 8 cards** (`P150x4`, `P150x8`).
-Every test docstring says `MESH_DEVICE=P150x4`. There is no published path for two
-cards, and several defaults assume four. This is that path, measured.
+## Current position
 
-> **Status:** working, with caveats stated inline. The tt-metal fix stack this
-> depends on is **unmerged and largely unreviewed** — see [Dependencies](#dependencies).
-> Read that section before putting this in front of anyone.
+### Combined-runtime coding screen
 
----
+The latest candidate adds **T16 gate/up fusion** to the combined runtime below.
+All results use **CTX 4096, one stream / batch 1**; TG counts committed tokens.
 
-## Results
+| Task | Candidate PP tok/s | Control TG tok/s | Candidate TG tok/s | Validation |
+| --- | ---: | ---: | ---: | --- |
+| Merge intervals | 3302.00 | 100.45 | **102.44** | Exact tokens/state |
+| Merge intervals, repeat | 3354.98 | 100.47 | **101.88** | Exact tokens/state |
+| Stable unique | 3298.34 | 118.02 | **119.57** | 4/4 functional cases |
+| Run-length encoding | 3311.14 | 117.72 | **121.68** | 4/4 functional cases |
+| Rotate right | 3369.42 | 82.58 | **84.71** | 5/5 functional cases |
 
-Hardware: 2 × Blackhole **p150a** (32 GiB each), linked by one QSFP-DD cable
-(2 ethernet links), opened as a `(1,2)` mesh. Model `Qwen/Qwen3.8-27B`, weights
-`bfloat8_b` with `bfloat4_b` on MLP gate/up — upstream's default, no quantisation
-work required.
+These are matched, independently validated full-request comparisons, not kernel
+estimates. The merge-intervals gain repeats at **1.4–2.0%**. Setup-inclusive latency
+is worse in these comparisons; 121.68 TG is task-specific, not a general coding
+rate. All 13 small functional cases pass. Neither 200 TG nor long-context scaling
+is established. [Run evidence and limitations](docs/captured-gate-up-2026-09-11.md).
 
-### Single stream, full context ladder
+#### Previous screen (without gate/up fusion)
 
-| Context | TTFT | Decode |
-| ---: | ---: | ---: |
-| 128 | 0.19 s | 18.19 tok/s |
-| 4,096 | 1.04 s | 18.01 tok/s |
-| 65,536 | 27.3 s | 16.19 tok/s |
-| ~104k¹ | 51.8 s | 15.80 tok/s |
-| **262,144** | 219.9 s | **12.76 tok/s** |
+Same composed path: native DSpark attention, captured proposals, commit-only GDN,
+folded T16 target attention and fused score layout. All rows are **one stream /
+batch 1, CTX 4096, 15 draft queries / 16 verifier rows**.
 
-¹ the 128k case is capped ~104k by its source text; only the 256k run fills its window.
+| Coding task | Combined PP tok/s | Control TG | Combined committed TG | Functional cases |
+| --- | ---: | ---: | ---: | ---: |
+| Stable unique | 3346.45 | 107.36 | **114.43** | 4/4 |
+| Run-length encoding | 3174.52 | 99.83 | **113.29** | 4/4 |
+| Rotate right | 3338.49 | 76.34 | **83.86** | 5/5 |
 
-**Decode falls 30% across a 2048× context range.** The architecture is hybrid —
-48 of 64 layers are Gated DeltaNet (linear attention, context-independent per
-token), 16 are full attention. Long context is nearly free on decode; the cost is
-all in prefill.
+Earlier completed matched runs, not pooled across tasks. Exact target tokens/state
+and proposal audits pass. These small frozen cases are not comprehensive coding
+quality certification. Run-length and rotate-right include publication diagnostics.
+Earlier runs had severe stalls (22.37 and 33.39 TG); they remain in the evidence,
+not discarded. Setup-inclusive latency is still worse on two of these comparisons.
+The 200 TG target is unmet. The no-copy trace prototype is **not included**.
+[Complete results, revisions and regressions](docs/coding-screen-2026-09-10.md).
 
-**TTFT turns superlinear past ~100k**, which is the 16 quadratic layers taking
-over:
+### Latest single-stream comparison
 
-| step | context ratio | time ratio |
-| --- | ---: | ---: |
-| 64k → ~104k | 1.63× | 1.90× |
-| ~104k → 262k | 2.52× | **4.24×** |
+All rows use one stream / batch1. TG counts committed output tokens, not draft
+tokens or aggregate concurrent throughput. Results are offline, not endpoint tests.
 
-Size long-context capacity assuming **quadratic TTFT above 100k**, not linear.
+| Path | PP tok/s | CTX tokens | Committed TG tok/s | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| DFlash2, repeat-confirmed | 3,324.52 | 4,096 | **74.27** | Four timed requests across two runs |
+| DSpark, repaired full-history cache | 3,350.93 | 4,096 | **65.16** | One audited + two timed requests |
+| DSpark eager, latest matched control | 3,304.00 | 4,096 | 54.93 | One audited + two timed requests |
+| DSpark captured proposals | 3,355.78 | 4,096 | 56.92 | One audited + two timed requests |
+| DSpark captured proposals + commit-only GDN | 3,319.26 | 4,096 | **59.81** | Exact tokens/state; +8.89% over matched eager |
+| DSpark precise-native attention + capture + commit-only GDN | 3,337.21 | 4,096 | **87.10** | Repeat-confirmed; four timed requests across two runs |
+| DSpark above + folded T16 target attention | 3,312.91 | 4,096 | **89.86** | Repeat-confirmed; four timed requests across two matched runs |
+| DSpark above + fused Markov score layout | 3,350.74 | 4,096 | **96.82** | Repeat run; control 88.35 TG; pooled two-run TG 96.08 |
 
-### Versus a single card
+The fused score layout improves committed TG by **7.74% and 9.58%** in two matched runs, with identical proposals,
+accepted tokens and target state. Drafting drops from **37.42 to 29.56 ms/block**;
+target verification/readback remains **69.09 ms/block** in the first run. The gain
+is repeat-confirmed, but this is not a held-out coding-quality result.
+[Score-layout evidence](docs/dspark-score-layout-2026-09-11.md#first-complete-hardware-result).
 
-The 27B fits on one 32 GiB card (27.49 GiB at bf8/bf4). Two cards buy more than
-the obvious 2×:
+DSpark's baseline preserves native target tokens/state, but does not beat DFlash2.
+The precise-native attention candidate reaches repeat-confirmed **87.10 TG**,
+versus59.43 matched control. All12 requests retain exact target outputs/state.
+[Matched results](docs/dspark-native-attention-results-2026-09-10.md).
+The earlier allocation-order comparison passes all nine requests after repairing trace allocation
+order. Its T16 simulator prerequisite passed all17 prefix/continuation cases.
+The repository-derived prompt changed, so historical rows are not matched controls.
+[Latest comparison and timings](docs/dspark-allocation-order-results-2026-09-10.md).
+[Baseline run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694)
+and [capture failure diagnosis](docs/dspark-capture-failure-2026-09-10.md).
+These results do not certify held-out coding quality or long-context scaling.
 
-| Context | 1 card TTFT | 2 cards TTFT | 1 card decode | 2 cards decode |
+### Previous MLP experiment
+
+**Native DRAM-sharded MLP with corrected FP32 partial reload.** Gate, up and down
+pass exact simulator replay checks. The complete T16 local MLP also passes:
+four eager and six replay comparisons, including poisoned-output replacement.
+
+| Test | State | What it establishes |
+| --- | --- | --- |
+| Individual projections | Simulator pass | Exact outputs, input/packed-weight integrity |
+| Complete local MLP | Simulator pass | Exact composition and changed-input replay |
+| Real weights + four-link collective | Correctness pass; slower | 0.357 ms versus 0.335 ms native; not promoted |
+| Shared staging + sharded product | Correctness pass; slower | 0.385 ms versus 0.335 ms native; not promoted |
+| Native gate/up/product + DRAM down only | Hardware gate and repeat pass | 0.321–0.322 ms versus 0.335 ms native |
+
+[Hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34466816834)
+includes input transfer and the collective. The candidate loses all nine timing
+blocks, **6.70% slower** overall. No new TG result.
+The [reduced-conversion run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34468926073)
+is **15.1% slower** despite fewer transfers.
+Profiling isolated a useful down-projection saving. The down-only hybrid is
+**about 4% lower latency** in both complete-MLP tests, but the full request is slower:
+
+| One coding stream | CTX | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Folded attention + native MLP | 4096 | 3286.50 | 90.08 |
+| Folded attention + DRAM down only | 4096 | 3334.04 | 88.93 |
+
+Not promoted: verification improves, but drafting regresses. An equal-weight-footprint
+diagnostic gives **90.10 versus 88.79 TG**, retaining exact outputs. It supports
+investigating allocation effects, not a new gain over the original native baseline.
+[Details](docs/dram-projection-reload-2026-09-10.md).
+
+### Recent request experiments
+
+The direct-scatter GDN norm reader passes 12 eager and 24 trace-replay simulator
+comparisons, including poisoned outputs and padding checks. Its full-request
+[A/B hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34451473973)
+passes all six requests: **PP 3331.87 / CTX 4096 / TG 87.04**, versus 85.85 TG
+control (**+1.39%**, not repeat-confirmed). Both arms use the same native-attention
+DSpark path with one stream and T16 verification. This is not a new overall best.
+Folded T16 target attention now passes simulator and two hardware comparisons:
+**89.86 pooled TG versus 83.88 matched control**. Setup-inclusive latency is
+still worse, and long-context scaling and held-out coding quality remain open.
+[Attention results](docs/target-t16-attention-2026-09-10.md).
+The combined hardware comparison passes correctness but adds **no speed**:
+90.24 TG with scatter norm versus 90.25 folded-attention control at CTX4096.
+No promotion. [Combined result](docs/dspark-combined-result-2026-09-10.md).
+[Experiment details](docs/gdn-norm-scatter-experiment-2026-09-10.md).
+
+### Other measured results
+
+Untuned coding tasks, one stream / batch1, using folded target attention:
+
+| Task | PP tok/s | CTX | Committed TG | Matched control TG | Functional cases |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stable unique | 3351.31 | 4096 | 109.04 | 103.20 | 4/4 pass |
+| Run-length encoding | 3320.98 | 4096 | 107.18 | 104.33 | 4/4 pass |
+| Rotate right | 3382.31 | 4096 | 76.93 | 73.06 | 5/5 pass |
+
+Each task has two timed requests per arm plus correctness audits. These are
+short local tasks, not broad coding-quality certification or long-context
+results; do not pool their rates into one claimed speedup.
+[Coding screen](docs/coding-screen-2026-09-10.md).
+
+- **Short-context DFlash2: 78.06 TG at CTX 170, PP 510.65.** Captured DFlash2 T8,
+  commit-only GDN and fused draft convolution improve the matched control by
+  8.10%. [Measured run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
+- **Repeat-confirmed 4K result: PP 3,324.52 / CTX 4,096 / TG 74.27**, versus
+  61.28 TG control (**+21.21%**, pooling both runs). Native attention changes
+  draft proposals only; all 12 requests retain exact target tokens and state.
+  [Results](docs/drafter-numerics-experiment-2026-09-09.md).
+- **8K:** the uncached repeat reaches 53.48 TG. This uses the older draft path,
+  not the new 4K candidate; these are not scaling guarantees.
+- **Current DSpark bottleneck:** T16 verification occupies about 76.17 ms on
+  device. The earlier DFlash2 T8 verifier took about 62 ms/block.
+  [Current attribution](docs/dspark-t16-verifier-profile-2026-09-10.md).
+- **Attention result:** live-query attention is 7-10% faster in isolation, but
+  the two complete 4K runs pool to **57.64 TG versus 59.27 control**. Both pass
+  correctness; all stalls remain included. No promotion. [Details](docs/live-query-attention-2026-09-09.md).
+- **Spare-core streaming result:** exact simulation and real-weight hardware
+  correctness pass, but the complete MLP takes **0.744 ms versus 0.335 ms native**.
+  It loses all nine comparisons and is not promoted. More active cores do not
+  guarantee lower latency. [Results](docs/tensix-pooled-mlp-2026-09-09.md).
+  [Device attribution](docs/tensix-mlp-device-profile-2026-09-09.md) locates the
+  slowdown in gate/up/down, not the copy or collective.
+  [Sixteen producers](docs/tensix-sixteen-producers-2026-09-09.md) improve the
+  prototype to **0.456 ms**, but remain **36.17% slower than native**. All 188
+  simulator and 118 hardware checks pass; no promotion or new TG result.
+- **Fixed-packet reader result:** simulator and hardware correctness pass, but
+  the complete MLP takes **0.425 ms versus 0.335 ms native: 26.92% slower**.
+  It loses all nine comparisons and is not promoted.
+  [Results](docs/weight-read-packets-2026-09-10.md).
+- **Fabric result:** at CTX 4,096, four target-model links reach **61.41 TG versus
+  62.39 control**; correctness passes, but no speed promotion. Sampler and drafter
+  are unchanged. [PP / CTX / TG table](docs/target-model-link-counts-2026-09-09.md).
+
+Smaller MLP tiles are [rejected: 4.70% slower](docs/tiny-tile-projections-2026-09-09.md).
+Stock native drafter SDPA failed its earlier numerical gate; the separately
+qualified precise-native candidate remains opt-in. All rates
+below are offline coding-task experiments, not held-out quality or serving certification.
+
+[Approximate draft attention](docs/drafter-numerics-experiment-2026-09-09.md)
+cuts drafting from **40.32 to 20.35 ms/block** in the complete 4K comparison.
+Acceptance stays **88.24%**, despite different proposals. The unchanged target
+verifier still costs **61.72 ms/block**: this remains the main obstacle to 200 TG.
+This is one coding prompt, not held-out quality or serving certification.
+
+## Setup
+
+| Component | Experiment setup |
+| --- | --- |
+| Accelerators | 2 × Blackhole P150A, 32 GiB each |
+| Placement | Tensor parallel across a `(1, 2)` mesh |
+| Card-to-card connection | Two QSFP-DD cables; four physical Ethernet links |
+| Host connections | One PCIe x16 card; one PCIe x4 card behind a switch |
+| Compute grid | 110 exposed workers/card on current worker-dispatch path |
+| Extra column | Ethernet dispatch could expose 120; not validated on this pair |
+| Model | Qwen/Qwen3.8-27B; 64 layers: 48 GDN + 16 attention |
+| Dimensions | Hidden 5120; MLP 17408; vocabulary 248320 |
+| Target weight formats | Gate/up BF4; down, other projections and LM head BF8 |
+| Experiment runtime | TT-Metal `9f9cd4f` plus audited grafts; vLLM plugin `bf77cd6` |
+
+Fabric communication does not establish fabric-based host weight loading.
+The model is not uniformly limited to 36 cores: different kernels use different grids.
+
+## Reading the results
+
+- **CTX:** actual input context tokens, including prompt template where applicable.
+- **PP:** prefill input tokens/s. `—` means not measured, not zero.
+- **TG:** generation tokens/s **per stream**; each table states the timing boundary.
+- **Streams (B):** concurrent requests. **Verify rows (T):** speculative positions, not users.
+- **TTFT:** time to first token. Includes more than prefill; we do not convert it into PP.
+
+## Current lead: PP / CTX / TG
+
+Captured DFlash2 T8 + commit-only GDN + fused convolution; **one stream**.
+These are offline complete requests, not endpoint streaming measurements.
+
+| PP tok/s | CTX tokens | Committed TG tok/s | Status |
+| ---: | ---: | ---: | --- |
+| 510.65 | 170 | **78.06** | Measured: two 150-token decode samples through EOS |
+| 3,355.04 | 4,096 | **58.18** | Measured: two 121-token decode samples through EOS |
+| 3,149.33 | 8,192 | **46.20** | First run: publication stall included; TG41.94 / 51.43 |
+| 3,298.59 | 8,192 | **53.48** | Same-code repeat: two 121-token EOS samples; TG53.40 / 53.57 |
+| 3,322.74 | 4,096 | **75.42** | New approximate-drafter candidate: two 121-token EOS samples; matched control61.47 |
+| 3,326.31 | 4,096 | **73.16** | Same-code repeat: two 121-token EOS samples; matched control61.08 |
+| — | 16,384 | — | Planned |
+| — | 32,768 | — | Planned |
+| — | 64,504 | — | Planned; reserves generation space below 65,536 |
+
+At CTX 170, mean prefill is **0.333 s**; prefill + fresh setup + decode is
+**6.42 s**, excluding model loading. TG excludes prefill/setup; PP includes
+target feature capture and first-token selection, but not drafter initialization.
+The drafter's rolling 2,048-token history is separate from the target's full KV
+context. An opt-in 4K initializer now captures the valid tail and retains absolute
+positions. The corrected 4K run passes native token/state and feature audits;
+mean prefill is 1.221 s and prefill + fresh setup + decode is 7.05 s.
+[4K hardware result](docs/dflash-long-context-2026-09-09.md).
+The first 8K run has a 424 ms publication stall; it remains included in TG.
+The same-code repeat measures 53.48 TG and 8.70 s mean complete request, versus
+46.20 TG and 10.24 s initially. This is repeatability evidence, not a code gain.
+[8K result and timing spread](docs/dflash-8k-context-2026-09-09.md).
+[Matrix, measurement rules and next gates](docs/pp-ctx-tg-benchmark-matrix.md).
+
+The new 4K approximate-drafter pair pools to **74.27 TG** across four timed
+requests, with **6.65 s** mean prefill/setup/decode. It has not run at 8K or
+higher.
+
+**DSpark remains experimental.** [Hardware integration passes](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34413173251):
+learned FC plus all five layers in one trace, using four fabric links.
+The warm replay mean is **10.19 ms/block at 32 history rows / seven query rows**.
+This excludes embeddings, target head, Markov selection and verification—**not TG**.
+[Real-target proposal integration now passes](docs/dspark-target-integration-2026-09-10.md),
+preserving target tokens/GDN/KV. Short-prefix acceptance is only **3/7 and 0/7**;
+these are not complete coding responses. Full-history attention and fifteen-query
+layouts now pass 58 + 126 simulator checks. Earlier learned numerical differences
+and held-out coding quality remain open.
+Build reuse is measured: **262 seconds down to 2 seconds** for native setup.
+
+**DSpark repair passes:** [three complete hardware requests](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34428179694).
+Fixed buffers stop verifier replay overwriting draft K/V; native control warmup is
+also corrected. Acceptance rises from **1.65% to 74.67%** on this request. All
+three runs preserve native tokens/state; two uninstrumented samples measure TG.
+
+| Streams | Draft / verify rows | CTX tokens | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: | ---: |
-| 128 | 0.338 s | **0.19 s** | 7.8 | **18.19** |
-| 4k | 19.4 s | **1.04 s** | 7.7 | **18.01** |
-| 64k | **OOM** | **27.3 s** | — | **16.19** |
+| 1 | 15 / 16 | 4,096 | 3,350.93 | **65.16** |
 
-64k TTFT improves **6.4×** (175 s → 27 s), well beyond a card-count argument: the
-single card needed `QWEN_SDPA_BF8=1` *and* was thrashing its memory ceiling, so
-removing both compounds.
+This uses all historical draft K/V, not the DFlash2 2K window, and explicit
+four-link proposal/sampling collectives. The initial proposer is eager; the target
+verifier is batched and captured. [Scope and correctness gates](docs/dspark-full-history-2026-09-10.md).
 
-### Batched serving (B=8)
+The two timed samples are **64.80 / 65.52 TG** through EOS. Mean fresh
+prefill/setup/decode is **7.42 seconds**, excluding model loading. This is not a
+matched win over the 74.27-TG DFlash2 lead. Drafting costs **86.49 ms/block**;
+verification **83.44 ms**, publication **14.07 ms**. At 12.1 committed tokens/block,
+200 TG needs a **60.5-ms total cycle**: proposal capture alone will not suffice.
+Serving defaults remain unchanged.
 
-| Context | TTFT | Per-user decode | **Aggregate** |
-| ---: | ---: | ---: | ---: |
-| 128 | 4.2 s | 12.56 tok/s | **100.5 tok/s** |
-| 4,096 | 57.7 s | 12.23 tok/s | **97.9 tok/s** |
-| 8,192 | 90.1 s | 11.71 tok/s | **93.6 tok/s** |
-| 65,536² | 275.1 s | 9.81 tok/s | **78.5 tok/s** |
+The separate matched4K cache experiment measures **PP3,307.88 /CTX4,096 /TG60.33**,
+against uncached **PP3,293.42 /TG58.81**. Publication overhead consumes most of
+the drafting saving; caching is not enabled in serving or the8K ladder rows.
+Capturing cache updates separately passes correctness but is effectively flat:
+**PP3,292.61 /CTX4,096 /TG62.11**, versus cached eager-update **62.01 TG**.
+That0.15% difference is within timing spread; it is not a performance promotion.
 
-² requires `QWEN_SDPA_BF8=1`; without it the allocator OOMs.
+## Serving baseline
 
-**~5.5× aggregate throughput at B=8**, for a 31% per-user decode cost.
+September 5: three repetitions, 1024 output tokens/request, container-local streaming
+endpoint with host sampling and `logprobs=1`. TG is **client-estimated**, not an
+engine commit-timestamp measurement. These are not coding-quality scores.
 
-### Correctness
+| CTX | Streams (B) | PP tok/s | TG tok/s per stream | TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 109 | 1 | — | 19.45 | 0.309 s |
+| 4078 | 1 | — | 19.27 | 1.203 s |
+| 32752 | 1 | — | 18.97 | 10.356 s |
+| 64504 | 1 | — | 18.39 | 23.272 s |
+| 4078 | 2 | — | 18.56 | 1.837 s |
+| 4078 | 8 | — | 17.18 | 10.158 s |
 
-**GSM8K: 58/60 = 96.7%** (canonical `openai/grade-school-math` test set, greedy,
-via the live endpoint at B=8, `max_tokens=2048`). Excluding the one item that
-returned no parseable answer: 58/59 = 98.3%.
+Tested context limit: 65536, reserving room for generation. Concurrency is not
+single-stream acceleration; these medians are not aggregate throughput.
+[Baseline details and evidence](docs/baseline-2026-09-05.md).
 
-Use **`max_tokens=2048`**: an earlier pass at 640 scored 55/60, but two of the
-three "failures" were truncation mid-reasoning rather than wrong arithmetic.
-Reasoning models need the budget.
+## Speculative request experiments
 
-Only 2 genuine misses remain, and one is `expected 13, got 12` — an off-by-one
-after correct reasoning. That is a model error, not a kernel one.
+### Native MTP: complete coding response
 
-This validates the stack **as a composition** — quantisation, tensor-parallel
-sharding, the patched kernels, and vLLM's scheduler and paged KV all preserving
-multi-step arithmetic. It is *not* a side-by-side against a CUDA reference, so it
-rules out gross regression rather than subtle drift.
+Seven draft tokens, up to eight target verification rows, full-vocabulary device
+argmax and cache repair after rejection. One stream, not eight batched users.
+TG includes drafting, verification/readback and commit; excludes prefill/setup.
 
----
+| CTX | Streams (B) | Path | Verify rows (T) | PP tok/s | Committed TG tok/s |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 170 | 1 | Native reference, all paired repetitions | 1 | 546.69 | 19.47 |
+| 170 | 1 | Host-stepped MTP K7, KV-only repair | Up to 8 | 566.80 | 57.24 |
+| 170 | 1 | Device-chained MTP K7, KV-only repair | Up to 8 | 534.26 | **58.33** |
 
-## Dependencies
+PP measures the target prefill helper; MTP feature capture is included, draft
+initialization is not. Both arms accept 125/178 proposals in 26 blocks.
+Each produces 150 committed decode tokens
+and reaches EOS; two repetitions per arm run in ABBA order. This is one coding task.
+Tokens, active GDN, valid KV and inactive slots match the native reference exactly.
+Mean prefill + unamortized setup + decode: **7.60 s host-stepped versus 9.27 s chained**.
+These totals start with the target model already loaded, not a cold process launch.
+Trace/setup reuse across requests and longer-context measurements remain to do.
+The chain cuts drafting from 27.15 to 25.15 ms/block. Its first setup takes 3.58 s;
+the second takes 0.16 s. Neither is treated as free. Earlier exact KV-only repair
+improved 55.07 to 56.85 TG (+3.25%). PP variation is not attributed to decode changes.
+Earlier approximate
+cache reuse lost 7% TG through lower acceptance; repaired parallel attention was also slower
+(54.36 versus 54.90 TG); its mask correctness fix remains separate from speed.
+The earlier [sampling comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34200129693)
+established +7.7%; changes between separate runs are not attributed to an optimization.
 
-This does **not** work on stock tt-metal. It needs three unmerged PRs plus a
-one-character fix of our own.
+### DFlash2: complete coding response
 
-| PR | What it fixes |
+All five learned layers, shared target embedding/head and committed feature history.
+TG includes drafting, verification/readback and publication; excludes prefill/setup.
+
+| CTX | Streams (B) | Verify rows (T) | PP tok/s | Committed TG tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 170 | 1 | Up to 8 | 568.82 | **37.64** |
+| 170 | 1 | Up to 32, trained-width extrapolation | 554.23 | **41.03** |
+| 170 | 1 | Up to 8, captured drafter | 517.11 | **66.76** |
+| 170 | 1 | Up to 32, captured drafter and trained-width extrapolation | 542.94 | **60.74** |
+| 170 | 1 | Up to 8, captured ABBA control | 496.89 | **65.50** |
+| 170 | 1 | Up to 8, captured + commit-only GDN | 530.32 | **70.34** |
+| 170 | 1 | Up to 8, convolution ABBA control | 517.89 | **72.21** |
+| 170 | 1 | Up to 8, captured + commit-only GDN + fused convolution | 510.65 | **78.06** |
+
+Two complete 150-token responses reach EOS at 37.11 and 38.18 TG. Each accepts
+129/154 proposals in 22 blocks. Tokens, GDN, valid KV and inactive slots are exact;
+a separate audited request checks every committed feature row on both chips.
+Prefill + unamortized setup + decode takes **8.24 / 8.17 s**, with the target loaded.
+This is one coding task, not held-out quality or a matched comparison against MTP.
+[Hardware run and artifacts](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34232609121).
+
+The opt-in 32-row test extrapolates beyond the trained eight-token block. It
+completes two exact 150-token requests at 40.79/41.26 TG, 17 blocks each.
+Complete prefill/setup/decode takes9.82/9.22s. The first attempt exhausted DRAM;
+reserving KV pages for one stream fixes that without reducing its65,536-token
+capacity. This is not a matched T8 comparison or an eight-stream configuration.
+[Wider hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34236992387).
+
+Captured T8 preserves the same129/154 acceptance and22 blocks in this task.
+Its two complete requests take7.34/7.43s including fresh prefill and setup;
+their decode-only rates are68.41/65.20 TG. This also changes context padding and
+KV allocation, so it is not a matched capture-only attribution.
+[Captured hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34238134003).
+
+Captured T32 completes at61.26/60.24 TG, with18 blocks/request. It costs98.44 ms
+per verification block versus65.27 ms at T8, without enough extra accepted tokens
+to compensate. It is not promoted over the trained-width T8 candidate.
+[Captured T32 run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34239197088).
+
+Commit-only GDN removes speculative state writes before acceptance. The matched
+ABBA test preserves all proposals and outputs: 150 tokens through EOS, 22 blocks,
+129/154 accepted drafts. Candidate prefill + fresh setup + decode takes
+**6.90 / 7.06 s**, versus control **8.15 / 8.59 s**; setup is not amortized.
+Two separate audit requests are excluded from TG. PP/setup variation is not
+attributed to the decode change. Serving defaults remain unchanged.
+[Matched hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34242926044).
+
+Fused convolution improves the matched control by 8.10%, with the same 150
+tokens through EOS, 22 blocks and 129/154 accepted drafts. Complete prefill +
+fresh setup + decode takes **6.56 / 6.29 s**, versus control **7.03 / 8.01 s**.
+Its audit checks all 20 learned convolutions per proposal on both chips, in
+addition to the existing token, feature and cache checks. Audits are excluded
+from TG; no setup amortization or held-out coding-quality claim.
+[Fused-convolution hardware run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34246322267).
+
+### Earlier lookup experiments
+
+Synthetic lookup proposals, **not a learned drafter or a coding benchmark**.
+TG counts committed tokens during decode, excluding prefill and setup.
+
+| CTX | Streams (B) | Maximum verify rows (T) | PP tok/s | Committed TG tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 4078 | 1 | 8 | — | 23.88 |
+| 16363 | 1 | 8 | — | 20.61 |
+
+Including setup, but still excluding prefill, rates fall to 10.75/10.35 tok/s.
+Acceptance is poor: 128 committed tokens require 89/99 verification blocks.
+[Request run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34084598829).
+
+## What currently limits 200 tok/s?
+
+MTP now produces useful drafts, but the chained candidate cycle averages **98.87 ms** for
+**5.77 committed tokens**. Measured mean costs in the completed request:
+
+| Work per block | Time |
+| --- | ---: |
+| Target verification and readback | 65.04 ms |
+| Device-chained MTP drafts | 25.15 ms |
+| Cache repair and commit | 7.77 ms |
+
+At that acceptance, 200 TG requires a cycle around **28.85 ms**, not 99 ms.
+Even perfect T8 acceptance and free drafting cannot overcome the current verifier.
+Next: reduce sequential drafting/repair and develop wider parallel proposals to
+amortize target verification. Short-context attention and earlier larger-grid MLP
+sweeps did not improve whole-request TG; repeating them is not the next step.
+
+The earlier September 8 coding requests expose weak lookup proposals.
+All four requests reach EOS after 150 committed decode tokens and match native
+tokens, active state and inactive slots. This is one task, not held-out coding-quality certification.
+
+| CTX | Streams | Path | PP tok/s | Committed TG tok/s |
+| ---: | ---: | --- | ---: | ---: |
+| 170 | 1 | Native reference, paired candidate repetitions | Not isolated | 18.96 |
+| 170 | 1 | Lookup capped at T32, norm batching on | Not isolated | 15.16 |
+| 170 | 1 | Lookup capped at T8, norm batching on | Not isolated | 18.26 |
+
+The T8 cap reduces proposals from 1812 to 572 per request, with the same 22 accepted.
+That recovers 20.4% versus T32, but remains slower than the paired native reference.
+TG excludes prefill/setup; T8 including setup is 13.67 tok/s.
+[Completed coding request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34183834884).
+The subsequent matched T8 request test measured **18.87 tok/s with one sampling
+link versus 19.10 with four (+1.26%)**. All four requests completed with identical
+tokens and state; setup-inclusive four-link TG was 14.60 tok/s. This is one ABBA
+block, not a robust production speedup claim.
+[Four-link request evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185881285).
+This is not adoption of a learned drafter or a serving change.
+
+Even perfect acceptance needs an eight-token draft/verify/commit cycle within **40 ms**.
+Our best static target verification alone still takes longer:
+
+| CTX | Verify rows (T) | Target verification block |
+| ---: | ---: | ---: |
+| 4095 | 8 | 62.35 ms |
+| 16383 | 8 | 64.00 ms |
+
+These are **block timings, not generated throughput**, excluding draft/commit overhead.
+[Verifier run](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34150091732).
+
+## Latest kernel and drafter results — September 8
+
+Four-channel fabric sampling now passes exact argmax and input-preservation checks
+on both cards, including ties and changing traced inputs. Three ABBA blocks per
+comparison measured the following warmed sampler latency (not model TG):
+
+| Comparison | One-link control | Candidate |
+| --- | ---: | ---: |
+| Two links | 2.671 ms | 2.098 ms |
+| Four links | 2.702 ms | 1.827 ms |
+
+This uses the `p150_x2` descriptor and a sampler-only override of the hardcoded
+link helper. Serving defaults are unchanged.
+[Fabric sampling evidence](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34185352446).
+
+The complete captured five-layer drafter now passes on hardware through EOS,
+including22 exact eager-versus-trace proposal audits. Earlier cancelled simulator
+attempts and local tensor-integrity failures are retained as failed evidence,
+not retroactively counted as passes.
+
+The native eager link-discovery bug is fixed in the disposable experiment build.
+The [two-card check](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34189506734)
+passes without the fallback warning. T8/T32 collectives show no useful speed gain;
+this is a correctness fix, not progress to 200 TG by itself.
+
+| Experiment | Measured outcome | Meaning |
+| --- | --- | --- |
+| Learned MLP, T8 captured replay | 1.911 ms median | One isolated MLP branch, not a complete draft |
+| Gate/up fusion, T8 eager | Native 0.240 ms; fused 0.761 ms | Correct but slower; not adopted |
+| Fusion captured replay, simulator | Changing-input and stale-input controls pass on both chips | Correctness only; no hardware speed claim |
+| Fusion captured replay, T8 hardware | Native 0.211 ms; fused 0.201 ms | About 4.4% lower isolated latency; not adopted in full model |
+
+Evidence: [MLP trace](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34170293087),
+[eager fusion](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34176158014),
+[captured fusion](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34179917205).
+Fusion uses geometry-matched DFlash weights, not a full target-model quality test.
+Captured measurements use three ABBA blocks with exact outputs on both chips;
+they exclude uploads, allocation, capture and validation. The earlier launch failure
+was resolved by restoring the exact runtime image.
+
+| Workstream | Current position |
 | --- | --- |
-| [#53314](https://github.com/tenstorrent/tt-metal/pull/53314) | conv2d channel-chunking — the depthwise GDN conv does not fit L1 at TP=2 |
-| [#53319](https://github.com/tenstorrent/tt-metal/pull/53319) | `ttnn.slice` tile-window carve — static CB clash in the GDN qkv-carry slice |
-| [#53320](https://github.com/tenstorrent/tt-metal/pull/53320) | qwen36 demo/model layer, incl. adding `"P300": (1, 2)` to the mesh map |
+| MTP | Device chain + KV-only repair: 58.33 TG, +1.90% matched; setup-inclusive latency is worse; wider parallel proposals needed |
+| DFlash2 | Complete exact captured T8: 66.76 TG; captured T32 is slower at60.74 TG; target-verifier optimization is next |
+| EAGLE3 / DSpark / combined drafters | No validated throughput on this pair |
+| KV usage | September 5: no zero occupancy in 4065 active-request samples; idle zero is expected |
+| Prefill/decode disaggregation | End-to-end placement, scheduling and responsiveness tests remain |
+| Ethernet dispatch / extra column | Hardware grid and fabric gates remain before performance claims |
+| Coding quality | Held-out coding evaluation remains; numerical gates alone do not certify quality |
 
-Root cause for the conv wall is documented in
-[#53303](https://github.com/tenstorrent/tt-metal/issues/53303): the conv L1
-estimator is **group-blind**, computing an 838 MB weight tensor for a depthwise
-conv whose real weight is ~80 KB.
+Next: reduce the measured verifier and drafting costs; acceptance is now measured.
+The modest isolated fusion gain does not close the verifier gap.
+PP and committed TG need a matched context/concurrency sweep after qualification.
 
-> **Read this before depending on it.** These PRs are authored by an agent account
-> (`ctxbot`) from a fork and carry essentially no human review — two have zero
-> reviews, one has only a bot review. Their silicon receipts are detailed and
-> matched our hardware exactly (we reproduced #53319's reported failure
-> byte-for-byte: same program number, same two L1 addresses, same file and line).
-> That is strong corroboration. It is not maintainer endorsement.
+## Guides and evidence
 
-### Our fix on top: batch truncation in the GDN FIR conv
+- [Experiment programme](docs/two-card-experiment-programme.md): gates, failures and dated results.
+- [August 24 bring-up guide](docs/bringup-2026-08-24.md): historical build/launch instructions and longer-context results, including 256K. Not a current baseline.
+- [Gotchas](docs/gotchas.md): configuration and runtime constraints.
 
-`patches/53320-fix-fir-batch-truncation.patch` — **one character.**
-
-#53320 replaced a Python slice with an explicit `ttnn.slice` to keep a
-row-major hop in DRAM (a sound fix for an L1 OOM). But writing the bounds out by
-hand pinned the **batch** end to a literal `1`:
-
-```diff
--        x_slice = x_padded[:, k : k + T]                                # keeps all B rows
-+        x_slice = ttnn.slice(x_padded, (0, k, 0), (1, k + T, D), ...)   # batch end LITERAL 1
-```
-
-Identical for B=1; for B≥2 every user past the first is silently discarded. It
-surfaces far downstream as `Ends 2 must be less than or equal to the shape of the
-tensor 1`. The change was intended as a no-op — its own comment says *"Pure memory
-placement, numerics unchanged"* — and the module's own tests only ever run
-`batch_size=1`, so nothing caught it.
-
-Fix is `(1, k + T, D)` → `(B, k + T, D)`; `B` is already in scope. Verified on
-silicon: batched GDN prefill at B=2 and B=4 pass at PCC 0.99998–1.00000.
-
----
-
-## Build
-
-```bash
-scripts/tt-build-images.sh --prstack --vllm
-```
-
-Three layers, each taking `BASE` as a build arg so they compose:
-
-| Image | Contains | Size |
-| --- | --- | ---: |
-| `tt-bringup` | tt-metal + ttnn + `test_system_health` | ~15 GB |
-| `tt-serving` | + torch / transformers / pytest | ~22 GB |
-| `tt-vllm` | + stock vLLM and the TT plugin | + ~2 GB |
-
-Set `REGISTRY` (default `localhost:5000`) and `TAG` (default `v0.77.0-rc1`).
-
-`--from serving` / `--from vllm` skip earlier stages. Worth knowing: the
-`-prstack` layer builds **FROM the built bring-up image**, so applying the patches
-triggers an *incremental* tt-metal rebuild — about a minute, versus hours from
-scratch.
-
-### The vLLM layer
-
-Built from [`tenstorrent/vllm-tt-plugin`](https://github.com/tenstorrent/vllm-tt-plugin)
-— **stock vLLM plus a plugin-only repo**, which is where Tenstorrent are moving.
-(An earlier version of this repo used their vLLM *fork*; the maintainer's guidance
-on [tenstorrent/vllm#473](https://github.com/tenstorrent/vllm/issues/473) is to
-migrate, and we have.)
-
-Their install script is worth reading before you replace it with something
-simpler. vLLM's PyPI metadata is generated on a CUDA machine, so a plain install
-resolves `requirements/cuda.txt` — torch, `flashinfer`, `tilelang`, `nvidia-*` —
-**regardless of `VLLM_TARGET_DEVICE`**. That fights tt-metal over `torch` and adds
-several GB. They fetch vLLM's `requirements/common.txt` at the pinned tag, install
-that explicitly, then install vLLM itself `--no-deps --no-binary`. torch stays the
-tt-metal one by construction.
-
----
-
-## Serve
-
-```bash
-docker run -d --name ttserve -p 127.0.0.1:8000:8000 -w /opt/vllm-tt-plugin \
-  --device /dev/tenstorrent/<a> --device /dev/tenstorrent/<b> \
-  -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
-  -v $HOME/tt-hf-cache:/root/.cache/huggingface \
-  -e HF_MODEL=Qwen/Qwen3.8-27B -e MESH_DEVICE=P300 \
-  -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
-  -e VLLM_PLUGINS=tt,tt_model_registry -e VLLM_RPC_TIMEOUT=100000 \
-  -e QWEN36_BATCHED_DECODE_MODE=host \
-  $REGISTRY/tt-vllm:v0.77.0-rc1-prstack-plugin \
-  python3 -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
-    --max_model_len 4096 --max-num-seqs 8 --no-enable-prefix-caching \
-    --block-size 64 --reasoning-parser qwen3 --port 8000 --host 0.0.0.0 \
-    --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
-```
-
-**Two deliberate choices in that command, both security-relevant.**
-
-`-p 127.0.0.1:8000:8000`, not `-p 8000:8000`. Docker's default publishes on
-*every* host interface and [punches through the host firewall to do
-it](https://docs.docker.com/engine/network/port-publishing/) — this endpoint has
-no authentication, so the bare form puts an open inference server on your
-network. Bind it to loopback and put a reverse proxy in front if you need it
-reachable. Note that vLLM's own `--api-key`
-[does not protect every endpoint](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/),
-so it is not a substitute. `--host 0.0.0.0` stays as-is: that is the *container's*
-interface, and the published port is what actually controls exposure.
-
-`$HOME/tt-hf-cache`, not `$HOME/.cache/huggingface`. Hugging Face
-[stores your access token in that directory](https://huggingface.co/docs/huggingface_hub/main/package_reference/environment_variables),
-and this image is built from unmerged, largely unreviewed upstream code. A
-dedicated cache directory keeps the token out of the container while still
-letting weights download and persist. Stricter still: mount only the model
-snapshot, read-only.
-
-**Readiness takes ~510 s** — weights, warmup, and prefill trace capture. Budget
-at least 600 s. A default 30 s initial delay will restart-loop forever, and the
-symptom reads as a broken image rather than an impatient probe.
-
-(For reference, the older fork-based build was 330–375 s. The plugin build is
-~40% slower to start; cause not established, first-run JIT cache population being
-the leading suspect.)
-
-**Every flag is load-bearing.** See [docs/gotchas.md](docs/gotchas.md) for what
-each one prevents. The short version:
-
-| Flag | Without it |
-| --- | --- |
-| `--no-enable-prefix-caching` | engine won't construct — affects **every** Qwen3.5/3.6/3.8 GDN model |
-| `l1_small_size: 24576` | `ttnn.conv1d` cannot allocate; error misleadingly reads as OOM |
-| `--max-num-seqs 8` | B=32 hits a matmul divisibility assert at TP=2 |
-| `--reasoning-parser qwen3` | users receive raw chain-of-thought in `content` |
-| `MESH_DEVICE=P300` | the demo path defaults to `(1,4)` and asks for four cards |
-
-Two Blackhole devices are a **`P300`** as far as tt-metal is concerned —
-`determine_device_name` keys purely off device count, regardless of whether
-they're two dies on one board or two boards on a cable.
-
----
-
-## What we could not make work
-
-Recorded because absence of evidence is useful too.
-
-**B=32 at TP=2.** Fails with `per_core_M % out_subblock_h == 0`
-(`matmul_program_config.cpp:1069`) — one bug with four manifestations, in unit
-tests and end-to-end alike. A *divisibility* assert: the shape factors at TP=4 and
-does not at TP=2, because halving device count doubles per-device M. B=8 works.
-
-**Batched prefill above B=4.** `BH ≤ ncores` in
-`chunk_gdn_phased_program_factory.cpp:137`, where `BH = B × Nv_tp` and
-`Nv_tp = linear_num_value_heads / TP`. At TP=2 with 48 value heads that's
-`8 × 24 = 192 > 110` compute cores. Prompts over 256 tokens sidestep it by
-prefilling per-user, which is why long-context B=8 works and *short*-context B=8
-needs `QWEN_BATCHED_GROUPED=0`.
-
-**On-device sampling.** Hard-refused below TP=4: vocab 248,320 gives 124,160
-logits/device at TP=2, over the 65,536 ceiling. Host sampling works
-(`QWEN36_BATCHED_DECODE_MODE=host`).
-
----
-
-## Licence and provenance
-
-The original work here — the Dockerfiles, the build script, and the documentation
-— is MIT, per [LICENSE](LICENSE).
-
-**The patch in `patches/` is not.** It is a one-line change to tt-metal, which is
-Apache-2.0, so it is a derivative work of Apache-2.0 code and is offered under
-**Apache-2.0**, not MIT. The same applies to the equivalent in-line fix applied by
-`docker/tenstorrent-bringup-prstack.Dockerfile`. It is offered upstream.
-
-tt-metal, the vLLM plugin, and the model weights are the property of their
-respective owners under their own licences and are neither vendored nor
-redistributed here — the images fetch them at build time. See [NOTICE](NOTICE) for
-the component-by-component breakdown.
-
-Measurements were taken on 2 × p150a on 2026-08-24 at tt-metal `v0.77.0-rc1`. They
-are single runs unless stated; where we repeated a configuration it reproduced to
-within 0.5%.
+Repository glue is [MIT licensed](LICENSE); derived patches retain upstream licensing.
+See [NOTICE](NOTICE). Model weights are not redistributed here.

@@ -1,9 +1,50 @@
 import unittest
+from unittest.mock import Mock, patch
 
-from fused_1d import BF16_PRODUCT, fused_compute, mapping
+from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping, native_gate_up_control
 
 
 class Fused1DTests(unittest.TestCase):
+    def test_target_math_is_explicit_and_recorded_without_changing_default(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            candidate = FusedProjection(None, None, token_rows=16, math_approx_mode=True)
+            self.assertIs(control.math_approx_mode, False)
+            self.assertIs(candidate.math_approx_mode, True)
+            self.assertIs(candidate.manifest['math_approx_mode'], True)
+            self.assertEqual(candidate.compute, control.compute)
+        for invalid in (0, 1, None, 'true'):
+            with self.assertRaisesRegex(ValueError, 'boolean math'):
+                FusedProjection(None, None, math_approx_mode=invalid)
+
+    def test_control_fuses_silu_before_gate_output_rounding(self):
+        operations = Mock()
+        operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.side_effect = lambda **options: options
+        operations.linear.side_effect = ['activated_gate', 'up']
+        operations.multiply.return_value = 'product'
+        owned = []
+        self.assertEqual(native_gate_up_control(operations, 'input', 'gate_weight', 'up_weight', 'kernel', owned), 'product')
+        gate, up = operations.linear.call_args_list
+        self.assertEqual(gate.kwargs['program_config']['fused_activation'], operations.UnaryOpType.SILU)
+        self.assertIsNone(up.kwargs['program_config']['fused_activation'])
+        operations.silu.assert_not_called()
+        operations.multiply.assert_called_once_with('activated_gate', 'up')
+        self.assertEqual(owned, ['activated_gate', 'up', 'product'])
+
+    def test_token_rows_are_explicit_and_do_not_change_compute(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            self.assertEqual(control.token_rows, 1)
+            for rows in (2, 4, 8, 16, 32):
+                candidate = FusedProjection(None, None, token_rows=rows)
+                self.assertEqual(candidate.compute, control.compute)
+                self.assertEqual(candidate.manifest['token_rows'], rows)
+        for rows in (0, 3, 33, True, 8.0):
+            with self.assertRaisesRegex(ValueError, 'single-tile'):
+                FusedProjection(None, None, token_rows=rows)
+
     def test_pair_mapping_matches_39_worker_control(self):
         workers = mapping()
         self.assertEqual(len(workers), 39)

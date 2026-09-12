@@ -1,0 +1,42 @@
+name: Qwen TT-Sim CPU experiments
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Simulator correctness only; no hardware timing
+        type: choice
+        options: [fusion-t16, fusion-t16-target, stack, shortlist]
+        default: fusion-t16
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+
+jobs:
+  simulator:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 180
+    steps:
+      - name: Verify dedicated host
+        run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run CPU-only simulator
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: ${{ inputs.suite }}
+        run: bash scripts/ci/run-simulator.sh
+      - name: Retain simulator evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qwen-ttsim-${{ github.run_id }}
+          path: experiment-results/
+          if-no-files-found: error
+          retention-days: 14

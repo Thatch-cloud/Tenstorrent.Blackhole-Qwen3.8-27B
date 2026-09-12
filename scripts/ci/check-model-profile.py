@@ -30,20 +30,35 @@ def analyze(rows, trace_id, steps):
         if len(selected) != steps:
             raise AssertionError("Incomplete decode replay sequence")
         totals = defaultdict(list)
+        grouped_totals = defaultdict(list)
+        grouped_counts = defaultdict(list)
         cores = defaultdict(set)
         counts = []
         for replay in selected:
             operations = sessions[(device, replay)]
             counts.append(len(operations))
             durations = defaultdict(float)
+            group_durations = defaultdict(float)
+            group_counts = defaultdict(int)
             for row in operations:
                 durations[row["OP CODE"]] += float(row["DEVICE KERNEL DURATION [ns]"])
                 cores[row["OP CODE"]].add(row.get("CORE COUNT", ""))
+                key = (row["OP CODE"], row.get("CORE COUNT", ""))
+                group_durations[key] += float(row["DEVICE KERNEL DURATION [ns]"])
+                group_counts[key] += 1
             for name, duration in durations.items():
                 totals[name].append(duration)
+            for key, duration in group_durations.items():
+                grouped_totals[key].append(duration)
+                grouped_counts[key].append(group_counts[key])
         if len(set(counts)) != 1 or any(len(values) != steps for values in totals.values()):
             raise AssertionError("Operation coverage changes between replays")
+        if any(len(values) != steps or len(set(values)) != 1 for values in grouped_counts.values()):
+            raise AssertionError("Operation and core-count coverage changes between replays")
         results.append(dict(device=device, replay_sessions=selected, operations_per_replay=counts[0],
+            operation_core_groups=sorted([dict(op=key[0], core_count=key[1],
+                operations_per_replay=grouped_counts[key][0], median_summed_kernel_ns=statistics.median(values))
+                for key, values in grouped_totals.items()], key=lambda item: -item['median_summed_kernel_ns']),
             operations=sorted([dict(op=name, median_summed_kernel_ns=statistics.median(values),
                                     core_counts=sorted(cores[name])) for name, values in totals.items()],
                               key=lambda item: -item["median_summed_kernel_ns"])))

@@ -1,0 +1,363 @@
+"""Single-request captured verifier buckets; prepare only after that request's prefill."""
+
+import os
+import time
+from pathlib import Path
+from contextlib import ExitStack
+
+from attention_batch import capture_operation
+from force_argmax import sample_rows
+from gdn_commit_dma import prepare
+from gdn_multitoken_conv import addresses, release_owned
+from model_batch import ModelBatch
+from verifier_inputs import stage_inputs
+
+
+def capture_widths(position, capacity, verifier_rows, remaining, max_verify_rows=32):
+    if type(max_verify_rows) is not int or max_verify_rows not in (1, 2, 4, 8, 16, 32):
+        raise ValueError('Explicit supported verification width cap required')
+    if any(type(value) is not int for value in (position, capacity, verifier_rows, remaining)):
+        raise ValueError('Integer request geometry required')
+    if position < 0 or remaining < 1 or position + remaining > capacity or verifier_rows not in (16, 32):
+        raise ValueError('The complete decode budget must fit the request page capacity')
+    return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining, max_verify_rows))
+
+
+def validate_replay_options(attention_replay, attention_mask_once, replay_group_rows):
+    if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
+        raise ValueError('Shared attention masks require explicit replay attention')
+    if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
+        raise ValueError('Replay group width must be integer four or eight')
+    if replay_group_rows == 8 and (not attention_replay or os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1'):
+        raise ValueError('Eight-row replay requires explicit replay attention and native compact scratch')
+
+
+class VerifierEngine:
+    def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
+                 attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
+                 native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
+                 commit_only_gdn=False, before_capture=None, target_attention_t16=False):
+        import ttnn
+
+        if before_capture is not None and not callable(before_capture):
+            raise ValueError('Callable pre-capture preparation required')
+
+        if type(commit_only_gdn) is not bool:
+            raise ValueError('Explicit commit-only GDN policy required')
+        self.commit_only_gdn = commit_only_gdn
+
+        if type(native_sampling_rows) is not bool or (native_sampling_rows and sampler is None):
+            raise ValueError('Native-row sampling requires an explicit device sampler')
+        self.native_sampling_rows = native_sampling_rows
+        if type(short_context) is not bool or (short_context and
+                (max_verify_rows != 8 or not norm_batch or not native_sampling_rows or replay_group_rows != 4)):
+            raise ValueError('Short-context verifier requires native-row sampling, batched norm and a T8 cap')
+        self.short_context = short_context
+        if type(attention_audit) is not bool or (attention_audit and not (short_context and attention_replay)):
+            raise ValueError('Attention diagnostics require explicit short-context replay')
+        self.attention_audit = attention_audit
+        if type(retain_mtp_hidden) is not bool:
+            raise ValueError('Explicit boolean MTP hidden retention required')
+        self.retain_mtp_hidden = retain_mtp_hidden
+        self.retain_feature_taps = tuple(retain_feature_taps)
+        if (len(set(self.retain_feature_taps)) != len(self.retain_feature_taps)
+                or any(type(index) is not int or not 0 <= index < len(model.layers) for index in self.retain_feature_taps)):
+            raise ValueError('Unique native target-layer feature taps required')
+        if type(norm_batch) is not bool:
+            raise ValueError('Explicit boolean norm-batch selection required')
+        if type(attention_replay) is not bool or (attention_replay and not norm_batch):
+            raise ValueError('Explicit replay attention requires norm batching')
+        validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
+        from target_t16_attention_gate import validate_request_option
+        validate_request_option(target_attention_t16, rows=max_verify_rows, position=session.position,
+            remaining=session.max_new_tokens - len(session.emitted), replay=attention_replay,
+            norm_batch=norm_batch, native_sampling=native_sampling_rows,
+            group_rows=replay_group_rows, short_context=short_context)
+        if target_attention_t16:
+            from target_t16_attention_gate import qualify
+            qualify(Path(__file__).parent)
+        self.target_attention_t16 = target_attention_t16
+        if attention_replay and max_verify_rows != 32 and not short_context and not target_attention_t16:
+            raise ValueError('Width-cap experiment currently requires native attention')
+        self.norm_batch = norm_batch
+        self.attention_replay = attention_replay
+        self.attention_mask_once = attention_mask_once
+        self.replay_group_rows = replay_group_rows
+        if session.phase != 'idle' or session.pending is not None or session.finished or len(helpers) != 48:
+            raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
+        if len(pages.shape) != 2 or pages.shape[0] != 1:
+            raise ValueError('One request page table required')
+        widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
+                                session.max_new_tokens - len(session.emitted), max_verify_rows)
+        self.model, self.session, self.pages, self.helpers = model, session, pages, helpers
+        self.operations, self.mesh, self.sampler = ttnn, model.mesh_device, sampler
+        self.position = session.position
+        self.phase, self.pending = 'preparing', None
+        self.initial, self.buckets = [], {}
+        self.mtp_row_reader = None
+        self.pending_key = None
+        self.replay_plan = None
+        if attention_replay:
+            from attention_request_plan import capture_plan
+            self.replay_plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
+                session.max_new_tokens - len(session.emitted), max_verify_rows=max_verify_rows, short_context=short_context)
+        self.native_addresses = [[addresses(ttnn, value) for value in helper.live] for helper in helpers]
+        self.widths = widths
+        started = time.perf_counter()
+        session.begin_preparation(session.request_id)
+        try:
+            for helper in helpers:
+                self.initial.append(helper.allocate())
+            for helper, snapshot in zip(helpers, self.initial, strict=True):
+                helper.save(snapshot)
+            captures = [(rows, rows, self.position) for rows in self.widths] if self.replay_plan is None else [
+                (capture.key, capture.rows, capture.position) for capture in self.replay_plan.captures]
+            for key, rows, position in captures:
+                bucket = dict(rows=rows, capture_position=position, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
+                self.buckets[key] = bucket
+                if self.retain_feature_taps:
+                    import torch
+                    from prepared_target_features import PreparedTargetFeatures
+
+                    bucket['target_features'] = []
+                    for index in self.retain_feature_taps:
+                        feature = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                            device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(self.mesh, dim=3))
+                        bucket['target_features'].append(feature)
+                    bucket['feature_capture'] = PreparedTargetFeatures(model, self.retain_feature_taps,
+                        bucket['target_features'], copy=ttnn.copy,
+                        storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
+            for key, rows, position in captures:
+                bucket = self.buckets[key]
+                if retain_mtp_hidden:
+                    import torch
+                    from mtp_hidden_capture import MTPHiddenCapture
+
+                    hidden = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                        device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+                    bucket['mtp_hidden'] = hidden
+                    bucket['mtp_capture'] = MTPHiddenCapture(model, hidden, copy=ttnn.copy,
+                        storage_ids=lambda value: addresses(ttnn, value))
+                for helper in helpers:
+                    bucket['checkpoints'].append(helper.allocate())
+                bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position)
+            if retain_mtp_hidden:
+                from mtp_hidden_rows import MTPHiddenRows
+                self.mtp_row_reader = MTPHiddenRows(ttnn, self.mesh, [bucket['mtp_hidden'] for bucket in self.buckets.values()])
+            if before_capture is not None:
+                before_capture(self)
+            for bucket in self.buckets.values():
+                rows = bucket['rows']
+                self.restore_initial()
+                warm = self.fixture(rows, bucket['checkpoints'], retain=self.commit_only_gdn and rows > 1,
+                    position=bucket['capture_position'])
+                result = None
+                try:
+                    result = self.operation(warm, hidden_capture=bucket.get('mtp_capture'),
+                        feature_capture=bucket.get('feature_capture'))
+                    ttnn.synchronize_device(self.mesh)
+                finally:
+                    if result is not None:
+                        release_owned(ttnn, [value for value in result if value is not None])
+                    warm.close()
+            if self.mtp_row_reader is not None:
+                self.mtp_row_reader.prepare()
+            for bucket in self.buckets.values():
+                rows = bucket['rows']
+                self.restore_initial()
+                bucket['trace'], bucket['output'] = capture_operation(ttnn, self.mesh,
+                    lambda bucket=bucket: self.operation(bucket['fixture'], hidden_capture=bucket.get('mtp_capture'),
+                        feature_capture=bucket.get('feature_capture')))
+                if rows > 1:
+                    layers = [[*state.entry, result['states'], *result['packed_conv_states'],
+                               state.gdn.rec_state, *state.gdn.conv_states, *checkpoint]
+                              for state, result, checkpoint in bucket['fixture'].retained.records]
+                    publications = {prefix: prepare(self.mesh, layers, prefix) for prefix in range(rows + 1)}
+                    for publication in publications.values():
+                        publication()
+                    ttnn.synchronize_device(self.mesh)
+                    for prefix, publication in publications.items():
+                        bucket['commits'][prefix], unused = capture_operation(ttnn, self.mesh, publication)
+            self.restore_initial()
+            ttnn.synchronize_device(self.mesh)
+            self.validate_bindings()
+            self.setup_ms = (time.perf_counter() - started) * 1000
+            session.finish_preparation(session.request_id)
+            self.phase = 'idle'
+        except BaseException:
+            self.phase = 'failed'
+            session.fail_preparation(session.request_id)
+            self.close()
+            raise
+
+    def fixture(self, rows, checkpoints, *, retain, position=None):
+        return ModelBatch(self.model, [1] * rows, self.position if position is None else position, self.pages, self.helpers, checkpoints,
+            0 if rows == 1 else rows, serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
+            skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
+            batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
+            norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False),
+            attention_mask_once=getattr(self, 'attention_mask_once', False),
+            replay_group_rows=getattr(self, 'replay_group_rows', 4),
+            short_context=getattr(self, 'short_context', False) and getattr(self, 'attention_replay', False),
+            attention_audit=getattr(self, 'attention_audit', False),
+            **(dict(commit_only_gdn=True) if getattr(self, 'commit_only_gdn', False) and rows > 1 else {}))
+
+    def proposal_rows(self):
+        remaining = self.session.max_new_tokens - len(self.session.emitted)
+        if getattr(self, 'replay_plan', None) is not None:
+            return self.replay_plan.max_rows(self.position, remaining)
+        return max(rows for rows in self.widths if rows <= remaining)
+
+    def bucket_key(self, ticket):
+        if getattr(self, 'replay_plan', None) is None:
+            return len(ticket.tokens)
+        remaining = self.session.max_new_tokens - len(self.session.emitted)
+        return self.replay_plan.select(ticket.position, len(ticket.tokens), remaining).key
+
+    def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
+        logits = None
+        try:
+            with ExitStack() as captures:
+                for capture in (hidden_capture, feature_capture):
+                    if capture is not None:
+                        captures.enter_context(capture.capture())
+                logits = fixture.run(sharded_logits=self.sampler is not None)
+            ids = sample_rows(self.sampler, logits, fixture.rows, self.operations,
+                native_rows=self.native_sampling_rows) if self.sampler is not None else None
+            return logits, ids
+        except BaseException:
+            if logits is not None:
+                self.operations.deallocate(logits)
+            raise
+
+    def restore_initial(self):
+        for helper, snapshot in zip(self.helpers, self.initial, strict=True):
+            helper.restore(snapshot)
+
+    def validate_bindings(self):
+        if any(helper.gdn.B != 8 or not helper.gdn._stable_state for helper in self.helpers):
+            raise ValueError('Native stable B8 state contract changed')
+        if [[addresses(self.operations, value) for value in helper.live] for helper in self.helpers] != self.native_addresses:
+            raise ValueError('Native GDN buffers changed under captured verifier')
+
+    def verify(self, ticket):
+        self.session.check_ticket(self.session.request_id, ticket)
+        key = self.bucket_key(ticket)
+        if self.phase != 'idle' or self.pending is not None or ticket.position != self.position or key not in self.buckets:
+            raise ValueError('An idle engine and its next supported request ticket are required')
+        self.phase, self.pending = 'verifying', ticket
+        self.pending_key = key
+        bucket = self.buckets[key]
+        try:
+            self.validate_bindings()
+            started = time.perf_counter()
+            stage_inputs(bucket['fixture'], ticket.tokens, ticket.position)
+            staged = time.perf_counter()
+            operation = lambda: self.operations.execute_trace(self.mesh, bucket['trace'], cq_id=0, blocking=True)
+            if bucket['first'] or bucket['fixture'].retained is None:
+                operation()
+                self.operations.synchronize_device(self.mesh)
+            else:
+                bucket['fixture'].retained.replay(operation)
+            if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
+                bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
+            logits, ids = bucket['output']
+            tensor = logits if ids is None else ids
+            parts = self.operations.get_device_tensors(tensor)
+            if len(parts) != 2:
+                raise AssertionError('Two chip-local outputs required')
+            host = self.operations.to_torch(parts[0])
+            predictions = (host.reshape(len(ticket.tokens), self.model.args.vocab_size).float().argmax(dim=-1)
+                           if ids is None else host.reshape(-1)[:len(ticket.tokens)]).tolist()
+            finished = time.perf_counter()
+            if len(predictions) != len(ticket.tokens):
+                raise AssertionError('Missing target prediction rows')
+            bucket['first'] = False
+            self.phase = 'verified'
+            return predictions, dict(input_ms=(staged - started) * 1000,
+                                      verify_readback_ms=(finished - staged) * 1000)
+        except BaseException:
+            self.phase = 'failed'
+            self.session.fail_verification(self.session.request_id, ticket)
+            raise
+
+    def verified_mtp_hidden(self, ticket):
+        self.session.check_ticket(self.session.request_id, ticket)
+        if (self.phase != 'verified' or self.pending is not ticket
+                or not getattr(self, 'retain_mtp_hidden', False)):
+            raise ValueError('MTP hidden requires its live verified ticket and opt-in retention')
+        return self.buckets[self.pending_key]['mtp_capture'].output()
+
+    def verified_mtp_hidden_for_publication(self, ticket):
+        if (self.phase != 'verified' or self.pending is not ticket or self.session.pending is not ticket
+                or self.session.phase != 'committing' or not self.retain_mtp_hidden):
+            raise ValueError('MTP publication hidden requires the current committing request')
+        return self.buckets[self.pending_key]['mtp_capture'].output()
+
+    def mtp_row(self, source, row):
+        if (self.phase != 'verified' or self.session.phase != 'committing'
+                or self.mtp_row_reader is None or source is not self.buckets[self.pending_key]['mtp_hidden']):
+            raise ValueError('Hidden row extraction is restricted to current target publication')
+        return self.mtp_row_reader(source, row)
+
+    def verified_features_for_publication(self, ticket):
+        if (self.phase != 'verified' or self.pending is not ticket or self.session.pending is not ticket
+                or self.session.phase != 'committing' or not self.retain_feature_taps):
+            raise ValueError('Feature publication requires the current committing verifier ticket')
+        return self.buckets[self.pending_key]['feature_capture'].outputs()
+
+    def publish(self, prefix):
+        ticket = self.pending
+        if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
+            raise ValueError('Publication requires the live verified ticket during its owner decision')
+        if type(prefix) is not int or not 0 <= prefix <= len(ticket.tokens):
+            raise ValueError('Selected prefix outside verified block')
+        self.phase = 'committing'
+        bucket = self.buckets[self.pending_key]
+        try:
+            if bucket['fixture'].retained is not None:
+                bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
+                    publication=lambda selected: self.operations.execute_trace(self.mesh, bucket['commits'][selected], cq_id=0, blocking=True))
+            else:
+                self.validate_bindings()
+                if prefix == 0:
+                    for helper, snapshot in zip(self.helpers, bucket['checkpoints'], strict=True):
+                        helper.restore(snapshot)
+                self.operations.synchronize_device(self.mesh)
+            self.position += prefix
+            self.phase, self.pending = 'idle', None
+            self.pending_key = None
+        except BaseException:
+            self.phase = 'failed'
+            raise
+
+    def close(self):
+        if self.phase == 'closed':
+            return
+        if self.phase not in ('idle', 'preparing', 'failed'):
+            raise ValueError('Finish or abort the pending verifier block before closing')
+        self.operations.synchronize_device(self.mesh)
+        if getattr(self, 'mtp_row_reader', None) is not None:
+            self.mtp_row_reader.close()
+        for bucket in self.buckets.values():
+            for trace in bucket['commits'].values():
+                self.operations.release_trace(self.mesh, trace)
+            if bucket['trace'] is not None:
+                self.operations.release_trace(self.mesh, bucket['trace'])
+        for bucket in self.buckets.values():
+            if bucket.get('feature_capture') is not None:
+                bucket['feature_capture'].close()
+            release_owned(self.operations, bucket.get('target_features', []))
+            if bucket.get('mtp_hidden') is not None:
+                release_owned(self.operations, [bucket['mtp_hidden']])
+            if bucket['output'] is not None:
+                release_owned(self.operations, [value for value in bucket['output'] if value is not None])
+            if bucket['fixture'] is not None:
+                bucket['fixture'].close()
+            release_owned(self.operations, [value for snapshot in bucket['checkpoints'] for value in snapshot])
+        release_owned(self.operations, [value for snapshot in self.initial for value in snapshot])
+        self.buckets.clear()
+        self.initial.clear()
+        self.phase, self.pending = 'closed', None

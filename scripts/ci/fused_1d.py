@@ -5,6 +5,23 @@ from pathlib import Path
 
 
 COMPUTE = "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp"
+
+
+def native_gate_up_control(operations, inputs, gate, up, kernel, owned):
+    projections = []
+    for weight, activation in ((gate, operations.UnaryOpType.SILU), (up, None)):
+        program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(11, 4),
+            in0_block_w=8, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=7,
+            fuse_batch=True, fused_activation=activation, mcast_in0=True)
+        projection = operations.linear(inputs, weight, program_config=program, compute_kernel_config=kernel,
+            memory_config=operations.L1_MEMORY_CONFIG)
+        owned.append(projection)
+        projections.append(projection)
+    result = operations.multiply(*projections)
+    owned.append(result)
+    return result
+
+
 BF16_PRODUCT = """MATH((SFPU_BINARY_CALL(
             DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul,
             (APPROX, ckernel::BinaryOp::MUL, 8, false), 0, 1, 0, VectorMode::RC)));"""
@@ -77,10 +94,17 @@ def mapping(pairs_per_worker=7):
 
 
 class FusedProjection:
-    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7):
+    def __init__(self, mesh, weights, intermediates=False, pairs_per_worker=7, *, token_rows=1,
+                 source_root=Path('/opt/tt-metal'), math_approx_mode=False):
+        if type(math_approx_mode) is not bool:
+            raise ValueError('Explicit boolean math approximation mode required')
+        self.math_approx_mode = math_approx_mode
+        if type(token_rows) is not int or token_rows not in (1, 2, 4, 8, 16, 32):
+            raise ValueError('Explicit single-tile token row count required')
+        self.token_rows = token_rows
         self.mesh = mesh
         self.weights = weights
-        self.source = Path("/opt/tt-metal") / COMPUTE
+        self.source = Path(source_root) / COMPUTE
         original = self.source.read_text()
         self.intermediates = intermediates
         self.pairs_per_worker = pairs_per_worker
@@ -92,17 +116,18 @@ class FusedProjection:
                              reader_sha256={filename: hashlib.sha256(Path(__file__).with_name(filename).read_bytes()).hexdigest()
                                             for filename in ("fused_1d_input.cpp", "fused_1d_weights.cpp")},
                              workers=len(self.workers), grid=[11, self.rows], pairs_per_worker=pairs_per_worker, k_block=8,
-                             intermediates=intermediates, input_noc=1, weight_noc=0,
+                             intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,
+                             math_approx_mode=math_approx_mode,
                              epilogue="BF16(silu(gate)), BF16(up), then BF16 multiply")
 
     def __call__(self, value):
         import ttnn
-        if list(value.shape) != [1, 1, 1, 5120] or value.dtype != ttnn.bfloat16:
-            raise ValueError("Only frozen BF16 B1 projection input is supported")
+        if list(value.shape) != [1, 1, self.token_rows, 5120] or value.dtype != ttnn.bfloat16:
+            raise ValueError("BF16 projection input must match the explicitly selected token rows")
         if self.weights.dtype != ttnn.bfloat4_b or list(self.weights.shape)[-2:] != [5120, 17408]:
             raise ValueError("Expected local TP2 pair-packed BF4 weights")
         output_tiles = 2 if self.intermediates else 1
-        output = ttnn.empty((1, 1, 1, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+        output = ttnn.empty((1, 1, self.token_rows, 8704 * output_tiles), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                             device=self.mesh, memory_config=ttnn.L1_MEMORY_CONFIG)
         pairs_per_worker = self.pairs_per_worker
         all_cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(10, self.rows - 1))])
@@ -149,7 +174,7 @@ class FusedProjection:
                 writer_args[core_x][core_y] = [local_weight.buffer_address(), local_output.buffer_address(), begin, count, output_tiles]
             writer.runtime_args = writer_args
             compute_config = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi,
-                fp32_dest_acc_en=True, math_approx_mode=False)
+                fp32_dest_acc_en=True, math_approx_mode=self.math_approx_mode)
             unpack_modes = [ttnn.UnpackToDestMode.Default] * 64
             unpack_modes[5] = ttnn.UnpackToDestMode.UnpackToDestFp32
             compute_config.unpack_to_dest_mode.extend(unpack_modes)

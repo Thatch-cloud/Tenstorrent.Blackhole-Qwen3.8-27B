@@ -1,0 +1,141 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator-only native DRAM-sharded T16 projection screen; no speed claim.",
+  "sources": {
+    "dram-sharded-projection-probe.py": "4d85c77cb8e28c3f9c424ae7ea828928afa36d2b9fce89a53d0db7af2a40e02a",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "dram_projection_replay.py": "1c769d22e27d81ba7de5d87c88b1214bc5842650dbacd748e4e49b77191115dc",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    }
+  ],
+  "timing_qualified": false,
+  "replay_qualified": true,
+  "stage": "complete",
+  "projection": "up",
+  "geometry": {
+    "inner": 5120,
+    "width": 8704,
+    "banks": 8,
+    "workers": 4,
+    "weight_shard": [
+      5120,
+      1088
+    ],
+    "input_shard": [
+      32,
+      1280
+    ],
+    "output_shard": [
+      32,
+      2176
+    ],
+    "in0_block_w": 8,
+    "per_core_M": 1,
+    "per_core_N": 68,
+    "dtype": "bfloat4_b",
+    "activation": false
+  },
+  "weight_roundtrip_exact": true,
+  "replay": {
+    "checks": [
+      {
+        "repetition": 0,
+        "pattern": 0,
+        "chip": 0,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      },
+      {
+        "repetition": 0,
+        "pattern": 0,
+        "chip": 1,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      },
+      {
+        "repetition": 1,
+        "pattern": 1,
+        "chip": 0,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      },
+      {
+        "repetition": 1,
+        "pattern": 1,
+        "chip": 1,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      },
+      {
+        "repetition": 2,
+        "pattern": 0,
+        "chip": 0,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      },
+      {
+        "repetition": 2,
+        "pattern": 0,
+        "chip": 1,
+        "exact_all_32_rows": true,
+        "input_unchanged": true,
+        "bindings_stable": true
+      }
+    ],
+    "stale_input_discriminating": true,
+    "packed_weight_integrity_qualified": true,
+    "output_poison_qualified": true,
+    "poisoned_logical_rows": 16,
+    "compared_physical_rows": 32
+  },
+  "sources_after": {
+    "dram-sharded-projection-probe.py": "4d85c77cb8e28c3f9c424ae7ea828928afa36d2b9fce89a53d0db7af2a40e02a",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "dram_projection_replay.py": "1c769d22e27d81ba7de5d87c88b1214bc5842650dbacd748e4e49b77191115dc",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  }
+}
