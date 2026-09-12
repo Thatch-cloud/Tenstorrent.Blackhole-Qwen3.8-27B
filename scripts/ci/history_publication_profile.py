@@ -1,6 +1,7 @@
 """Opt-in host-wall attribution for history publication; no additional device fences."""
 
 from contextlib import contextmanager
+import gc
 import time
 
 
@@ -9,17 +10,32 @@ class HistoryPublicationProfile:
         self.records = []
         self.active = None
         self.used = False
+        self.gc_ns = 0
+        self.gc_count = 0
+        self.gc_started = None
+
+    def observe_gc(self, phase, info):
+        if phase == 'start':
+            self.gc_started = time.perf_counter_ns()
+        elif phase == 'stop' and self.gc_started is not None:
+            self.gc_ns += time.perf_counter_ns() - self.gc_started
+            self.gc_count += 1
+            self.gc_started = None
 
     @contextmanager
     def stage(self, name):
         started = time.perf_counter_ns()
+        cpu_started = time.process_time_ns()
+        gc_started, gc_count = self.gc_ns, self.gc_count
         passed = False
         try:
             yield
             passed = True
         finally:
             self.records.append(dict(stage=name, position=self.active[0], prefix=self.active[1],
-                passed=passed, host_ms=(time.perf_counter_ns() - started) / 1e6))
+                passed=passed, host_ms=(time.perf_counter_ns() - started) / 1e6,
+                process_cpu_ms=(time.process_time_ns() - cpu_started) / 1e6,
+                gc_ms=(self.gc_ns - gc_started) / 1e6, gc_collections=self.gc_count - gc_count))
 
     @contextmanager
     def install(self, history, module=None):
@@ -54,9 +70,12 @@ class HistoryPublicationProfile:
 
         history.prepare_publication, history.prepare_projected = publication, assembly
         module.project_chunks = projection
+        callback = self.observe_gc
+        gc.callbacks.append(callback)
         try:
             yield self
         finally:
+            gc.callbacks.remove(callback)
             unchanged = (history.prepare_publication is publication and history.prepare_projected is assembly
                 and module.project_chunks is projection)
             del history.prepare_publication

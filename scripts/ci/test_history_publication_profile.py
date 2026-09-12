@@ -1,10 +1,38 @@
 from types import SimpleNamespace
+import gc
 import unittest
 
 from history_publication_profile import HistoryPublicationProfile
 
 
 class HistoryProfileTests(unittest.TestCase):
+    def test_gc_attribution_preserves_collection_and_callbacks(self):
+        module = SimpleNamespace(project_chunks=lambda: None)
+
+        class History:
+            def prepare_publication(self, value, prefix, *, position):
+                gc.collect()
+                return value
+
+            def prepare_projected(self):
+                pass
+
+        callbacks = list(gc.callbacks)
+        enabled = gc.isenabled()
+        profiler = HistoryPublicationProfile()
+        with profiler.install(History(), module):
+            profiler.active = (4096, 1)
+            with profiler.stage('test'):
+                gc.collect()
+            profiler.active = None
+        record = profiler.records[0]
+        self.assertEqual(record['gc_collections'], 1)
+        self.assertGreater(record['gc_ms'], 0)
+        self.assertGreaterEqual(record['host_ms'], record['gc_ms'])
+        self.assertGreaterEqual(record['process_cpu_ms'], 0)
+        self.assertEqual(gc.callbacks, callbacks)
+        self.assertEqual(gc.isenabled(), enabled)
+
     def test_split_records_preserve_results_and_restore_methods(self):
         module = SimpleNamespace(project_chunks=lambda value: value + 1)
 
