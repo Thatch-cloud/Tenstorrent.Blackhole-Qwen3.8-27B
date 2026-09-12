@@ -19,7 +19,7 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = gdn-output-l1 ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = gdn-output-* ]]; then
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path
@@ -31,11 +31,12 @@ patch = Path('/simulator-support/blackhole-packer-zero-flags.patch').read_bytes(
 packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
-    if [ "$QWEN_SIM_CASE" = gdn-output-l1 ]; then
+    if [[ "$QWEN_SIM_CASE" = gdn-output-* ]]; then
+        [[ "$QWEN_SIM_CASE" = gdn-output-l1 || "$QWEN_SIM_CASE" = gdn-output-grid ]]
         status=0
-        timeout -k 15 3600 python3 -u /experiment-scripts/ci/gdn-output-l1-probe.py \
-            --output /experiment/results/gdn-output-l1.json || status=$?
-        printf '%s\n' "$status" > /experiment/results/gdn-output-l1.exit-status
+        timeout -k 15 3600 python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py" \
+            --output "/experiment/results/$QWEN_SIM_CASE.json" || status=$?
+        printf '%s\n' "$status" > "/experiment/results/$QWEN_SIM_CASE.exit-status"
         exit "$status"
     fi
     math_flags=()
