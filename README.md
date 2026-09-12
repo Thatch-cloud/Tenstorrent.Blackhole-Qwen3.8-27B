@@ -14,12 +14,17 @@ reported separately. These are offline runtime tests, not streaming endpoint tes
 
 | Combined T16 runtime | PP tok/s | CTX tokens | Committed TG tok/s | Hardware run |
 | --- | ---: | ---: | ---: | --- |
-| Native GDN output grid (retained baseline) | **3331.48** | **4096** | **106.38** | 34694909047 |
-| Wider GDN output grid | 3237.06 | 4096 | 105.76 | 34694909047 |
+| Native combined runtime | 3291.48 | 4096 | 105.14 | 34702027898 |
+| Shared Q/K normalization | 3330.21 | 4096 | 107.15 | 34702027898 |
+| Native repeat | 3241.27 | 4096 | 105.85 | 34702526963 |
+| Shared Q/K repeat | 3279.29 | 4096 | 106.58 | 34702526963 |
 
-The wider grid loses 0.58% in this matched comparison and remains disabled.
-Both arms pass exact output/state checks across six audit/timing requests.
-This is not held-out coding-quality certification or a full context ladder.
+Shared Q/K saves about **1.2 ms per verifier block** in both matched runs.
+Complete-request TG improves **1.91%**, then **0.70%**; draft-time variation
+affects the end-to-end gain. All twelve audit/timing requests pass exact
+token/state checks. Serving defaults remain unchanged. Context-ladder and
+held-out coding-quality acceptance are still pending.
+[Shared Q/K evidence](docs/shared-qk-recurrence-results.md).
 
 **Latest kernel check:** paired GDN copies reach **106.26 TG** versus **105.49 TG**
 matched control at CTX 4096 in run **34696377960**. Exactness passes, but blocking

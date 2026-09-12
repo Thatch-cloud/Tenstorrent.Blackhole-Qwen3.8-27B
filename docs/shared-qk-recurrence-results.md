@@ -2,10 +2,10 @@
 
 ## Status
 
-The complete synthetic pipeline passes numerical simulation and its first
-matched full-request hardware comparison. The small improvement needs a repeat
-before acceptance. Serving defaults are unchanged; the target remains 200
-committed tokens/s for one stream.
+The complete synthetic pipeline passes numerical simulation and two matched
+full-request hardware comparisons. The verifier saving repeats; full context
+and coding-quality acceptance remain pending. Serving defaults are unchanged;
+the target remains 200 committed tokens/s for one stream.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
@@ -47,6 +47,17 @@ Report: `runner-evidence.local/34701425373/gdn-shared-recurrence.json`.
 SHA256: `a155b893786f68ac36b4f040454892df683a0da0c3aa0b22b898697b22241ffe`.
 
 ## Next acceptance gate
+
+Repeat CI 34702526963 uses the same revision and passes all six exact
+token/state/inactive checks, 96 candidate pipeline constructions per request,
+buffer release/restoration, and 801 script hashes. Native PP / CTX / TG is
+3241.27 / 4096 / 105.85; candidate is 3279.29 / 4096 / 106.58. Verifier time is
+68.01854 versus 66.81181 ms, confirming the first run's approximately 1.2 ms
+saving. Draft time moves the other way: 27.13774 versus 28.10680 ms. The repeat
+therefore shows only 0.70% end-to-end gain. Do not extrapolate to 200 TG.
+
+Repeat report SHA256:
+`73151825723aee8fa1fadb2e64754f797dff151adc0c7439c460b1a30129eacb`.
 
 Integrate behind an experiment-only switch with explicit lifetime ownership of
 the preparation buffers. Require the simulator report and matching source
