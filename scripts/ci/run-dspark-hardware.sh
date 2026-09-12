@@ -46,9 +46,9 @@ if [ "$publication" = 1 ]; then
     printf '%s  %s\n' 14d9fa6ae9b2e5ec0674d5b846f382c141e38ee73fa423ddb82a8ac73258bd99 "$copy_evidence/gdn-copy-pairs.json" | sha256sum -c -
     test "$(cat "$copy_evidence/gdn-copy-pairs.exit-status")" = 0
     outer_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-outer-add.XXXXXX")
-    gh run download 34697528864 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
-        --name qwen-hardware-inventory-34697528864 --dir "$outer_evidence"
-    printf '%s  %s\n' a2a90b18cc56c6c1e2acafc90e559b1890ddb9f13c2484505439f2f6306b81ca "$outer_evidence/gdn-outer-add.json" | sha256sum -c -
+    gh run download 34699176210 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34699176210 --dir "$outer_evidence"
+    printf '%s  %s\n' 036be9bbfa0c8de8e5f0415beb2d5d6447a5755ac894e6e0cd6ba238d4eada52 "$outer_evidence/gdn-outer-add.json" | sha256sum -c -
     test "$(cat "$outer_evidence/gdn-outer-add.exit-status")" = 0
     printf '%s  %s\n' 4bd749d6381cb7e1f5be69276d5a5011c9e6cfa7c30182b44dd09f3d1b115914 "$publication_report" | sha256sum -c -
 fi

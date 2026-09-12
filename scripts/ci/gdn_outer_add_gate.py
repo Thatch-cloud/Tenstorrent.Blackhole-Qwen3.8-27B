@@ -7,7 +7,7 @@ from pathlib import Path
 from gdn_multitoken import HASHES, KERNEL_ROOT
 
 
-REPORT_SHA256 = 'a2a90b18cc56c6c1e2acafc90e559b1890ddb9f13c2484505439f2f6306b81ca'
+REPORT_SHA256 = '036be9bbfa0c8de8e5f0415beb2d5d6447a5755ac894e6e0cd6ba238d4eada52'
 LOCAL_SOURCES = ('gdn-outer-add-probe.py', 'gdn_outer_add.py', 'gdn_multitoken.py',
     'gdn_vsplit.py', 'gdn_vsplit_prepared.py', 'gdn_vsplit_norm_batch.py',
     'gdn_vsplit_prefetch.py', 'attention_batch.py')
