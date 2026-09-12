@@ -1,6 +1,7 @@
 # Shared block Q/K normalization
 
-Status: design hypothesis, not implemented or qualified.
+Status: compute-source generator implemented and host-checked; dataflow,
+simulator comparison and hardware integration remain unimplemented/unqualified.
 
 ## Why change direction?
 
@@ -37,3 +38,19 @@ This is not a proposed 12x model speedup: only Q/K normalization is duplicated
 across those workers. The 200 committed TG objective still requires substantial
 improvement across verifier and drafting costs, followed by coding acceptance
 and the context ladder.
+
+## Compute source implementation
+
+`gdn_shared_qk_compute.py` extracts the normalization chain from the hash-pinned
+native kernel. Block and serial reference variants differ only in loop count;
+they retain distinct Q scaling and K normalization, EPS placement, native matmul
+reduction, and separate FP32 sum/factor buffers. The reader/writer will determine
+whether each input tile contains all token rows or only the current row-zero
+token. No model path is changed yet.
+
+Normalized Q/K buffers become writer-consumed outputs. The extracted compute
+therefore removes its terminal waits on those two outputs: a concurrent writer
+could otherwise pop a buffer before the compute's wait and deadlock. All waits
+on compute-owned scratch remain. Five host tests cover the source transform,
+ownership rule, coordinate mapping, and invalid inputs. Extraction from the
+actual pinned source also passes. This is not compilation or numerical evidence.
