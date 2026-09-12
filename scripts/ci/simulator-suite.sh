@@ -62,7 +62,7 @@ packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
     if [ "$QWEN_SIM_CASE" = t32-combined ]; then
-        python3 -B -m unittest test_dspark_t32_prepared test_t32_sim_target test_t32_target_weights
+        python3 -B -m unittest test_dspark_t32_prepared test_t32_sim_target test_t32_target_weights test_t32_combined_upload
         status=0
         QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/t32-combined-proposal-probe.py \
             --checkpoint /dspark-model.safetensors --config /dspark-config.json \

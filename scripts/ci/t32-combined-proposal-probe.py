@@ -58,8 +58,9 @@ def main():
         mesh.enable_program_cache()
         collectives = TT_CCL(mesh)
 
-        def upload(value, sharded=False):
-            tensor = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+        def upload(value, sharded=False, row_major=False):
+            tensor = ttnn.from_torch(value, device=mesh, dtype=ttnn.bfloat16,
+                layout=ttnn.ROW_MAJOR_LAYOUT if row_major else ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=0)
                 if sharded else ttnn.ReplicateTensorToMesh(mesh))
             owned.append(tensor)
@@ -75,7 +76,7 @@ def main():
                 value, sharded = pack_parameter(name, reader.tensor(name))
                 parameters[name] = upload(value, sharded)
                 del value
-            predecessor = upload(reader.tensor('markov_head.markov_w1.weight').reshape(1, 1, 248320, 256))
+            predecessor = upload(reader.tensor('markov_head.markov_w1.weight').reshape(1, 1, 248320, 256), row_major=True)
             successor = upload(reader.tensor('markov_head.markov_w2.weight').T.contiguous().reshape(1, 1, 256, 248320))
         rotary = DSparkRotary(json.loads(options.config.read_text()))
         generator = torch.Generator().manual_seed(383932)
