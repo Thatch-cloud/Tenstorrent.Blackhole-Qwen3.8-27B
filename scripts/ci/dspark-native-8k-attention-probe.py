@@ -40,7 +40,7 @@ def execute(operations, mesh, query, key, value, mask, owned, *, context_rows,
     if mesh is None or not isinstance(owned, list):
         raise ValueError('Explicit mesh and caller-owned attention output required')
     validate_inputs(operations, query, key, value, mask, context_rows, proposals, mask_validated)
-    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=32)
+    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=64)
     owned.append(output)
     return output
 
@@ -58,6 +58,12 @@ def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
         'build_Release/lib/_ttnncpp.so': 'f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3',
         'build_Release/ttnn/_ttnncpp.so': 'd6c53113a104719a442b4d4a9ec2b344cdd0e00daa1e4d907afb9c13d1e531d9',
     }
+    if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') == '1':
+        from dspark_fp32_build import validate_manifest
+        build = validate_manifest(root, '/experiment/results/dspark-fp32-build.json')
+        if build.get('binaries_before') != binaries:
+            raise ValueError('Rebuild must start from the pinned CI image binaries')
+        binaries = build['binaries_after']
     directory = root / 'ttnn/cpp/ttnn/operations/transformer/sdpa'
     sources = [path.relative_to(root) for path in directory.rglob('*')
         if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h')]
@@ -159,10 +165,13 @@ def run():
         positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
         sources=source_hashes(), native_sources=NATIVE.fingerprints(root,
             packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True),
-        kernel_audit=kernel_audit, key_chunk_size=32, resources_before=snapshot(bounded=True),
+        kernel_audit=kernel_audit, key_chunk_size=64, resources_before=snapshot(bounded=True),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         **{name: [] for name in COUNTS})
     owned, transient = [], []
+    if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') == '1':
+        from dspark_fp32_build import validate_manifest
+        report['factory_build'] = validate_manifest(root, '/experiment/results/dspark-fp32-build.json')
     mesh = trace = None
 
     def progress(stage):

@@ -7,7 +7,30 @@ import shutil
 import subprocess
 
 from dspark_hardware_gate import digest
-from dspark_fp32_intermediates import SOURCE, transform
+from dspark_fp32_intermediates import SOURCE, SOURCE_SHA256, ANCHOR, REPLACEMENT, transform
+
+
+def validate_manifest(root, output):
+    report = json.loads(Path(output).read_text())
+    root = Path(root)
+    if report.get('passed') is not True or report.get('source_before') != SOURCE_SHA256:
+        raise ValueError('Completed pinned factory rebuild required')
+    source = (root / SOURCE).read_bytes()
+    if source.count(REPLACEMENT.encode()) != 1:
+        raise ValueError('Unique rebuilt factory variant required')
+    original = source.replace(REPLACEMENT.encode(), ANCHOR.encode())
+    if transform(original) != source or digest(root / SOURCE) != report.get('source_after'):
+        raise ValueError('Rebuilt factory differs from exact transformation')
+    expected = {'build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'}
+    binaries = report.get('binaries_after', {})
+    if set(binaries) != expected or len(set(binaries.values())) != 1:
+        raise ValueError('Both binary paths must contain the rebuilt library')
+    if any(digest(root / name) != value for name, value in binaries.items()):
+        raise ValueError('Rebuilt binary changed')
+    for name in ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py'):
+        if report.get('builders', {}).get(name) != digest(Path(__file__).with_name(name)):
+            raise ValueError('Factory builder changed')
+    return report
 
 
 def main():

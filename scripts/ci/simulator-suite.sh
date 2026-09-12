@@ -39,6 +39,8 @@ PY
             export QWEN_SIM_BOUNDED_MEMORY=1
             mkdir -p /optimisation
             ln -s /simulator-support /optimisation/sim
+            timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py
+            export QWEN_DRAFT_FP32_INTERMEDIATES=1
         fi
         if [[ "$QWEN_SIM_CASE" = gdn-copy-pairs || "$QWEN_SIM_CASE" = gdn-outer-add || "$QWEN_SIM_CASE" = dspark-native-8k-attention || "$QWEN_SIM_CASE" = target-t16-attention-8k || "$QWEN_SIM_CASE" = gdn-shared-recurrence || "$QWEN_SIM_CASE" = gdn-shared-qk ]]; then limit=900; fi
         timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py" \
