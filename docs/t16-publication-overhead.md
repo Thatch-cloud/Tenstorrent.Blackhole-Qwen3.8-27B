@@ -77,3 +77,20 @@ dispatches shared feature projection and all ten learned K/V projections, then
 synchronizes for each accepted prefix. A captured path must keep inputs and
 outputs at stable addresses, preserve rounding and accepted-prefix masking,
 and prove changed-position replay plus rollback before hardware comparison.
+
+## Captured projection simulator gate
+
+Run **34677062667**, revision `0ba59b3`, passes with exit 0 and clean cleanup.
+All 20 learned K/V output shards match fixed32 eager execution exactly at
+positions 4096, 4111 and 4128, with changing synthetic feature taps and rotary
+tables. Entirely stale output is explicitly rejected. Source hashes match the
+checked-out revision and remain unchanged during the run; runtime fingerprints
+are unchanged. Peak cgroup memory is 8.36 GiB, with no OOM events or swap use.
+
+Report SHA256: `2986b5b4c89b1a30f499d957d50fb2e3993b946f6980877ac924a09f6f07de5e`.
+
+This qualifies the observed captured-versus-eager projection behavior only,
+not an independent model oracle, accepted-prefix publication/rollback,
+coexisting target traces or combined-request performance. Next integrate the
+captured outputs with the existing transactional history banks, preserving
+prefix slicing and borrowed-output lifetime before the paired hardware run.
