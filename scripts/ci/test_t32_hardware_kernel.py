@@ -10,6 +10,31 @@ import t32_hardware_kernel as kernel
 
 
 class HardwareKernelTests(unittest.TestCase):
+    def test_request_admission_restores_hook_and_detects_kernel_mutation(self):
+        import t32_attention_admission
+
+        original_hook = t32_attention_admission.require_active
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            (root / 'binary').write_bytes(b'binary')
+            directory = root / kernel.KERNEL_DIRECTORY
+            directory.mkdir(parents=True)
+            (directory / 'compute_common.hpp').write_bytes(b'kernel')
+            runtime = {'binary': hashlib.sha256(b'binary').hexdigest()}
+            patched = {'compute_common.hpp': hashlib.sha256(b'kernel').hexdigest()}
+            links = {'backend': 'hardware', 'requested_links': 4}
+            stack.enter_context(patch.object(kernel, 'RUNTIME', runtime))
+            stack.enter_context(patch.object(kernel, 'PATCHED', patched))
+            stack.enter_context(patch.object(kernel, 'validate', return_value=links))
+            evidence = dict(runtime=runtime, patched=patched, links=links,
+                full_request_qualified=False, proposal={'run': 34660555430})
+            with kernel.request_admission(root, evidence):
+                self.assertEqual(t32_attention_admission.require_active(), evidence)
+                (directory / 'compute_common.hpp').write_bytes(b'changed')
+                with self.assertRaisesRegex(ValueError, 'runtime changed'):
+                    t32_attention_admission.require_active()
+            self.assertIs(t32_attention_admission.require_active, original_hook)
+
     def test_simulator_policy_rejected_before_evidence_or_runtime_access(self):
         with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1'}, clear=True), patch.object(kernel, 'qualify') as qualify:
             with self.assertRaises(ValueError), kernel.installed('/missing', '/missing', '/missing'):

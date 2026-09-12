@@ -34,6 +34,37 @@ def build_sources(original):
 
 
 @contextmanager
+def request_admission(root, evidence):
+    import t32_attention_admission as admission
+
+    root = Path(root)
+    original = admission.require_active
+
+    def require_hardware():
+        if (evidence.get('runtime') != RUNTIME or evidence.get('patched') != PATCHED
+                or evidence.get('full_request_qualified') is not False
+                or evidence.get('proposal', {}).get('run') != 34660555430):
+            raise ValueError('Explicit retained hardware experiment admission required')
+        if validate(os.environ) != evidence['links']:
+            raise ValueError('Hardware link policy changed inside request')
+        current = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in RUNTIME}
+        kernels = {name: hashlib.sha256((root / KERNEL_DIRECTORY / name).read_bytes()).hexdigest() for name in PATCHED}
+        if current != RUNTIME or kernels != PATCHED:
+            raise ValueError('Admitted hardware runtime changed inside request')
+        return evidence
+
+    require_hardware()
+    admission.require_active = require_hardware
+    try:
+        yield evidence
+    finally:
+        modified = admission.require_active is not require_hardware
+        admission.require_active = original
+        if modified:
+            raise RuntimeError('T32 experiment admission changed during request')
+
+
+@contextmanager
 def installed(root, evidence, directory):
     forbidden = ('QWEN_SIM_ONLY', 'QWEN_T32_SFPU_SUM', 'QWEN_T32_FP32_BUILD',
         'QWEN_T32_PRECISE_RECIP', 'QWEN_T32_EXPLICIT_PACK')
