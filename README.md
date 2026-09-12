@@ -21,9 +21,10 @@ The wider grid loses 0.58% in this matched comparison and remains disabled.
 Both arms pass exact output/state checks across six audit/timing requests.
 This is not held-out coding-quality certification or a full context ladder.
 
-**In flight:** paired tile-copy register handoffs inside GDN, tested against this
-combined runtime in hardware run **34696377960**. The weight-free simulator passed;
-no hardware speed result is available yet. Serving defaults are unchanged.
+**Latest kernel check:** paired GDN copies reach **106.26 TG** versus **105.49 TG**
+matched control at CTX 4096 in run **34696377960**. Exactness passes, but blocking
+trace time worsens slightly, so this is not a demonstrated kernel speedup and
+the candidate remains disabled. Serving defaults are unchanged.
 [Experiment and acceptance gates](docs/gdn-copy-pairs-experiment.md).
 
 ### Earlier short-output screen
