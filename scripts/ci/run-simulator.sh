@@ -2,7 +2,7 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
-case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16|fusion-t16-target|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16|fusion-t16-target|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|t32-request) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
@@ -12,12 +12,12 @@ kinds='attention convolution mlp stack selector'
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then kinds=''; fi
 mounts=()
-if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = t32-request ]]; then
     checkpoint="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/model.safetensors"
     test -f "$checkpoint"
     mounts+=(--mount "type=bind,src=$checkpoint,dst=/dspark-model.safetensors,readonly")
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = t32-request ]]; then
     config="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/config.json"
     target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
     test -f "$config"
@@ -63,8 +63,11 @@ docker cp scripts "$container:/experiment-scripts"
 if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
     docker cp optimisation "$container:/optimisation"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = t32-request ]]; then
     docker cp optimisation/sim "$container:/simulator-support"
+fi
+if [ "${QWEN_SIM_CASE:-stack}" = t32-request ]; then
+    docker cp speculative-decoding "$container:/speculative-decoding"
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     docker cp optimisation/sim/sdpa-graft-registration.patch "$container:/tmp/ccl-graft-registration.patch"
