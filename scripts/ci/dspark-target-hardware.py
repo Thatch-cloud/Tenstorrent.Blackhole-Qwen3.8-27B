@@ -154,6 +154,10 @@ def main():
             parser.error('Captured publication requires the isolated combined fusion request')
         from dspark_publication_gate import qualify as qualify_publication
         qualify_publication(Path(__file__).with_name('dspark-publication-simulator.json'), Path(__file__).parent)
+        if os.environ.get('QWEN_GDN_COPY_PAIRS_EXPERIMENT') == '1':
+            from gdn_copy_pairs_gate import qualify as qualify_copies
+            qualify_copies(Path(__file__).with_name('gdn-copy-pairs.json'), Path(__file__).parent,
+                os.environ['TT_METAL_HOME'])
         if os.environ.get('QWEN_GDN_OUTPUT_GRID_EXPERIMENT') == '1':
             from gdn_output_grid_gate import qualify as qualify_grid
             qualify_grid(Path(__file__).with_name('gdn-output-grid.json'), Path(__file__).parent,

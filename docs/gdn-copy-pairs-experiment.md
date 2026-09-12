@@ -1,6 +1,6 @@
 # GDN paired-copy experiment
 
-Status: candidate only. No speed or hardware correctness result yet.
+Status: simulator passed; complete-request hardware comparison pending. No speed claim yet.
 
 | Item | Decision |
 |---|---|
@@ -19,6 +19,12 @@ around existing format-conversion copies, without deleting the BF16 rounding
 that defines the recurrence's numerical behavior.
 
 The source generator changes only the recurrence copy helper and rejects changed
-anchors. The candidate is not wired into the serving or hardware request paths.
-After simulator admission, compare against the unchanged combined T16 runtime.
+anchors. The candidate is not wired into serving. The experimental hardware route
+changes only T16 recurrence construction against the combined T16 runtime.
+Other token widths and norm kernels stay native.
 The prior wider-output-grid and L1-output experiments remain disabled.
+
+Simulator run 34695921492 passed 24 exact comparisons covering gated output,
+every prefix state and FP32 bridge, plus 48 input-immutability checks. Both chips
+closed cleanly. Retained report SHA256:
+`14d9fa6ae9b2e5ec0674d5b846f382c141e38ee73fa423ddb82a8ac73258bd99`.

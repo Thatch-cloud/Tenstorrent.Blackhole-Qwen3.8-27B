@@ -271,6 +271,12 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['fusion_simulator_evidence'] = qualify_simulator()
     if captured_publication:
         from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
+        if os.environ.get('QWEN_GDN_COPY_PAIRS_EXPERIMENT') == '1':
+            if any(os.environ.get(name) == '1' for name in (
+                    'QWEN_GDN_OUTPUT_L1_EXPERIMENT', 'QWEN_GDN_OUTPUT_GRID_EXPERIMENT')):
+                raise ValueError('Copy-pair experiment must be isolated from other GDN candidates')
+            from gdn_copy_pairs_variants import SCHEDULE, POLICIES, summarize_variants
+            report['comparison_axis'] = 'Native versus paired T16 recurrence copies; complete combined runtime'
         if os.environ.get('QWEN_GDN_OUTPUT_GRID_EXPERIMENT') == '1':
             if os.environ.get('QWEN_GDN_OUTPUT_L1_EXPERIMENT') == '1':
                 raise ValueError('Only one GDN output experiment may be selected')
