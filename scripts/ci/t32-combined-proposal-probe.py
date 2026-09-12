@@ -48,7 +48,7 @@ def main():
     if options.publication_only:
         report.update(scope='Learned captured history projection with synthetic feature taps; no target request or TG',
             proposals=0, publication_only=True)
-    owned, mesh, prepared = [], None, None
+    owned, mesh, prepared, bank_audit = [], None, None, None
 
     def progress(stage):
         report['stage'] = stage
@@ -94,11 +94,14 @@ def main():
         generator = torch.Generator().manual_seed(383932)
         if options.publication_only:
             from dspark_publication_trace import PreparedHistoryProjection
+            from publication_bank_audit import PublicationBankAudit
 
             layers = tuple({name: parameters[f'layers.{layer}.{name}'] for name in SPECIFICATIONS}
                 for layer in range(5))
+            bank_audit = PublicationBankAudit(ttnn, mesh)
             previous = None
-            for ordinal, position in enumerate((4096, 4111, 4128)):
+            for ordinal, (prefix, commit) in enumerate(((15, True), (1, False), (32, True))):
+                position = bank_audit.cache.position
                 progress('publication_projection_' + str(position))
                 features = tuple(upload((.1 * torch.randn(2, 1, 32, 2560,
                     generator=generator)).bfloat16(), True) for tap in range(5))
@@ -114,7 +117,9 @@ def main():
                     raise AssertionError('Changed publication inputs produced entirely stale outputs')
                 previous = actual
                 report['checks'].append(dict(position=position, tensors=len(actual), exact=True))
+                bank_audit.exercise(prepared, features, tables, prefix, commit)
             report['replay_checks'] = prepared.checks
+            report['publication_checks'] = bank_audit.checks
             report['passed'] = True
             return
         history = []
@@ -148,6 +153,8 @@ def main():
         try:
             if prepared is not None:
                 prepared.close()
+            if bank_audit is not None:
+                bank_audit.close()
             if mesh is not None:
                 ttnn.synchronize_device(mesh)
                 release_owned(ttnn, owned)
