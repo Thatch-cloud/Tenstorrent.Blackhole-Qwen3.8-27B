@@ -8,6 +8,13 @@ does not yet identify rounding versus dataflow as the cause. A diagnostic retry
 records differences for both chips, all prefix states and the FP32 bridge before
 rejecting the candidate. Exactness is not relaxed; no hardware test is admitted.
 
+Diagnostic run **34697183901** confirms finite but unequal outputs on both chips.
+Chip 0 differs in 17,764/49,152 gated-output values and 1,112,139/6,291,456 prefix
+state values. Maximum absolute differences are 0.015625 and 0.00048828125,
+respectively. Differences begin at the first token, not only after trace replay.
+The FP32 bridge also differs. These observations do not prove the cause; inspect
+the pinned image's SFPU addition implementation before changing arithmetic again.
+
 | Question | Experiment |
 |---|---|
 | What changes? | Compute each outer-product tile, add its decayed-state tile in destination registers, then pack once |

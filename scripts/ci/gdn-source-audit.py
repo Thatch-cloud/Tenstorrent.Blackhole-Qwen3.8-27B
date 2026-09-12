@@ -44,6 +44,11 @@ def main():
         'models/demos/blackhole/qwen36/tt/model.py',
         'models/demos/blackhole/qwen36/tt/qwen36_vllm.py',
         'ttnn/cpp/ttnn/operations/experimental/paged_cache/device/update_cache/paged_update_cache_device_operation.cpp',
+        'tt_metal/hw/inc/api/compute/eltwise_binary_sfpu.h',
+        'tt_metal/hw/inc/api/compute/eltwise_binary.h',
+        'tt_metal/hw/inc/api/compute/tile_move_copy.h',
+        'tt_metal/hw/inc/api/compute/bcast.h',
+        'tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/ckernel_sfpu_binary.h',
     )]
     ownership, missing = ownership_sources(source)
     paths = sorted(set(paths + ownership))
