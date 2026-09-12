@@ -12,6 +12,26 @@ python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
 python3 /experiment-scripts/ci/dspark_native_restore.py
 mode=${QWEN_DSPARK_MODE:-backbone}
+if [ "$mode" = request-t32 ]; then
+    ln -s /experiment-optimisation /optimisation
+    python3 -B -m unittest test_t32_hardware_kernel test_full_dspark_request test_t32_request_summary
+    python3 /experiment-scripts/ci/dspark_runtime_cache.py
+    status=0
+    timeout -k 20 3000 python3 -u /experiment-scripts/ci/t32-hardware-request.py \
+        --checkpoint /dspark/model.safetensors --config /dspark/config.json \
+        --target /models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+        --evidence /experiment-scripts/ci/t32-combined-simulator.json \
+        --output /experiment/results/t32-request-hardware.json \
+        > /experiment/results/t32-request-hardware.log 2>&1 || status=$?
+    cat /experiment/results/t32-request-hardware.log
+    printf '%s\n' "$status" > /experiment/results/t32-request-hardware.exit-status
+    test "$status" = 0
+    if grep -q 'Failed to discover available ethernet links' /experiment/results/t32-request-hardware.log; then
+        echo 'Four-link hardware request invoked fallback discovery' >&2
+        exit 1
+    fi
+    exit 0
+fi
 [[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
 if [[ "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
     test -f /experiment-optimisation/sim/gdn-multitoken.py

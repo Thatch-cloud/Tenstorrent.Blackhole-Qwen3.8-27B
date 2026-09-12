@@ -4,6 +4,14 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
+t32_report=''
+if [ "$mode" = request-t32 ]; then
+    evidence=$(mktemp -d "$RUNNER_TEMP/qwen-t32-evidence.XXXXXX")
+    gh run download 34660555430 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34660555430 --dir "$evidence"
+    t32_report="$evidence/t32-combined.json"
+    printf '%s  %s\n' e90aa5715fe105a3722f75b17d933db8be89e79de6c79c9f994d761671566559 "$t32_report" | sha256sum -c -
+fi
 draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
 [[ "$draft_profile" = 0 || "$draft_profile" = 1 ]]
 if [ "$draft_profile" = 1 ]; then test "$mode" = request-verifier-profile; fi
@@ -46,7 +54,7 @@ case "$task" in
     stable_unique_v1|run_length_encode_v1|rotate_right_v1) test "$mode" = request-target-attention ;;
     *) exit 64 ;;
 esac
-[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
+[[ "$mode" = request-t32 || "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
 target_mount=()
 if [ "$mode" != backbone ]; then
     target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
@@ -55,9 +63,13 @@ if [ "$mode" != backbone ]; then
 fi
 output=experiment-results
 mkdir -p "$output"
+if [ "$mode" = request-t32 ]; then
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from t32_proposal_gate import qualify; print(qualify(sys.argv[1], "scripts/ci"))' "$t32_report" > "$output/t32-proposal-preflight.txt"
+else
 PYTHONPATH=scripts/ci python3 -c \
     'import json; from dspark_hardware_gate import simulator_preflight; print(json.dumps(simulator_preflight("scripts/ci"),indent=2))' \
     > "$output/dspark-simulator-preflight.json"
+fi
 fixture=/home/thatch/.cache/qwen-experiments/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393
 timeout -k 10 1200 python3 scripts/ci/dspark-hardware-fixtures.py --output "$fixture" \
     > "$output/dspark-checkpoint-manifest.json"
@@ -123,6 +135,10 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "$mode" = request-t32 ]; then
+    docker cp "$t32_report" "$test_id:/experiment-scripts/ci/t32-combined-simulator.json"
+    docker cp speculative-decoding "$test_id:/speculative-decoding"
+fi
 if [ "$publication" = 1 ]; then
     docker cp "$publication_report" "$test_id:/experiment-scripts/ci/dspark-publication-simulator.json"
 fi
