@@ -2,6 +2,34 @@
 
 ## Matched short-output combined runtime - 2026-09-12
 
+### Wider GDN output grid: exact, slower
+
+Simulator **34694674606** passes twelve exact eager and changed-input replay
+checks after repairing a CoreCoord API mismatch in the initial probe. Matched
+hardware **34694909047**, revision **5d8c7ed**, changes only the GDN output grid:
+all other combined-runtime optimisations and native DRAM placement remain fixed.
+
+| GDN output grid | PP | CTX | Streams | Committed TG | Setup-inclusive ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native 11x3 | 3331.48 | 4096 | 1 | 106.38 | 5997.41 |
+| Candidate 11x6 | 3237.06 | 4096 | 1 | 105.76 | 6287.16 |
+
+All six output/state/inactive checks pass; every one of the 48 candidate layers
+engages and restores. All 772 source hashes and both pooled TG values were
+independently verified. Each arm commits 242 timed tokens, accepting 222/330
+drafts. The wider grid is 0.58% slower, with blocking trace time 68.13 versus
+68.01 ms. More allocated cores do not establish more useful throughput.
+
+Return the experiment baseline to the native grid. Preserve this candidate and
+its evidence but do not repeat it as a promising throughput improvement. This
+result rules out this particular output-column partition, not all wider-grid
+designs or other projection shapes. Serving defaults remain unchanged.
+
+Hardware report SHA256:
+`d82d81ab89ed788d31c1112b589e3f3a1feefbc6ad43fef2d662b3b73ad0e3da`.
+Simulator report SHA256:
+`c8017ca9258dd32eb88f9833956bfe133b28487eb75e2487363c3ca86c9271ba`.
+
 ### GDN output placement: exact, no meaningful gain
 
 Simulator **34693525557** passes twelve exact eager/replay comparisons for one

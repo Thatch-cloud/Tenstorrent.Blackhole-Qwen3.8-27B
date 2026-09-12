@@ -53,7 +53,7 @@ if [ "$mode" = request-target-attention ]; then
                 request_options+=(--captured-publication --max-new-tokens 256)
                 export QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1
                 export QWEN_GDN_OUTPUT_L1_EXPERIMENT=0
-                export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=1
+                export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
             fi
         fi
         if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
