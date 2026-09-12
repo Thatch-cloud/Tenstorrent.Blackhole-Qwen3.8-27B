@@ -1,5 +1,41 @@
 # Qwen3.8-27B: two-card experiment programme
 
+## Matched short-output combined runtime - 2026-09-12
+
+Hardware run **34690758890**, revision **b2f6801**, passes all six requests
+(one audit and two timed repeats per T16 arm). The prompt and all emitted tokens
+also match T32 run 34689543028 exactly. Each timed request commits 64 tokens.
+All 754 recorded source hashes match this revision and remain unchanged;
+both pooled TG values were independently recomputed.
+
+| Runtime | CTX | Streams | PP tok/s | Committed TG tok/s | Accepted/proposed |
+| --- | --- | --- | --- | --- | --- |
+| T16 combined, eager publication | 4096 | 1 | 1855.97 | 48.66 | 110/188 |
+| T16 combined, captured publication | 4096 | 1 | 1794.57 | 51.93 | 110/188 |
+| T32 folded attention, commit-only | 4096 | 1 | 1638.13 | 36.56 | 110/316 |
+
+T16 arms are interleaved in one loaded session. T32 is from a separate run:
+the workload matches, but this is not an interleaved cross-width comparison.
+Captured publication improves T16 TG by 6.7%. Its mean cycle is 136.89 ms:
+draft 35.13, input/state 23.04, verify/readback 63.24, selection/publication
+15.08 ms. These are host-stage timings, not isolated device timings.
+
+**Decision:** continue from combined T16, targeting verification/readback and
+input/state overhead. Do not assume wider drafts help: both widths need nine
+blocks per request here, while T32 proposes more rejected tokens. The historical
+106.75 TG result used a longer output and is not reproduced by this short test;
+do not present it as the current matched measurement. Distinguish host/load
+variation from workload effects before attributing that difference to a kernel.
+
+Mean setup-inclusive T16 candidate request time is 12.59 seconds. This remains
+below 200 TG; short exact-output checks are not broad coding-quality acceptance.
+Serving defaults remain unchanged. Failed run 34690576186 was a preflight source
+mismatch, before hardware measurement; the retry restores the qualified T16
+baseline rather than weakening its simulator gate.
+
+Report SHA256:
+`08fea0642881c8b3119e35719e78ecfce1d81d6fcd7bd8761b496bbfbd5b92da`.
+
 ## Combined-runtime tuning priorities - 2026-09-11
 
 Primary objective remains **200 committed TG tok/s, one coding stream, TP2**.
