@@ -6,7 +6,27 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ## Current position
 
-### Combined-runtime coding screen
+### Latest verified short-output screen
+
+One coding stream, batch 1, two P150A cards. **PP** is prompt-processing tok/s,
+**CTX** is input tokens, and **TG** is committed output tok/s, including drafting,
+verification, transfers and publication. These are offline runtime tests, not
+streaming endpoint measurements. Each timed request commits 64 output tokens.
+
+| Combined runtime | PP | CTX | TG | Hardware run |
+| --- | ---: | ---: | ---: | --- |
+| T32, folded attention + commit-only state | 1638.13 | 4096 | 36.56 | 34689543028 |
+| T16, fusion + captured publication | 1794.57 | 4096 | 51.93 | 34690758890 |
+| T16 above, skip unused position uploads | **1865.03** | **4096** | **57.67** | **34691992781** |
+
+Exact target output, recurrent state and inactive slots pass. T16 staging drops
+from 29.14 to 8.68 ms per full-width block; target trace execution remains the
+largest measured cost. Cross-run comparisons are not interleaved A/B tests.
+The 64-token screen is not complete-function quality acceptance. Longer-output
+confirmation is pending in run **34692629032**; no new context ladder or concurrent
+batch result is claimed. [Details and hashes](docs/two-card-experiment-programme.md).
+
+### Earlier combined-runtime coding screen
 
 Same composed path: native DSpark attention, captured proposals, commit-only GDN,
 folded T16 target attention and fused score layout. All rows are **one stream /
@@ -18,7 +38,7 @@ batch 1, CTX 4096, 15 draft queries / 16 verifier rows**.
 | Run-length encoding | 3174.52 | 99.83 | **113.29** | 4/4 |
 | Rotate right | 3338.49 | 76.34 | **83.86** | 5/5 |
 
-Latest completed matched runs, not pooled across tasks. Exact target tokens/state
+Earlier completed matched runs, not pooled across tasks. Exact target tokens/state
 and proposal audits pass. These small frozen cases are not comprehensive coding
 quality certification. Run-length and rotate-right include publication diagnostics.
 Earlier runs had severe stalls (22.37 and 33.39 TG); they remain in the evidence,
@@ -26,7 +46,7 @@ not discarded. Setup-inclusive latency is still worse on two of these comparison
 The 200 TG target is unmet. The no-copy trace prototype is **not included**.
 [Complete results, revisions and regressions](docs/coding-screen-2026-09-10.md).
 
-### Latest single-stream comparison
+### Earlier single-stream comparisons
 
 All rows use one stream / batch1. TG counts committed output tokens, not draft
 tokens or aggregate concurrent throughput. Results are offline, not endpoint tests.
