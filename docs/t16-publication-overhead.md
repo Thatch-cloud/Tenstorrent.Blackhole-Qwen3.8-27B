@@ -111,3 +111,25 @@ Initial history and feature taps remain synthetic; learned projection weights
 are real. This is not full-request admission or a TG measurement. The next
 gate is opt-in full-request integration with target-derived features and
 coexisting target/proposal traces, followed by matched hardware PP/CTX/TG.
+
+## Combined hardware result: captured publication
+
+Run **34679446247**, revision `b09450f`, passes exact outputs, target state and
+inactive state on all six requests. The audited candidate records 12 complete
+20-shard projection comparisons. The paired summary was independently
+recomputed; request and native source snapshots remain unchanged.
+
+| Merge intervals, one stream | PP tok/s | CTX | Committed TG tok/s | Mean select/commit ms/cycle |
+| --- | ---: | ---: | ---: | ---: |
+| Combined fusion control | 3291.29 | 4096 | 102.12 | 11.441 |
+| Captured publication | 3326.66 | 4096 | 106.75 | 7.157 |
+
+Both arms commit 242 tokens across two timed requests, with 222/330 accepted
+drafts (67.27%). TG improves **4.53%**, saving about **4.284 ms/cycle** in
+selection/publication. Candidate mean whole-cycle time is 103.008 ms versus
+107.670 ms control. Setup-inclusive time worsens: 6455.79 versus 6096.87 ms.
+This is a useful combined-runtime improvement, not 200 TG or broad coding
+quality qualification. Retain the supported context-ladder acceptance step;
+do not extrapolate this CTX4096 result to long context or multiple streams.
+
+Report SHA256: `2451fe1ab0470f5a1b82d376d7b6a5d95a1997ca9a46b9d3bb42938fc4bf9ec4`.
