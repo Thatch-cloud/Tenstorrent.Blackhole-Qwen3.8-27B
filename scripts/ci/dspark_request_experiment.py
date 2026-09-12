@@ -177,9 +177,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, t32_request=False, t32_timed=False, t32_commit=False):
+        history_profile=False, captured_publication=False, t32_request=False, t32_timed=False, t32_commit=False,
+        t32_folded=False):
     import torch
     from full_dspark_request import measure_dspark_request
+    if type(t32_folded) is not bool or (t32_folded and (not t32_request or not t32_commit)):
+        raise ValueError('T32 folded attention requires the combined commit-only request')
+    if t32_folded:
+        from target_t32_attention_gate import qualify
+        report['t32_folded_evidence'] = qualify(Path(__file__).parent)
     if type(t32_timed) is not bool or (t32_timed and not t32_request):
         raise ValueError('Explicit T32 hardware timing selection required')
     if type(t32_commit) is not bool or (t32_commit and not t32_request):
@@ -345,6 +351,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         POLICIES = {'t32': dict(t32_request=True, proposal_trace=True, native_attention=True)}
         if t32_commit:
             POLICIES['t32'].update(commit_only_gdn=True, t32_commit_evidence=Path(__file__).parent)
+        if t32_folded:
+            POLICIES['t32']['t32_folded'] = True
     report['coding_context'], report['request_checks'] = context, []
     report['sampler_links'] = 4
     control_warmed = False

@@ -19,9 +19,18 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, t32_request=False, t32_timing_evidence=None,
-        t32_commit_evidence=None):
+        t32_commit_evidence=None, t32_folded=False):
     import torch
     from full_request import measure_request
+    if type(t32_folded) is not bool or (t32_folded and (not t32_request or not commit_only_gdn)):
+        raise ValueError('T32 folded attention requires the combined commit-only request')
+    folded_evidence = None
+    if t32_folded:
+        from pathlib import Path
+        from target_t32_attention_gate import qualify
+        if len(prompt) != 4096 or max_new_tokens > 257:
+            raise ValueError('T32 folded request must remain in the qualified 4K context family')
+        folded_evidence = qualify(Path(__file__).parent)
     if type(t32_request) is not bool or (t32_request and (
             (not audit_features and t32_timing_evidence is None) or not proposal_trace or not native_attention
             or (commit_only_gdn and t32_commit_evidence is None)
@@ -47,6 +56,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             raise ValueError('T32 timing prompt differs from its audited request')
         if t32_timing_evidence.get('commit_only_gdn', False) != commit_only_gdn:
             raise ValueError('T32 timing state policy differs from its audited request')
+        if bool(t32_timing_evidence.get('dspark', {}).get('t32_folded_evidence')) != t32_folded:
+            raise ValueError('T32 timing attention policy differs from its audited request')
     proposals = 31 if t32_request else 15
     verifier_rows = proposals + 1
     if type(captured_publication) is not bool or (captured_publication and (
@@ -287,6 +298,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=audit_features and commit_only_gdn,
             lookup_max_rows=verifier_rows, feature_factory=factory, feature_drafter_name='dspark',
+            **(dict(attention_replay=True, family_routing=True) if t32_folded else {}),
             **(dict(target_attention_t16=True, attention_replay=True, family_routing=True)
                if target_attention_t16 else {}),
             **(dict(verifier_before_capture=prepare_proposal_trace) if proposal_trace else {}),
@@ -325,6 +337,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             result['dspark']['t32_integration'] = dict(admission=t32_admission,
                 scope='Experimental T32 request with native target attention and full state history; backend admission recorded separately')
             result['dspark']['t32_commit_evidence'] = commit_evidence
+            result['dspark']['t32_folded_evidence'] = folded_evidence
         if observer is not None:
             result['verifier_profile'] = observer.summary()
         if banked_proposal:

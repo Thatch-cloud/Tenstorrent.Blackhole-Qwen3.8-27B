@@ -16,6 +16,10 @@ if [ "$mode" = request-t32 ]; then
         --name qwen-hardware-inventory-34654732582 --dir "$commit_evidence"
     printf '%s  %s\n' 4a29010fbcc8b0ff456ce0b156370a2f3791ed496a1762a2f212a5019a2c439d "$commit_evidence/t32-commit.json" | sha256sum -c -
     test "$(cat "$commit_evidence/t32-commit.exit-status")" = 0
+    attention_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-t32-attention.XXXXXX")
+    gh run download 34590151457 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34590151457 --dir "$attention_evidence"
+    printf '%s  %s\n' 774a53bf54fcbb7fe5c02fb1f358be63c9fcc0254679f19543232d4079429b1b "$attention_evidence/t32-attention.json" | sha256sum -c -
 fi
 draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
 [[ "$draft_profile" = 0 || "$draft_profile" = 1 ]]
@@ -144,6 +148,7 @@ if [ "$mode" = request-t32 ]; then
     docker cp "$t32_report" "$test_id:/experiment-scripts/ci/t32-combined-simulator.json"
     docker cp "$commit_evidence/t32-commit.json" "$test_id:/experiment-scripts/ci/t32-commit.json"
     docker cp "$commit_evidence/t32-commit.exit-status" "$test_id:/experiment-scripts/ci/t32-commit.exit-status"
+    docker cp "$attention_evidence/t32-attention.json" "$test_id:/experiment-scripts/ci/t32-attention.json"
     docker cp speculative-decoding "$test_id:/speculative-decoding"
 fi
 if [ "$publication" = 1 ]; then

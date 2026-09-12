@@ -17,15 +17,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--timed', action='store_true', help='Run two timing repeats only after a fresh full audit')
     parser.add_argument('--commit-only', action='store_true', help='Use simulator-qualified committed-prefix GDN publication')
+    parser.add_argument('--folded-attention', action='store_true')
     for name in ('checkpoint', 'config', 'target', 'output', 'evidence'):
         parser.add_argument('--' + name, type=Path, required=True)
     options = parser.parse_args()
+    if options.folded_attention and not options.commit_only:
+        parser.error('Folded attention requires the commit-only candidate')
     require_projection_environment(os.environ, True)
     if options.output.exists() or digest(options.config) != FILES['config.json'][1]:
         raise ValueError('Fresh output and pinned draft configuration required')
     rotary = DSparkRotary(json.loads(options.config.read_text()))
     root = Path(os.environ['TT_METAL_HOME'])
     directory = Path(__file__).parent
+    if options.folded_attention:
+        from target_t32_attention_gate import qualify
+        qualify(directory)
     if options.commit_only:
         from t32_commit_gate import qualify
         qualify(directory)

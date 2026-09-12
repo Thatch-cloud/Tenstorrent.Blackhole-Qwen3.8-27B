@@ -10,6 +10,13 @@ SOURCES = {'attention_replay.py', 'attention_mask_replay.py', 'attention_mask_re
            'target-t32-attention-probe.py'}
 
 
+def qualify(directory):
+    path = Path(directory) / 't32-attention.json'
+    if hashlib.sha256(path.read_bytes()).hexdigest() != '774a53bf54fcbb7fe5c02fb1f358be63c9fcc0254679f19543232d4079429b1b':
+        raise ValueError('Retained T32 folded-attention simulator report required')
+    return validate(json.loads(path.read_text()), Path(__file__).parent)
+
+
 def validate(report, directory):
     if report.get('rows') != 32 or report.get('passed') is not True or report.get('closed') is not True or report.get('backend') != 'simulator':
         raise ValueError('Complete closed simulator result required')

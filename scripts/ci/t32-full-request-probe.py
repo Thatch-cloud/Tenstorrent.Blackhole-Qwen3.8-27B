@@ -113,7 +113,8 @@ def run_request(options, rotary, admission, *, hardware=False):
         run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
             layer_weights, predecessor, successor, rotary, report, progress,
             prompt=prompt, context=context, t32_request=True, t32_timed=hardware and getattr(options, 'timed', False),
-            t32_commit=hardware and getattr(options, 'commit_only', False))
+            t32_commit=hardware and getattr(options, 'commit_only', False),
+            t32_folded=hardware and getattr(options, 'folded_attention', False))
         if hardware:
             summary = report['request_summary']
             if 'full_request_simulator_exact' in summary:
