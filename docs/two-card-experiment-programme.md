@@ -4,6 +4,16 @@
 
 ### First timed T32 integration baseline
 
+Commit-only follow-up **34689060295** passes the fresh audit and both timed
+requests with unchanged output and acceptance. At CTX4096 it measures **PP 2036.11 /
+TG 36.22 tok/s**, versus TG 33.86 before (about 7% higher; separate runs, not an
+interleaved comparison). Mean cycle falls from 209.92 to **196.25 ms**: draft
+61.19, input/state 28.81, verify/readback 81.47, selection/publication 24.38 ms.
+All 828 source files and the pooled summary independently verified. Report SHA256:
+`a03e91a5460bc5f3aa872a7902957a18b37eec8dde658329d3a4b6d9735947f1`.
+This remains far below the target. Next candidate: the already simulator-tested
+T32 folded target attention, composed with commit-only state in the full request.
+
 Run **34688574940** passes one fresh audit and two identical timed requests.
 This initial integration uses native target attention and full GDN state history;
 it does **not** yet include the faster T16 runtime's combined optimisations.
