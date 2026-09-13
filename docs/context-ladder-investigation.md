@@ -356,3 +356,22 @@ explicitly record `value_diagnostics_enabled`. Numerical tolerances, fixture
 controls, input/layout checks, replay checks and cleanup are unchanged.
 Use diagnostics when investigating a failure, not on every regression context.
 CPU wrapper/fixture/compiler/CI tests pass; elapsed CI savings remain unmeasured.
+
+### 64K/1024 result: improved but rejected
+
+Run **34749444881**, revision **50a185b**, completed with a numerical failure,
+not a timeout. The first eager case on chip 0 has **129 failing elements**,
+maximum absolute error **0.514190674**, versus 256 and 0.638324738 at chunk
+512. Probe duration was 907 seconds; teardown was clean. Replay and smaller
+context regressions were not reached. No hardware admission follows.
+
+The constant-value diagnostic still drifts by about 0.03125 on both chips
+(3200/2816 failed elements). Oldest-token and last-proposal diagnostics pass.
+Fewer accumulation iterations reduce the error but do not establish adequate
+precision; avoid treating another chunk-size sweep as a demonstrated fix.
+The next precision investigation should isolate BF16 output recurrence and
+its operand conversions, preserving the passing 32K reference and full history.
+
+Report SHA256:
+`38050b207858adcf3ad10a80fc04aeff41a7502275242fb8f2afa3476940929f`.
+Committed single-stream hardware throughput is unchanged by this experiment.
