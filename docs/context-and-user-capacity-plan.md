@@ -28,6 +28,23 @@ The existing simulator ladder still ends at 65536 input tokens. New large-window
 fixtures, exact native selectors and runtime admission remain implementation work.
 Use independently bounded CI probes for these sizes, not full-model simulation.
 
+### Runtime integration audit
+
+Current source inspection identifies these separate prerequisites; a passing
+attention probe alone does not remove them.
+
+| Path | Existing boundary | Required follow-up |
+|---|---|---|
+| `dspark_context_selection.py` | Only 4096/8192 request selection | Evidence-backed per-size request admission |
+| `dspark_history.py:FullHistoryKV` | Initial frontier limited to 8192 | Qualify full-history initialization and publication beyond 8K |
+| `dspark_stable_history.py` / `dspark_8k_scope.py` | 8192 default, exact 8448 scoped allocation | Preserve active/spare ownership, cleanup and rollback at new capacities |
+| `dspark_history.py:project_chunks` | Projects history in 32-row blocks, with table uploads per block | Profile request setup independently; qualify a larger-block projection before replacing it |
+| `dspark_ladder_build.py` | CPU-simulator-only build route | Matching physical build provenance and numerical evidence before hardware admission |
+
+The 32-row projection loop is a source-observed scaling concern, not a measured
+TG bottleneck: it initializes drafter history and must be timed in setup/TTFT,
+not silently excluded from end-to-end results or blamed for steady decode.
+
 ## Concurrent users
 
 Measure simultaneous active generating requests, not connected idle sessions.
