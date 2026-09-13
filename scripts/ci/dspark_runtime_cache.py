@@ -66,6 +66,16 @@ def main():
     factory = prepare(root, scripts, enabled=request_context() == 8192)
     if factory is not None:
         inputs['draft_8k_factory'] = factory
+    cache_selection = os.environ.get('QWEN_DSPARK_BIAS_CACHE', '0')
+    if cache_selection not in ('0', '1'):
+        raise ValueError('Explicit zero or one bias cache selection required')
+    cache_factory = None
+    if cache_selection == '1':
+        from dspark_cached_markov_build import prepare as prepare_cache
+        cache_factory = prepare_cache(root, scripts, enabled=True)
+        inputs['markov_cache_factory'] = cache_factory
+        inputs['markov_cache_builders'] = {name: digest(scripts / name) for name in (
+            'dspark_cached_markov_build.py', 'dspark_cached_markov_gate.py', 'markov_sparse_fp32.py')}
     manifest = inspect_entry(cache,inputs)
     hit = manifest is not None
     if hit:
@@ -91,6 +101,12 @@ def main():
         evidence = completed(root, factory, manifest['binary_sha256'], import_passed=True)
         evidence['cache_key'] = cache_key(inputs)
         (output/'dspark-8k-hardware-build.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    if cache_factory is not None:
+        from dspark_cached_markov_build import completed as completed_cache
+        subprocess.run([sys.executable, '-c', 'import ttnn; assert callable(ttnn.sparse_matmul)'], check=True)
+        evidence = completed_cache(root, cache_factory, manifest['binary_sha256'], import_passed=True)
+        evidence['cache_key'] = cache_key(inputs)
+        (output/'dspark-cached-markov-hardware-build.json').write_text(json.dumps(evidence,indent=2)+'\n')
     (output/'dspark-runtime-cache.json').write_text(json.dumps(dict(cache_hit=hit,cache_key=cache_key(inputs),**manifest),indent=2)+'\n')
 
 
