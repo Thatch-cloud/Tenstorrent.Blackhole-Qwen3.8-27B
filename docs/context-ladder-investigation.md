@@ -546,3 +546,24 @@ head 0 / row 8 / channel 116. Channel 116 maps to output tile 3, lane 20;
 denominator and maximum remain in tile 0. Print only logical core (0,0),
 checking q=0 in the resulting log. Test the cross-tile coordinate mapping
 explicitly. No arithmetic or tolerance changes accompany this measurement.
+
+### Remaining element: numerator drift dominates
+
+Run **34782414632** (c2a62c0) reproduces the scalar-sum candidate's exact
+chip-0 eager hash `1e6891b6e1a90951b420b562b4504d91d05bc79ec396b32705ab86f4813fe5d6`,
+one failure and clean teardown. Report SHA256:
+`c0486e391b460b048fc5a9e86018e1fba53a4dc7723ddbbccda8a2bc71a701ba`.
+
+At chip 0 / head 0 / row 8 / channel 116 the native maximum is 162,
+numerator -56, denominator 1.285524368, scalar reciprocal 0.777892709.
+Their pre-rounding quotient is -43.561990262, versus FP32 reference
+-43.949645996. Rescaling the FP32 reference from maximum 162.189453125 to
+162 gives numerator -56.703657611 and denominator 1.290195957. Numerator
+magnitude is 1.241% low; denominator is 0.362% low. Final output is -43.5.
+
+This isolates the remaining error differently from the earlier head-5 failure:
+numerator precision now needs investigation while retaining the improved sum
+update. Earlier FP32-output-storage rejection used the old native sum update,
+so it does not prove how FP32 output storage interacts with the corrected sum.
+Any combined precision experiment must retain full-history, unchanged tolerance,
+both fixtures/chips and exact replay rather than targeting only this element.
