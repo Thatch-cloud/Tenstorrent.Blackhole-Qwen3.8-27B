@@ -1,8 +1,38 @@
 # 8K draft attention: 256-key component qualified
 
 The 8K target-attention replay gate and the 256-key draft-attention component
-now pass. The original 64-key draft path remains rejected at 8K. Combined-runtime
-integration and hardware validation are still required: there is no 8K PP/TG result.
+now pass. The original 64-key draft path remains rejected at 8K. The first
+combined-runtime hardware result passes request audits; repeat confirmation,
+the remaining context ladder and broad coding-quality acceptance remain open.
+
+## First combined 8K hardware result
+
+Run **34729556803**, revision **8c102b2**, completes with exit 0. Independent
+reconciliation verifies 828 source hashes and recomputes both arm summaries
+from the six complete requests, all exact in target tokens, state and inactive
+slots. Each arm has one audited and two timed requests, ending at EOS after
+121 committed tokens per request (256 was the maximum allowance).
+
+| One stream / batch 1 | PP tok/s | CTX | Committed TG tok/s | Draft ms/block | Verifier trace ms/block |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Combined control | 3323.93 | 8192 | 99.81 | 30.82 | 68.79 |
+| Shared Q/K candidate | 3310.33 | 8192 | 101.27 | 30.22 | 67.73 |
+
+Both arms use qualified 256-key draft attention and 8448-row fixed history.
+Acceptance is 222/330 proposed tokens (67.27%) in each timed arm. The candidate
+improves TG by 1.47%; it does not establish an isolated chunk-size speedup.
+Its full-width cycle averages 108.57 ms, including 9.13 ms selection/publication.
+These nested timing fields should not be added as independent profiled intervals.
+
+The 200 TG target needs roughly 55 ms per cycle at this committed-token yield,
+so the remaining gap is substantial. Report SHA256:
+`ce36fa35d6c8b4acc1af8c581d6b99c1738f0a6a22c6d547d8398bc12f22b92a`.
+
+Shutdown caveat: after the report marks completion, the log emits
+`SubDeviceManagerTracker is not initialized on MeshDevice 0`. The same message
+exists in earlier 4K runs 34702027898 and 34702526963. Exit status and request
+audits pass, but do not describe the shutdown log as warning-free. No serving
+or held-out coding-quality qualification follows from this result.
 
 ## Accepted synthetic component
 
