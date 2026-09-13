@@ -10,6 +10,9 @@ from gdn_multitoken_conv import addresses
 
 
 class ScoreLayoutArm:
+    def execute_feedback(self, *arguments, **keywords):
+        return candidate(*arguments, **keywords)
+
     def __init__(self, device, *, hardware_audit=None):
         if device.closed or device.max_drafts != 15 or list(device.mesh.shape) != [1, 2]:
             raise ValueError('Open fifteen-query two-chip drafter required')
@@ -40,7 +43,7 @@ class ScoreLayoutArm:
                 self.failed = True
                 raise ValueError('Only this request owner and complete fifteen-query vocabulary may use the hook')
             try:
-                result = candidate(operations, device.mesh, anchor, logits, predecessor, successor, owned,
+                result = self.execute_feedback(operations, device.mesh, anchor, logits, predecessor, successor, owned,
                     on_step_enqueued=on_step_enqueued)
             except BaseException:
                 self.failed = True

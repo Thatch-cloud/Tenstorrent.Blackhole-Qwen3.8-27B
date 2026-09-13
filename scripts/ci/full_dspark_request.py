@@ -20,9 +20,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         target_attention_t16=False, score_layout=False, score_layout_evidence=None,
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
-        gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False):
+        gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False,
+        bias_cache=False, bias_cache_build=None):
     import torch
     from full_request import measure_request
+    if type(bias_cache) is not bool or (bias_cache and not (
+            proposal_trace and score_layout and captured_publication and gdn_shared_qk
+            and fused_t16_mlp and target_attention_t16 and isinstance(bias_cache_build, dict))):
+        raise ValueError('Cached feedback requires the complete qualified combined runtime and build evidence')
     if type(combined_profile) is not bool or (combined_profile and not (
             audit_features and captured_publication and fused_t16_mlp and target_attention_t16
             and commit_only_gdn and native_attention and proposal_trace and not profile_verifier)):
@@ -246,6 +251,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         status('warm_fifteen_query_proposal_before_verifier_capture')
         drafter.propose(seed, 15)
 
+        if bias_cache:
+            score_arm.reset_after_warmup()
+
     def factory():
         nonlocal drafter, runtime, proposal_device, score_arm, publication_arm
         status('project_full_prefill_history', context=len(prompt))
@@ -269,8 +277,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if history_observer is not None:
             score_scope.enter_context(history_observer.install(proposal_device.history))
         if score_layout:
-            from dspark_score_layout_scope import ScoreLayoutArm
-            score_arm = ScoreLayoutArm(proposal_device, hardware_audit=score_layout_evidence)
+            if bias_cache:
+                from dspark_cached_markov_scope import CachedMarkovArm
+                score_arm = CachedMarkovArm(proposal_device, hardware_audit=score_layout_evidence,
+                    build_evidence=bias_cache_build, factory_root='/opt/tt-metal')
+            else:
+                from dspark_score_layout_scope import ScoreLayoutArm
+                score_arm = ScoreLayoutArm(proposal_device, hardware_audit=score_layout_evidence)
             score_scope.enter_context(score_arm.install())
         capture.close()
         if audit_features:
