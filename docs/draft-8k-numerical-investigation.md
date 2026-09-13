@@ -74,6 +74,28 @@ and maximum error 1.70295; also truncating statistics gives 30,617 failures and
 these as hypotheses, not assertions about actual packer rounding. Distinguish
 rounding/storage behavior with stage evidence before another precision change.
 
+## Value-isolation evidence
+
+Run 34726821443 retains identical baseline output hashes and the 256 failures.
+Its three value-only diagnostics complete on both chips, with clean teardown.
+They do not qualify attention merely because their absolute tolerance passes.
+
+| Chip 1 diagnostic | Head 11, row 13 actual/reference | Head 13, row 11 actual/reference |
+| --- | --- | --- |
+| Constant one | 1.00000 / 1.00000 | 0.99609 / 1.00000 |
+| Oldest-token indicator | 0.10352 / 0.10395 | 0.10352 / 0.10335 |
+| Last-proposal indicator | 0.82031 / 0.81436 | 0.82422 / 0.81786 |
+
+The last-proposal probability excess times its value of -64 accounts for about
+-0.38 and -0.41 of the error in these rows. This is evidence of incorrect
+effective weights, not proof of a denominator bug: numerator arithmetic can
+also affect the indicator result. Constant-value maximum error is 0.01563.
+
+Next isolate the final denominator row reduction: replace its matmul-by-identity
+with the native SUM reduction API for the draft signature only. Preserve FP32
+statistics, the pack fix, reciprocal, fixtures, and original tolerance. This
+is an unqualified simulator experiment, not a runtime default change.
+
 ## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination
