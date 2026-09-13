@@ -30,6 +30,22 @@ SNAPSHOT = '''
         }
 '''
 
+RECIPROCAL = '''        } else {
+            /* cb_cur_sum = 1.0 / cb_cur_sum */
+            recip_block_inplace(alias_prev_sum, Sq_chunk_t);'''
+RECIPROCAL_SNAPSHOT = '''
+            if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+                CircularBuffer(alias_prev_sum).wait_front(Sq_chunk_t);
+                DEVICE_PRINT("QWEN_RECIP q={} reciprocal={:.9f}\\n",
+                    local_q_start + q_iter - iter_q_start,
+                    TSLICE(alias_prev_sum, 0,
+                        (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}),
+                        true, true));
+#endif
+            }
+'''
+
 
 @contextmanager
 def stage_snapshots():
@@ -38,7 +54,8 @@ def stage_snapshots():
     def replacements():
         substitutions = original()
         substitutions['compute_common.hpp'] += (
-            (INCLUDE, INCLUDE_AFTER), (REDUCE, REDUCE + SNAPSHOT))
+            (INCLUDE, INCLUDE_AFTER), (REDUCE, REDUCE + SNAPSHOT),
+            (RECIPROCAL, RECIPROCAL + RECIPROCAL_SNAPSHOT))
         return substitutions
 
     with patch.object(native_draft_sdpa, 'replacements', replacements):

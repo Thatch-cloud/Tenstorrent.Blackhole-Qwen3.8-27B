@@ -7,13 +7,14 @@ import unittest
 
 import native_draft_sdpa
 from dspark_ladder_factory import scoped_stats_pack
-from dspark_ladder_stage_print import SNAPSHOT, stage_snapshots
+from dspark_ladder_stage_print import RECIPROCAL_SNAPSHOT, SNAPSHOT, stage_snapshots
 
 
 class StagePrintTests(unittest.TestCase):
     def test_snapshot_does_not_consume_or_write_buffers(self):
         for forbidden in ('pop_front', 'push_back', 'reserve_back', 'pack_tile', 'copy_tile'):
             self.assertNotIn(forbidden, SNAPSHOT)
+            self.assertNotIn(forbidden, RECIPROCAL_SNAPSHOT)
         self.assertIn('COMPILE_FOR_TRISC == 0', SNAPSHOT)
         self.assertNotIn('TSLICE_INPUT_CB', SNAPSHOT)
         self.assertNotIn('TSLICE_RD_PTR', SNAPSHOT)
@@ -40,7 +41,7 @@ template <typename... Arguments> void DEVICE_PRINT(const char*, Arguments...) {}
 void snapshot() {
     uint32_t alias_prev_sum=0, alias_prev_max=1, alias_mm2_prev_out=2;
     uint32_t Sq_chunk_t=1, out_chunk_tiles=4, local_q_start=12, q_iter=0, iter_q_start=0;
-''' + SNAPSHOT + '\n}\n'
+''' + SNAPSHOT + RECIPROCAL_SNAPSHOT + '\n}\n'
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.cpp'
             path.write_text(source)
@@ -57,4 +58,5 @@ void snapshot() {
         with stage_snapshots(), scoped_stats_pack():
             patched = native_draft_sdpa.patched_sources(source)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_STAGE'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_RECIP'), 1)
         self.assertIn(b'Ladder probe requires an explicit padded history geometry', patched['sdpa.cpp'])
