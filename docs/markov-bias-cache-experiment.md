@@ -159,7 +159,7 @@ full-vocabulary performance result. The next size gate must exercise the real
 
 ## Production-size worker gate
 
-Run 34733393010 is running the unchanged 64-column protocol matrix plus two
+Run 34733393010 passed the 64-column protocol matrix plus two
 larger synthetic widths, using the real rank-256 reduction and 78 tiles per
 matmul worker. There is one factory build for the complete suite.
 
@@ -177,3 +177,17 @@ timed requests start cold rather than inheriting cache entries from warmup.
 Persistent cache buffers must outlive the prepared proposal trace and be
 released only after that trace closes. Both comparison arms must retain the
 qualified shared-Q/K, fused T16, four-link and 8K attention configuration.
+
+All 164 chip/request checks and six stale-ticket checks passed with clean
+teardown. All seven pipeline source hashes match the current worktree and
+before/after records. Total CI time was 7m05s including the factory build.
+
+| Columns | Exact comparisons | Report SHA256 |
+| ---: | ---: | --- |
+| 64 | 140 | `0934aee979f6a0d42abb930956db11a9e8cf10eee577ff365b6cc0a7b0ac346b` |
+| 4992 | 12 | `66c18bd4c3e6c492af4ba30fc2519f26847a1de3acd6380f466b05de45ed30d9` |
+| 3712 | 12 | `eb77b9c2cb1a93e0e8a4493407fda5000615d02d9cf729ee2df0e73677ef3ee9` |
+
+These results qualify the tested worker tile counts, not 100-worker multicast
+scaling or full-request speed. Live draft-token feedback and the complete
+hardware request comparison are the next integration gate.
