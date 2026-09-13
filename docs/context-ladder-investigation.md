@@ -215,3 +215,30 @@ Correct all three slices to the compute-thread signature confirmed in
 `api/debug/dprint_tile.h` and `api/debug/dump.h`. The migration guide example
 was insufficiently thread-specific. No stage readings were obtained; this is
 an instrumentation compile error, not attention numerical evidence.
+
+## First usable native stage readings
+
+Run 34744366341 subsequently failed snapshot statement syntax; revision 379314b
+replaces the invalid multi-statement `UNPACK((...))` expression with a TR0
+preprocessor guard and adds host C++ syntax checks for all three compute threads.
+Run **34744884673** compiles and produces the snapshots. Its eager output hashes
+match the uninstrumented 512-key run exactly on both chips; the same 17 elements
+fail, and cleanup passes. Build: 260 seconds; instrumented probe: 494 seconds.
+
+Mixed fixture, row 2 / channel 5:
+
+| Chip | Head | Native maximum | Native numerator | Native denominator |
+|---:|---:|---:|---:|---:|
+| 0 | 12 | 164 | -60.5 | 1.327724457 |
+| 0 | 13 | 169 | -60.5 | 1.277560234 |
+| 1 | 12 | 165 | -57.5 | 1.247028351 |
+| 1 | 13 | 165 | -57.5 | 1.247047424 |
+
+Compare numerator and denominator at the **same maximum**, since changing the
+softmax reference maximum rescales both. At chip 1/head 12, converting the CPU
+reference to maximum 165 gives numerator -57.340910913 and denominator
+1.252475117. Both native quantities therefore differ from the reference; this
+is not only denominator drift. Their native quotient is -46.109617278, while
+the final BF16 output is -46.25. Inspect the stored reciprocal and final
+normalization stage next before assigning that additional discrepancy to a
+particular rounding instruction. A shifted maximum alone cancels in the quotient.
