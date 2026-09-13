@@ -36,9 +36,15 @@ and restores the default 8192-row limit even on failure. Three host tests pass.
 This helper is not yet connected to request execution: it cannot currently
 enable 8K serving or bypass existing guards.
 
+The isolated four-link runtime cache now includes the qualified factory patch
+and its provenance in the 8K cache key. Both cache hits and new builds install
+matching source; successful import and matching binaries are required before
+writing hardware-build admission evidence. CI downloads and hash-checks the
+retained draft report. Seven build/cache tests and shell syntax validation pass.
+No hardware build has run with this wiring yet.
+
 Remaining integration work:
-- Include the qualified factory patch in the isolated four-link runtime cache key/build.
-- Download the retained draft report in CI and admit the request after verifying that build.
+- Admit the request after verifying the factory build, without bypassing preflight.
 - Route fixed-history native attention through the exact 256-key implementation;
   scope the 8448-row capacity without modifying simulator-pinned dependencies.
 - Run the combined two-card request with token/state auditing and report PP/CTX/TG.

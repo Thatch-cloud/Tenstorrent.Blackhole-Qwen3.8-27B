@@ -14,7 +14,8 @@ from dspark_hardware_gate import digest
 
 IMAGE = 'sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465'
 BUILDERS = ('ccl-links-build.sh','sdpa_graft_build.py','lazy_ccl_links.py','dspark_runtime_cache.py',
-    'dspark_hardware_gate.py','dspark_native_restore.py')
+    'dspark_hardware_gate.py','dspark_native_restore.py','dspark_8k_build.py',
+    'dspark_fp32_intermediates.py','dspark_attention_8k_gate.py')
 
 
 def cache_key(inputs):
@@ -60,6 +61,11 @@ def main():
     patch = Path('/tmp/ccl-graft-registration.patch')
     cache,output = Path('/experiment-cache/dspark-native-v1'),Path('/experiment/results')
     inputs = dict(image=IMAGE,builders={name:digest(scripts/name) for name in BUILDERS},registration_patch=digest(patch))
+    from dspark_context_selection import request_context
+    from dspark_8k_build import prepare, completed
+    factory = prepare(root, scripts, enabled=request_context() == 8192)
+    if factory is not None:
+        inputs['draft_8k_factory'] = factory
     manifest = inspect_entry(cache,inputs)
     hit = manifest is not None
     if hit:
@@ -81,6 +87,10 @@ def main():
     subprocess.run([sys.executable,'-c',
         'import ttnn; names=("attn_decode_prep","gdn_decode_norm_gate","gdn_decode_conv_gates","decode_gated_delta_rule_packed"); '
         'assert all(callable(getattr(ttnn.transformer,name)) for name in names)'],check=True)
+    if factory is not None:
+        evidence = completed(root, factory, manifest['binary_sha256'], import_passed=True)
+        evidence['cache_key'] = cache_key(inputs)
+        (output/'dspark-8k-hardware-build.json').write_text(json.dumps(evidence,indent=2)+'\n')
     (output/'dspark-runtime-cache.json').write_text(json.dumps(dict(cache_hit=hit,cache_key=cache_key(inputs),**manifest),indent=2)+'\n')
 
 

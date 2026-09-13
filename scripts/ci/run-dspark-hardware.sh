@@ -48,6 +48,11 @@ if [ "$publication" = 1 ]; then
     outer_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-outer-add.XXXXXX")
     shared_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-shared-qk.XXXXXX")
     attention_8k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-attention-8k.XXXXXX")
+    draft_8k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-draft-attention-8k.XXXXXX")
+    gh run download 34728453080 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34728453080 --dir "$draft_8k_evidence"
+    printf '%s  %s\n' 2baa47c721607fac512b72413024c15a510ef475954cab976ee6d59222ab61af "$draft_8k_evidence/dspark-native-8k-attention.json" | sha256sum -c -
+    test "$(cat "$draft_8k_evidence/dspark-native-8k-attention.exit-status")" = 0
     gh run download 34703126782 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34703126782 --dir "$attention_8k_evidence"
     printf '%s  %s\n' 1a60ca077425c671ea9e4b30ddf0490700382d835b7aee3327d320c2ce8b83cd "$attention_8k_evidence/target-t16-attention-8k.json" | sha256sum -c -
@@ -171,6 +176,7 @@ if [ "$publication" = 1 ]; then
     docker cp "$outer_evidence/gdn-outer-add.json" "$test_id:/experiment-scripts/ci/gdn-outer-add.json"
     docker cp "$shared_evidence/gdn-shared-recurrence.json" "$test_id:/experiment-scripts/ci/gdn-shared-recurrence.json"
     docker cp "$attention_8k_evidence/target-t16-attention-8k.json" "$test_id:/experiment-scripts/ci/target-t16-attention-8k.json"
+    docker cp "$draft_8k_evidence/dspark-native-8k-attention.json" "$test_id:/experiment-scripts/ci/dspark-native-8k-attention.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
