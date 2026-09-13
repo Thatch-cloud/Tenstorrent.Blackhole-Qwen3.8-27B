@@ -191,3 +191,23 @@ before/after records. Total CI time was 7m05s including the factory build.
 These results qualify the tested worker tile counts, not 100-worker multicast
 scaling or full-request speed. Live draft-token feedback and the complete
 hardware request comparison are the next integration gate.
+
+## Live token feedback
+
+Run 34733995681 is testing the new `dspark_cached_markov.py` request-owned
+adapter. Each of its fifteen steps uses the device-selected previous token
+for both embedding and cache lookup, then adds the current base logits and
+selects the next token. The request metadata deliberately contains an invalid
+token in the simulator, so lookup cannot accidentally use a host placeholder.
+
+The gate repeats the controller/payload size matrix, then compares all scores
+and tokens against the unchanged native fifteen-step chain. It includes a
+zero-logit tie fixture, changed-input replay, immutable inputs/weights, output
+poisoning, and cold resets that advance the epoch without changing addresses.
+Sixteen local Python tests pass. Hardware integration is not enabled yet.
+
+The combined-runtime reset belongs after `prepare_proposal_trace` completes
+its extra warmup proposal, not immediately after trace capture: that later
+warmup would otherwise repopulate the cache before timing starts. Its cost
+must remain in request setup. The borrowing proposal trace must close before
+the cache releases persistent buffers.
