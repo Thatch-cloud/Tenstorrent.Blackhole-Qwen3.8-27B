@@ -700,3 +700,21 @@ retain zero-mask scores and apply blocked entries exactly, while accounting
 for the subsequent score reload in exponentiation. Merely storing FP32,
 changing output recurrence, or loosening tolerance does not fix that boundary.
 No hardware performance is established by this diagnostic result.
+
+### FP32 mask and centering diagnostic
+
+At exact 64K geometry only, apply the BF16 additive mask directly to stored
+FP32 scores on TR0, preserving zero-mask values and blocked negative infinity.
+Then subtract the stored row maximum in FP32 before the native exponential
+reload. Replace that path's broadcast subtraction with a tile copy: native
+exponentiation and partial-sum packing remain, but they now reload the small
+centered difference instead of independently truncating large score/max values.
+This still uses native lower-precision reload, not an all-FP32 softmax.
+
+Retain scalar sum update, scalar reciprocal, BF16 output intermediates and
+all numerical/replay gates. Smaller contexts retain original arithmetic.
+Twenty-eight CPU tests pass, including four score tiles, two maximum rows,
+all tile faces, zero/blocked masks, TR0-only writes, buffer consumption,
+combined patch composition and Blackhole helper compilation. Native scheduling
+and full numerical acceptance still require CI; scalar loops are diagnostic
+and must not be presented as the final production-speed implementation.
