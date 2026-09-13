@@ -68,8 +68,8 @@ The `markov-cache-control` suite in the CPU simulator workflow loads no model
 weights, does no runtime-library rebuild, and has a ten-minute probe timeout.
 It checks 148 commands on both chips, including uncommitted misses, LRU
 eviction, generation changes, stale commits, overflow and changed-input replay.
-No cached bias payload, conditional native matmul, simulator numerical pass
-or combined-runtime speedup is implemented yet.
+This controller gate alone does not qualify a bias cache or speedup. The later
+sparse-dot numerical gate and connected-pipeline work are recorded below.
 
 | CI run | Result | Scope |
 | --- | --- | --- |
@@ -131,3 +131,16 @@ zeroing operation in the matmul writer. At full vocabulary this still writes
 a padded FP32 tile row (about 30.31 MiB per chip). Even a numerically qualified
 sparse path will need combined-runtime timing; skipped MACs alone are not proof
 of a useful speedup.
+
+## Connected cache pipeline
+
+Run 34733011935 is testing the connected device sequence: lookup, sparse mask,
+native sparse dot, FP32 payload fill/read, then metadata commit. All decisions
+execute inside the same replayed trace, without host hit/miss branching.
+
+The synthetic matrix fills 64 slots, checks reuse and LRU eviction, changes
+the weight epoch, and rejects a stale payload ticket without changing the
+cache. Hits must return the exact dense bias while the sparse-dot output is
+zero. Cache rows start poisoned. The dense dot in this test is an independent
+audit, not intended for the optimized runtime. Real token-to-embedding feedback,
+production per-worker tile counts and combined hardware PP/CTX/TG remain open.
