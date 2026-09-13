@@ -4,6 +4,9 @@ Two-card inference and kernel experiments for fast, reliable coding responses.
 **Target: 200 committed tokens/s for one coding stream. Not achieved yet.**
 Experimental paths are opt-in; serving defaults remain unchanged.
 
+**Building the next model?** Start with the [Blackhole tuning playbook](docs/blackhole-tuning-playbook.md)
+and [experiment record template](docs/tuning-experiment-template.md).
+
 ## Current position
 
 **Latest experiment rejected:** the request-owned Markov bias cache passes hardware
