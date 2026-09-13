@@ -288,3 +288,10 @@ shortcut. The pinned `tile_move_copy.h` explicitly documents that parameter
 as integer-FPU mode on Blackhole/Wormhole, unlike Quasar's unpack-to-destination
 meaning. Use an audited descriptor/kernel combination or an isolated compatible
 operand route; the observed error does not justify bypassing these API contracts.
+
+The direct-sum candidate builds successfully in run 34747044277, but fabric
+startup fails even with the 60000-ms bound, before attention executes. Do not
+attribute this to sum-buffer arithmetic. Remove stage-print instrumentation
+and its debug-server environment from the next candidate run, retaining the
+same direct-sum transform, startup bound and numerical tests. Prior snapshots
+remain useful evidence; the print path need not stay enabled for qualification.

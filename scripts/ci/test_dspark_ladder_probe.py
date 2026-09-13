@@ -28,9 +28,9 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertEqual(report['native_padded_keys'], fixture['native_keys'])
                     self.assertEqual(report['added_masked_poison_rows'], fixture['extra_masked_keys'])
                     self.assertEqual(report['ladder_geometry']['context'], context)
-                    self.assertTrue(report['stage_instrumented'])
+                    self.assertFalse(report['stage_instrumented'])
                     self.assertFalse(report['performance_qualified'])
-                    self.assertIn('dspark_ladder_stage_print.py', stub.SOURCES)
+                    self.assertIn('dspark_ladder_sum_unpack.py', stub.SOURCES)
                     self.assertFalse(report['ladder_geometry']['runtime_admitted'])
                 stub.main = run
                 with patch.dict(os.environ, dict(QWEN_LADDER_CONTEXT=str(context),
