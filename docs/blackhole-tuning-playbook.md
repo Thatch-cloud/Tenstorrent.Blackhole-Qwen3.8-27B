@@ -128,18 +128,18 @@ The quoted TG results use a 121-token EOS coding fixture, one stream, not a
 
 ## 7. Keep iteration fast and recoverable
 
-### Separate throughput work from context expansion
+### Current priority: complete the context ladder
 
-- Use the accepted combined 4K/8K runtime for the 200 committed-TG performance
-  track. A failing 64K synthetic case blocks 64K admission, not unrelated
-  performance experiments on already-qualified contexts.
-- Stop serial one-coordinate diagnostic campaigns after the current bounded
-  experiment. Collect multiple relevant stage boundaries in one diagnostic run.
+- The user reaffirmed ladder-first ordering. Resolve the active precision
+  gate, qualify the full-history runtime, then measure combined PP/CTX/TG at
+  each supported context. Do not pivot to unrelated short-context tuning.
+- Collect multiple relevant stage boundaries in one diagnostic run rather
+  than repeatedly paying setup cost for one coordinate or stage.
 - Require each further expensive experiment to name the combined-runtime
   bottleneck it addresses, the expected measurable change, and a reject rule.
-- Run the full context ladder at milestone acceptance, not on every edit.
-  Preserve the outstanding 32K/64K/131K/262K and concurrency requirements;
-  this sequencing change does not qualify or remove them.
+- The outstanding ladder includes 32K/64K and capacity-qualified 131K/262K
+  windows, followed by concurrency investigation. Neither a synthetic pass
+  nor the existing 4K/8K measurements substitutes for these requirements.
 - Treat cached-build reuse as pending until implemented and validated; the
   existing recommendation below is not evidence that CI currently reuses builds.
 
