@@ -6,6 +6,22 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ## Current position
 
+### Context and workload coverage
+
+| Workload | CTX | PP tok/s | Committed TG tok/s | Status |
+| --- | ---: | ---: | ---: | --- |
+| One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
+| One stream, batch 1, up to 256 output tokens | 8192 | Pending | Pending | Combined hardware trial 34729556803 queued |
+| Larger contexts | >8192 | Not measured | Not measured | Full ladder pending |
+| Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
+
+**8K numerical milestone:** 256-key draft attention passes the full synthetic
+accuracy/replay gate on both simulated chips. It uses 34 online iterations
+instead of 133, preserves all live history, and passes with poisoned padding.
+This is not a measured speedup. The hardware trial combines it with the current
+T16 verifier, shared Q/K normalization, fused MLP and captured publication.
+[8K evidence and remaining gates](docs/draft-8k-numerical-investigation.md).
+
 ### Latest complete-response comparison
 
 One stream / batch 1, CTX 4096. Each timed response commits 121 tokens and ends
