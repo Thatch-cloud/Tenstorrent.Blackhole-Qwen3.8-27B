@@ -66,12 +66,13 @@ def main():
 
         state, request, commit_request, decision, status = [allocate(shape) for shape in
             ((1, 65, 8), (1, 1, 8), (1, 1, 8), (1, 1, 8), (1, 1, 8))]
+        anchor = allocate((1, 1, 1))
         mask = allocate((1, 1, 1), ttnn.bfloat16)
         cache = allocate((1, 64, width), ttnn.float32, fill=float('nan'))
         left = allocate((1, 1, 256), ttnn.bfloat16, ttnn.TILE_LAYOUT)
         right = allocate((1, 256, width), ttnn.bfloat16, ttnn.TILE_LAYOUT)
         bias, output, dense = [allocate((1, 1, width), ttnn.float32, ttnn.TILE_LAYOUT) for unused in range(3)]
-        lookup_program = controller(mesh, state, request, decision, status)
+        lookup_program = controller(mesh, state, request, decision, status, anchor=anchor)
         commit_program = controller(mesh, state, commit_request, decision, status)
         mask_program, payload_program = plumbing(mesh, state, decision, bias, cache, output, mask)
         config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(2, 1),
@@ -82,7 +83,7 @@ def main():
         upload(torch.tensor([1] + [0] * 7).reshape(1, 1, 1, 8).repeat(2, 1, 1, 1), commit_request)
 
         def run():
-            ttnn.generic_op([state, request, decision, status], lookup_program)
+            ttnn.generic_op([state, request, decision, status, anchor], lookup_program)
             ttnn.generic_op([decision, mask], mask_program)
             ttnn.sparse_matmul(left, right, sparsity=mask, program_config=config,
                 is_input_a_sparse=True, is_input_b_sparse=True, compute_kernel_config=math,
@@ -98,7 +99,8 @@ def main():
             weights = torch.randn((2, 1, 256, width), generator=torch.Generator().manual_seed(382000 + epoch)).mul(.2).bfloat16()
             upload(latent, left)
             upload(weights, right)
-            upload(torch.tensor([[0, token + chip, epoch] + [0] * 5 for chip in range(2)]).reshape(2, 1, 1, 8), request)
+            upload(torch.tensor([[0, 248320, epoch] + [0] * 5 for chip in range(2)]).reshape(2, 1, 1, 8), request)
+            upload(torch.tensor([token, token + 1]).reshape(2, 1, 1, 1), anchor)
             ttnn.synchronize_device(mesh)
 
         inputs(999, 1)

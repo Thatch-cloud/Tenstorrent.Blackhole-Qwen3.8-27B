@@ -3,11 +3,14 @@
 from pathlib import Path
 
 
-def build(mesh, state, request, decision, status):
+def build(mesh, state, request, decision, status, *, anchor=None):
     import ttnn
 
     tensors = (state, request, decision, status)
     shapes = ((1, 1, 65, 8),) + ((1, 1, 1, 8),) * 3
+    if anchor is not None:
+        tensors += (anchor,)
+        shapes += ((1, 1, 1, 1),)
     for tensor, shape in zip(tensors, shapes, strict=True):
         if (tuple(tensor.shape) != shape or tensor.dtype != ttnn.uint32
                 or tensor.layout != ttnn.ROW_MAJOR_LAYOUT
@@ -24,12 +27,13 @@ def build(mesh, state, request, decision, status):
     for chip in range(2):
         local = [values[chip] for values in parts]
         addresses = [tensor.buffer_address() for tensor in local]
-        if len(set(addresses)) != 4:
+        if len(set(addresses)) != len(tensors):
             raise ValueError('Controller buffers must not alias')
         kernel = ttnn.KernelDescriptor(
             kernel_source=str(Path(__file__).with_name('markov_cache_control.cpp')), core_ranges=cores,
             compile_time_args=[argument for tensor in local
                 for argument in ttnn.TensorAccessorArgs(tensor).get_compile_time_args()],
+            defines=[('QWEN_CACHE_LIVE_ANCHOR', '1')] if anchor is not None else [],
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                 noc=ttnn.NOC.RISCV_0_default))
         runtime = ttnn.RuntimeArgs()

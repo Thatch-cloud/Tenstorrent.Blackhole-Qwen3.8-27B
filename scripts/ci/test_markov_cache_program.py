@@ -32,6 +32,14 @@ class MarkovCacheProgramTests(unittest.TestCase):
         self.assertIn('exit "$status"', branch)
         self.assertNotIn('build.py', branch)
 
+    def test_live_anchor_requires_a_uint32_scalar(self):
+        api = SimpleNamespace(uint32='uint32', ROW_MAJOR_LAYOUT='row', DRAM_MEMORY_CONFIG='dram')
+        tensors = [SimpleNamespace(shape=shape, dtype='uint32', layout='row', memory_config=lambda: 'dram')
+            for shape in ((1, 1, 65, 8), (1, 1, 1, 8), (1, 1, 1, 8), (1, 1, 1, 8))]
+        anchor = SimpleNamespace(shape=(1, 1, 1, 8), dtype='uint32', layout='row', memory_config=lambda: 'dram')
+        with patch.dict('sys.modules', {'ttnn': api}), self.assertRaises(ValueError):
+            build(None, *tensors, anchor=anchor)
+
 
 if __name__ == '__main__':
     unittest.main()

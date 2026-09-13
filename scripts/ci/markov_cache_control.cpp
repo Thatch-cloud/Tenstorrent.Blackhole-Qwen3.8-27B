@@ -44,7 +44,16 @@ void kernel_main() {
     asm volatile("" ::: "memory");
     auto& state = *reinterpret_cast<markov_cache::State*>(scratch);
     auto& decision = *reinterpret_cast<markov_cache::Decision*>(decision_address);
-    const auto request = reinterpret_cast<const uint32_t*>(request_address);
+    auto request = reinterpret_cast<uint32_t*>(request_address);
+#ifdef QWEN_CACHE_LIVE_ANCHOR
+    if (request[0] == 0) {
+        constexpr auto anchor_args = TensorAccessorArgs<status_args.next_compile_time_args_offset()>();
+        const auto anchor = TensorAccessor(anchor_args, get_arg_val<uint32_t>(4), 4);
+        const uint32_t anchor_address = scratch + 2304;
+        read_record(get_noc_addr(0, anchor), anchor_address);
+        request[1] = *reinterpret_cast<const uint32_t*>(anchor_address);
+    }
+#endif
     auto status = reinterpret_cast<uint32_t*>(status_address);
     for (uint32_t word = 0; word < 8; ++word) {
         status[word] = 0;

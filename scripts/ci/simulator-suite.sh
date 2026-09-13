@@ -67,6 +67,11 @@ PY
                     --width "$width" --output "/experiment/results/markov-cache-pipeline-$width.json" || status=$?
                 printf '%s\n' "$status" > "/experiment/results/markov-cache-pipeline-$width.exit-status"
             done
+            if [[ "$status" = 0 ]]; then
+                timeout -k 15 900 python3 -u /experiment-scripts/ci/dspark-cached-markov-probe.py \
+                    --output /experiment/results/dspark-cached-markov.json || status=$?
+                printf '%s\n' "$status" > /experiment/results/dspark-cached-markov.exit-status
+            fi
         fi
         exit "$status"
     fi
