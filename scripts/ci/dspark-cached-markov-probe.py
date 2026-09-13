@@ -66,6 +66,26 @@ def main():
             memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=replicate))
             for value, layout in zip(weights_host, (ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT), strict=True)]
         cache = BiasCache(ttnn, mesh, *weights)
+        original_dot = cache.dot
+        def diagnosed_dot(anchor, latent, retain):
+            output = original_dot(anchor, latent, retain)
+            if 'first_dot' not in report:
+                config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(2, 1),
+                    in0_block_w=1, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
+                    fuse_batch=True, fused_activation=None, mcast_in0=True)
+                kernel = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4,
+                    math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+                reference = retain(ttnn.matmul(latent, weights[1], dtype=ttnn.float32, program_config=config,
+                    compute_kernel_config=kernel, memory_config=ttnn.DRAM_MEMORY_CONFIG))
+                report['first_dot'] = dict(latent_shape=list(latent.shape), comparisons=[])
+                for chip, (actual, expected) in enumerate(zip(read(output), read(reference), strict=True)):
+                    report['first_dot']['comparisons'].append(dict(chip=chip,
+                        exact=torch.equal(actual.view(torch.int32), expected.view(torch.int32)),
+                        max_abs=float((actual - expected).abs().max()),
+                        actual=actual.reshape(-1)[:16].tolist(), expected=expected.reshape(-1)[:16].tolist(),
+                        state=read(cache.state)[chip].reshape(65, 8)[:3].to(torch.int64).tolist()))
+            return output
+        cache.dot = diagnosed_dot
         def candidate(operations, device_mesh, anchor, base, predecessor, successor, owned):
             return cached_execute(cache, operations, device_mesh, anchor, base, predecessor, successor, owned)
         patterns = []
@@ -117,6 +137,11 @@ def main():
                 for chip, (token, scores) in enumerate(zip(read(record['token']), read(record['scores']), strict=True)):
                     reference_token, reference_scores = expected[step][chip]
                     if not torch.equal(token, reference_token) or not same(scores, reference_scores):
+                        report['mismatch'] = dict(pattern=pattern, step=step, chip=chip,
+                            token=token.reshape(-1).tolist(), reference_token=reference_token.reshape(-1).tolist(),
+                            shape=list(scores.shape), reference_shape=list(reference_scores.shape),
+                            max_abs=float((scores - reference_scores).abs().max()),
+                            scores=scores.reshape(-1)[:16].tolist(), reference_scores=reference_scores.reshape(-1)[:16].tolist())
                         raise AssertionError(f'Feedback differs: pattern={pattern} step={step} chip={chip}')
                     checks.append(dict(pattern=pattern, repetition=repetition, step=step, chip=chip,
                         token_exact=True, scores_exact=True))
