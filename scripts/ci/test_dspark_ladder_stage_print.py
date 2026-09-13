@@ -88,6 +88,8 @@ void snapshot() {
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_OUTPUT_BEFORE'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_SCORES'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_EXP'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_PRE_MASK'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_POST_MASK'), 1)
         self.assertLess(patched['compute_common.hpp'].index(b'QWEN_PARTIAL_SUM'),
             patched['compute_common.hpp'].index(b'matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);'))
         self.assertIn(b'Ladder probe requires an explicit padded history geometry', patched['sdpa.cpp'])

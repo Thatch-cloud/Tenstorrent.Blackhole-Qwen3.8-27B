@@ -673,3 +673,9 @@ capture does not separate matmul packing from mask-add reload. The exp
 function also reloads scores, so changing mask addition alone cannot be
 assumed to preserve FP32 arithmetic through normalization. Avoid another
 output-recurrence change as a remedy for this observed upstream score loss.
+
+Next read-only capture brackets the provided-mask addition with the same
+15-element score slice, retaining post-reduction/pre-exp and post-exp slices.
+This directly tests whether the mask-add operation changes unmasked proposal
+scores or whether precision was already lost in QK matmul packing. Only the
+final chunk is logged. Eighteen preflight tests pass; no arithmetic changes.

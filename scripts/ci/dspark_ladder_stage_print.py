@@ -30,6 +30,7 @@ OUTPUT_BEFORE = '''
 '''
 EXP_UPDATE = '''            sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, scale_fp32, true>(
                 alias_cur_max, alias_cur_sum, Sk_chunk_t);'''
+MASK_UPDATE = '                    add_block_inplace(cb_qk_im, cb_mask_in, qk_chunk_tiles);'
 QK_SNAPSHOT = '''
             if (!QWEN_DRAFT_EXP_APPROX && processed_k_chunks == 65) {
 #if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
@@ -118,6 +119,8 @@ def stage_snapshots(*, row=2, column=5):
             (OUTPUT_UPDATE, output_before + OUTPUT_UPDATE),
             (EXP_UPDATE, qk_snapshot.replace('QWEN_QK_STAGE', 'QWEN_QK_SCORES') + EXP_UPDATE
                 + qk_snapshot.replace('QWEN_QK_STAGE', 'QWEN_QK_EXP')),
+            (MASK_UPDATE, qk_snapshot.replace('QWEN_QK_STAGE', 'QWEN_QK_PRE_MASK') + MASK_UPDATE
+                + qk_snapshot.replace('QWEN_QK_STAGE', 'QWEN_QK_POST_MASK')),
             (RECIPROCAL, RECIPROCAL + reciprocal))
         return substitutions
 
