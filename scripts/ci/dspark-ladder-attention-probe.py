@@ -30,6 +30,7 @@ def main():
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
                 stage_instrumented=True, performance_qualified=False,
+                sum_unpack_mode='fp32-direct-sum-a-b',
                 output_recurrence='native-l1-pack-accumulation-bf16',
                 key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
@@ -40,7 +41,8 @@ def main():
         probe.SOURCES = tuple(sorted(set(probe.SOURCES + (
             'dspark-native-8k-attention-probe.py', 'dspark-ladder-attention-probe.py',
             'dspark_ladder_attention.py', 'dspark_ladder_geometry.py', 'dspark_ladder_fixtures.py',
-            'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_stage_print.py'))))
+            'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_stage_print.py',
+            'dspark_ladder_sum_unpack.py'))))
         probe.__file__ = str(Path(__file__).resolve())
         with stage_snapshots(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import dspark_fp32_build as baseline
 from dspark_ladder_build import factory_scope, main, validate_manifest
 from dspark_ladder_factory import geometry_predicate
+from dspark_ladder_sum_unpack import remove_unpack_transform
 
 
 class LadderBuildTests(unittest.TestCase):
@@ -34,4 +35,10 @@ class LadderBuildTests(unittest.TestCase):
         with factory_scope():
             candidate = baseline.transform(original, enabled=True)
             self.assertEqual(candidate.count(baseline.REPLACEMENT.encode()), 1)
-            self.assertEqual(candidate.replace(baseline.REPLACEMENT.encode(), baseline.ANCHOR.encode()), original)
+            partial_original = candidate.replace(baseline.REPLACEMENT.encode(), baseline.ANCHOR.encode())
+            self.assertEqual(remove_unpack_transform(partial_original), original)
+            self.assertEqual(baseline.transform(partial_original, enabled=True), candidate)
+            with self.assertRaises(ValueError):
+                baseline.transform(partial_original.replace(b'.at(cb_ids.sum_B)', b'.at(cb_ids.qk_im)'), enabled=True)
+            with self.assertRaises(ValueError):
+                baseline.transform(candidate, enabled=True)
