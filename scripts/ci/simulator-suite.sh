@@ -52,9 +52,13 @@ PY
             timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
             printf 'ladder build completed elapsed_seconds=%s\n' "$((SECONDS - build_started))"
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
+            export TT_METAL_DPRINT_CORES=all
+            export TT_METAL_DPRINT_RISCVS=TRISC0
+            export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
             for context in 32768 65536 128 4096 8192; do
                 context_status=0
                 context_started=$SECONDS
+                export TT_METAL_DPRINT_FILE="/experiment/results/dspark-ladder-stage-$context.log"
                 printf 'ladder context=%s started %s\n' "$context" "$(date -u +%FT%TZ)"
                 QWEN_LADDER_CONTEXT="$context" timeout -k 15 1800 python3 -u \
                     /experiment-scripts/ci/dspark-ladder-attention-probe.py \
