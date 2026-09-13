@@ -47,14 +47,21 @@ PY
             mkdir -p /optimisation
             ln -s /simulator-support /optimisation/sim
             export QWEN_DRAFT_FP32_CONTROL=0
+            build_started=$SECONDS
+            printf 'ladder build started %s\n' "$(date -u +%FT%TZ)"
             timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
+            printf 'ladder build completed elapsed_seconds=%s\n' "$((SECONDS - build_started))"
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
-            for context in 128 4096 8192 32768 65536; do
+            for context in 32768 65536 128 4096 8192; do
                 context_status=0
+                context_started=$SECONDS
+                printf 'ladder context=%s started %s\n' "$context" "$(date -u +%FT%TZ)"
                 QWEN_LADDER_CONTEXT="$context" timeout -k 15 1800 python3 -u \
                     /experiment-scripts/ci/dspark-ladder-attention-probe.py \
                     --output "/experiment/results/dspark-ladder-attention-$context.json" || context_status=$?
                 printf '%s\n' "$context_status" > "/experiment/results/dspark-ladder-attention-$context.exit-status"
+                printf '%s\n' "$((SECONDS - context_started))" > "/experiment/results/dspark-ladder-attention-$context.elapsed-seconds"
+                printf 'ladder context=%s completed status=%s elapsed_seconds=%s\n' "$context" "$context_status" "$((SECONDS - context_started))"
                 if [ "$context_status" != 0 ]; then exit "$context_status"; fi
             done
             exit 0
