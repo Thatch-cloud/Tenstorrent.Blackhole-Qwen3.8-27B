@@ -306,3 +306,28 @@ Remove direct sum routing from the active ladder builder and keep its transform
 and immutable CI tag as a rejected experiment. An isolated reciprocal operand
 must preserve the existing formats for binary/matmul sum consumers. Do not
 suppress simulator undefined-behavior detection or mark the direct-sum gate passed.
+
+## Isolated scalar reciprocal: 32K passes, 64K remains open
+
+Run **34748217636**, revision b0f3a77, evaluates the reciprocal directly from
+stored FP32 first-column values on TR0. Shared-buffer formats stay unchanged.
+The native toolchain links and executes this diagnostic; host object compilation
+and two-tile address tests were prerequisites, not the device proof.
+
+| Prompt / output headroom | Numerical result | Replay | Cleanup | Simulator probe time |
+|---|---|---|---|---:|
+| 32768 / 1024 | All four eager comparisons pass | All four changed-input comparisons exact to eager | Clean | 940 s |
+| 65536 / 1024 | First eager comparison: chip 0, 256 failing elements, max abs 0.638324738 | Not reached | Clean | 916 s |
+
+32K report SHA256:
+`8d05be0a5853e763e9a0b475f5a01f119ffa4923d517f4f5d62aba580549029b`.
+At 64K the first failures include head 9, row 10: -46.75 versus reference
+approximately -46.125. The remaining 128/4K/8K regressions were not executed
+because this run stops at the first failing context.
+
+This confirms the isolated reciprocal change is sufficient for the tested 32K
+component matrix, not for 64K, full-model correctness, coding quality or TG.
+Do not compare simulator times as hardware performance: the passing 32K probe
+executes additional eager and replay work that earlier failed probes never reached.
+Retain this candidate as a diagnostic baseline while isolating 64K output/history
+accumulation drift; hardware admission and the full PP/CTX/TG ladder remain open.
