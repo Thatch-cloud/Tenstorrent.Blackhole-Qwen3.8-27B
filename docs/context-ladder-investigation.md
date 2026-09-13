@@ -67,3 +67,20 @@ Retain the tolerance and hardware block. Investigate normalization and partial
 output precision before assuming a further chunk-size increase is sufficient.
 Future CI revisions run 32K first, then 64K and all smaller regressions, with
 per-stage elapsed times; this completed run used the old ascending order.
+
+### Remaining-error localization
+
+The first 16 recorded failures are chip 1, query row 2, heads 12/13:
+output -46.25 versus reference about -45.78. At those same head/row coordinates,
+the constant-value diagnostic returns 0.9921875 rather than 1. A uniform
+normalization gain alone cannot explain both: it would shrink the negative
+output magnitude, whereas the observed failing output has larger magnitude.
+This rules out treating constant-value drift as a sufficient root-cause diagnosis.
+
+The pinned `compute_common.hpp` packs each `QK @ V` chunk into `out_im_A/B`,
+then rescales and accumulates through `mul_block_bcast_cols<..., false, true>`
+using explicit L1 pack accumulation. The ladder factory still allocates those
+buffers in BF16; QK/sums and the patched statistics are FP32. Next isolate that
+output recurrence from the denominator, preserving the actual mixed-value fixture.
+Do not repeat the previously rejected blanket FP32-intermediate switch without
+auditing its unpack, pack and accumulation paths.
