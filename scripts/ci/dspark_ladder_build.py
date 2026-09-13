@@ -8,12 +8,10 @@ from unittest.mock import patch
 
 import dspark_fp32_build as baseline
 from dspark_hardware_gate import digest
-from dspark_ladder_factory import geometry_predicate
-from dspark_ladder_sum_unpack import INSERT, remove_unpack_transform, transform
+from dspark_ladder_factory import geometry_predicate, transform
 
 
-BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py',
-    'dspark_ladder_sum_unpack.py')
+BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py')
 BASELINE_VALIDATE = baseline.validate_manifest
 
 
@@ -27,8 +25,6 @@ def factory_scope():
     def selected(source, *, enabled=True):
         if enabled is not True:
             raise ValueError('Ladder requires the enabled FP32 statistics factory')
-        if INSERT.encode() in source:
-            source = remove_unpack_transform(source)
         return transform(source)
 
     with patch.object(baseline, 'REPLACEMENT', replacement), patch.object(baseline, 'transform', selected):
@@ -42,8 +38,6 @@ def validate_manifest(root, output):
         raise ValueError('Exact ladder builder provenance required')
     if report.get('experiment') != 'full-context-ladder':
         raise ValueError('Explicit ladder build required')
-    if report.get('sum_unpack_mode') != 'fp32-direct-sum-a-b':
-        raise ValueError('Explicit sum-buffer unpack candidate required')
     return report
 
 
@@ -59,7 +53,6 @@ def main():
     report = json.loads(output.read_text())
     report['experiment'] = 'full-context-ladder'
     report['ladder_builders'] = builders
-    report['sum_unpack_mode'] = 'fp32-direct-sum-a-b'
     output.write_text(json.dumps(report, indent=2) + '\n')
     validate_manifest('/opt/tt-metal', output)
 

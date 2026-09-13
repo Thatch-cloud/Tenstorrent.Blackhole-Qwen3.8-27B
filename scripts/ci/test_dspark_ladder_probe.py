@@ -30,7 +30,7 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertEqual(report['ladder_geometry']['context'], context)
                     self.assertFalse(report['stage_instrumented'])
                     self.assertFalse(report['performance_qualified'])
-                    self.assertIn('dspark_ladder_sum_unpack.py', stub.SOURCES)
+                    self.assertEqual(report['sum_unpack_mode'], 'native-tf32')
                     self.assertFalse(report['ladder_geometry']['runtime_admitted'])
                 stub.main = run
                 with patch.dict(os.environ, dict(QWEN_LADDER_CONTEXT=str(context),

@@ -295,3 +295,14 @@ attribute this to sum-buffer arithmetic. Remove stage-print instrumentation
 and its debug-server environment from the next candidate run, retaining the
 same direct-sum transform, startup bound and numerical tests. Prior snapshots
 remain useful evidence; the print path need not stay enabled for qualification.
+
+Run **34747542923** reaches execution without debug printing, then the simulator
+rejects `tensix_unpacr: unpack_to_dst=0 in_data_format=0 out_data_format=0`
+as undefined behavior. The globally changed sum-buffer format is incompatible
+with a source-register unpack consumer. This is not a numerical pass/fail and
+must not be retried on hardware. Build: 259 seconds; failed probe: 146 seconds.
+
+Remove direct sum routing from the active ladder builder and keep its transform
+and immutable CI tag as a rejected experiment. An isolated reciprocal operand
+must preserve the existing formats for binary/matmul sum consumers. Do not
+suppress simulator undefined-behavior detection or mark the direct-sum gate passed.
