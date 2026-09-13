@@ -57,6 +57,11 @@ PY
         timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py" \
             --output "/experiment/results/$QWEN_SIM_CASE.json" || status=$?
         printf '%s\n' "$status" > "/experiment/results/$QWEN_SIM_CASE.exit-status"
+        if [[ "$QWEN_SIM_CASE" = markov-sparse-dot && "$status" = 0 ]]; then
+            timeout -k 15 600 python3 -u /experiment-scripts/ci/markov-cache-pipeline-probe.py \
+                --output /experiment/results/markov-cache-pipeline.json || status=$?
+            printf '%s\n' "$status" > /experiment/results/markov-cache-pipeline.exit-status
+        fi
         exit "$status"
     fi
     math_flags=()
