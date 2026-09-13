@@ -520,3 +520,23 @@ Consume only the previous sum, as the original update does. This is a
 diagnostic, not a production-speed implementation. Two-tile face/address and
 ownership tests plus native patch composition and Blackhole object compilation
 pass; simulator execution must still establish synchronization and correctness.
+
+### Scalar sum update: 129 failures reduced to one, still unqualified
+
+Run **34781446816**, revision **7c098b1**, executes successfully with clean
+teardown but fails numerical acceptance in the first eager case on chip 0.
+The failing element count decreases from 129 to **1**. The remaining element
+is head 0, row 8, channel 116: **-43.5** versus **-43.949645996**, absolute
+error **0.449645996**. Do not widen the unchanged tolerance to admit it.
+Chip 1 eager acceptance and changed-input replay are not reached.
+
+At the previously failing head 5 / row 5 / channel 0, numerator stays -59
+while the denominator improves from 1.278387070 to **1.284729004**, versus
+the reference 1.286179920 at native maximum. This supports repeated sum-update
+conversion as a material source of that row's drift, not a complete diagnosis
+of the remaining element. Preserve this diagnostic for the next targeted
+head-0 investigation; it is not yet hardware-admitted or performance-qualified.
+The probe takes 530 seconds, not a hardware speed measurement.
+
+Report SHA256:
+`52f610a6623e4a53fca20ab018614ea15226ef5ef0e3331f7205952ecb2c0689`.
