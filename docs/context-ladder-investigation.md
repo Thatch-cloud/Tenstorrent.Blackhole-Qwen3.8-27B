@@ -167,3 +167,28 @@ not exoneration of the reload path. Do not choose a device rounding mode by
 assuming its name implies either CPU hypothesis. Further qualification requires
 native stage-level evidence, particularly partial denominator reduction and
 probability/output matmul, rather than additional aggregate CPU curve fitting.
+
+## Native stage snapshot run
+
+Run 34742988039, revision e43a8ec, adds read-only TRISC0 tile slices immediately
+after final denominator reduction. Capture row 2, numerator channel 5 and
+denominator/maximum column 0, with chip/core prefixes and global query index.
+The native BF16 output recurrence is unchanged. Instrumented timings are not
+performance evidence. Separate per-context print logs are retained in CI artifacts.
+
+CPU FP32 reference for the mixed-value fixture 0 (unscaled QK maximum):
+
+| Chip | Head | Maximum | Numerator | Denominator | Quotient |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 12 | 164.951171875 | -56.029891968 | 1.226281285 | -45.690898895 |
+| 0 | 13 | 169.750000000 | -56.498088837 | 1.193859696 | -47.323894501 |
+| 1 | 12 | 165.258789063 | -56.044185638 | 1.224151254 | -45.782077789 |
+| 1 | 13 | 165.251953125 | -56.043537140 | 1.224238634 | -45.778278351 |
+
+Computed from `fixture_probe(32768).fixtures()[0]`, local KV head `head // 4`,
+query row 2, joined full-history keys and value channel 5. Add the original mask
+to unscaled QK, subtract its maximum, exponentiate with `128 ** -0.5`, then sum
+probabilities and their value products. These are reference calculations, not
+device observations. The constant-value fixture has numerator equal to denominator;
+the last-proposal-only fixture has numerator 1 at these coordinates. Both retain
+the same maximum and denominator, helping distinguish print decoding from math drift.
