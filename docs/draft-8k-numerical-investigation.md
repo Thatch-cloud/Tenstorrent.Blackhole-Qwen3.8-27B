@@ -104,6 +104,17 @@ selector and exactly 8512 physical keys / 64-key chunks. Source hashes alone
 prove installation, not that a conditional branch executed. Successful compilation
 with these assertions will prove specialization selection for this probe only.
 
+Run 34727823121 successfully compiles with both assertions and executes all
+value diagnostics before reproducing the same eager output hashes and 256
+failures. Specialization selection is therefore verified; a silently disabled
+conditional does not explain these unchanged results. Teardown is clean.
+
+The CPU control also tests BF16 score conversion before maximum/subtraction.
+On case 0/chip 1, round-to-nearest produces 10,444 failures (max 1.20284), and
+truncation produces 8,075 (max 1.05605), without output rounding. Neither matches
+the native signature. These are additional excluded simple hypotheses, not
+evidence that the native implementation actually converts scores to BF16.
+
 ## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination

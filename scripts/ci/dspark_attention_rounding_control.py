@@ -17,7 +17,7 @@ def bf16_storage(value, truncate=False):
 
 
 def online_attention(query, key, value, mask, *, round_output=False, round_probability=False,
-        round_statistics=False, truncate_scale=False, truncate_storage=False):
+        round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False):
     scale = torch.tensor(128 ** -.5)
     if truncate_scale:
         scale = ((scale.view(torch.int32) >> 16) << 16).view(torch.float32)
@@ -27,6 +27,8 @@ def online_attention(query, key, value, mask, *, round_output=False, round_proba
     for start in range(0, key.shape[2], 64):
         scores = query @ key[:, :, start:start + 64].transpose(-1, -2)
         scores = scores + mask[:, :, :, start:start + 64]
+        if round_scores:
+            scores = bf16_storage(scores, truncate_storage)
         updated = torch.maximum(maximum, scores.amax(-1, keepdim=True))
         if round_statistics:
             updated = bf16_storage(updated, truncate_storage)
@@ -68,18 +70,23 @@ def main():
                     (False, False, False, True), (True, False, True, True))
                 variants = tuple((*variant, False) for variant in variants) + (
                     (True, False, False, True, True), (True, False, True, True, True))
-                for round_output, round_probability, round_statistics, truncate_scale, truncate_storage in variants:
+                variants = tuple((*variant, False) for variant in variants) + (
+                    (False, False, False, True, False, True),
+                    (False, False, False, True, True, True))
+                for round_output, round_probability, round_statistics, truncate_scale, truncate_storage, round_scores in variants:
                     actual = online_attention(query, key, value, mask,
                         round_output=round_output, round_probability=round_probability,
                         round_statistics=round_statistics, truncate_scale=truncate_scale,
-                        truncate_storage=truncate_storage)
+                        truncate_storage=truncate_storage, round_scores=round_scores)
                     failed = ~torch.isclose(actual, expected, rtol=.01, atol=.01)
                     records.append(dict(case=case, chip=chip, round_output=round_output,
                         round_probability=round_probability, round_statistics=round_statistics,
                         truncate_scale=truncate_scale, truncate_storage=truncate_storage,
+                        round_scores=round_scores,
                         failed=int(failed.sum()),
                         max_abs=float((actual - expected).abs().max())))
-                    if not any((round_output, round_probability, round_statistics, truncate_scale)) and failed.any():
+                    if not any((round_output, round_probability, round_statistics, truncate_scale,
+                            truncate_storage, round_scores)) and failed.any():
                         raise AssertionError('FP32 online-softmax CPU control failed')
     print(json.dumps(dict(qualification=False, device_access=False, records=records), indent=2))
 
