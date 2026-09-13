@@ -59,7 +59,7 @@ when weights or cache ownership change; exhausted epochs require fresh state.
 The C++ host test passes with `-Wall -Wextra -Werror`, covering hits, uncommitted
 misses, eviction, invalidation and counter exhaustion. This is only controller
 logic. A metadata-only RISCV dataflow wrapper and changed-input trace probe are
-now implemented, pending CI simulator qualification. They use one worker per
+now simulator-qualified for metadata only. They use one worker per
 chip, 2,176 bytes of persistent metadata and 4 KiB scratch per chip. Commands
 and commit tickets remain device-resident; host reads in the probe are audits,
 not a proposed serving path. Execution must be serialized by the cache owner.
@@ -70,3 +70,31 @@ It checks 148 commands on both chips, including uncommitted misses, LRU
 eviction, generation changes, stale commits, overflow and changed-input replay.
 No cached bias payload, conditional native matmul, simulator numerical pass
 or combined-runtime speedup is implemented yet.
+
+| CI run | Result | Scope |
+| --- | --- | --- |
+| 34731557841 | Rejected immediately | DMA staging did not match DRAM address alignment; no completed checks |
+| 34731657226 | Passed, 2m19s total CI | 296 exact checks, both chips, changed-input trace replay and clean teardown |
+
+The corrected wrapper stages each transfer with matching low address bits,
+then copies between aligned DMA staging and packed controller records.
+This conservative metadata implementation is not a latency result. All four
+probe/kernel source hashes match the run and remain unchanged after execution.
+Report SHA256: `ff55bddd2dfbcce53601b1f56b0d220e57fb5b194cdc3637c673ee849a1bc3a5`.
+Ten local Python tests and the warning-clean C++ controller test also pass.
+
+## Next: skip the native dot, not just its result
+
+Local native-source inspection found an existing `ttnn.sparse_matmul` path.
+With `nnz` omitted, its reader sends a device-side validity flag to all three
+compute threads, which skip the matmul loop for an inactive batch. This is a
+candidate for avoiding a new custom conditional-matmul implementation, not
+yet a qualified replacement for the current dense Markov dot.
+
+The next tiny test must compare active sparse output bit-for-bit against the
+current HiFi4/FP32 dense dot at rank 256, then alternate active/inactive inputs
+through the same trace. Do not set a fixed `nnz`: changing hit/miss counts would
+violate that kernel's protocol. The sparse writer zero-fills skipped output,
+so cached bias needs a separate persistent payload and explicit selection.
+Its FP32 intermediate-buffer configuration must also match dense arithmetic;
+sharing the compute source alone does not prove numerical equivalence.
