@@ -194,7 +194,7 @@ hardware request comparison are the next integration gate.
 
 ## Live token feedback
 
-Run 34733995681 is testing the new `dspark_cached_markov.py` request-owned
+Run 34733995681 tested the new `dspark_cached_markov.py` request-owned
 adapter. Each of its fifteen steps uses the device-selected previous token
 for both embedding and cache lookup, then adds the current base logits and
 selects the next token. The request metadata deliberately contains an invalid
@@ -211,3 +211,9 @@ its extra warmup proposal, not immediately after trace capture: that later
 warmup would otherwise repopulate the cache before timing starts. Its cost
 must remain in request setup. The borrowing proposal trace must close before
 the cache releases persistent buffers.
+
+The live-anchor controller/payload tests passed at all three widths, but the
+fifteen-step chain failed its first pattern/step/chip score comparison and
+closed cleanly. This is not admitted to hardware. Run 34734406268 adds first-dot
+shape, cache-state and dense-reference diagnostics, plus score/token mismatch
+details. It is currently running; exactness checks are unchanged.
