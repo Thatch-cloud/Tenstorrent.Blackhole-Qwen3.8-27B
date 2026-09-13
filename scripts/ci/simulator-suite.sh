@@ -52,7 +52,7 @@ PY
             timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
             printf 'ladder build completed elapsed_seconds=%s\n' "$((SECONDS - build_started))"
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
-            export TT_METAL_DPRINT_CORES=all
+            export TT_METAL_DPRINT_CORES='(4,1),(5,1)'
             export TT_METAL_DPRINT_RISCVS=TR0
             export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
             for context in 32768 65536 128 4096 8192; do

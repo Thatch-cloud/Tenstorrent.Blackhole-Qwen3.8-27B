@@ -199,3 +199,11 @@ example in `rtoptions.cpp` is not authoritative over the HAL parser/runtime.
 Build completed in 266 seconds, then initialization failed after 7 seconds.
 Correct the selector and retain a CI regression assertion. No stage readings
 or new numerical evidence were produced by run 34742988039.
+
+Retry 34743320392 accepts `TR0` but fails the 15000-ms fabric-router startup
+handshake before kernel execution. Its stage log is empty; no arithmetic
+conclusion follows. Restrict debug polling to logical cores (4,1)/(5,1), the
+global-query 12/13 workers under the probe's 8x8 grid and one query tile per
+head, instead of all workers. Retain the existing startup timeout for this
+comparison. Debug-server overhead is a hypothesis, not a proven cause of the
+handshake failure; do not change physical fabric configuration or reset cards.

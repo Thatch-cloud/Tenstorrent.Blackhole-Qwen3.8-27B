@@ -15,6 +15,7 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertIn('context.elapsed-seconds', suite)
         self.assertIn('ladder build completed elapsed_seconds=', suite)
         self.assertIn('export TT_METAL_DPRINT_RISCVS=TR0\n', suite)
+        self.assertIn("export TT_METAL_DPRINT_CORES='(4,1),(5,1)'", suite)
         self.assertNotIn('TT_METAL_DPRINT_RISCVS=TRISC0', suite)
         self.assertIn('dspark_ladder_build.py', suite)
         self.assertIn('dspark-ladder-attention-$context.exit-status', suite)
