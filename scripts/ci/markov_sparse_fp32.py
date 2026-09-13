@@ -9,6 +9,8 @@ ANCHOR = '    // Create compute kernel\n'
 INSERT = '''    const bool qwen_markov_fp32_reload =
         a.logical_shape() == ttnn::Shape{1, 1, 1, 256} &&
         (b.logical_shape() == ttnn::Shape{1, 1, 256, 64} ||
+         b.logical_shape() == ttnn::Shape{1, 1, 256, 4992} ||
+         b.logical_shape() == ttnn::Shape{1, 1, 256, 3712} ||
          b.logical_shape() == ttnn::Shape{1, 1, 256, 248320}) &&
         is_input_a_sparse && operation_attributes.is_input_b_sparse &&
         !nnz.has_value() && !use_indices && fp32_dest_acc_en && !packer_l1_acc_en &&

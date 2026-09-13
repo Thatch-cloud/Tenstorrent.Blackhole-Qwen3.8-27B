@@ -7,7 +7,7 @@ def build(mesh, state, decision, bias, cache, output, mask):
     import ttnn
 
     width = int(bias.shape[-1])
-    if width not in (64, 248320):
+    if width not in (64, 3712, 4992, 248320):
         raise ValueError('Explicit Markov vocabulary geometry required')
     expected = ((state, (1, 1, 65, 8), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT),
         (decision, (1, 1, 1, 8), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT),
@@ -50,4 +50,4 @@ def build(mesh, state, decision, bias, cache, output, mask):
         return result
 
     return program('markov_cache_mask.cpp', (1, 5), 1), program(
-        'markov_cache_payload.cpp', (0, 1, 2, 3, 4), 2 if width == 64 else 10)
+        'markov_cache_payload.cpp', (0, 1, 2, 3, 4), 10 if width == 248320 else 2)

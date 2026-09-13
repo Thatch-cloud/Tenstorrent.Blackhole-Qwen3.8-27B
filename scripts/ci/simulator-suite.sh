@@ -61,6 +61,12 @@ PY
             timeout -k 15 600 python3 -u /experiment-scripts/ci/markov-cache-pipeline-probe.py \
                 --output /experiment/results/markov-cache-pipeline.json || status=$?
             printf '%s\n' "$status" > /experiment/results/markov-cache-pipeline.exit-status
+            for width in 4992 3712; do
+                if [[ "$status" != 0 ]]; then break; fi
+                timeout -k 15 600 python3 -u /experiment-scripts/ci/markov-cache-pipeline-probe.py \
+                    --width "$width" --output "/experiment/results/markov-cache-pipeline-$width.json" || status=$?
+                printf '%s\n' "$status" > "/experiment/results/markov-cache-pipeline-$width.exit-status"
+            done
         fi
         exit "$status"
     fi
