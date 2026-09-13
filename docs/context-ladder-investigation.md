@@ -590,3 +590,22 @@ does not qualify the broader candidate. Restore BF16 output intermediates
 while retaining the scalar sum update, which had only one first-case failure.
 Report SHA256:
 `b57744cc5cb70dc9aefc2c9c98be1782d9fd8f95e7025bfdaea20ab2db4bfb43`.
+
+### CPU screen before another native candidate
+
+Extend the existing non-qualifying rounding model to the actual 1024-key
+chunk and test chip 0 / head 0 / row 8 / channel 116. Seven CPU unit tests
+pass, including FP32-reference preservation at that chunk size.
+
+| CPU reload hypothesis | FP32 output intermediates | Nearest BF16 storage | Truncated BF16 storage |
+|---|---:|---:|---:|
+| None | -44 | -44 | -44.75 |
+| Nearest TF32 | -44 | -44 | -44.75 |
+| Truncated TF32 | -44.25 | -44.25 | -45 |
+
+None reproduces native -43.5. This cheap screen does not justify selecting a
+rounding flag or assuming a numerical fix; it models neither native partial
+PV matmul nor the exact pack/unpack recurrence. Retain it as a CPU diagnostic,
+not a simulator replacement or admission gate. The next native isolation
+must separate output recurrence from the partial PV results while retaining
+the improved denominator, rather than extrapolating from this surrogate.

@@ -31,7 +31,7 @@ def tf32_reload(value, mode):
 def online_attention(query, key, value, mask, *, round_output=False, round_probability=False,
         round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False, key_chunk=64,
         reload_mode='none'):
-    if type(key_chunk) is not int or key_chunk not in (64, 256, 512):
+    if type(key_chunk) is not int or key_chunk not in (64, 256, 512, 1024):
         raise ValueError('Explicit diagnostic key chunk required')
     scale = torch.tensor(128 ** -.5)
     def reload(value):

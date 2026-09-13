@@ -44,7 +44,7 @@ class OnlineAttentionTests(unittest.TestCase):
         mask = torch.zeros(1, 1, 3, 1024)
         mask[..., 768:] = float('-inf')
         expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
-        for chunk in (64, 256, 512):
+        for chunk in (64, 256, 512, 1024):
             with self.subTest(chunk=chunk):
                 torch.testing.assert_close(online_attention(query, key, value, mask, key_chunk=chunk),
                     expected, rtol=.01, atol=.01)
