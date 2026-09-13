@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import dspark_fp32_build
 import dspark_stats_pack
+import dspark_attention_value_diagnostics
 from dspark_ladder_attention import adapter
 from dspark_ladder_build import validate_manifest
 from dspark_ladder_factory import selector_assert
@@ -17,6 +18,9 @@ from dspark_ladder_scalar_reciprocal import scalar_reciprocal
 
 
 def main():
+    diagnostics = os.environ.get('QWEN_LADDER_VALUE_DIAGNOSTICS', '0')
+    if diagnostics not in ('0', '1'):
+        raise ValueError('Value diagnostics must be explicitly 0 or 1')
     context_text = os.environ.get('QWEN_LADDER_CONTEXT')
     if context_text not in tuple(map(str, CONTEXTS)):
         raise ValueError('Explicit ladder context required')
@@ -30,6 +34,7 @@ def main():
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
                 stage_instrumented=False, performance_qualified=False,
+                value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
                 output_recurrence='native-l1-pack-accumulation-bf16',
@@ -45,6 +50,8 @@ def main():
             'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_scalar_reciprocal.py'))))
         probe.__file__ = str(Path(__file__).resolve())
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
+                patch.object(dspark_attention_value_diagnostics, 'KINDS',
+                    dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \
                 patch.object(probe, 'json', SimpleNamespace(dumps=dumps)):
             probe.main()

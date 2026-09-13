@@ -343,3 +343,16 @@ Native storage is 67584 keys and the selector admits only the exact
 2112-key-tile/32-chunk-tile pair. This is a bounded accumulation hypothesis,
 not a general chunk sweep or assumed speed improvement. Run 64K first, then
 all four smaller regressions if it passes. Retain unchanged tolerances.
+
+### Faster subsequent probes
+
+Run 34749444881 tests revision 50a185b with diagnostics unchanged. Do not
+cancel or replace that in-flight numerical experiment.
+
+For subsequent ladder probes, the three non-qualifying value-diagnostic
+executions are opt-in with `QWEN_LADDER_VALUE_DIAGNOSTICS=1`; default `0`
+goes directly to the existing eager and replay acceptance matrix. Reports
+explicitly record `value_diagnostics_enabled`. Numerical tolerances, fixture
+controls, input/layout checks, replay checks and cleanup are unchanged.
+Use diagnostics when investigating a failure, not on every regression context.
+CPU wrapper/fixture/compiler/CI tests pass; elapsed CI savings remain unmeasured.
