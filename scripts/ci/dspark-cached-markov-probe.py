@@ -180,7 +180,7 @@ def main():
                 cache.reset()
                 report['cache_reset_epochs'].append(cache.epoch)
                 for state in read(cache.state):
-                    if int(state.reshape(65, 8)[0, 0]) != cache.epoch or torch.count_nonzero(state.reshape(65, 8)[1:, 0]):
+                    if int(state.reshape(65, 8)[0, 0]) != cache.epoch or torch.count_nonzero(state.reshape(65, 8)[1:, 0].long()):
                         raise AssertionError('Cold cache reset did not invalidate entries')
             for record in records:
                 ttnn.copy_host_to_device_tensor(poison_token, record['token'])

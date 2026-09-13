@@ -229,3 +229,11 @@ reshape, dtype conversion or added data movement. It repeats every size and
 feedback gate, and now explicitly requires the diagnostic three-dimensional
 first-dot comparisons to be bit-exact. Sixteen host tests pass; hardware
 promotion remains disabled pending this result.
+
+Run 34734814212 passed both first-dot comparisons and all 90 eager feedback
+comparisons. Replay stopped before its first comparison because PyTorch CPU
+does not implement `count_nonzero` for the returned UInt32 cache metadata.
+Teardown was clean. The reset assertion now converts host metadata to int64
+before counting; no device kernel or runtime precision changes. The host reset
+test also exercises UInt32 metadata. All 16 host tests pass. A fresh synthetic
+replay gate is required before hardware promotion; no new TG result is claimed.

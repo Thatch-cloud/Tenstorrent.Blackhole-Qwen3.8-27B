@@ -2,6 +2,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+import torch
+
 from dspark_cached_markov import BiasCache
 
 
@@ -27,7 +29,7 @@ class CachedMarkovTests(unittest.TestCase):
         self.assertEqual(self.operations.copy_host_to_device_tensor.call_count, 2)
         state, request = [call.args[0] for call in self.operations.from_torch.call_args_list[-2:]]
         self.assertEqual(int(state[0, 0, 0, 0]), 2)
-        self.assertEqual(int(state[0, 0, 1:, 0].count_nonzero()), 0)
+        self.assertEqual(int(state.to(dtype=torch.uint32)[0, 0, 1:, 0].long().count_nonzero()), 0)
         self.assertEqual(request.reshape(-1).tolist(), [0, 248320, 2, 0, 0, 0, 0, 0])
         self.assertEqual(self.operations.deallocate.call_count, 0)
 
