@@ -447,3 +447,36 @@ maximum and scalar reciprocal, without consuming or writing their buffers.
 Smaller contexts remain uninstrumented. Compare final eager hashes against
 run 34749444881 before treating snapshots as representative of that failure.
 No simulator timing from this instrumented run qualifies hardware performance.
+
+### 64K stage evidence: denominator drift precedes reciprocal
+
+Run **34751818673**, revision **5fe0eba**, reproduces the baseline's 129
+failing elements / 0.514190674 max error and exact chip-0 eager SHA256
+`c020277846d324c70116bf8629f1d9f4dd0dcfe5c204f18ace0595560bea2c07`.
+The logical core reports q=5, confirming the selected head. Clean teardown;
+391-second probe, no replay. Report SHA256:
+`c077d9255328bcb3d43f2743cf53d8633298440e328f92501c961d3dd502613a`.
+
+Row 5 / channel 0, fixture 0:
+
+| Chip | Native maximum | Native numerator | Native denominator | Scalar reciprocal |
+|---|---:|---:|---:|---:|
+| 0 | 166 | -59 | 1.278387070 | 0.782235682 |
+| 1 | 171 | -58.5 | 1.228707314 | 0.813863456 |
+
+CPU Torch FP32 recomputation from the same deterministic full-history fixture
+uses unscaled `K @ query`, masked maximum, and `exp((score-max)/sqrt(128))`.
+Compare numerator/denominator only after rescaling the reference to the native
+maximum with `exp((reference_max-native_max)/sqrt(128))`:
+
+| Chip | Reference max | Reference numerator at native max | Reference denominator at native max | Reference quotient |
+|---|---:|---:|---:|---:|
+| 0 | 166.5234375 | -58.851352031 | 1.286179920 | -45.756702571 |
+| 1 | 171.486328125 | -59.136698852 | 1.244706821 | -47.510544551 |
+
+Chip 0 numerator magnitude is 0.253% high and denominator 0.606% low. Their
+native quotient is already -46.151906089 before final reciprocal reload and
+BF16 rounding (reported output -46.25). Thus reciprocal-only changes cannot
+be assumed to fix the upstream error. Next isolate the denominator's final
+row reduction from its per-chunk accumulation; do not infer that all drift
+comes from one stage or that FP32 storage implies FP32 operand arithmetic.
