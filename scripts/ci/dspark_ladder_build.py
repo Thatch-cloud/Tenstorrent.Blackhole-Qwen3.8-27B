@@ -12,6 +12,7 @@ from dspark_ladder_factory import predicate, transform
 
 
 BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py')
+BASELINE_VALIDATE = baseline.validate_manifest
 
 
 @contextmanager
@@ -31,7 +32,7 @@ def factory_scope():
 
 def validate_manifest(root, output):
     with factory_scope():
-        report = baseline.validate_manifest(root, output)
+        report = BASELINE_VALIDATE(root, output)
     if report.get('ladder_builders') != {name: digest(Path(__file__).with_name(name)) for name in BUILDERS}:
         raise ValueError('Exact ladder builder provenance required')
     if report.get('experiment') != 'full-context-ladder':

@@ -24,7 +24,7 @@ class LadderBuildTests(unittest.TestCase):
             build.assert_not_called()
 
     def test_old_build_manifest_cannot_qualify_ladder(self):
-        with patch.object(baseline, 'validate_manifest', return_value={'passed': True}):
+        with patch('dspark_ladder_build.BASELINE_VALIDATE', return_value={'passed': True}):
             with self.assertRaisesRegex(ValueError, 'provenance'):
                 validate_manifest('/unused', '/unused')
 
