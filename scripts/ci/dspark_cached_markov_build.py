@@ -7,6 +7,24 @@ from dspark_cached_markov_gate import qualify
 from markov_sparse_fp32 import SOURCE, transform
 
 
+def admitted_reference(root, scripts, reference, evidence):
+    from markov_sparse_fp32 import SOURCE_SHA256, INSERT, CONFIG_REPLACEMENT, CONFIG
+    if reference.get(SOURCE) != SOURCE_SHA256:
+        raise ValueError('Original pinned sparse reference required')
+    inputs = evidence['factory_inputs']
+    if inputs.get('admission') != qualify(scripts, scripts) or inputs.get('source_before') != SOURCE_SHA256:
+        raise ValueError('Accepted simulator admission and original sparse source required')
+    source = (Path(root) / SOURCE).read_bytes()
+    original = source.replace(INSERT.encode(), b'').replace(CONFIG_REPLACEMENT.encode(), CONFIG.encode())
+    if transform(original) != source:
+        raise ValueError('Exact qualified sparse transformation required')
+    checked = completed(root, inputs, evidence['binaries']['build_Release/lib/_ttnncpp.so'],
+        import_passed=evidence.get('import_passed'))
+    if any(evidence.get(key) != value for key, value in checked.items()):
+        raise ValueError('Sparse build evidence differs from loaded runtime')
+    return dict(reference, **{SOURCE: checked['factory_sha256']})
+
+
 def prepare(root, scripts, *, enabled):
     if type(enabled) is not bool:
         raise ValueError('Explicit cached Markov build selection required')

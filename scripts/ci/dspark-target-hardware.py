@@ -262,6 +262,12 @@ def main():
         gate['request_prerequisites']['draft_8k_factory'] = dict(
             original_sha256=SOURCE_SHA256, qualified_sha256=qualified_factory)
         gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})
+    if options.request and not options.preflight and os.environ.get('QWEN_DSPARK_BIAS_CACHE') == '1':
+        from dspark_cached_markov_build import admitted_reference
+        cache_build = json.loads(Path('/experiment/results/dspark-cached-markov-hardware-build.json').read_text())
+        gate['native_reference'] = admitted_reference(root, Path(__file__).parent,
+            gate['native_reference'], cache_build)
+        gate['request_prerequisites']['bias_cache_build'] = cache_build
     require_compatible_native(native, gate['native_reference'], require_built_library=not options.preflight)
     if options.request:
         from dspark_context_selection import request_context, validate_history_capacity
