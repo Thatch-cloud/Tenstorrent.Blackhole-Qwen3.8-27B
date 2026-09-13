@@ -14,12 +14,33 @@ void kernel_main() {
     const uint32_t request_address = scratch + sizeof(markov_cache::State);
     const uint32_t decision_address = request_address + 32;
     const uint32_t status_address = decision_address + 32;
+    const uint32_t staging_base = (scratch + 3072 + 127) & ~127u;
+    auto read_record = [&](uint64_t source, uint32_t destination) {
+        const uint32_t staging = staging_base + static_cast<uint32_t>(source & 127);
+        noc_async_read(source, staging, 32);
+        noc_async_read_barrier();
+        auto input = reinterpret_cast<volatile uint32_t*>(staging);
+        auto output = reinterpret_cast<uint32_t*>(destination);
+        for (uint32_t word = 0; word < 8; ++word) {
+            output[word] = input[word];
+        }
+    };
+    auto write_record = [&](uint32_t source, uint64_t destination) {
+        const uint32_t staging = staging_base + static_cast<uint32_t>(destination & 127);
+        auto input = reinterpret_cast<const uint32_t*>(source);
+        auto output = reinterpret_cast<volatile uint32_t*>(staging);
+        for (uint32_t word = 0; word < 8; ++word) {
+            output[word] = input[word];
+        }
+        asm volatile("" ::: "memory");
+        noc_async_write(staging, destination, 32);
+        noc_async_write_barrier();
+    };
     for (uint32_t page = 0; page <= markov_cache::slots; ++page) {
-        noc_async_read(get_noc_addr(page, state_access), scratch + page * 32, 32);
+        read_record(get_noc_addr(page, state_access), scratch + page * 32);
     }
-    noc_async_read(get_noc_addr(0, request_access), request_address, 32);
-    noc_async_read(get_noc_addr(0, decision_access), decision_address, 32);
-    noc_async_read_barrier();
+    read_record(get_noc_addr(0, request_access), request_address);
+    read_record(get_noc_addr(0, decision_access), decision_address);
     asm volatile("" ::: "memory");
     auto& state = *reinterpret_cast<markov_cache::State*>(scratch);
     auto& decision = *reinterpret_cast<markov_cache::Decision*>(decision_address);
@@ -37,9 +58,8 @@ void kernel_main() {
     }
     asm volatile("" ::: "memory");
     for (uint32_t page = 0; page <= markov_cache::slots; ++page) {
-        noc_async_write(scratch + page * 32, get_noc_addr(page, state_access), 32);
+        write_record(scratch + page * 32, get_noc_addr(page, state_access));
     }
-    noc_async_write(decision_address, get_noc_addr(0, decision_access), 32);
-    noc_async_write(status_address, get_noc_addr(0, status_access), 32);
-    noc_async_write_barrier();
+    write_record(decision_address, get_noc_addr(0, decision_access));
+    write_record(status_address, get_noc_addr(0, status_access));
 }
