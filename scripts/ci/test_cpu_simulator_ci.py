@@ -6,6 +6,15 @@ import unittest
 
 
 class CpuSimulatorCiTests(unittest.TestCase):
+    def test_results_are_persisted_before_cleanup(self):
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('type=bind,src=$results,dst=/experiment/results', runner)
+        self.assertIn('docker start -a "$container" 2>&1 | tee experiment-results/simulator-container.log', runner)
+        self.assertIn('set -euo pipefail', runner)
+        self.assertNotIn('docker cp "$container:/experiment/results/."', runner)
+        self.assertIn('timeout -k 5 20 docker logs', runner)
+        self.assertIn('timeout -k 5 20 docker rm -f', runner)
+
     def test_ladder_runs_explicit_contexts_without_weights(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()

@@ -4,6 +4,7 @@ test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
 case "${QWEN_SIM_CASE:-stack}" in dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
+results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 cache=/home/thatch/.cache/qwen-experiments
@@ -29,9 +30,8 @@ cleanup() {
     status=$?
     trap - EXIT
     if [ -n "$container" ]; then
-        docker logs "$container" > experiment-results/simulator-container.log 2>&1 || true
-        docker cp "$container:/experiment/results/." experiment-results/ || true
-        docker rm -f "$container" >/dev/null || true
+        timeout -k 5 20 docker logs "$container" > experiment-results/simulator-final-container.log 2>&1 || true
+        timeout -k 5 20 docker rm -f "$container" >/dev/null || true
     fi
     exit "$status"
 }
@@ -44,6 +44,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     --pids-limit 4096 --memory 64g --cpus 16 --shm-size 8g \
     "${memory_options[@]}" \
     --mount "type=bind,src=$assets,dst=/simulator-assets,readonly" \
+    --mount "type=bind,src=$results,dst=/experiment/results" \
     "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
@@ -56,5 +57,5 @@ fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then
     docker cp optimisation/sim/sdpa-graft-registration.patch "$container:/tmp/ccl-graft-registration.patch"
 fi
-docker start -a "$container"
+docker start -a "$container" 2>&1 | tee experiment-results/simulator-container.log
 test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
