@@ -734,3 +734,28 @@ synchronization. Zero masks now bypass scalar addition entirely, preserving
 stored scores without a software floating-point operation; this is a local
 cost reduction, not a demonstrated fix for the timeout. Context-ladder
 acceptance and the 200 committed-token/s objective remain outstanding.
+
+### Small probe completed; 64K cancelled: run 34789440914
+
+The completed GitHub job log resolves the ambiguous `eager_0` messages:
+
+| UTC time | Event |
+| --- | --- |
+| 23:27:26 | 128-token score smoke started |
+| 23:30:14 / 23:31:19 | Replay stages 0 / 1 reached |
+| 23:32:27 | Smoke exited 0 after 301 seconds; 64K started |
+| 23:32:50 | 64K first eager invocation entered |
+| 23:45:52 | User cancellation terminated the job |
+
+The ten-minute smoke timeout did not fail: the smoke had already finished.
+The 64K probe was cancelled before its thirty-minute deadline. This rules
+out an unconditional hang of the score-centering sequence at small geometry,
+but does not prove that the 64K invocation was progressing. Scalar execution
+cost and geometry-dependent synchronization remain distinct possibilities.
+Only the asset checksum file survived in the uploaded artifact; the detailed
+smoke JSON and container log were not retained. Exit 0 and replay progress
+are useful evidence, not a substitute for a retained acceptance report.
+Do not rerun the same small probe merely to rediscover this outcome.
+
+Progress records now include context and smoke mode. Cancellation-safe result
+retention still needs improvement before another costly full-context run.
