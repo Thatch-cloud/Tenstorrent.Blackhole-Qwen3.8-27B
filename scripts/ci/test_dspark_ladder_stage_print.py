@@ -17,7 +17,13 @@ class StagePrintTests(unittest.TestCase):
             snapshot = next(after for before, after in edits if 'QWEN_STAGE' in after)
             self.assertIn('.h0=5, .h1=6', snapshot)
             self.assertNotIn('.w0=5, .w1=6', snapshot)
-        for row, column in ((15, 0), (5, 32), (-1, 0), (True, 0)):
+        with stage_snapshots(row=8, column=116):
+            edits = native_draft_sdpa.replacements()['compute_common.hpp']
+            snapshot = next(after for before, after in edits if 'QWEN_STAGE' in after)
+            self.assertIn('TSLICE(alias_mm2_prev_out, 3,', snapshot)
+            self.assertIn('.w0=20, .w1=21', snapshot)
+            self.assertIn('TSLICE(alias_prev_sum, 0,', snapshot)
+        for row, column in ((15, 0), (5, 128), (-1, 0), (True, 0)):
             with self.assertRaises(ValueError):
                 with stage_snapshots(row=row, column=column):
                     pass

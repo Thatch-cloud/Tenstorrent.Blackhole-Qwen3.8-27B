@@ -64,10 +64,12 @@ RECIPROCAL_SNAPSHOT = '''
 
 @contextmanager
 def stage_snapshots(*, row=2, column=5):
-    if type(row) is not int or type(column) is not int or not 0 <= row < 15 or not 0 <= column < 32:
-        raise ValueError('One live proposal row and first-tile channel required')
+    if type(row) is not int or type(column) is not int or not 0 <= row < 15 or not 0 <= column < 128:
+        raise ValueError('One live proposal row and output channel required')
+    tile, lane = divmod(column, 32)
     snapshot = SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}').replace(
-        '.w0=5, .w1=6', f'.w0={column}, .w1={column + 1}')
+        '.w0=5, .w1=6', f'.w0={lane}, .w1={lane + 1}').replace(
+        'TSLICE(alias_mm2_prev_out, 0,', f'TSLICE(alias_mm2_prev_out, {tile},')
     reciprocal = RECIPROCAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
     partial = PARTIAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
     original = native_draft_sdpa.replacements

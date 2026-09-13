@@ -540,3 +540,9 @@ The probe takes 530 seconds, not a hardware speed measurement.
 
 Report SHA256:
 `52f610a6623e4a53fca20ab018614ea15226ef5ef0e3331f7205952ecb2c0689`.
+
+Next measurement retains scalar sum update and moves read-only snapshots to
+head 0 / row 8 / channel 116. Channel 116 maps to output tile 3, lane 20;
+denominator and maximum remain in tile 0. Print only logical core (0,0),
+checking q=0 in the resulting log. Test the cross-tile coordinate mapping
+explicitly. No arithmetic or tolerance changes accompany this measurement.

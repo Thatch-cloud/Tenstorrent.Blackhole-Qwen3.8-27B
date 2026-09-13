@@ -37,7 +37,7 @@ def main():
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
                 stage_instrumented=context == 65536, performance_qualified=False,
-                stage_coordinates=dict(row=5, column=0) if context == 65536 else None,
+                stage_coordinates=dict(row=8, column=116) if context == 65536 else None,
                 value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
                 sum_update_mode='tr0-scalar-fp32' if context == 65536 else 'native',
@@ -58,7 +58,7 @@ def main():
         probe.__file__ = str(Path(__file__).resolve())
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 scalar_sum_update(), \
-                (stage_snapshots(row=5, column=0) if context == 65536 else nullcontext()), \
+                (stage_snapshots(row=8, column=116) if context == 65536 else nullcontext()), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \
