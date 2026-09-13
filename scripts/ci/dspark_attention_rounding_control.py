@@ -16,11 +16,27 @@ def bf16_storage(value, truncate=False):
     return value.bfloat16().float()
 
 
+def tf32_reload(value, mode):
+    if mode not in ('none', 'nearest', 'truncate'):
+        raise ValueError('Explicit CPU reload rounding hypothesis required')
+    if mode == 'none':
+        return value
+    bits = value.contiguous().view(torch.int32)
+    if mode == 'nearest':
+        bits = bits + 4095 + ((bits >> 13) & 1)
+    rounded = ((bits >> 13) << 13).view(torch.float32)
+    return torch.where(torch.isfinite(value), rounded, value)
+
+
 def online_attention(query, key, value, mask, *, round_output=False, round_probability=False,
-        round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False, key_chunk=64):
+        round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False, key_chunk=64,
+        reload_mode='none'):
     if type(key_chunk) is not int or key_chunk not in (64, 256, 512):
         raise ValueError('Explicit diagnostic key chunk required')
     scale = torch.tensor(128 ** -.5)
+    def reload(value):
+        return tf32_reload(value, reload_mode)
+    reload(scale)
     if truncate_scale:
         scale = ((scale.view(torch.int32) >> 16) << 16).view(torch.float32)
     maximum = torch.full((*query.shape[:-1], 1), float('-inf'))
@@ -28,27 +44,30 @@ def online_attention(query, key, value, mask, *, round_output=False, round_proba
     numerator = torch.zeros_like(query)
     for start in range(0, key.shape[2], key_chunk):
         scores = query @ key[:, :, start:start + key_chunk].transpose(-1, -2)
-        scores = scores + mask[:, :, :, start:start + key_chunk]
+        scores = reload(scores) + mask[:, :, :, start:start + key_chunk]
+        scores = reload(scores)
         if round_scores:
             scores = bf16_storage(scores, truncate_storage)
-        updated = torch.maximum(maximum, scores.amax(-1, keepdim=True))
+        updated = torch.maximum(reload(maximum), scores.amax(-1, keepdim=True))
         if round_statistics:
             updated = bf16_storage(updated, truncate_storage)
-        correction = ((maximum - updated) * scale).exp()
+        correction = ((reload(maximum) - reload(updated)) * scale).exp()
         if round_statistics:
             correction = bf16_storage(correction, truncate_storage)
-        probability = ((scores - updated) * scale).exp()
+        probability = ((scores - reload(updated)) * scale).exp()
         if round_probability:
             probability = bf16_storage(probability, truncate_storage)
-        partial = probability @ value[:, :, start:start + key_chunk]
+        partial = reload(probability) @ value[:, :, start:start + key_chunk]
         if round_output:
             partial = bf16_storage(partial, truncate_storage)
-        numerator = numerator * correction + partial
+        numerator = numerator * reload(correction) + partial
         if round_output:
             numerator = bf16_storage(numerator, truncate_storage)
-        denominator = denominator * correction + probability.sum(-1, keepdim=True)
+        denominator = reload(reload(denominator) * reload(correction)) + reload(probability.sum(-1, keepdim=True))
         maximum = updated
-    return (numerator / denominator).bfloat16().float()
+    if reload_mode == 'none':
+        return (numerator / denominator).bfloat16().float()
+    return (numerator * reload(reload(denominator).reciprocal())).bfloat16().float()
 
 
 def main():

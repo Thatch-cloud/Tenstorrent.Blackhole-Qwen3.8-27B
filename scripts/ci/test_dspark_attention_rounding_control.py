@@ -4,10 +4,24 @@ import unittest
 
 import torch
 
-from dspark_attention_rounding_control import bf16_storage, online_attention
+from dspark_attention_rounding_control import bf16_storage, online_attention, tf32_reload
 
 
 class OnlineAttentionTests(unittest.TestCase):
+    def test_tf32_reload_ties_sign_and_nonfinite(self):
+        values = torch.tensor([1 + 2 ** -11, 1 + 3 * 2 ** -11,
+            -1 - 2 ** -11, -1 - 3 * 2 ** -11, float('inf'), float('-inf'), float('nan')])
+        nearest = tf32_reload(values, 'nearest')
+        self.assertEqual(nearest[:4].tolist(), [1., 1 + 2 ** -9, -1., -1 - 2 ** -9])
+        self.assertEqual(tf32_reload(values, 'truncate')[:4].tolist(),
+            [1., 1 + 2 ** -10, -1., -1 - 2 ** -10])
+        self.assertTrue(torch.isposinf(nearest[4]))
+        self.assertTrue(torch.isneginf(nearest[5]))
+        self.assertTrue(torch.isnan(nearest[6]))
+        self.assertIs(tf32_reload(values, 'none'), values)
+        with self.assertRaises(ValueError):
+            tf32_reload(values, 'implicit')
+
     def test_chunk_control_rejects_implicit_values(self):
         for chunk in (True, 0, 128, 512.0):
             with self.subTest(chunk=chunk), self.assertRaises(ValueError):

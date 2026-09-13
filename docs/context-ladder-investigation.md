@@ -145,3 +145,25 @@ reload precision, not mislabel the native route as BF16 unpack or assume a
 missing mode is automatically a bug. Direct-to-destination unpack also changes
 operand routing: audit compatibility for copy/SFPU versus binary/matmul users
 before enabling it for shared circular buffers.
+
+### CPU reload hypotheses
+
+The CPU diagnostic now supports `reload_mode='nearest'` or `'truncate'` for
+10-bit-mantissa intermediate reloads; `'none'` retains the existing control.
+Six unit tests cover controls plus signed ties and nonfinite preservation.
+For fixture 0/chip 1 at 32K, 512-key chunks and nearest BF16 output storage:
+
+| Reload model | Failing elements | Maximum absolute error | Head 12 / row 2 / channel 5 |
+|---|---:|---:|---:|
+| None | 0 | 0.2220345 | -45.75 |
+| Nearest | 0 | 0.3749504 | -45.75 |
+| Truncate | 470 | 0.5313950 | -46.00 |
+| Native simulator | 17 | 0.4752197 | -46.25 |
+
+Neither hypothesis reproduces the native result. The model uses CPU matmul,
+exponentials and flat row sums rather than Tensix tile-wise reduction/SFPU
+instructions, so this is evidence against a simple rounding-only explanation,
+not exoneration of the reload path. Do not choose a device rounding mode by
+assuming its name implies either CPU hypothesis. Further qualification requires
+native stage-level evidence, particularly partial denominator reduction and
+probability/output matmul, rather than additional aggregate CPU curve fitting.
