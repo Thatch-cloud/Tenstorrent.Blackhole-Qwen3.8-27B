@@ -237,3 +237,19 @@ Teardown was clean. The reset assertion now converts host metadata to int64
 before counting; no device kernel or runtime precision changes. The host reset
 test also exercises UInt32 metadata. All 16 host tests pass. A fresh synthetic
 replay gate is required before hardware promotion; no new TG result is claimed.
+
+Run 34735206013 (revision 8ef266f) passes: 90 eager and 120 changed-input
+feedback comparisons, reset epochs 2 and 3, and clean teardown. All 15 local
+feedback source hashes match both report snapshots. The 64-, 4992- and
+3712-column pipeline reports also pass with clean teardown and all seven local
+sources matching before/after snapshots. Feedback report SHA256:
+`2084242137fd239a0a46e55810414cbb5cc8e411c2e01e212d025f6f295ac620`.
+
+This admits work on the opt-in combined hardware integration, not a performance
+claim: full-vocabulary qualification and performance qualification remain false.
+The hardware build must include the scoped sparse FP32 factory change alongside
+the existing four-link and 8K changes. Both comparison arms must retain shared
+QK, fused T16, captured publication and score layout; only the candidate adds
+the bias cache. Reset after the final proposal warmup and release borrowing
+traces before cache buffers. Follow this comparison with the full-ladder
+checkpoint in the programme, rather than another optimization cycle.
