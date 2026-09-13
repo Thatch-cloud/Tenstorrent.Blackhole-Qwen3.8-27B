@@ -2,13 +2,14 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
-case "${QWEN_SIM_CASE:-stack}" in stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
+if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then kinds=''; fi
 mounts=()

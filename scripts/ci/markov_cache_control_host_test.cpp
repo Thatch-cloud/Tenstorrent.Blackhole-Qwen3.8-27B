@@ -38,7 +38,7 @@ int main() {
     assert(!lookup(state, vocabulary, 2).ok);
     assert(!lookup(state, 0, 0).ok);
     state.clock = std::numeric_limits<uint32_t>::max();
-    assert(!lookup(state, 0, 2).ok);
+    assert(!lookup(state, 0, 3).ok);
     assert(lookup(state, 0, 4).ok);
     return 0;
 }

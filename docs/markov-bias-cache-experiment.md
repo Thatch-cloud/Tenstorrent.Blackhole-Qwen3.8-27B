@@ -58,5 +58,15 @@ when weights or cache ownership change; exhausted epochs require fresh state.
 
 The C++ host test passes with `-Wall -Wextra -Werror`, covering hits, uncommitted
 misses, eviction, invalidation and counter exhaustion. This is only controller
-logic. No device wrapper, cached bias payload, conditional native matmul,
-simulator numerical pass or combined-runtime speedup is implemented yet.
+logic. A metadata-only RISCV dataflow wrapper and changed-input trace probe are
+now implemented, pending CI simulator qualification. They use one worker per
+chip, 2,176 bytes of persistent metadata and 4 KiB scratch per chip. Commands
+and commit tickets remain device-resident; host reads in the probe are audits,
+not a proposed serving path. Execution must be serialized by the cache owner.
+
+The `markov-cache-control` suite in the CPU simulator workflow loads no model
+weights, does no runtime-library rebuild, and has a ten-minute probe timeout.
+It checks 148 commands on both chips, including uncommitted misses, LRU
+eviction, generation changes, stale commits, overflow and changed-input replay.
+No cached bias payload, conditional native matmul, simulator numerical pass
+or combined-runtime speedup is implemented yet.

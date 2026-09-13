@@ -19,6 +19,13 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then
+    status=0
+    timeout -k 15 600 python3 -u /experiment-scripts/ci/markov-cache-control-probe.py \
+        --output /experiment/results/markov-cache-control.json || status=$?
+    printf '%s\n' "$status" > /experiment/results/markov-cache-control.exit-status
+    exit "$status"
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
     python3 - <<'PY'
 import importlib.util
