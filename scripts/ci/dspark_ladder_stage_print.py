@@ -19,13 +19,13 @@ SNAPSHOT = '''
                     local_q_start + q_iter - iter_q_start,
                     TSLICE(alias_mm2_prev_out, 0,
                         (SliceRange{.h0=2, .h1=3, .hs=1, .w0=5, .w1=6, .ws=1}),
-                        TSLICE_INPUT_CB, TSLICE_RD_PTR, true, true),
+                        true, true),
                     TSLICE(alias_prev_sum, 0,
                         (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}),
-                        TSLICE_INPUT_CB, TSLICE_RD_PTR, true, true),
+                        true, true),
                     TSLICE(alias_prev_max, 0,
                         (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}),
-                        TSLICE_INPUT_CB, TSLICE_RD_PTR, true, true));
+                        true, true));
             ));
         }
 '''

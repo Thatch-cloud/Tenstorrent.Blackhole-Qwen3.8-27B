@@ -207,3 +207,11 @@ global-query 12/13 workers under the probe's 8x8 grid and one query tile per
 head, instead of all workers. Retain the existing startup timeout for this
 comparison. Debug-server overhead is a hypothesis, not a proven cause of the
 handshake failure; do not change physical fabric configuration or reset cards.
+
+Run 34743843204 passes fabric startup with restricted polling, then fails JIT
+compilation: the TR0 `TileSlice` constructor takes five arguments, whereas the
+seven-argument form includes CB/pointer selectors only available on BR/NC.
+Correct all three slices to the compute-thread signature confirmed in
+`api/debug/dprint_tile.h` and `api/debug/dump.h`. The migration guide example
+was insufficiently thread-specific. No stage readings were obtained; this is
+an instrumentation compile error, not attention numerical evidence.

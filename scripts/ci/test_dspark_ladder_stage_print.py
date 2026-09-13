@@ -12,6 +12,9 @@ class StagePrintTests(unittest.TestCase):
         for forbidden in ('pop_front', 'push_back', 'reserve_back', 'pack_tile', 'copy_tile'):
             self.assertNotIn(forbidden, SNAPSHOT)
         self.assertIn('UNPACK((', SNAPSHOT)
+        self.assertNotIn('TSLICE_INPUT_CB', SNAPSHOT)
+        self.assertNotIn('TSLICE_RD_PTR', SNAPSHOT)
+        self.assertEqual(SNAPSHOT.count('TSLICE('), 3)
         self.assertIn('!QWEN_DRAFT_EXP_APPROX', SNAPSHOT)
         original = native_draft_sdpa.replacements
         with self.assertRaises(RuntimeError):
