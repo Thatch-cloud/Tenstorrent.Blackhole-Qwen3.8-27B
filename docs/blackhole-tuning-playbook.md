@@ -13,6 +13,7 @@ Keep this guide curated; detailed logs belong in the experiment programme.
 | [Programme](two-card-experiment-programme.md) | Detailed backlog, history and acceptance requirements |
 | [8K investigation](draft-8k-numerical-investigation.md) | Attention precision and context-extension case study |
 | [Bias cache experiment](markov-bias-cache-experiment.md) | Correctness success that became a performance rejection |
+| [Context and user capacity](context-and-user-capacity-plan.md) | 131K/262K window qualification and concurrent-user sweeps |
 
 ## 1. Record the machine and model before tuning
 
@@ -55,7 +56,11 @@ trace allocation, append, read and reset paths, and check counter ownership.
 Our initial ladder is 128/4096/8192/32768/65536 input tokens, batch 1.
 Aim for 1024 generated tokens for sustained measurements; first verify ignore-EOS
 support. If generation stops naturally, report the real count rather than padding
-or relabelling the run. Test batch/concurrency 2 and 8 separately afterward.
+or relabelling the run. Extend coverage to 131072/262144 total-token windows
+with generation headroom inside the limit. Then sweep active users 1/2/4/8/16
+where memory and scheduler support permit; record actual batch size separately.
+Follow the [capacity plan](context-and-user-capacity-plan.md); these extensions
+are planned, not supported-runtime or user-capacity claims.
 
 ## 3. Find the bottleneck, not the emptiest core
 

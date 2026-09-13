@@ -1672,6 +1672,15 @@ it currently counts text-bearing events and averages per-stream median gaps.
 
 ## 2. E0-E2: baseline, cache truth and responsiveness
 
+### Extended context and user-capacity coverage
+
+The [capacity plan](context-and-user-capacity-plan.md) extends the ladder to
+131072/262144 total-token windows, reserving output space within those limits.
+After per-size correctness and combined batch-1 measurements, sweep active users
+1/2/4/8/16 where safe. Publish per-user latency/TG and aggregate throughput
+separately, with actual scheduler batch size and memory per card. Largest-window
+runtime admission and sustainable user counts remain unqualified.
+
 ### E0: reproduce the current baseline
 
 Inspect the running container and its actual imported model/plugin files, not merely the
