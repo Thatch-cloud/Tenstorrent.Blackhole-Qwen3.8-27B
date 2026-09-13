@@ -3,7 +3,7 @@
 import unittest
 
 import native_draft_sdpa
-from dspark_stats_pack import BEFORE, AFTER, SUM_BEFORE, SUM_AFTER, scoped_stats_pack
+from dspark_stats_pack import BEFORE, AFTER, SUM_BEFORE, SUM_AFTER, SELECTOR_ASSERT, scoped_stats_pack
 
 
 class StatsPackTests(unittest.TestCase):
@@ -13,7 +13,9 @@ class StatsPackTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'scope exit'):
             with scoped_stats_pack():
                 changed = native_draft_sdpa.replacements()
-                self.assertEqual(changed['sdpa.cpp'], baseline['sdpa.cpp'])
+                self.assertEqual(changed['sdpa.cpp'][0][0], baseline['sdpa.cpp'][0][0])
+                self.assertEqual(changed['sdpa.cpp'][0][1], baseline['sdpa.cpp'][0][1].replace(
+                    '#include "compute_common.hpp"', SELECTOR_ASSERT + '#include "compute_common.hpp"'))
                 self.assertEqual(changed['compute_common.hpp'],
                     baseline['compute_common.hpp'] + ((BEFORE, AFTER), (SUM_BEFORE, SUM_AFTER)))
                 self.assertNotIn('recip_tile_first_column<false>', str(changed))

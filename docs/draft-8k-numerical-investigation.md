@@ -96,6 +96,14 @@ with the native SUM reduction API for the draft signature only. Preserve FP32
 statistics, the pack fix, reciprocal, fixtures, and original tolerance. This
 is an unqualified simulator experiment, not a runtime default change.
 
+Run 34727344168 fails with both eager output hashes unchanged from 34726821443;
+all six value-diagnostic maxima also remain unchanged. The SUM substitution is
+not an accepted fix. Before drawing stronger conclusions from identical results,
+the synthetic scope now adds compile-time assertions requiring the precise-draft
+selector and exactly 8512 physical keys / 64-key chunks. Source hashes alone
+prove installation, not that a conditional branch executed. Successful compilation
+with these assertions will prove specialization selection for this probe only.
+
 ## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination
