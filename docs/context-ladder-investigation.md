@@ -679,3 +679,24 @@ Next read-only capture brackets the provided-mask addition with the same
 This directly tests whether the mask-add operation changes unmasked proposal
 scores or whether precision was already lost in QK matmul packing. Only the
 final chunk is logged. Eighteen preflight tests pass; no arithmetic changes.
+
+### Confirmed zero-mask score truncation
+
+Run **34786241488** (c95eaf1) matches the one-failure eager hash and closes
+cleanly. Report SHA256:
+`8452b36e39aad8141a02fd4bb4d96d46fd65f9f05aa2a66d5432757ea9cbd6df`.
+For the unmasked final proposal, QK matmul produces the exact reference
+score; adding its zero mask changes it:
+
+| Chip | Before mask addition | After mask addition | CPU FP32 reference |
+|---|---:|---:|---:|
+| 0 | 162.189453125 | 162.125 | 162.189453125 |
+| 1 | 170.119140625 | 170 | 170.119140625 |
+
+The other 14 proposal scores also truncate at mask addition. This directly
+identifies source-register reload during mask addition as a precision-loss
+boundary, rather than QK matmul packing at these coordinates. A fix must
+retain zero-mask scores and apply blocked entries exactly, while accounting
+for the subsequent score reload in exponentiation. Merely storing FP32,
+changing output recurrence, or loosening tolerance does not fix that boundary.
+No hardware performance is established by this diagnostic result.
