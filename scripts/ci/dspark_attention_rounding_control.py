@@ -17,16 +17,18 @@ def bf16_storage(value, truncate=False):
 
 
 def online_attention(query, key, value, mask, *, round_output=False, round_probability=False,
-        round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False):
+        round_statistics=False, truncate_scale=False, truncate_storage=False, round_scores=False, key_chunk=64):
+    if type(key_chunk) is not int or key_chunk not in (64, 256, 512):
+        raise ValueError('Explicit diagnostic key chunk required')
     scale = torch.tensor(128 ** -.5)
     if truncate_scale:
         scale = ((scale.view(torch.int32) >> 16) << 16).view(torch.float32)
     maximum = torch.full((*query.shape[:-1], 1), float('-inf'))
     denominator = torch.zeros_like(maximum)
     numerator = torch.zeros_like(query)
-    for start in range(0, key.shape[2], 64):
-        scores = query @ key[:, :, start:start + 64].transpose(-1, -2)
-        scores = scores + mask[:, :, :, start:start + 64]
+    for start in range(0, key.shape[2], key_chunk):
+        scores = query @ key[:, :, start:start + key_chunk].transpose(-1, -2)
+        scores = scores + mask[:, :, :, start:start + key_chunk]
         if round_scores:
             scores = bf16_storage(scores, truncate_storage)
         updated = torch.maximum(maximum, scores.amax(-1, keepdim=True))
@@ -38,7 +40,7 @@ def online_attention(query, key, value, mask, *, round_output=False, round_proba
         probability = ((scores - updated) * scale).exp()
         if round_probability:
             probability = bf16_storage(probability, truncate_storage)
-        partial = probability @ value[:, :, start:start + 64]
+        partial = probability @ value[:, :, start:start + key_chunk]
         if round_output:
             partial = bf16_storage(partial, truncate_storage)
         numerator = numerator * correction + partial

@@ -8,6 +8,24 @@ from dspark_attention_rounding_control import bf16_storage, online_attention
 
 
 class OnlineAttentionTests(unittest.TestCase):
+    def test_chunk_control_rejects_implicit_values(self):
+        for chunk in (True, 0, 128, 512.0):
+            with self.subTest(chunk=chunk), self.assertRaises(ValueError):
+                online_attention(None, None, None, None, key_chunk=chunk)
+
+    def test_supported_chunk_sizes_preserve_fp32_reference(self):
+        generator = torch.Generator().manual_seed(383929)
+        query = torch.randn(1, 1, 3, 128, generator=generator)
+        key = torch.randn(1, 1, 1024, 128, generator=generator)
+        value = torch.randn(1, 1, 1024, 128, generator=generator)
+        mask = torch.zeros(1, 1, 3, 1024)
+        mask[..., 768:] = float('-inf')
+        expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
+        for chunk in (64, 256, 512):
+            with self.subTest(chunk=chunk):
+                torch.testing.assert_close(online_attention(query, key, value, mask, key_chunk=chunk),
+                    expected, rtol=.01, atol=.01)
+
     def test_truncation_differs_from_round_to_nearest(self):
         values = torch.tensor([1.007, -1.007, float('-inf')])
         truncated = bf16_storage(values, truncate=True)

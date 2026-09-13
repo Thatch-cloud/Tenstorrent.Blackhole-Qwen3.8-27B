@@ -103,3 +103,28 @@ Measured cycle breakdown: native build 261 seconds, 32K probe 492 seconds.
 The numerical failure is available after roughly 12.6 minutes of these stages,
 without spending time on the three smaller contexts first. Simulator build caching
 can address the 4.35-minute build component, not eliminate the 8.2-minute probe.
+
+## CPU rounding check at the failing geometry
+
+Extend `dspark_attention_rounding_control.online_attention` with explicit
+64/256/512-key chunks (default 64 unchanged). Five CPU unit tests pass.
+Use `fixture_probe(32768)`, fixture 0, chip 1, 15 live query rows, joined
+full-history keys/values with fourfold KV-head expansion, and the unchanged mask.
+Compare to `probe.reference` at rtol=atol=0.01. These are CPU hypotheses, not
+Tensix simulation or admission evidence.
+
+| Key chunk | Partial/running output storage model | Failing elements | Maximum absolute error |
+|---:|---|---:|---:|
+| 256 | FP32 | 0 | 0.1250114 |
+| 256 | BF16 nearest | 0 | 0.2220345 |
+| 256 | BF16 truncation | 30720 | 1.9038239 |
+| 512 | FP32 | 0 | 0.1250000 |
+| 512 | BF16 nearest | 0 | 0.2220345 |
+| 512 | BF16 truncation | 18146 | 1.1017494 |
+
+At head 12 / row 2 / channel 5, 512-key truncation reproduces -46.25,
+while nearest produces -45.75 versus reference -45.7820702. However, the
+truncation model fails 18146 elements, not the device's 17: matching one
+coordinate does not establish the mechanism. Ordinary nearest BF16 output
+storage alone does not reproduce this failure. Do not promote blanket FP32
+storage on this evidence; inspect the actual per-operation rounding/unpack paths.
