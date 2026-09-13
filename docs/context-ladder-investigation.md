@@ -84,3 +84,22 @@ buffers in BF16; QK/sums and the patched statistics are FP32. Next isolate that
 output recurrence from the denominator, preserving the actual mixed-value fixture.
 Do not repeat the previously rejected blanket FP32-intermediate switch without
 auditing its unpack, pack and accumulation paths.
+
+## Explicit output recurrence diagnostic
+
+Run 34741921352, revision c211e67, replaces output L1 pack accumulation with
+BF16 multiply-in-place followed by explicit addition. The same 32K case still
+fails 17 elements on chip 1, with the same maximum error 0.4752197265625.
+Both output hashes change, so the candidate does affect arithmetic, but neither
+the worst error nor constant-value drift improves. Chip 0 passes; cleanup passes.
+No replay, 64K or smaller regression cases were reached in this fail-first run.
+
+Reject this as a fix and restore the native output recurrence in the ladder
+entrypoint. Retain the isolated diagnostic module and immutable tag for reproduction.
+This rules out this replacement as sufficient; it does not prove BF16 output
+storage is harmless or that all affected intermediate values are identical.
+
+Measured cycle breakdown: native build 261 seconds, 32K probe 492 seconds.
+The numerical failure is available after roughly 12.6 minutes of these stages,
+without spending time on the three smaller contexts first. Simulator build caching
+can address the 4.35-minute build component, not eliminate the 8.2-minute probe.
