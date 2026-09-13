@@ -6,6 +6,18 @@ import unittest
 
 
 class CpuSimulatorCiTests(unittest.TestCase):
+    def test_ladder_runs_explicit_contexts_without_weights(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        self.assertEqual(workflow.count('dspark-ladder-attention-sim'), 5)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('for context in 128 4096 8192 32768 65536', suite)
+        self.assertIn('dspark_ladder_build.py', suite)
+        self.assertIn('dspark-ladder-attention-$context.exit-status', suite)
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertTrue(any('dspark-ladder-attention' in line and "kinds=''" in line
+            for line in runner.splitlines()))
+
     def test_dedicated_fusion_workflow_is_serialized_and_cpu_only(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / '.github/workflows/qwen-ttsim.yml').read_text()
