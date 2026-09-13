@@ -252,10 +252,26 @@ def main():
         gate['simulator_metadata_only_sources'] = request_gate['simulator_metadata_only_sources']
         gate['sampling_link_sources'] = sampling_link_audit(root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
     native = native_fingerprints(root, dict(native_sources=gate['native_reference']))
+    from dspark_context_selection import request_context
+    if options.request and not options.preflight and request_context() == 8192:
+        from dspark_8k_admission import history_limit, verify_factory
+        from dspark_fp32_intermediates import SOURCE, SOURCE_SHA256
+        if history_limit() != 8448 or gate['native_reference'].get(SOURCE) != SOURCE_SHA256:
+            raise ValueError('Admitted 8K request and original pinned factory reference required')
+        qualified_factory = verify_factory(root)
+        gate['request_prerequisites']['draft_8k_factory'] = dict(
+            original_sha256=SOURCE_SHA256, qualified_sha256=qualified_factory)
+        gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})
     require_compatible_native(native, gate['native_reference'], require_built_library=not options.preflight)
     if options.request:
         from dspark_context_selection import request_context, validate_history_capacity
-        validate_history_capacity(request_context(), request_limit(options.max_new_tokens))
+        if options.preflight and request_context() == 8192:
+            from dspark_8k_admission import validate_request
+            from dspark_attention_8k_gate import qualify as qualify_8k
+            validate_request(request_context(), request_limit(options.max_new_tokens))
+            gate['request_prerequisites']['draft_8k'] = qualify_8k(Path(__file__).parent)
+        else:
+            validate_history_capacity(request_context(), request_limit(options.max_new_tokens))
     from transformers import AutoConfig, AutoTokenizer
     from models.demos.blackhole.qwen36.tt.qwen36_vllm import Qwen36ForCausalLM
     config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)
@@ -607,4 +623,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    from dspark_8k_entry import run
+    run(main)

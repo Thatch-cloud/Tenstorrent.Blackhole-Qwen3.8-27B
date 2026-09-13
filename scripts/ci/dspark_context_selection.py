@@ -11,6 +11,10 @@ def request_context():
 
 
 def validate_history_capacity(context, output_tokens):
+    from dspark_8k_admission import history_limit, validate_request
+    if history_limit() == 8448:
+        validate_request(context, output_tokens)
+        return
     if (type(context) is not int or type(output_tokens) is not int
             or not 2 <= output_tokens <= 513 or not 1 <= context <= 8192 - output_tokens):
         raise ValueError('Draft history supports 8192 total rows including output; longer contexts need a new numerical gate')

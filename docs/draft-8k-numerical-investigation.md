@@ -44,10 +44,17 @@ retained draft report. Seven build/cache tests and shell syntax validation pass.
 No hardware build has run with this wiring yet.
 
 Remaining integration work:
-- Admit the request after verifying the factory build, without bypassing preflight.
-- Route fixed-history native attention through the exact 256-key implementation;
-  scope the 8448-row capacity without modifying simulator-pinned dependencies.
+- Validate the newly wired entry and scoped adapter in the actual hardware container.
 - Run the combined two-card request with token/state auditing and report PP/CTX/TG.
+
+The hardware entry now admits only the explicit captured-publication 8K trial
+after checking build evidence. Preflight checks the numerical report and exact
+8192/256 geometry before building. The scoped adapter selects the retained
+256-key attention function and 8448-row double-buffered history, restoring
+bindings on exit. The native compatibility gate permits only the independently
+verified factory hash to differ from its old reference; all other native source
+checks remain in place. Tests pass: 20 full-request, eight admission/build/scope,
+and four existing context-selection tests. Hardware acceptance remains pending.
 
 | Draft configuration | CI run | First failing comparison |
 | --- | --- | --- |

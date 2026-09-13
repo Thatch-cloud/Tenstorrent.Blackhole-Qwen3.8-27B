@@ -2,6 +2,7 @@
 
 import json
 from contextlib import ExitStack
+from dspark_8k_admission import history_limit
 
 from dspark_device import DSparkDevice
 from dspark_intake import TAPS
@@ -122,7 +123,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     if (any(type(value) is not bool for value in (audit_features, proposal_trace, commit_only_gdn, native_attention))
             or (native_attention and not proposal_trace)
             or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
-            or not 1 <= len(prompt) <= 8192 - max_new_tokens):
+            or not 1 <= len(prompt) <= history_limit() - max_new_tokens):
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
     if native_attention:
         import os
