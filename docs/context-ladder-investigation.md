@@ -250,3 +250,25 @@ fully resolves it. Test a bounded 60000-ms startup timeout in the CPU-only
 ladder branch; keep router topology, kernel arithmetic, numerical tolerances
 and the 1800-second per-context process bound unchanged. A longer timeout is
 not a fabric correctness fix and supplies no hardware performance evidence.
+
+## Reciprocal reload boundary identified
+
+Run **34746136745** (revision 8ac4e12) reaches the kernel and preserves both
+uninstrumented eager output hashes, the same 17 failures and clean teardown.
+Build takes 261 seconds; the instrumented 32K probe takes 500 seconds.
+For chip 1/head 12, the stored denominator is 1.247028351 and the captured
+reciprocal is 0.802507818. Truncating that denominator to a 10-bit mantissa
+gives 1.24609375, whose reciprocal is 0.80250783699, matching the native value
+to float precision. The full-denominator reciprocal would be 0.80190638745.
+
+Multiplying the native numerator -57.5 by the captured reciprocal gives
+-46.144199535, which rounds to BF16 -46.25. Dividing by the stored denominator
+instead gives -46.109617278, which rounds to BF16 -46.0. A CPU regression check
+locks down this observed boundary. This identifies a concrete contribution
+from the reciprocal reload precision at this coordinate, not proof that fixing
+it resolves all contexts or the earlier numerator/denominator drift.
+
+Next candidate should preserve the denominator's FP32 bits during the reciprocal
+copy/SFPU path. Audit shared-buffer binary/matmul consumers before enabling a
+per-CB direct-unpack mode; do not globally reroute every FP32 operand or relax
+the existing full numerical/replay matrix.

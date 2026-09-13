@@ -8,6 +8,15 @@ from dspark_attention_rounding_control import bf16_storage, online_attention, tf
 
 
 class OnlineAttentionTests(unittest.TestCase):
+    def test_observed_reciprocal_matches_truncated_denominator_boundary(self):
+        denominator = torch.tensor(1.247028351)
+        truncated = tf32_reload(denominator, 'truncate')
+        self.assertEqual(float(truncated), 1.24609375)
+        self.assertAlmostEqual(float(truncated.reciprocal()), 0.802507818, places=7)
+        numerator = torch.tensor(-57.5)
+        self.assertEqual(float((numerator / denominator).bfloat16()), -46.0)
+        self.assertEqual(float((numerator * truncated.reciprocal()).bfloat16()), -46.25)
+
     def test_tf32_reload_ties_sign_and_nonfinite(self):
         values = torch.tensor([1 + 2 ** -11, 1 + 3 * 2 ** -11,
             -1 - 2 ** -11, -1 - 3 * 2 ** -11, float('inf'), float('-inf'), float('nan')])
