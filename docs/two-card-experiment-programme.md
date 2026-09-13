@@ -1629,6 +1629,25 @@ proof of the currently running image's performance.
 
 ### Measurement contract
 
+#### Next full-ladder checkpoint (2026-09-13)
+
+Finish the current cached-feedback replay gate, then its matched combined hardware
+comparison if correctness passes. Run the context ladder before another optimization
+cycle. If cache correctness or performance fails, use the qualified shared-QK baseline
+instead; do not make 200 TG a prerequisite for measuring the ladder.
+
+This is not yet a dispatch-only task: `dspark_context_selection.py` admits only
+4096/8192 prompts, and `dspark_8k_admission.py` admits exactly 8192 plus 256 output
+rows. Do not bypass these guards or present 8K component proof as 32K/64K proof.
+
+| Required work | Evidence before claiming a completed ladder |
+|---|---|
+| Extend explicit context/headroom admission | Synthetic attention tests at each new physical history geometry, including masked padding and changed-input replay |
+| Exercise 128, 4096, 32768 and 65536 prompt rows; retain 8192 comparison | Exact full-request target tokens/state, actual templated prompt count and termination count for every supported row |
+| Establish the 1024-output throughput mode | Verify ignore-EOS capability or clearly report natural-stop output counts; the current 121-token fixture does not satisfy this duration |
+| Publish single-stream PP/CTX/TG and latency | Immutable revision, paired raw timings, setup/TTFT and generation accounting; mark unsupported rows explicitly rather than silently skipping them |
+| Separate serving and concurrency checks | Container/gateway and batch 2/8 evidence remain distinct from offline batch-1 speed |
+
 Start with concurrency 1 and prompt lengths 128, 4096, 32768 and 65536 tokens, reserving
 space for generation inside the configured context limit. Count the final templated
 prompt with the pinned tokenizer; reduce input length where necessary. Generate 1024
