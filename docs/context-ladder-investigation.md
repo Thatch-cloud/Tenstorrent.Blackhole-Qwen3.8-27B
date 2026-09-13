@@ -128,3 +128,20 @@ truncation model fails 18146 elements, not the device's 17: matching one
 coordinate does not establish the mechanism. Ordinary nearest BF16 output
 storage alone does not reproduce this failure. Do not promote blanket FP32
 storage on this evidence; inspect the actual per-operation rounding/unpack paths.
+
+## Native unpack audit
+
+The pinned SDPA `ComputeConfigDescriptor` sets FP32 destination accumulation,
+but does not set `unpack_to_dest_mode`. In `tt_metal/jit_build/genfiles.cpp`,
+`compute_data_formats` selects **Tf32** as the conditional unpack destination
+when FP32 accumulation is enabled with exponent-B buffers. In `data_format.cpp`,
+`get_single_unpack_dst_format` maps Float32 storage to that conditional format;
+only explicit non-default per-buffer unpack modes select Float32 directly.
+
+Thus FP32 QK, sum and statistics storage does not imply full FP32 precision
+through every reload in this path. The previous CPU output-rounding control
+does not model these TF32 reloads. Next diagnostic must cover intermediate
+reload precision, not mislabel the native route as BF16 unpack or assume a
+missing mode is automatically a bug. Direct-to-destination unpack also changes
+operand routing: audit compatibility for copy/SFPU versus binary/matmul users
+before enabling it for shared circular buffers.
