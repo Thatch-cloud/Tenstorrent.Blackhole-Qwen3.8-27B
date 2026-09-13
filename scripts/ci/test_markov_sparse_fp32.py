@@ -25,7 +25,7 @@ class MarkovSparseFp32Tests(unittest.TestCase):
     def test_protocol_and_precision_remain_explicit(self):
         for guard in ('!nnz.has_value()', '!use_indices', '!packer_l1_acc_en',
                 'is_input_a_sparse', 'operation_attributes.is_input_b_sparse',
-                'ttnn::Shape{1, 1, 1, 256}', 'ttnn::Shape{1, 1, 256, 248320}'):
+                'ttnn::Shape{1, 1, 1, 256}', 'ttnn::Shape{1, 1, 256}', 'ttnn::Shape{1, 1, 256, 248320}'):
             self.assertIn(guard, INSERT)
         self.assertIn('qwen_unpack_mode[tt::CBIndex::c_5]', INSERT)
         self.assertTrue(CONFIG_REPLACEMENT.startswith(CONFIG))

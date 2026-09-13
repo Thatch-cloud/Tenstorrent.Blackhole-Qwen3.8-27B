@@ -59,6 +59,10 @@ class BiasCache:
         if self.closed:
             raise ValueError('Live request-owned cache required')
         operations, mesh, width = self.operations, self.mesh, self.width
+        if (tuple(latent.shape) not in ((1, 1, 256), (1, 1, 1, 256))
+                or latent.dtype != operations.bfloat16 or latent.layout != operations.TILE_LAYOUT
+                or latent.memory_config() != operations.DRAM_MEMORY_CONFIG):
+            raise ValueError('One native BF16 rank-256 embedding row required')
 
         def allocate(shape, dtype, layout):
             return retain(operations.empty(shape, dtype=dtype, layout=layout,

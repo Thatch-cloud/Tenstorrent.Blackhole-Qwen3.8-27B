@@ -196,7 +196,9 @@ def main():
         weight_check('after')
         if (len(report['eager_checks']) != 90 or len(report['replay_checks']) != 120
                 or len(report['input_checks']) != 28 or len(report['weight_checks']) != 8
-                or report['cache_reset_epochs'] != [2, 3]):
+                or report['cache_reset_epochs'] != [2, 3]
+                or report['first_dot']['latent_shape'] != [1, 1, 256]
+                or any(not check['exact'] for check in report['first_dot']['comparisons'])):
             raise AssertionError('Incomplete cached feedback matrix')
         report['passed'] = True
     except BaseException as error:

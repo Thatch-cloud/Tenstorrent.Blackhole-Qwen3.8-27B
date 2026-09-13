@@ -7,7 +7,7 @@ SOURCE = 'ttnn/cpp/ttnn/operations/matmul/device/sparse/factory/sparse_matmul_mu
 SOURCE_SHA256 = 'ba25c662b5b5486cf09e02d44e34ac7ffc742206aea2383a9e0d0cef720f9a46'
 ANCHOR = '    // Create compute kernel\n'
 INSERT = '''    const bool qwen_markov_fp32_reload =
-        a.logical_shape() == ttnn::Shape{1, 1, 1, 256} &&
+        (a.logical_shape() == ttnn::Shape{1, 1, 1, 256} || a.logical_shape() == ttnn::Shape{1, 1, 256}) &&
         (b.logical_shape() == ttnn::Shape{1, 1, 256, 64} ||
          b.logical_shape() == ttnn::Shape{1, 1, 256, 4992} ||
          b.logical_shape() == ttnn::Shape{1, 1, 256, 3712} ||
