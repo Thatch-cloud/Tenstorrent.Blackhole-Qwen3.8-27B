@@ -42,6 +42,9 @@ PY
         [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "$QWEN_SIM_CASE" = gdn-output-l1 || "$QWEN_SIM_CASE" = gdn-output-grid || "$QWEN_SIM_CASE" = gdn-copy-pairs || "$QWEN_SIM_CASE" = gdn-outer-add || "$QWEN_SIM_CASE" = dspark-native-8k-attention || "$QWEN_SIM_CASE" = target-t16-attention-8k || "$QWEN_SIM_CASE" = gdn-shared-recurrence || "$QWEN_SIM_CASE" = gdn-shared-qk ]]
         status=0
         limit=3600
+        if [[ "$QWEN_SIM_CASE" = markov-sparse-dot ]]; then
+            timeout -k 30 1900 python3 -u /experiment-scripts/ci/markov_sparse_build.py
+        fi
         if [[ "$QWEN_SIM_CASE" = dspark-native-8k-attention ]]; then
             export QWEN_SIM_BOUNDED_MEMORY=1
             mkdir -p /optimisation

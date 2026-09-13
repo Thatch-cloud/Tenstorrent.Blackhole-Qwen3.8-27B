@@ -16,6 +16,9 @@ def main():
         raise ValueError('Simulator only and fresh report required')
     import torch
     import ttnn
+    from markov_sparse_build import validate
+
+    build = validate(os.environ['TT_METAL_HOME'], '/experiment/results/markov-sparse-build.json')
 
     root = Path(os.environ['TT_METAL_HOME']) / 'ttnn/cpp/ttnn/operations/matmul'
     paths = [Path(__file__), root / 'device/sparse/factory/sparse_matmul_multicore_reuse_mcast_1d_optimized.cpp',
@@ -29,7 +32,7 @@ def main():
     def hashes():
         return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
-    report = dict(passed=False, closed_cleanly=False, scope=__doc__, sources=hashes(), checks=[],
+    report = dict(passed=False, closed_cleanly=False, scope=__doc__, sources=hashes(), checks=[], build=build,
         performance_qualified=False, full_vocabulary_qualified=False, cache_payload_qualified=False)
     mesh, trace, owned = None, None, []
 
