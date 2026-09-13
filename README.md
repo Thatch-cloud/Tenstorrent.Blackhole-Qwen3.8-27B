@@ -11,7 +11,7 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 | Workload | CTX | PP tok/s | Committed TG tok/s | Status |
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
-| One stream, batch 1, up to 256 output tokens | 8192 | Pending | Pending | Combined hardware trial 34729556803 queued |
+| One stream, batch 1, up to 256 output tokens | 8192 | Pending | Pending | Hardware qualification pending: run 34729556803 |
 | Larger contexts | >8192 | Not measured | Not measured | Full ladder pending |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 
