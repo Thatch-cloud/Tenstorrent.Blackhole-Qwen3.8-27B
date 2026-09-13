@@ -55,6 +55,7 @@ PY
             export TT_METAL_DPRINT_CORES='(4,1),(5,1)'
             export TT_METAL_DPRINT_RISCVS=TR0
             export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
+            export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
             for context in 32768 65536 128 4096 8192; do
                 context_status=0
                 context_started=$SECONDS

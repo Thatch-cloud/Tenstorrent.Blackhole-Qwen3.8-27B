@@ -242,3 +242,11 @@ is not only denominator drift. Their native quotient is -46.109617278, while
 the final BF16 output is -46.25. Inspect the stored reciprocal and final
 normalization stage next before assigning that additional discrepancy to a
 particular rounding instruction. A shifted maximum alone cancels in the quotient.
+
+Reciprocal-snapshot run 34745650412 fails the 15000-ms simulator fabric startup
+handshake before kernel execution. This recurrence with the restricted print
+cores means the earlier successful startup did not prove polling restriction
+fully resolves it. Test a bounded 60000-ms startup timeout in the CPU-only
+ladder branch; keep router topology, kernel arithmetic, numerical tolerances
+and the 1800-second per-context process bound unchanged. A longer timeout is
+not a fabric correctness fix and supplies no hardware performance evidence.
