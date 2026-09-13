@@ -46,7 +46,6 @@ int main() {
         uint32_t local=index%1024;
         bool column=(local<256 || (local>=512 && local<768)) && local%16==0;
         float expected=(COMPILE_FOR_TRISC==0 && column) ? 1.0f/1.247028351f : 1.247028351f;
-        if(COMPILE_FOR_TRISC==0 && column && TEST_KEY_TILES==2112) expected=0.8017578125f;
         if(values[index]!=expected) return 3;
     }
     return munmap(allocation,8192)==0 ? 0 : 4;

@@ -420,3 +420,18 @@ Smaller contexts retain their previous reciprocal arithmetic. Reports name the
 reload mode separately from reciprocal computation. CPU tests check both
 geometries on all three thread branches and preserve untouched tile lanes;
 native numerical/replay qualification remains required.
+
+### Reciprocal reload rounding result: rejected
+
+Run **34751094661**, revision **87be2c3**, completes with a numerical failure:
+257 failing elements, maximum absolute error 0.521884918, first eager case
+on chip 0. Probe duration is 400 seconds; cleanup is clean, replay is not
+reached. This is worse than native truncation's 129 / 0.514190674 at the same
+geometry. Restore native truncation; the immutable tag retains the experiment.
+
+Report SHA256:
+`e49c84f200c4e85e0961edfe6403e26694244f39104ab69c09e2f4eaa0d53516`.
+Neither FP32 intermediate storage nor nearest reciprocal reload fixes 64K.
+The next step needs numerator/denominator stage evidence for the failing 64K
+coordinates, not another unsupported precision-toggle sweep. The 32K component
+pass remains distinct from unimplemented longer-context full-runtime admission.
