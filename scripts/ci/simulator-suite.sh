@@ -55,6 +55,12 @@ PY
             unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
             for context in 65536 32768 128 4096 8192; do
+                unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
+                if [ "$context" = 65536 ]; then
+                    export TT_METAL_DPRINT_CORES='(5,0)'
+                    export TT_METAL_DPRINT_RISCVS=TR0
+                    export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
+                fi
                 context_status=0
                 context_started=$SECONDS
                 printf 'ladder context=%s started %s\n' "$context" "$(date -u +%FT%TZ)"

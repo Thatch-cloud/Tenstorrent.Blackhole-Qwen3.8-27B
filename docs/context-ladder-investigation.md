@@ -435,3 +435,15 @@ Neither FP32 intermediate storage nor nearest reciprocal reload fixes 64K.
 The next step needs numerator/denominator stage evidence for the failing 64K
 coordinates, not another unsupported precision-toggle sweep. The 32K component
 pass remains distinct from unimplemented longer-context full-runtime admission.
+
+### Targeted 64K stage measurement
+
+Instrument the restored BF16/1024 baseline at proposal row 5, channel 0.
+The recorded failure includes all 128 channels of chip 0 head 5 at that row
+(for channel 0, -46.25 versus -45.756687164). Enable TR0 prints on logical
+core (5,0), retaining the q/head label in each snapshot so mapping is checked
+from output rather than assumed. Capture numerator, denominator, unscaled
+maximum and scalar reciprocal, without consuming or writing their buffers.
+Smaller contexts remain uninstrumented. Compare final eager hashes against
+run 34749444881 before treating snapshots as representative of that failure.
+No simulator timing from this instrumented run qualifies hardware performance.

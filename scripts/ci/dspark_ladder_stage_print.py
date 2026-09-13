@@ -48,14 +48,19 @@ RECIPROCAL_SNAPSHOT = '''
 
 
 @contextmanager
-def stage_snapshots():
+def stage_snapshots(*, row=2, column=5):
+    if type(row) is not int or type(column) is not int or not 0 <= row < 15 or not 0 <= column < 32:
+        raise ValueError('One live proposal row and first-tile channel required')
+    snapshot = SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}').replace(
+        '.w0=5, .w1=6', f'.w0={column}, .w1={column + 1}')
+    reciprocal = RECIPROCAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
     original = native_draft_sdpa.replacements
 
     def replacements():
         substitutions = original()
         substitutions['compute_common.hpp'] += (
-            (INCLUDE, INCLUDE_AFTER), (REDUCE, REDUCE + SNAPSHOT),
-            (RECIPROCAL, RECIPROCAL + RECIPROCAL_SNAPSHOT))
+            (INCLUDE, INCLUDE_AFTER), (REDUCE, REDUCE + snapshot),
+            (RECIPROCAL, RECIPROCAL + reciprocal))
         return substitutions
 
     with patch.object(native_draft_sdpa, 'replacements', replacements):

@@ -11,6 +11,17 @@ from dspark_ladder_stage_print import RECIPROCAL_SNAPSHOT, SNAPSHOT, stage_snaps
 
 
 class StagePrintTests(unittest.TestCase):
+    def test_64k_coordinates_and_bounds(self):
+        with stage_snapshots(row=5, column=0):
+            edits = native_draft_sdpa.replacements()['compute_common.hpp']
+            snapshot = next(after for before, after in edits if 'QWEN_STAGE' in after)
+            self.assertIn('.h0=5, .h1=6', snapshot)
+            self.assertNotIn('.w0=5, .w1=6', snapshot)
+        for row, column in ((15, 0), (5, 32), (-1, 0), (True, 0)):
+            with self.assertRaises(ValueError):
+                with stage_snapshots(row=row, column=column):
+                    pass
+
     def test_snapshot_does_not_consume_or_write_buffers(self):
         for forbidden in ('pop_front', 'push_back', 'reserve_back', 'pack_tile', 'copy_tile'):
             self.assertNotIn(forbidden, SNAPSHOT)

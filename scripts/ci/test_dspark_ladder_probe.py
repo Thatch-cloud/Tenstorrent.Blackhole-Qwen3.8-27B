@@ -28,7 +28,8 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertEqual(report['native_padded_keys'], fixture['native_keys'])
                     self.assertEqual(report['added_masked_poison_rows'], fixture['extra_masked_keys'])
                     self.assertEqual(report['ladder_geometry']['context'], context)
-                    self.assertFalse(report['stage_instrumented'])
+                    self.assertEqual(report['stage_instrumented'], context == 65536)
+                    self.assertEqual(report['stage_coordinates'], dict(row=5, column=0) if context == 65536 else None)
                     self.assertFalse(report['value_diagnostics_enabled'])
                     self.assertEqual(report['output_recurrence'],
                         'native-l1-pack-accumulation-bf16')
