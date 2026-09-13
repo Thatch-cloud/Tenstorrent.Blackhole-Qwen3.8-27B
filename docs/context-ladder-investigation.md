@@ -272,3 +272,19 @@ Next candidate should preserve the denominator's FP32 bits during the reciprocal
 copy/SFPU path. Audit shared-buffer binary/matmul consumers before enabling a
 per-CB direct-unpack mode; do not globally reroute every FP32 operand or relax
 the existing full numerical/replay matrix.
+
+### Direct-unpack implementation constraint
+
+The pinned `copy_tile_to_dst_init_short`/`copy_tile` APIs select `UnpackToDestEn`
+and generated per-operand formats internally; they have no per-call FP32 mode
+argument. `llk_unpack_A_api.h` reads `unpack_dst_format[operand_id]` for both
+initialization and execution. The binary `llk_unpack_AB_api.h` also reads that
+same format table. Therefore setting the sum buffers' descriptor mode is not
+a reciprocal-only change: correction, sum addition, final row reduction and
+normalization consumers must be included in validation.
+
+Do not force the fourth math-datacopy-init template parameter to true as a
+shortcut. The pinned `tile_move_copy.h` explicitly documents that parameter
+as integer-FPU mode on Blackhole/Wormhole, unlike Quasar's unpack-to-destination
+meaning. Use an audited descriptor/kernel combination or an isolated compatible
+operand route; the observed error does not justify bypassing these API contracts.
