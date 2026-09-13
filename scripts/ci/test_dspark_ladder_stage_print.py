@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -11,7 +14,7 @@ class StagePrintTests(unittest.TestCase):
     def test_snapshot_does_not_consume_or_write_buffers(self):
         for forbidden in ('pop_front', 'push_back', 'reserve_back', 'pack_tile', 'copy_tile'):
             self.assertNotIn(forbidden, SNAPSHOT)
-        self.assertIn('UNPACK((', SNAPSHOT)
+        self.assertIn('COMPILE_FOR_TRISC == 0', SNAPSHOT)
         self.assertNotIn('TSLICE_INPUT_CB', SNAPSHOT)
         self.assertNotIn('TSLICE_RD_PTR', SNAPSHOT)
         self.assertEqual(SNAPSHOT.count('TSLICE('), 3)
@@ -21,6 +24,31 @@ class StagePrintTests(unittest.TestCase):
             with stage_snapshots():
                 raise RuntimeError('abort')
         self.assertIs(native_draft_sdpa.replacements, original)
+
+    @unittest.skipUnless(shutil.which('g++'), 'Host C++ syntax compiler required')
+    def test_snapshot_cpp_syntax_and_compute_slice_arity(self):
+        source = '''
+#include <cstdint>
+#define QWEN_DRAFT_EXP_APPROX false
+struct SliceRange { int h0, h1, hs, w0, w1, ws; };
+struct CircularBuffer {
+    explicit CircularBuffer(uint32_t) {}
+    void wait_front(uint32_t) {}
+};
+int TSLICE(uint32_t, int, const SliceRange&, bool, bool) { return 0; }
+template <typename... Arguments> void DEVICE_PRINT(const char*, Arguments...) {}
+void snapshot() {
+    uint32_t alias_prev_sum=0, alias_prev_max=1, alias_mm2_prev_out=2;
+    uint32_t Sq_chunk_t=1, out_chunk_tiles=4, local_q_start=12, q_iter=0, iter_q_start=0;
+''' + SNAPSHOT + '\n}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'snapshot.cpp'
+            path.write_text(source)
+            for processor in (0, 1, 2):
+                result = subprocess.run(['g++', '-std=c++17', '-fsyntax-only',
+                    '-DCOMPILE_FOR_TRISC=' + str(processor), str(path)],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(os.environ.get('TT_NATIVE_TEST_ROOT'), 'Pinned native source required')
     def test_exact_source_composition(self):

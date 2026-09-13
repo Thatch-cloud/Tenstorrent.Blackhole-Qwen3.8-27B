@@ -11,7 +11,7 @@ INCLUDE_AFTER = INCLUDE + '\n#include "api/debug/dprint.h"'
 REDUCE = '        matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);'
 SNAPSHOT = '''
         if constexpr (!QWEN_DRAFT_EXP_APPROX) {
-            UNPACK((
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
                 CircularBuffer(alias_prev_sum).wait_front(Sq_chunk_t);
                 CircularBuffer(alias_prev_max).wait_front(Sq_chunk_t);
                 CircularBuffer(alias_mm2_prev_out).wait_front(out_chunk_tiles);
@@ -26,7 +26,7 @@ SNAPSHOT = '''
                     TSLICE(alias_prev_max, 0,
                         (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}),
                         true, true));
-            ));
+#endif
         }
 '''
 
