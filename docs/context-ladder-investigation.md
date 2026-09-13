@@ -391,3 +391,20 @@ shortcut. This candidate uses normal format-derived unpacking. The simulator
 must establish native compatibility, numerical accuracy, replay and cleanup;
 24 CPU preflight tests alone do not establish those properties. The three
 non-qualifying diagnostics are omitted on this run to shorten feedback time.
+
+### FP32 output-intermediate result: worse, rejected
+
+Run **34750342186**, revision **474e6ad**, builds and executes but fails the
+first eager comparison on chip 0: **4131 failing elements**, maximum absolute
+error **0.737335205**. Teardown is clean; replay is not reached. Restore BF16
+output intermediates in the active candidate; retain the immutable CI tag
+as evidence. FP32 storage alone is not an accuracy fix: normal format-derived
+unpacking still converts operands, so this does not test an all-FP32 recurrence.
+
+The probe took **402 seconds** without optional diagnostics, versus 907 seconds
+for the prior diagnostic-enabled probe. These are different numerical candidates,
+so the 505-second difference is not a controlled timing attribution or TG result.
+
+Report SHA256:
+`5c5e8fd4c535390f017794114d36c63fb6be5701344a648f55b740dfa5318d43`.
+No hardware qualification or serving changes follow from this run.

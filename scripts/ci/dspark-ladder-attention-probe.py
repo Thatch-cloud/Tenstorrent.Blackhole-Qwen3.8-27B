@@ -37,7 +37,7 @@ def main():
                 value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
-                output_recurrence='native-l1-pack-accumulation-' + ('fp32' if context == 65536 else 'bf16'),
+                output_recurrence='native-l1-pack-accumulation-bf16',
                 key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
         return json.dumps(value, *arguments, **keywords)
