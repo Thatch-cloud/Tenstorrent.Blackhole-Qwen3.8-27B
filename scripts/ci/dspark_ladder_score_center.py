@@ -71,12 +71,13 @@ def scalar_score_center(key_tiles=2112):
     def replacements():
         substitutions = original()
         helper = HELPER
-        if key_tiles == 40:
+        if key_tiles in (40, 2112):
             substitutions['compute_common.hpp'] += (('#include <cstdint>',
                 '#include <cstdint>\n#include "api/debug/dprint.h"'),)
             helper = helper.replace('    CircularBuffer(scores_cb).wait_front(tiles);', '''    static uint32_t progress_calls = 0;
-    const bool report_progress = progress_calls++ < 2;
-    if (report_progress) DEVICE_PRINT("QWEN_SCORE_ENTER mask={} tiles={}\\n", mask, tiles);
+    const uint32_t progress_call = progress_calls++;
+    const bool report_progress = progress_call < 2 || progress_call % 16 == 0;
+    if (report_progress) DEVICE_PRINT("QWEN_SCORE_ENTER call={} mask={} tiles={}\\n", progress_call, mask, tiles);
     CircularBuffer(scores_cb).wait_front(tiles);
     if (report_progress) DEVICE_PRINT("QWEN_SCORE_SCORES_READY mask={}\\n", mask);''').replace(
                 '    const auto scores_interface',

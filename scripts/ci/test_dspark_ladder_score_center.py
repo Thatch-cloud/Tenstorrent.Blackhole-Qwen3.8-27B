@@ -42,7 +42,7 @@ class ScoreCenterTests(unittest.TestCase):
             helper = next(after for before, after in replacements if before.startswith('void recip_block_inplace'))
             for stage in ('ENTER', 'SCORES_READY', 'OPERAND_READY', 'DONE'):
                 self.assertIn(f'QWEN_SCORE_{stage}', helper)
-            self.assertIn('progress_calls++ < 2', helper)
+            self.assertIn('progress_call < 2 || progress_call % 16 == 0', helper)
         with self.assertRaises(ValueError):
             with scalar_score_center(key_tiles=296):
                 pass
@@ -97,7 +97,8 @@ int main() {
         sources = {name: (directory / name).read_bytes() for name in native_draft_sdpa.SOURCE_HASHES}
         with scalar_reciprocal(), scalar_sum_update(), stage_snapshots(row=8, column=116), scalar_score_center(), scoped_stats_pack():
             patched = native_draft_sdpa.patched_sources(sources)
-            self.assertEqual(patched['compute_common.hpp'].count(HELPER.encode()), 1)
+            self.assertEqual(patched['compute_common.hpp'].count(b'void qwen_scalar_score_transform('), 1)
+            self.assertIn(b'QWEN_SCORE_ENTER call=', patched['compute_common.hpp'])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'score.cpp'
             path.write_text(STUB)
