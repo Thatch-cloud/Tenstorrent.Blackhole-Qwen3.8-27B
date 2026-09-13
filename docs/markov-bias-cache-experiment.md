@@ -98,3 +98,24 @@ violate that kernel's protocol. The sparse writer zero-fills skipped output,
 so cached bias needs a separate persistent payload and explicit selection.
 Its FP32 intermediate-buffer configuration must also match dense arithmetic;
 sharing the compute source alone does not prove numerical equivalence.
+
+### Sparse-dot evidence
+
+| CI run | Result | What it establishes |
+| --- | --- | --- |
+| 34731978621 | Rejected by shape validation | Default sparse semantics expand both batch dimensions; single-pair mode must be explicit |
+| 34732171781 | Numerical failure, clean teardown | Four inactive chip/replay outputs exactly zero; all six active comparisons differ from dense FP32 bits |
+| 34732469080 | Submitted, pending result | Scoped `UnpackToDestFp32` correction for rank-256 sparse partial reloads |
+
+The active mismatch affects all 64 output values per comparison, with maximum
+absolute differences of 0.00225–0.00310. No tolerance was relaxed. Native-source
+inspection shows that dense matmul marks partials CB5 for FP32-to-destination
+unpack, while the sparse factory omits this flag. The new factory trial adds
+that flag only for the paired Markov geometry; the simulator must confirm the
+hypothesis before any integration. Source and rebuilt-library hashes are retained.
+
+The inactive zero fill is an operation-level output initialization, not a
+zeroing operation in the matmul writer. At full vocabulary this still writes
+a padded FP32 tile row (about 30.31 MiB per chip). Even a numerically qualified
+sparse path will need combined-runtime timing; skipped MACs alone are not proof
+of a useful speedup.
