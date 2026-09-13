@@ -7,7 +7,7 @@ import unittest
 
 import native_draft_sdpa
 from dspark_ladder_factory import scoped_stats_pack
-from dspark_ladder_stage_print import OUTPUT_BEFORE, PARTIAL_SNAPSHOT, RECIPROCAL_SNAPSHOT, SNAPSHOT, stage_snapshots
+from dspark_ladder_stage_print import OUTPUT_BEFORE, PARTIAL_SNAPSHOT, QK_SNAPSHOT, RECIPROCAL_SNAPSHOT, SNAPSHOT, stage_snapshots
 
 
 class StagePrintTests(unittest.TestCase):
@@ -37,6 +37,7 @@ class StagePrintTests(unittest.TestCase):
             self.assertNotIn(forbidden, RECIPROCAL_SNAPSHOT)
             self.assertNotIn(forbidden, PARTIAL_SNAPSHOT)
             self.assertNotIn(forbidden, OUTPUT_BEFORE)
+            self.assertNotIn(forbidden, QK_SNAPSHOT)
         self.assertIn('COMPILE_FOR_TRISC == 0', SNAPSHOT)
         self.assertNotIn('TSLICE_INPUT_CB', SNAPSHOT)
         self.assertNotIn('TSLICE_RD_PTR', SNAPSHOT)
@@ -64,7 +65,8 @@ void snapshot() {
     uint32_t alias_prev_sum=0, alias_prev_max=1, alias_mm2_prev_out=2;
     uint32_t Sq_chunk_t=1, out_chunk_tiles=4, local_q_start=12, q_iter=0, iter_q_start=0;
     uint32_t alias_mm2_cur_out=3, cb_exp_max_diff=4, processed_k_chunks=1;
-''' + OUTPUT_BEFORE + PARTIAL_SNAPSHOT + SNAPSHOT + RECIPROCAL_SNAPSHOT + '\n}\n'
+    uint32_t cb_qk_im=5, Sk_chunk_t=32;
+''' + QK_SNAPSHOT + OUTPUT_BEFORE + PARTIAL_SNAPSHOT + SNAPSHOT + RECIPROCAL_SNAPSHOT + '\n}\n'
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.cpp'
             path.write_text(source)
@@ -84,6 +86,8 @@ void snapshot() {
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_RECIP'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_PARTIAL_SUM'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_OUTPUT_BEFORE'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_SCORES'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_EXP'), 1)
         self.assertLess(patched['compute_common.hpp'].index(b'QWEN_PARTIAL_SUM'),
             patched['compute_common.hpp'].index(b'matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);'))
         self.assertIn(b'Ladder probe requires an explicit padded history geometry', patched['sdpa.cpp'])

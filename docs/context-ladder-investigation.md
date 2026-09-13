@@ -646,3 +646,10 @@ Thus the remaining numerator error is already materially present in partial
 PV, not just output accumulation. Next inspect the final chunk's QK/exp
 inputs and probability values before proposing another recurrence change.
 This is coordinate-level diagnosis, not whole-model correctness or speed.
+
+Next capture limits output-update logs to final processed chunk 65 and adds
+the 15 proposal scores immediately before exponentiation plus the 15
+exponentiated values immediately after it. Each slice stays below the
+16-value debug limit. This reduces log pressure and separates QK/exp error
+from partial PV matmul error at row 8. Retain identical arithmetic and
+compare eager hashes again. Eighteen CPU preflight tests pass.
