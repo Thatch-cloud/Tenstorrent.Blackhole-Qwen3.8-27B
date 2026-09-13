@@ -134,7 +134,7 @@ of a useful speedup.
 
 ## Connected cache pipeline
 
-Run 34733011935 is testing the connected device sequence: lookup, sparse mask,
+Run 34733011935 passed the connected device sequence: lookup, sparse mask,
 native sparse dot, FP32 payload fill/read, then metadata commit. All decisions
 execute inside the same replayed trace, without host hit/miss branching.
 
@@ -144,3 +144,15 @@ cache. Hits must return the exact dense bias while the sparse-dot output is
 zero. Cache rows start poisoned. The dense dot in this test is an independent
 audit, not intended for the optimized runtime. Real token-to-embedding feedback,
 production per-worker tile counts and combined hardware PP/CTX/TG remain open.
+
+The run completed in 6m18s including its disposable factory build. All 140
+chip/request checks passed (including six chip-local cache hits), both stale
+tickets produced poisoned output without changing cache bits, and teardown
+completed cleanly. All seven pipeline/controller source hashes match the local
+worktree and the before/after run records. The separate ten-comparison native
+sparse/dense gate also runs before this pipeline test.
+
+Report SHA256: `1e5380c8d640c89221962f40aa6a47e8c805f45ecb0de0b551d30dfc940cf351`.
+Eleven local Python tests pass. This remains a 64-column synthetic gate, not a
+full-vocabulary performance result. The next size gate must exercise the real
+78 output tiles per worker, followed by complete-request hardware timing.
