@@ -3,13 +3,13 @@ from pathlib import Path
 import unittest
 
 from dspark_fp32_intermediates import SOURCE
-from dspark_ladder_factory import KEY_TILES, predicate, scoped_stats_pack, selector_assert, transform
+from dspark_ladder_factory import KEY_TILES, geometry_predicate, scoped_stats_pack, selector_assert, transform
 
 
 class LadderFactoryTests(unittest.TestCase):
     def test_selectors_cover_only_explicit_ladder_and_existing_baseline(self):
-        self.assertEqual(KEY_TILES, (40, 168, 272, 296, 1064, 2088))
-        self.assertIn(predicate('get_compile_time_arg_val(3)'), selector_assert())
+        self.assertEqual(KEY_TILES, (40, 168, 272, 296, 1072, 2096))
+        self.assertIn(geometry_predicate('get_compile_time_arg_val(3)', 'get_compile_time_arg_val(8)'), selector_assert())
         self.assertIn('get_compile_time_arg_val(8) == 8', selector_assert())
 
     def test_scoped_pack_restores_after_failure(self):
@@ -28,7 +28,7 @@ class LadderFactoryTests(unittest.TestCase):
     def test_transform_retains_precision_guards_and_rejects_unknown_sources(self):
         original = (Path(os.environ['TT_NATIVE_TEST_ROOT']) / SOURCE).read_bytes()
         candidate = transform(original).decode()
-        self.assertIn(predicate('Skt'), candidate)
+        self.assertIn(geometry_predicate('Skt', 'Sk_chunk_t'), candidate)
         self.assertIn('fp32_dest_acc_en && !exp_approx_mode', candidate)
         self.assertIn('!is_causal && compute_use_provided_mask && !is_chunked', candidate)
         with self.assertRaises(ValueError):

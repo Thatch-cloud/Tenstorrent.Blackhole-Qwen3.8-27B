@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import dspark_fp32_build as baseline
 from dspark_hardware_gate import digest
-from dspark_ladder_factory import predicate, transform
+from dspark_ladder_factory import geometry_predicate, transform
 
 
 BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py')
@@ -17,7 +17,8 @@ BASELINE_VALIDATE = baseline.validate_manifest
 
 @contextmanager
 def factory_scope():
-    replacement = baseline.REPLACEMENT.replace('Skt == 272', predicate('Skt'))
+    replacement = baseline.REPLACEMENT.replace('Skt == 272 && Sq_chunk_t == 1 && Sk_chunk_t == 8',
+        geometry_predicate('Skt', 'Sk_chunk_t') + ' && Sq_chunk_t == 1')
     if replacement == baseline.REPLACEMENT:
         raise ValueError('Original baseline geometry selector required')
 

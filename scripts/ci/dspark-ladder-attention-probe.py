@@ -28,6 +28,7 @@ def main():
     def dumps(value, *arguments, **keywords):
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
+                key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
         return json.dumps(value, *arguments, **keywords)
 

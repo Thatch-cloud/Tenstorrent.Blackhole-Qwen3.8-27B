@@ -15,20 +15,25 @@ def predicate(expression):
     return '(' + ' || '.join(f'{expression} == {tiles}' for tiles in KEY_TILES) + ')'
 
 
+def geometry_predicate(keys, chunk):
+    pairs = sorted({(272, 8), *((row['native_keys'] // 32, row['key_chunk'] // 32) for row in ladder())})
+    return '(' + ' || '.join(f'({keys} == {key_tiles} && {chunk} == {chunk_tiles})'
+        for key_tiles, chunk_tiles in pairs) + ')'
+
+
 def transform(source):
     candidate = eight_k_transform(source)
     before = b'Skt == 272 && Sq_chunk_t == 1 && Sk_chunk_t == 8 &&'
     if candidate.count(before) != 1:
         raise ValueError('Unique qualified baseline factory selector required')
-    after = (predicate('Skt') + ' && Sq_chunk_t == 1 && Sk_chunk_t == 8 &&').encode()
+    after = (geometry_predicate('Skt', 'Sk_chunk_t') + ' && Sq_chunk_t == 1 &&').encode()
     return candidate.replace(before, after)
 
 
 def selector_assert():
     return ('static_assert(!QWEN_DRAFT_EXP_APPROX,\n'
         '    "Ladder probe requires precise draft arithmetic");\n'
-        'static_assert(' + predicate('get_compile_time_arg_val(3)') +
-        ' && get_compile_time_arg_val(8) == 8,\n'
+        'static_assert(' + geometry_predicate('get_compile_time_arg_val(3)', 'get_compile_time_arg_val(8)') + ',\n'
         '    "Ladder probe requires an explicit padded history geometry");\n')
 
 

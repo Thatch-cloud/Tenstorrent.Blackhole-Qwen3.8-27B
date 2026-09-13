@@ -30,3 +30,18 @@ configuration is not interchangeable with this 8192+1024 test.
 No 32K hardware admission and no tolerance relaxation. Retain the uncached
 qualified hardware baseline. Finish numerical diagnosis, then resume the full
 hardware PP/CTX/TG ladder. These component passes do not finish that ladder.
+
+## Next candidate: 512-key long-context chunks
+
+The existing value diagnostics show constant-value error up to 0.0195312
+on chip 1. The first failing output coordinates include head 4, row 14:
+actual -47 versus reference approximately -46.50. This is evidence of
+normalization/output numerical drift, not proof of a specific faulty stage.
+
+Test 512-key chunks only at 32K/64K. Keep 256 at smaller contexts. At 32K,
+native padded storage changes from 34048 to 34304 keys, reducing online chunk
+iterations from 133 to 67. The extra keys remain poisoned and masked; logical
+history, queries, precision flags and tolerance are unchanged. Factory and
+compute selectors admit exact key-count/chunk-size pairs, not a broad range.
+Fourteen host tests pass. This is an unqualified hypothesis until CI numerical
+and replay results pass; it is not a TG improvement claim.

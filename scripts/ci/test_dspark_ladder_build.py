@@ -5,14 +5,14 @@ from unittest.mock import patch
 
 import dspark_fp32_build as baseline
 from dspark_ladder_build import factory_scope, main, validate_manifest
-from dspark_ladder_factory import predicate
+from dspark_ladder_factory import geometry_predicate
 
 
 class LadderBuildTests(unittest.TestCase):
     def test_scope_restores_original_builder_and_rejects_disabled_variant(self):
         original = baseline.transform, baseline.REPLACEMENT
         with factory_scope():
-            self.assertIn(predicate('Skt'), baseline.REPLACEMENT)
+            self.assertIn(geometry_predicate('Skt', 'Sk_chunk_t'), baseline.REPLACEMENT)
             with self.assertRaises(ValueError):
                 baseline.transform(b'unused', enabled=False)
         self.assertEqual((baseline.transform, baseline.REPLACEMENT), original)
