@@ -621,3 +621,28 @@ the last update. This separates native partial PV values from accumulated
 rounding without changing arithmetic or widening the acceptance criterion.
 Eighteen CPU preflight tests pass. Require matching eager hashes before
 using the new snapshots as evidence about the one-failure baseline.
+
+### Output operand evidence points upstream of recurrence
+
+Run **34784419980** (08ef82a) preserves the one-failure baseline's exact
+eager hash and clean teardown. Report SHA256:
+`38dbe46337d79a4354829664bc98b997eb92f5e66080eca30199024c3964cf7c`.
+Chip 1 emits all 65 update records. Chip 0 emits 62: labels 25-27 are
+absent, so its log is not a complete recurrence trace and must not be used
+to claim a full high-precision reconstruction.
+
+All observed next-state comparisons agree with nearest-BF16 rounding of
+`previous * correction + partial`; the chip-0 gap remains unobserved.
+The final recorded update is:
+
+| Chip | Previous | Partial PV | Correction | Final numerator |
+|---|---:|---:|---:|---:|
+| 0 | 64 | -64.5 | 0.130979255 | -56 |
+| 1 | 68.5 | -64 | 0.109758809 | -56.5 |
+
+CPU FP32 recomputation of the final proposal chunk at the native maximum
+gives partial PV -65.095664978 (chip 0) and -64.677909851 (chip 1).
+Thus the remaining numerator error is already materially present in partial
+PV, not just output accumulation. Next inspect the final chunk's QK/exp
+inputs and probability values before proposing another recurrence change.
+This is coordinate-level diagnosis, not whole-model correctness or speed.
