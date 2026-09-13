@@ -31,6 +31,8 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertFalse(report['stage_instrumented'])
                     self.assertFalse(report['performance_qualified'])
                     self.assertEqual(report['sum_unpack_mode'], 'native-tf32')
+                    self.assertEqual(report['reciprocal_mode'], 'tr0-scalar-fp32-diagnostic')
+                    self.assertIn('dspark_ladder_scalar_reciprocal.py', stub.SOURCES)
                     self.assertFalse(report['ladder_geometry']['runtime_admitted'])
                 stub.main = run
                 with patch.dict(os.environ, dict(QWEN_LADDER_CONTEXT=str(context),
