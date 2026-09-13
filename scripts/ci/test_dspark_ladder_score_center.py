@@ -39,6 +39,10 @@ class ScoreCenterTests(unittest.TestCase):
                 '                sub_tiles_bcast_cols(in0_cb, in1_cb, j, i, j);')]
             self.assertEqual(len(selected), 3)
             self.assertTrue(all('== 40' in source and '== 2112' not in source for source in selected))
+            helper = next(after for before, after in replacements if before.startswith('void recip_block_inplace'))
+            for stage in ('ENTER', 'SCORES_READY', 'OPERAND_READY', 'DONE'):
+                self.assertIn(f'QWEN_SCORE_{stage}', helper)
+            self.assertIn('progress_calls++ < 2', helper)
         with self.assertRaises(ValueError):
             with scalar_score_center(key_tiles=296):
                 pass

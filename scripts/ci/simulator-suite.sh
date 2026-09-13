@@ -56,6 +56,9 @@ PY
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
             smoke_status=0
             smoke_started=$SECONDS
+            export TT_METAL_DPRINT_CORES='(0,0)'
+            export TT_METAL_DPRINT_RISCVS=TR0
+            export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
             printf 'ladder score smoke started %s\n' "$(date -u +%FT%TZ)"
             QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 600 python3 -u \
                 /experiment-scripts/ci/dspark-ladder-attention-probe.py \

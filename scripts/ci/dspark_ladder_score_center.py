@@ -70,7 +70,21 @@ def scalar_score_center(key_tiles=2112):
 
     def replacements():
         substitutions = original()
-        substitutions['compute_common.hpp'] += ((HELPER_ANCHOR, HELPER + HELPER_ANCHOR),) + tuple(
+        helper = HELPER
+        if key_tiles == 40:
+            substitutions['compute_common.hpp'] += (('#include <cstdint>',
+                '#include <cstdint>\n#include "api/debug/dprint.h"'),)
+            helper = helper.replace('    CircularBuffer(scores_cb).wait_front(tiles);', '''    static uint32_t progress_calls = 0;
+    const bool report_progress = progress_calls++ < 2;
+    if (report_progress) DEVICE_PRINT("QWEN_SCORE_ENTER mask={} tiles={}\\n", mask, tiles);
+    CircularBuffer(scores_cb).wait_front(tiles);
+    if (report_progress) DEVICE_PRINT("QWEN_SCORE_SCORES_READY mask={}\\n", mask);''').replace(
+                '    const auto scores_interface',
+                '    if (report_progress) DEVICE_PRINT("QWEN_SCORE_OPERAND_READY mask={}\\n", mask);\n    const auto scores_interface').replace(
+                '    if (mask) CircularBuffer(operand_cb).pop_front(tiles);',
+                '    if (mask) CircularBuffer(operand_cb).pop_front(tiles);\n'
+                '    if (report_progress) DEVICE_PRINT("QWEN_SCORE_DONE mask={}\\n", mask);')
+        substitutions['compute_common.hpp'] += ((HELPER_ANCHOR, helper + HELPER_ANCHOR),) + tuple(
             (before, after.replace('== 2112', f'== {key_tiles}'))
             for before, after in ((MASK, MASK_AFTER), (INIT, INIT_AFTER), (SUBTRACT, SUBTRACT_AFTER)))
         return substitutions
