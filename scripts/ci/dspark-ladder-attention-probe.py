@@ -13,6 +13,7 @@ from dspark_ladder_build import validate_manifest
 from dspark_ladder_factory import selector_assert
 from dspark_ladder_fixtures import fixture_probe
 from dspark_ladder_geometry import CONTEXTS, geometry
+from dspark_ladder_output_recurrence import explicit_output_recurrence
 
 
 def main():
@@ -28,6 +29,7 @@ def main():
     def dumps(value, *arguments, **keywords):
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
+                output_recurrence='explicit-multiply-add-bf16',
                 key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
         return json.dumps(value, *arguments, **keywords)
@@ -37,9 +39,9 @@ def main():
         probe.SOURCES = tuple(sorted(set(probe.SOURCES + (
             'dspark-native-8k-attention-probe.py', 'dspark-ladder-attention-probe.py',
             'dspark_ladder_attention.py', 'dspark_ladder_geometry.py', 'dspark_ladder_fixtures.py',
-            'dspark_ladder_factory.py', 'dspark_ladder_build.py'))))
+            'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_output_recurrence.py'))))
         probe.__file__ = str(Path(__file__).resolve())
-        with patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
+        with explicit_output_recurrence(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \
                 patch.object(probe, 'json', SimpleNamespace(dumps=dumps)):
             probe.main()
