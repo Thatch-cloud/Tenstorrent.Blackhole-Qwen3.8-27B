@@ -27,6 +27,22 @@ matrices, failed comparisons and non-exact replay. This is **not** full-request,
 coding-quality or performance qualification. Next integrate this exact candidate
 and its FP32-statistics factory into the bounded combined-runtime hardware trial.
 
+### Hardware integration status
+
+`dspark_8k_admission.py` now requires the retained component gate, exact
+8192/256 request geometry, the pinned factory transformation, successful build
+evidence, and matching hashes at both native binary paths. Admission is scoped
+and restores the default 8192-row limit even on failure. Three host tests pass.
+This helper is not yet connected to request execution: it cannot currently
+enable 8K serving or bypass existing guards.
+
+Remaining integration work:
+- Include the qualified factory patch in the isolated four-link runtime cache key/build.
+- Download the retained draft report in CI and admit the request after verifying that build.
+- Route fixed-history native attention through the exact 256-key implementation;
+  scope the 8448-row capacity without modifying simulator-pinned dependencies.
+- Run the combined two-card request with token/state auditing and report PP/CTX/TG.
+
 | Draft configuration | CI run | First failing comparison |
 | --- | --- | --- |
 | 64-key chunks, precise exponential | 34705245937 | Chip 1: 256 values, heads 11/13 at query rows 13/11 |
