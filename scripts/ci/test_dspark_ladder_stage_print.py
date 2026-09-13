@@ -23,6 +23,9 @@ class StagePrintTests(unittest.TestCase):
                     pass
 
     def test_snapshot_does_not_consume_or_write_buffers(self):
+        self.assertEqual(PARTIAL_SNAPSHOT.count('TSLICE('), 2)
+        self.assertIn('.w0=0, .w1=16', PARTIAL_SNAPSHOT)
+        self.assertIn('.w0=16, .w1=32', PARTIAL_SNAPSHOT)
         for forbidden in ('pop_front', 'push_back', 'reserve_back', 'pack_tile', 'copy_tile'):
             self.assertNotIn(forbidden, SNAPSHOT)
             self.assertNotIn(forbidden, RECIPROCAL_SNAPSHOT)

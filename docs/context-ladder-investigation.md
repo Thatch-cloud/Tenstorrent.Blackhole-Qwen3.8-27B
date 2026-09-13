@@ -491,3 +491,11 @@ error already in the partials from extra error in the final native reduction.
 Arithmetic, output buffers, chunk geometry and numerical tolerances remain
 unchanged. Sixteen preflight tests cover patch composition, C++ slice syntax,
 read-only behavior, scalar reciprocal and CI isolation.
+
+Run **34752550619** (658a596) preserves the baseline eager hash and clean
+teardown, but the debug API truncates each TileSlice to 16 values. Only half
+of each partial-sum row was emitted, so this run cannot attribute the complete
+reduction error. Fix the snapshot as two 16-value slices; retain the same
+arithmetic and coordinate. Add a slice-size regression check before rerunning.
+Report SHA256:
+`7ed67f8fd64778ec795579532421924b6a9eb0c4bb35710ffcdff023e399f77e`.

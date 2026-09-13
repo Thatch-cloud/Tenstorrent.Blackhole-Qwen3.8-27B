@@ -13,10 +13,13 @@ PARTIAL_SNAPSHOT = '''
         if constexpr (!QWEN_DRAFT_EXP_APPROX) {
 #if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
                 CircularBuffer(alias_prev_sum).wait_front(Sq_chunk_t);
-                DEVICE_PRINT("QWEN_PARTIAL_SUM q={} partials={:.9f}\\n",
+                DEVICE_PRINT("QWEN_PARTIAL_SUM q={} low={:.9f} high={:.9f}\\n",
                     local_q_start + q_iter - iter_q_start,
                     TSLICE(alias_prev_sum, 0,
-                        (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=32, .ws=1}),
+                        (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=16, .ws=1}),
+                        true, true),
+                    TSLICE(alias_prev_sum, 0,
+                        (SliceRange{.h0=2, .h1=3, .hs=1, .w0=16, .w1=32, .ws=1}),
                         true, true));
 #endif
         }
