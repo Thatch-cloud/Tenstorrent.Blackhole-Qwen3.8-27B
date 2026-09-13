@@ -156,3 +156,24 @@ Report SHA256: `1e5380c8d640c89221962f40aa6a47e8c805f45ecb0de0b551d30dfc940cf351
 Eleven local Python tests pass. This remains a 64-column synthetic gate, not a
 full-vocabulary performance result. The next size gate must exercise the real
 78 output tiles per worker, followed by complete-request hardware timing.
+
+## Production-size worker gate
+
+Run 34733393010 is running the unchanged 64-column protocol matrix plus two
+larger synthetic widths, using the real rank-256 reduction and 78 tiles per
+matmul worker. There is one factory build for the complete suite.
+
+| Output columns | Workers | Active output tiles per worker | Purpose |
+| ---: | ---: | --- | --- |
+| 4992 | 2 | 78, 78 | Full production worker workload |
+| 3712 | 2 | 78, 38 | Same final-worker padding as 248320 columns across 100 workers |
+
+Each wider case checks misses, hits, weight invalidation and stale payload
+rejection. This avoids loading the complete model into simulation; it does
+not substitute for the eventual full-vocabulary hardware gate.
+
+Runtime integration must reset metadata after proposal warmup/capture, so
+timed requests start cold rather than inheriting cache entries from warmup.
+Persistent cache buffers must outlive the prepared proposal trace and be
+released only after that trace closes. Both comparison arms must retain the
+qualified shared-Q/K, fused T16, four-link and 8K attention configuration.
