@@ -45,3 +45,10 @@ history, queries, precision flags and tolerance are unchanged. Factory and
 compute selectors admit exact key-count/chunk-size pairs, not a broad range.
 Fourteen host tests pass. This is an unqualified hypothesis until CI numerical
 and replay results pass; it is not a TG improvement claim.
+
+CI run 34740697532 tests this candidate at immutable revision af94fb5, tag
+`ci-qwen-ladder-chunk512-20260913`. It repeats all five synthetic contexts;
+the previous lower-context passes do not qualify a changed native build.
+Sixteen host checks now also lock down the exact long-context padding and
+key-count/chunk-size pairs. These additional test-only changes do not change
+the running candidate. Hardware admission remains closed pending the reports.
