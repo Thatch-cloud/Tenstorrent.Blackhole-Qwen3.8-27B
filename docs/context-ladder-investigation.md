@@ -192,3 +192,10 @@ probabilities and their value products. These are reference calculations, not
 device observations. The constant-value fixture has numerator equal to denominator;
 the last-proposal-only fixture has numerator 1 at these coordinates. Both retain
 the same maximum and denominator, helping distinguish print decoding from math drift.
+
+The initial snapshot run failed before kernel execution: the runtime rejects
+`TT_METAL_DPRINT_RISCVS=TRISC0`; the accepted selector is `TR0`. The outdated
+example in `rtoptions.cpp` is not authoritative over the HAL parser/runtime.
+Build completed in 266 seconds, then initialization failed after 7 seconds.
+Correct the selector and retain a CI regression assertion. No stage readings
+or new numerical evidence were produced by run 34742988039.
