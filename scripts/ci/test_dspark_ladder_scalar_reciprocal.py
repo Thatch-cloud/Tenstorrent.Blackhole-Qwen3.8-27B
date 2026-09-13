@@ -13,6 +13,10 @@ from dspark_ladder_scalar_reciprocal import BODY, scalar_reciprocal
 STUB = '''
 #include <cstdint>
 #define QWEN_DRAFT_EXP_APPROX false
+#ifndef TEST_KEY_TILES
+#define TEST_KEY_TILES 1072
+#endif
+constexpr uint32_t get_compile_time_arg_val(uint32_t) { return TEST_KEY_TILES; }
 constexpr uint32_t cb_addr_shift=4;
 struct Interface { uint32_t fifo_rd_ptr, fifo_page_size; };
 Interface state;
@@ -42,6 +46,7 @@ int main() {
         uint32_t local=index%1024;
         bool column=(local<256 || (local>=512 && local<768)) && local%16==0;
         float expected=(COMPILE_FOR_TRISC==0 && column) ? 1.0f/1.247028351f : 1.247028351f;
+        if(COMPILE_FOR_TRISC==0 && column && TEST_KEY_TILES==2112) expected=0.8017578125f;
         if(values[index]!=expected) return 3;
     }
     return munmap(allocation,8192)==0 ? 0 : 4;
@@ -50,9 +55,10 @@ int main() {
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'reciprocal.cpp'
             path.write_text(source)
-            for processor in (0, 1, 2):
+            for processor, keys in ((0, 1072), (1, 1072), (2, 1072), (0, 2112), (1, 2112), (2, 2112)):
                 binary = Path(directory) / ('reciprocal-' + str(processor))
                 result = subprocess.run(['g++', '-std=c++17', '-O2', '-DCOMPILE_FOR_TRISC=' + str(processor),
+                    '-DTEST_KEY_TILES=' + str(keys),
                     str(path), '-o', str(binary)], capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 subprocess.run([str(binary)], check=True, timeout=10)

@@ -408,3 +408,15 @@ so the 505-second difference is not a controlled timing attribution or TG result
 Report SHA256:
 `5c5e8fd4c535390f017794114d36c63fb6be5701344a648f55b740dfa5318d43`.
 No hardware qualification or serving changes follow from this run.
+
+### Reciprocal reload rounding candidate
+
+With BF16 output recurrence restored, isolate one remaining conversion: the
+scalar FP32 reciprocal is subsequently unpacked as TF32 by the final broadcast
+multiply. At the exact 64K geometry only, round that reciprocal to nearest-even
+TF32 before normal unpacking, rather than letting unpack truncate it. This is
+not an all-FP32 normalization and does not alter sum-buffer formats or routing.
+Smaller contexts retain their previous reciprocal arithmetic. Reports name the
+reload mode separately from reciprocal computation. CPU tests check both
+geometries on all three thread branches and preserve untouched tile lanes;
+native numerical/replay qualification remains required.

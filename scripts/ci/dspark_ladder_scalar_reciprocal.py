@@ -18,6 +18,14 @@ BODY = '''
             for (uint32_t row = 0; row < 32; ++row) {
                 const uint32_t offset = row < 16 ? row * 16 : 512 + (row - 16) * 16;
                 values[offset] = 1.0f / values[offset];
+                if constexpr (get_compile_time_arg_val(3) == 2112) {
+                    union { float value; uint32_t bits; } rounded;
+                    rounded.value = values[offset];
+                    if ((rounded.bits & 0x7f800000u) != 0x7f800000u) {
+                        rounded.bits = (rounded.bits + 0xfffu + ((rounded.bits >> 13) & 1u)) & 0xffffe000u;
+                        values[offset] = rounded.value;
+                    }
+                }
             }
         }
 #endif
