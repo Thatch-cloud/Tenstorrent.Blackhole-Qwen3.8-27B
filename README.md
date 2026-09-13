@@ -11,7 +11,7 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 | Workload | CTX | PP tok/s | Committed TG tok/s | Status |
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
-| One stream, batch 1, 121-token EOS response | 8192 | 3310.33 | 101.27 | First combined hardware result; repeat pending |
+| One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
 | Larger contexts | >8192 | Not measured | Not measured | Full ladder pending |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 
@@ -22,6 +22,8 @@ Run **34729556803** now measures the combined T16 verifier, shared Q/K
 normalization, fused MLP and captured publication at 8K. All six request audits
 pass. The matched control is **99.81 TG**, versus **101.27 TG** with shared Q/K.
 Both use 256-key draft attention; this does not isolate a chunk-size speedup.
+Repeat **34730226400** reaches **101.59 TG** versus **100.34 TG** control;
+all six requests pass again. The cached runtime build takes three seconds.
 The run exits successfully but logs a shutdown warning also seen in older 4K runs.
 [8K evidence and remaining gates](docs/draft-8k-numerical-investigation.md).
 

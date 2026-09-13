@@ -34,6 +34,24 @@ exists in earlier 4K runs 34702027898 and 34702526963. Exit status and request
 audits pass, but do not describe the shutdown log as warning-free. No serving
 or held-out coding-quality qualification follows from this result.
 
+### Repeat confirmation
+
+Run **34730226400** repeats the identical revision and numerical policy.
+Independent reconciliation again verifies 828 source hashes and recomputes both
+arm summaries from six exact requests. Acceptance and emitted lengths are unchanged.
+
+| One stream / batch 1 repeat | PP tok/s | CTX | Committed TG tok/s | Draft ms/block | Verifier trace ms/block |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Combined control | 3281.19 | 8192 | 100.34 | 29.89 | 68.79 |
+| Shared Q/K candidate | 3304.32 | 8192 | 101.59 | 29.78 | 67.73 |
+
+The candidate gains 1.24% over its matched control; full-width cycle time is
+108.23 ms. Runtime-cache reuse succeeds and the build stage takes three seconds.
+Report SHA256: `c4ab877ca9db65a5491b04afa5456ceedff5f4451154f96d16d39ebd4a0b804c`.
+This confirms 8K combined request correctness and roughly 101 TG, not 200 TG.
+Contexts above 8K remain outside the current admission and numerical gates;
+the requested full ladder is still outstanding, not silently reduced to two rows.
+
 ## Accepted synthetic component
 
 Run **34728453080**, commit **d029589**, passes the unchanged FP32 tolerance,
