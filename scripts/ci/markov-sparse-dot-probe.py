@@ -74,6 +74,7 @@ def main():
             ttnn.matmul(left, right, dtype=ttnn.float32, program_config=config,
                 compute_kernel_config=math, memory_config=ttnn.DRAM_MEMORY_CONFIG, optional_output_tensor=dense)
             ttnn.sparse_matmul(left, right, sparsity=mask, program_config=config,
+                is_input_a_sparse=True, is_input_b_sparse=True,
                 compute_kernel_config=math, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 optional_output_tensor=sparse)
 
