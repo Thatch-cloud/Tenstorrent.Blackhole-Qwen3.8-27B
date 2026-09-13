@@ -47,3 +47,16 @@ This optimization cannot reach 200 TG alone: even deleting the entire draft
 stage leaves the current verifier slower than the roughly 55 ms cycle budget
 at the observed eleven committed tokens per block. Verifier and acceptance
 improvements remain necessary. The full context ladder remains outstanding.
+
+## Controller implementation status
+
+`markov_cache_control.hpp` implements 64-slot LRU lookup and explicit commit
+with 32-byte metadata records suitable for a device dataflow wrapper. A miss
+does not become valid until commit; stale tickets, repeated commits, invalid
+tokens, epoch rollback and counter overflow are rejected. Epochs must increase
+when weights or cache ownership change; exhausted epochs require fresh state.
+
+The C++ host test passes with `-Wall -Wextra -Werror`, covering hits, uncommitted
+misses, eviction, invalidation and counter exhaustion. This is only controller
+logic. No device wrapper, cached bias payload, conditional native matmul,
+simulator numerical pass or combined-runtime speedup is implemented yet.
