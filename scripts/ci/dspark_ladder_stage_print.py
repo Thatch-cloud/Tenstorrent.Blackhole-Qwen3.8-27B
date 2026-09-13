@@ -9,6 +9,25 @@ import native_draft_sdpa
 INCLUDE = '#include <cstdint>'
 INCLUDE_AFTER = INCLUDE + '\n#include "api/debug/dprint.h"'
 REDUCE = '        matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);'
+OUTPUT_UPDATE = '''                mul_block_bcast_cols<Sq_chunk_t, vDHt, false, true>(
+                    alias_mm2_prev_out, cb_exp_max_diff, alias_mm2_cur_out);'''
+OUTPUT_BEFORE = '''
+                if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+                    CircularBuffer(alias_mm2_prev_out).wait_front(out_chunk_tiles);
+                    CircularBuffer(alias_mm2_cur_out).wait_front(out_chunk_tiles);
+                    CircularBuffer(cb_exp_max_diff).wait_front(Sq_chunk_t);
+                    DEVICE_PRINT("QWEN_OUTPUT_BEFORE q={} chunk={} previous={:.9f} partial={:.9f} correction={:.9f}\\n",
+                        local_q_start + q_iter - iter_q_start, processed_k_chunks,
+                        TSLICE(alias_mm2_prev_out, 0,
+                            (SliceRange{.h0=2, .h1=3, .hs=1, .w0=5, .w1=6, .ws=1}), true, true),
+                        TSLICE(alias_mm2_cur_out, 0,
+                            (SliceRange{.h0=2, .h1=3, .hs=1, .w0=5, .w1=6, .ws=1}), true, true),
+                        TSLICE(cb_exp_max_diff, 0,
+                            (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}), true, true));
+#endif
+                }
+'''
 PARTIAL_SNAPSHOT = '''
         if constexpr (!QWEN_DRAFT_EXP_APPROX) {
 #if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
@@ -72,12 +91,17 @@ def stage_snapshots(*, row=2, column=5):
         'TSLICE(alias_mm2_prev_out, 0,', f'TSLICE(alias_mm2_prev_out, {tile},')
     reciprocal = RECIPROCAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
     partial = PARTIAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
+    output_before = OUTPUT_BEFORE.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}').replace(
+        '.w0=5, .w1=6', f'.w0={lane}, .w1={lane + 1}')
+    for name in ('alias_mm2_prev_out', 'alias_mm2_cur_out'):
+        output_before = output_before.replace(f'TSLICE({name}, 0,', f'TSLICE({name}, {tile},')
     original = native_draft_sdpa.replacements
 
     def replacements():
         substitutions = original()
         substitutions['compute_common.hpp'] += (
             (INCLUDE, INCLUDE_AFTER), (REDUCE, partial + REDUCE + snapshot),
+            (OUTPUT_UPDATE, output_before + OUTPUT_UPDATE),
             (RECIPROCAL, RECIPROCAL + reciprocal))
         return substitutions
 

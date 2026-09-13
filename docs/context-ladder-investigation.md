@@ -609,3 +609,15 @@ PV matmul nor the exact pack/unpack recurrence. Retain it as a CPU diagnostic,
 not a simulator replacement or admission gate. The next native isolation
 must separate output recurrence from the partial PV results while retaining
 the improved denominator, rather than extrapolating from this surrogate.
+
+### Native output recurrence capture
+
+Keep scalar sum update and BF16 output storage. At the existing head-0,
+row-8, channel-116 coordinate, print previous output, current partial PV
+output and maximum-rescaling factor before each native output update.
+Chunk labels order the records; the next record's previous output supplies
+the prior update result, with the existing final numerator snapshot closing
+the last update. This separates native partial PV values from accumulated
+rounding without changing arithmetic or widening the acceptance criterion.
+Eighteen CPU preflight tests pass. Require matching eager hashes before
+using the new snapshots as evidence about the one-failure baseline.
