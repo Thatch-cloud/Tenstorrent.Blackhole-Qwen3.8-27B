@@ -6,6 +6,11 @@ Experimental paths are opt-in; serving defaults remain unchanged.
 
 ## Current position
 
+**Latest experiment rejected:** the request-owned Markov bias cache passes hardware
+correctness but reduces 8K TG from **100.90 to 93.91** (−6.93%), with unchanged
+acceptance. Run **34736316338**; one stream, two timed 121-token EOS responses
+per arm. It is not adopted. Next: the full context ladder on the uncached runtime.
+
 ### Context and workload coverage
 
 | Workload | CTX | PP tok/s | Committed TG tok/s | Status |

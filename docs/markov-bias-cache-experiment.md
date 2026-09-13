@@ -253,3 +253,26 @@ QK, fused T16, captured publication and score layout; only the candidate adds
 the bias cache. Reset after the final proposal warmup and release borrowing
 traces before cache buffers. Follow this comparison with the full-ladder
 checkpoint in the programme, rather than another optimization cycle.
+
+## Combined hardware outcome: rejected
+
+Run 34736316338, revision efc847c, passes correctness and closes cleanly.
+Both arms retain shared Q/K, fused T16, captured publication, score layout and
+four-link sampling. At 8192 prompt tokens, control PP/TG is 3311.81/100.90;
+cache PP/TG is 3306.93/93.91. TG regresses 6.9277%. Each arm has one audited
+and two timed requests, 242 timed committed tokens, 330 proposed and 222
+accepted (67.2727%). This is the 121-token natural-EOS fixture, not sustained
+1024-token generation or held-out coding quality.
+
+All 856 reported local source entries are unchanged across execution, as are
+the native source snapshots. Report SHA256:
+`196ce98ba43cef180d8b8bdb64569f794290a1f359f3fc1f337b83f573de219b`.
+The preceding run 34735942778 built successfully but stopped before model
+execution because the source gate expected the original sparse factory;
+efc847c added exact transformed-source admission, not an arithmetic change.
+
+Do not promote the cache. CI selection returns to uncached operation, preserving
+the immutable cache experiment tags. Continue the full-context ladder on the
+uncached baseline before further performance candidates. The regression cause
+needs attribution; correctness and an offline predicted hit rate do not prove
+that saved dot products outweigh cache traffic and dispatch costs.
