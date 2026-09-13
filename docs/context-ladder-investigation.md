@@ -375,3 +375,19 @@ its operand conversions, preserving the passing 32K reference and full history.
 Report SHA256:
 `38050b207858adcf3ad10a80fc04aeff41a7502275242fb8f2afa3476940929f`.
 Committed single-stream hardware throughput is unchanged by this experiment.
+
+### Next candidate: FP32 output intermediates only at 64K
+
+Keep chunk 1024, full history, scalar reciprocal and all tolerances fixed.
+Within the guarded 64K selector only, change `im_df` to Float32. This changes
+the two output intermediate buffers and their tile sizes together; the final
+output retains its native output dtype. The factory also uses `im_df` for
+reciprocal scratch, so this is not claimed to be a single-buffer change.
+All smaller context configurations retain BF16 output intermediates.
+
+Do not change global unpack routing: the previous direct-sum experiment
+demonstrated that shared source-register consumers cannot safely use that
+shortcut. This candidate uses normal format-derived unpacking. The simulator
+must establish native compatibility, numerical accuracy, replay and cleanup;
+24 CPU preflight tests alone do not establish those properties. The three
+non-qualifying diagnostics are omitted on this run to shorten feedback time.

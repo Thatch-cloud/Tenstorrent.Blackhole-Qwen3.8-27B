@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import dspark_fp32_build as baseline
 from dspark_hardware_gate import digest
-from dspark_ladder_factory import geometry_predicate, transform
+from dspark_ladder_factory import geometry_predicate, output_precision, transform
 
 
 BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py')
@@ -21,6 +21,7 @@ def factory_scope():
         geometry_predicate('Skt', 'Sk_chunk_t') + ' && Sq_chunk_t == 1')
     if replacement == baseline.REPLACEMENT:
         raise ValueError('Original baseline geometry selector required')
+    replacement = output_precision(replacement)
 
     def selected(source, *, enabled=True):
         if enabled is not True:
@@ -52,6 +53,7 @@ def main():
         baseline.main()
     report = json.loads(output.read_text())
     report['experiment'] = 'full-context-ladder'
+    report['precision_variant'] = 'fp32-stats-and-64k-output-intermediates'
     report['ladder_builders'] = builders
     output.write_text(json.dumps(report, indent=2) + '\n')
     validate_manifest('/opt/tt-metal', output)
