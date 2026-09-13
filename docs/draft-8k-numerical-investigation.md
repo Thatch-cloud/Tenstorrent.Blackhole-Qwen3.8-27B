@@ -115,6 +115,22 @@ truncation produces 8,075 (max 1.05605), without output rounding. Neither matche
 the native signature. These are additional excluded simple hypotheses, not
 evidence that the native implementation actually converts scores to BF16.
 
+## Bounded chunk-merging candidate
+
+With correction, reciprocal, final reduction and selector hypotheses exhausted,
+test fewer online merges directly: 256-key chunks give 34 iterations rather
+than 133 at 64 keys. The earlier 32-key trial worsened errors; the value probes
+now identify biased effective weights. This motivates a bounded comparison,
+not an unrestricted chunk sweep or a claim that rounding is proven causal.
+
+All original 8512 operand rows, absolute positions and 15 proposals are retained.
+Add 192 rows of +8192 keys / -8192 values with negative-infinity mask entries,
+giving 8704 physical keys. Host tests verify original operands and masks are
+unchanged, added rows are poisoned/masked, dispatch requests 256 keys, and all
+new tensors are retained for trace lifetime. The FP32-statistics predicate and
+compile-time selector assertions match the new geometry. Remove the ineffective
+SUM substitution; keep the pack-format fix. No serving default changes.
+
 ## Source-backed precision scope
 
 The pinned SDPA factory uses FP32 QK and sum buffers when FP32 destination

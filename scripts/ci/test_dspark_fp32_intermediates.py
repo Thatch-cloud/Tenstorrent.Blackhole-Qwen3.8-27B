@@ -35,6 +35,6 @@ class FactoryTests(unittest.TestCase):
                 candidate.transform(original)
 
     def test_target_and_streaming_paths_excluded(self):
-        for clause in ('NQH == 16', 'NKH == 4', 'DHt == 4', 'Skt == 266',
-                       'Sk_chunk_t == 2', '!use_streaming_compute', 'fp32_dest_acc_en', '!is_causal'):
+        for clause in ('NQH == 16', 'NKH == 4', 'DHt == 4', 'Skt == 272',
+                       'Sk_chunk_t == 8', '!use_streaming_compute', 'fp32_dest_acc_en', '!is_causal'):
             self.assertIn(clause, candidate.REPLACEMENT)

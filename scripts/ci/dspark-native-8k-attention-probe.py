@@ -26,7 +26,7 @@ SPEC.loader.exec_module(FULL)
 NATIVE_SPEC = importlib.util.spec_from_file_location('native_attention_gate', Path(__file__).with_name('dspark-attention-probe.py'))
 NATIVE = importlib.util.module_from_spec(NATIVE_SPEC)
 NATIVE_SPEC.loader.exec_module(NATIVE)
-SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
+SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_attention_chunk_trial.py', 'dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
     'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 'dspark-attention-probe.py'))))
 CAPACITY, PROPOSALS = 8448, 15
 POSITIONS = (8192, 8433)
@@ -37,12 +37,9 @@ COUNTS = dict(eager_checks=4, replay_checks=4, input_checks=48, layout_checks=16
 
 def execute(operations, mesh, query, key, value, mask, owned, *, context_rows,
         proposals, mask_validated=False):
-    if mesh is None or not isinstance(owned, list):
-        raise ValueError('Explicit mesh and caller-owned attention output required')
-    validate_inputs(operations, query, key, value, mask, context_rows, proposals, mask_validated)
-    output = draft_sdpa(operations, query, key, value, mask, key_chunk_size=64)
-    owned.append(output)
-    return output
+    from dspark_attention_chunk_trial import execute as chunk_trial
+    return chunk_trial(operations, mesh, query, key, value, mask, owned,
+        context_rows=context_rows, proposals=proposals, mask_validated=mask_validated)
 
 
 def source_hashes():
@@ -168,7 +165,8 @@ def run():
         positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
         sources=source_hashes(), native_sources=NATIVE.fingerprints(root,
             packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True),
-        kernel_audit=kernel_audit, key_chunk_size=64, resources_before=snapshot(bounded=True),
+        kernel_audit=kernel_audit, key_chunk_size=256, native_padded_keys=8704,
+        added_masked_poison_rows=192, resources_before=snapshot(bounded=True),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         **{name: [] for name in COUNTS})
     owned, transient = [], []

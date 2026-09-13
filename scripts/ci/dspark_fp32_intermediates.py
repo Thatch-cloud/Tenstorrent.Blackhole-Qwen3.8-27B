@@ -10,7 +10,7 @@ ANCHOR = '''    tt::DataFormat im_df =
     tt::DataFormat stats_df = im_df;'''
 REPLACEMENT = '''    const bool qwen_draft_fp32_intermediates =
         B == 1 && NQH == 16 && NKH == 4 && DHt == 4 && vDHt == 4 &&
-        Skt == 266 && Sq_chunk_t == 1 && Sk_chunk_t == 2 &&
+        Skt == 272 && Sq_chunk_t == 1 && Sk_chunk_t == 8 &&
         !is_causal && compute_use_provided_mask && !is_chunked &&
         !use_attention_sink && !is_windowed && !use_streaming_compute &&
         fp32_dest_acc_en && !exp_approx_mode;
