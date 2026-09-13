@@ -54,7 +54,7 @@ PY
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
             unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
-            for context in 32768 65536 128 4096 8192; do
+            for context in 65536 32768 128 4096 8192; do
                 context_status=0
                 context_started=$SECONDS
                 printf 'ladder context=%s started %s\n' "$context" "$(date -u +%FT%TZ)"

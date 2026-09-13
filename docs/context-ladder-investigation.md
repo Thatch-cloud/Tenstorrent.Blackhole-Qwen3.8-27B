@@ -331,3 +331,15 @@ Do not compare simulator times as hardware performance: the passing 32K probe
 executes additional eager and replay work that earlier failed probes never reached.
 Retain this candidate as a diagnostic baseline while isolating 64K output/history
 accumulation drift; hardware admission and the full PP/CTX/TG ladder remain open.
+
+### 64K candidate: reduce accumulation iterations
+
+The 64K constant-value diagnostics show maximum drift 0.0312497 on chip 0 and
+0.0351562 on chip 1 despite the full-precision reciprocal. Test 1024-key chunks
+only at 64K, retaining the 32K/512 configuration and scalar reciprocal. This
+reduces online accumulation iterations from 131 to 66, with full logical
+history unchanged; masked poisoned padding grows from 448 to 960 keys.
+Native storage is 67584 keys and the selector admits only the exact
+2112-key-tile/32-chunk-tile pair. This is a bounded accumulation hypothesis,
+not a general chunk sweep or assumed speed improvement. Run 64K first, then
+all four smaller regressions if it passes. Retain unchanged tolerances.

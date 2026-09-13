@@ -5,15 +5,15 @@ from dspark_ladder_geometry import geometry, ladder
 
 class LadderGeometryTests(unittest.TestCase):
     def test_long_context_chunk_candidate_preserves_exact_headroom(self):
-        for context, capacity, storage, native in (
-                (32768, 33792, 33856, 34304),
-                (65536, 66560, 66624, 67072)):
+        for context, capacity, storage, native, chunk, padding in (
+                (32768, 33792, 33856, 34304, 512, 448),
+                (65536, 66560, 66624, 67584, 1024, 960)):
             with self.subTest(context=context):
                 row = geometry(context)
                 self.assertEqual((row['capacity'], row['storage_keys'], row['native_keys']),
                     (capacity, storage, native))
-                self.assertEqual(row['key_chunk'], 512)
-                self.assertEqual(row['extra_masked_keys'], 448)
+                self.assertEqual(row['key_chunk'], chunk)
+                self.assertEqual(row['extra_masked_keys'], padding)
                 self.assertEqual(row['probe_positions'], (context, capacity - 15))
 
     def test_preserves_existing_eight_k_comparison_geometry(self):

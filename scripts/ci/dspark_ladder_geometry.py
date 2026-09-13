@@ -11,7 +11,7 @@ def geometry(context, output_tokens=1024):
         raise ValueError('Explicit short comparison or sustained output allowance required')
     capacity = ((context + output_tokens + 31) // 32) * 32
     storage_keys = ((capacity + 15 + 63) // 64) * 64
-    key_chunk = 512 if context >= 32768 else 256
+    key_chunk = {32768: 512, 65536: 1024}.get(context, 256)
     native_keys = ((storage_keys + key_chunk - 1) // key_chunk) * key_chunk
     return dict(context=context, output_tokens=output_tokens, capacity=capacity,
         proposals=15, storage_keys=storage_keys, native_keys=native_keys,

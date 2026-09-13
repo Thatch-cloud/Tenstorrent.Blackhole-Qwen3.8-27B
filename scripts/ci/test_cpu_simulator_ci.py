@@ -11,7 +11,7 @@ class CpuSimulatorCiTests(unittest.TestCase):
         workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
         self.assertEqual(workflow.count('dspark-ladder-attention-sim'), 5)
         suite = Path(__file__).with_name('simulator-suite.sh').read_text()
-        self.assertIn('for context in 32768 65536 128 4096 8192', suite)
+        self.assertIn('for context in 65536 32768 128 4096 8192', suite)
         self.assertIn('context.elapsed-seconds', suite)
         self.assertIn('ladder build completed elapsed_seconds=', suite)
         self.assertIn('unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS', suite)

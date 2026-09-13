@@ -12,14 +12,15 @@ class LadderFactoryTests(unittest.TestCase):
         expression = geometry_predicate('keys', 'chunk')
         pairs = {(int(keys), int(chunk)) for keys, chunk in
             re.findall(r'\(keys == (\d+) && chunk == (\d+)\)', expression)}
-        expected = {(40, 8), (168, 8), (272, 8), (296, 8), (1072, 16), (2096, 16)}
+        expected = {(40, 8), (168, 8), (272, 8), (296, 8), (1072, 16), (2112, 32)}
         self.assertEqual(pairs, expected)
         self.assertEqual(expression.count('||'), len(expected) - 1)
         for keys, chunk in expected:
-            self.assertNotIn((keys, 16 if chunk == 8 else 8), pairs)
+            for other_chunk in {8, 16, 32} - {chunk}:
+                self.assertNotIn((keys, other_chunk), pairs)
 
     def test_selectors_cover_only_explicit_ladder_and_existing_baseline(self):
-        self.assertEqual(KEY_TILES, (40, 168, 272, 296, 1072, 2096))
+        self.assertEqual(KEY_TILES, (40, 168, 272, 296, 1072, 2112))
         self.assertIn(geometry_predicate('get_compile_time_arg_val(3)', 'get_compile_time_arg_val(8)'), selector_assert())
         self.assertIn('get_compile_time_arg_val(8) == 8', selector_assert())
 
