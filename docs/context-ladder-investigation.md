@@ -567,3 +567,14 @@ update. Earlier FP32-output-storage rejection used the old native sum update,
 so it does not prove how FP32 output storage interacts with the corrected sum.
 Any combined precision experiment must retain full-history, unchanged tolerance,
 both fixtures/chips and exact replay rather than targeting only this element.
+
+### Combined sum/output precision candidate
+
+Retain the simulator-executed scalar FP32 sum update and scalar reciprocal;
+change only the exact 64K factory's output intermediate storage to FP32.
+The earlier standalone output-storage candidate lacked this sum update.
+Keep the row-8 snapshots to compare numerator and denominator directly, with
+the full eager/replay gate unchanged. Other context configurations remain
+unchanged. Normal unpack routing still applies; do not call this all-FP32
+arithmetic or assume it improves performance. Twenty-six CPU preflight tests
+pass, including factory rebuild provenance and scalar-update buffer ownership.
