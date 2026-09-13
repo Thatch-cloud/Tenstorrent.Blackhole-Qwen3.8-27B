@@ -9,6 +9,18 @@ import native_draft_sdpa
 INCLUDE = '#include <cstdint>'
 INCLUDE_AFTER = INCLUDE + '\n#include "api/debug/dprint.h"'
 REDUCE = '        matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);'
+PARTIAL_SNAPSHOT = '''
+        if constexpr (!QWEN_DRAFT_EXP_APPROX) {
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+                CircularBuffer(alias_prev_sum).wait_front(Sq_chunk_t);
+                DEVICE_PRINT("QWEN_PARTIAL_SUM q={} partials={:.9f}\\n",
+                    local_q_start + q_iter - iter_q_start,
+                    TSLICE(alias_prev_sum, 0,
+                        (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=32, .ws=1}),
+                        true, true));
+#endif
+        }
+'''
 SNAPSHOT = '''
         if constexpr (!QWEN_DRAFT_EXP_APPROX) {
 #if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
@@ -54,12 +66,13 @@ def stage_snapshots(*, row=2, column=5):
     snapshot = SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}').replace(
         '.w0=5, .w1=6', f'.w0={column}, .w1={column + 1}')
     reciprocal = RECIPROCAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
+    partial = PARTIAL_SNAPSHOT.replace('.h0=2, .h1=3', f'.h0={row}, .h1={row + 1}')
     original = native_draft_sdpa.replacements
 
     def replacements():
         substitutions = original()
         substitutions['compute_common.hpp'] += (
-            (INCLUDE, INCLUDE_AFTER), (REDUCE, REDUCE + snapshot),
+            (INCLUDE, INCLUDE_AFTER), (REDUCE, partial + REDUCE + snapshot),
             (RECIPROCAL, RECIPROCAL + reciprocal))
         return substitutions
 

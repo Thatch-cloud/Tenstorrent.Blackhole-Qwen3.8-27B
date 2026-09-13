@@ -480,3 +480,14 @@ BF16 rounding (reported output -46.25). Thus reciprocal-only changes cannot
 be assumed to fix the upstream error. Next isolate the denominator's final
 row reduction from its per-chunk accumulation; do not infer that all drift
 comes from one stage or that FP32 storage implies FP32 operand arithmetic.
+
+### Separate final reduction from accumulated partials
+
+Extend the same read-only row-5 snapshot to print all 32 stored FP32 partial
+denominator values immediately before `matmul_reduce`. Sum those values on
+the host and compare against both the observed native post-reduction value
+and reference 1.286179920 (chip 0, at native maximum). This distinguishes
+error already in the partials from extra error in the final native reduction.
+Arithmetic, output buffers, chunk geometry and numerical tolerances remain
+unchanged. Sixteen preflight tests cover patch composition, C++ slice syntax,
+read-only behavior, scalar reciprocal and CI isolation.
