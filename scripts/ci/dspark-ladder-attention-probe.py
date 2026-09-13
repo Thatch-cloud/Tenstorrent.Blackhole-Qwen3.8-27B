@@ -38,6 +38,8 @@ def main():
         raise ValueError('Score smoke requires the 128-token fixture')
 
     def dumps(value, *arguments, **keywords):
+        if isinstance(value, dict) and 'stage' in value:
+            value = dict(value, context=context, score_center_smoke=smoke == '1')
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
                 score_center_smoke=smoke == '1',

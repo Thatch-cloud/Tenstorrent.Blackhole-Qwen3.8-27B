@@ -21,6 +21,8 @@ class LadderProbeTests(unittest.TestCase):
                 fixture = PROBE.geometry(context)
                 stub = SimpleNamespace(SOURCES=(), json=json)
                 def run():
+                    progress = json.loads(stub.json.dumps(dict(stage='eager_0')))
+                    self.assertEqual(progress, dict(stage='eager_0', context=context, score_center_smoke=False))
                     self.assertEqual(Path(stub.__file__).name, 'dspark-ladder-attention-probe.py')
                     self.assertIn('dspark-native-8k-attention-probe.py', stub.SOURCES)
                     report = json.loads(stub.json.dumps(dict(capacity=fixture['capacity'],
