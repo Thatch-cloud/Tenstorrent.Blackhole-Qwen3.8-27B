@@ -578,3 +578,15 @@ the full eager/replay gate unchanged. Other context configurations remain
 unchanged. Normal unpack routing still applies; do not call this all-FP32
 arithmetic or assume it improves performance. Twenty-six CPU preflight tests
 pass, including factory rebuild provenance and scalar-update buffer ownership.
+
+### Combined output-storage result: rejected on complete first-case comparison
+
+Run **34783345209**, revision **3db0cbf**, fails the first eager comparison
+on chip 0 with **343 failing elements**, maximum error **0.617980957**.
+Cleanup is clean; later cases/replay are not reached. At the inspected row,
+numerator improves from -56 to -56.609519958 (reference -56.703657611 at
+native maximum); denominator stays 1.285524368. Improvement at one coordinate
+does not qualify the broader candidate. Restore BF16 output intermediates
+while retaining the scalar sum update, which had only one first-case failure.
+Report SHA256:
+`b57744cc5cb70dc9aefc2c9c98be1782d9fd8f95e7025bfdaea20ab2db4bfb43`.
