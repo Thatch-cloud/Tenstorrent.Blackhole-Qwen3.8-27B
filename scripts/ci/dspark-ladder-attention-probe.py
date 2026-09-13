@@ -33,16 +33,20 @@ def main():
         raise ValueError('Dedicated rebuilt ladder simulator required')
     context = int(context_text)
     fixture = geometry(context)
+    smoke = os.environ.get('QWEN_LADDER_SCORE_SMOKE', '0')
+    if smoke not in ('0', '1') or (smoke == '1' and context != 128):
+        raise ValueError('Score smoke requires the 128-token fixture')
 
     def dumps(value, *arguments, **keywords):
         if isinstance(value, dict) and 'capacity' in value and 'numerical_tolerances' in value:
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
+                score_center_smoke=smoke == '1',
                 stage_instrumented=context == 65536, performance_qualified=False,
                 stage_coordinates=dict(row=8, column=116) if context == 65536 else None,
                 value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
                 sum_update_mode='tr0-scalar-fp32' if context == 65536 else 'native',
-                score_center_mode='tr0-fp32-before-reload' if context == 65536 else 'native',
+                score_center_mode='tr0-fp32-before-reload' if context == 65536 or smoke == '1' else 'native',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
                 reciprocal_reload_rounding='native-truncate',
                 output_recurrence='native-l1-pack-accumulation-bf16',
@@ -61,7 +65,7 @@ def main():
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 scalar_sum_update(), \
                 (stage_snapshots(row=8, column=116) if context == 65536 else nullcontext()), \
-                scalar_score_center(), \
+                scalar_score_center(key_tiles=40 if smoke == '1' else 2112), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \

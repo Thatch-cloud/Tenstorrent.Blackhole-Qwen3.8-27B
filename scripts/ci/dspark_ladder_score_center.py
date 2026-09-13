@@ -25,8 +25,10 @@ void qwen_scalar_score_transform(uint32_t scores_cb, uint32_t operand_cb, uint32
                 const uint32_t offset = first + (column < 16 ? column : 256 + column - 16);
                 if (mask) {
                     const volatile uint16_t* masks = reinterpret_cast<const volatile uint16_t*>(operand_address);
+                    const uint32_t mask_bits = static_cast<uint32_t>(masks[offset]) << 16;
+                    if ((mask_bits & 0x7fffffffU) == 0) continue;
                     union { uint32_t bits; float value; } converted;
-                    converted.bits = static_cast<uint32_t>(masks[offset]) << 16;
+                    converted.bits = mask_bits;
                     scores[offset] = scores[offset] + converted.value;
                 } else {
                     const volatile float* maxima = reinterpret_cast<const volatile float*>(operand_address);
@@ -61,13 +63,16 @@ SUBTRACT_AFTER = '''                if constexpr (!QWEN_DRAFT_EXP_APPROX && get_
 
 
 @contextmanager
-def scalar_score_center():
+def scalar_score_center(key_tiles=2112):
+    if key_tiles not in (40, 2112):
+        raise ValueError('Only the 128-token smoke or 64K ladder geometry is supported')
     original = native_draft_sdpa.replacements
 
     def replacements():
         substitutions = original()
-        substitutions['compute_common.hpp'] += ((HELPER_ANCHOR, HELPER + HELPER_ANCHOR),
-            (MASK, MASK_AFTER), (INIT, INIT_AFTER), (SUBTRACT, SUBTRACT_AFTER))
+        substitutions['compute_common.hpp'] += ((HELPER_ANCHOR, HELPER + HELPER_ANCHOR),) + tuple(
+            (before, after.replace('== 2112', f'== {key_tiles}'))
+            for before, after in ((MASK, MASK_AFTER), (INIT, INIT_AFTER), (SUBTRACT, SUBTRACT_AFTER)))
         return substitutions
 
     with patch.object(native_draft_sdpa, 'replacements', replacements):

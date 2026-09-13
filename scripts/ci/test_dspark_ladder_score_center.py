@@ -30,6 +30,19 @@ struct CircularBuffer {
 
 
 class ScoreCenterTests(unittest.TestCase):
+    def test_smoke_selector_is_explicit_and_bounded(self):
+        with scalar_score_center(key_tiles=40):
+            replacements = native_draft_sdpa.replacements()['compute_common.hpp']
+            selected = [after for before, after in replacements if before in (
+                '                    add_block_inplace(cb_qk_im, cb_mask_in, qk_chunk_tiles);',
+                '    sub_bcast_cols_init(in0_cb, in1_cb);',
+                '                sub_tiles_bcast_cols(in0_cb, in1_cb, j, i, j);')]
+            self.assertEqual(len(selected), 3)
+            self.assertTrue(all('== 40' in source and '== 2112' not in source for source in selected))
+        with self.assertRaises(ValueError):
+            with scalar_score_center(key_tiles=296):
+                pass
+
     @unittest.skipUnless(os.name == 'posix' and shutil.which('g++'), 'Linux compiler required')
     def test_mask_and_center_preserve_precision_faces_and_ownership(self):
         source = STUB + '''

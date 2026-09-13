@@ -54,6 +54,16 @@ PY
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
             unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
+            smoke_status=0
+            smoke_started=$SECONDS
+            printf 'ladder score smoke started %s\n' "$(date -u +%FT%TZ)"
+            QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 600 python3 -u \
+                /experiment-scripts/ci/dspark-ladder-attention-probe.py \
+                --output /experiment/results/dspark-ladder-score-smoke.json || smoke_status=$?
+            printf '%s\n' "$smoke_status" > /experiment/results/dspark-ladder-score-smoke.exit-status
+            printf '%s\n' "$((SECONDS - smoke_started))" > /experiment/results/dspark-ladder-score-smoke.elapsed-seconds
+            printf 'ladder score smoke completed status=%s elapsed_seconds=%s\n' "$smoke_status" "$((SECONDS - smoke_started))"
+            if [ "$smoke_status" != 0 ]; then exit "$smoke_status"; fi
             for context in 65536 32768 128 4096 8192; do
                 unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
                 if [ "$context" = 65536 ]; then

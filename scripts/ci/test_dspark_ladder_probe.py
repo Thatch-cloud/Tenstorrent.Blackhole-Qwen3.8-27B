@@ -74,6 +74,14 @@ class LadderProbeTests(unittest.TestCase):
                 PROBE.main()
             factory.assert_not_called()
 
+    def test_rejects_smoke_on_large_context(self):
+        with patch.dict(os.environ, dict(QWEN_LADDER_CONTEXT='65536',
+                QWEN_LADDER_SCORE_SMOKE='1', QWEN_SIM_CASE='dspark-ladder-attention',
+                QWEN_DRAFT_FP32_INTERMEDIATES='1')), patch.object(PROBE, 'fixture_probe') as factory:
+            with self.assertRaises(ValueError):
+                PROBE.main()
+            factory.assert_not_called()
+
     def test_rejects_unsupported_context_before_fixture_creation(self):
         with patch.dict(os.environ, {'QWEN_LADDER_CONTEXT': '262144'}), \
                 patch.object(PROBE, 'fixture_probe') as factory:

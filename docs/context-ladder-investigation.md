@@ -718,3 +718,19 @@ all tile faces, zero/blocked masks, TR0-only writes, buffer consumption,
 combined patch composition and Blackhole helper compilation. Native scheduling
 and full numerical acceptance still require CI; scalar loops are diagnostic
 and must not be presented as the final production-speed implementation.
+
+### Score-centering timeout: run 34787283613
+
+The 64K simulator probe exited with status 124 after exactly 1800 seconds.
+Fabric initialization completed on both simulated devices; the final progress
+record was `eager_0`. There is no numerical result or clean-close evidence,
+so this candidate is not admitted to hardware. The log does not distinguish
+a synchronization stall from excessive scalar execution cost.
+
+Do not extend the timeout or rerun the full ladder unchanged. First isolate
+this path at small workload size while retaining its mask, centering and
+native exponential sequence. The existing host tests do not model TRISC
+synchronization. Zero masks now bypass scalar addition entirely, preserving
+stored scores without a software floating-point operation; this is a local
+cost reduction, not a demonstrated fix for the timeout. Context-ladder
+acceptance and the 200 committed-token/s objective remain outstanding.

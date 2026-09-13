@@ -12,6 +12,9 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertEqual(workflow.count('dspark-ladder-attention-sim'), 5)
         suite = Path(__file__).with_name('simulator-suite.sh').read_text()
         self.assertIn('for context in 65536 32768 128 4096 8192', suite)
+        self.assertIn('QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 600', suite)
+        self.assertLess(suite.index('if [ "$smoke_status" != 0 ]; then exit "$smoke_status"; fi'),
+            suite.index('for context in 65536'))
         self.assertIn('context.elapsed-seconds', suite)
         self.assertIn('ladder build completed elapsed_seconds=', suite)
         self.assertIn('unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS', suite)
