@@ -36,6 +36,7 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertEqual(PROBE.dspark_attention_value_diagnostics.KINDS, ())
                     self.assertFalse(report['performance_qualified'])
                     self.assertEqual(report['sum_unpack_mode'], 'native-tf32')
+                    self.assertEqual(report['sum_update_mode'], 'tr0-scalar-fp32' if context == 65536 else 'native')
                     self.assertEqual(report['reciprocal_reload_rounding'],
                         'native-truncate')
                     self.assertEqual(report['reciprocal_mode'], 'tr0-scalar-fp32-diagnostic')

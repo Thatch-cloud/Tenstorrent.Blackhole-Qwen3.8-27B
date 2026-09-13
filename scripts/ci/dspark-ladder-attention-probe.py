@@ -17,6 +17,7 @@ from dspark_ladder_fixtures import fixture_probe
 from dspark_ladder_geometry import CONTEXTS, geometry
 from dspark_ladder_scalar_reciprocal import scalar_reciprocal
 from dspark_ladder_stage_print import stage_snapshots
+from dspark_ladder_sum_update import scalar_sum_update
 
 
 def main():
@@ -39,6 +40,7 @@ def main():
                 stage_coordinates=dict(row=5, column=0) if context == 65536 else None,
                 value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
+                sum_update_mode='tr0-scalar-fp32' if context == 65536 else 'native',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
                 reciprocal_reload_rounding='native-truncate',
                 output_recurrence='native-l1-pack-accumulation-bf16',
@@ -52,9 +54,10 @@ def main():
             'dspark-native-8k-attention-probe.py', 'dspark-ladder-attention-probe.py',
             'dspark_ladder_attention.py', 'dspark_ladder_geometry.py', 'dspark_ladder_fixtures.py',
             'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_scalar_reciprocal.py',
-            'dspark_ladder_stage_print.py'))))
+            'dspark_ladder_stage_print.py', 'dspark_ladder_sum_update.py'))))
         probe.__file__ = str(Path(__file__).resolve())
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
+                scalar_sum_update(), \
                 (stage_snapshots(row=5, column=0) if context == 65536 else nullcontext()), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \

@@ -499,3 +499,24 @@ reduction error. Fix the snapshot as two 16-value slices; retain the same
 arithmetic and coordinate. Add a slice-size regression check before rerunning.
 Report SHA256:
 `7ed67f8fd64778ec795579532421924b6a9eb0c4bb35710ffcdff023e399f77e`.
+
+### Complete partial sums and next isolated update
+
+Run **34753183554** (6c76a6f) captures both halves and exactly reproduces the
+baseline eager hash, 129 failures and clean teardown. Report SHA256:
+`a42adf96addfa5e864f613374fab368dfa59301ede7b6b4c387b4c9ac43eb849`.
+
+| Chip | Sum of 32 printed partials | Native final reduction | FP32 reference at native maximum |
+|---|---:|---:|---:|
+| 0 | 1.277565000 | 1.278387070 | 1.286179920 |
+| 1 | 1.230964668 | 1.228707314 | 1.244706821 |
+
+Printed values have nine decimal places. Most denominator drift is already
+upstream of final reduction; on chip 0 that reduction actually reduces the
+shortfall. Isolate the recurring sum update next: at 64K only, use a TR0 scalar
+FP32 `current += previous * correction` over all partial lanes, retaining CB
+formats and leaving the correction available to native output accumulation.
+Consume only the previous sum, as the original update does. This is a
+diagnostic, not a production-speed implementation. Two-tile face/address and
+ownership tests plus native patch composition and Blackhole object compilation
+pass; simulator execution must still establish synchronization and correctness.
