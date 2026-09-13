@@ -94,7 +94,7 @@ yet a qualified replacement for the current dense Markov dot.
 The next tiny test must compare active sparse output bit-for-bit against the
 current HiFi4/FP32 dense dot at rank 256, then alternate active/inactive inputs
 through the same trace. Do not set a fixed `nnz`: changing hit/miss counts would
-violate that kernel's protocol. The sparse writer zero-fills skipped output,
+violate that kernel's protocol. The sparse operation zero-fills skipped output,
 so cached bias needs a separate persistent payload and explicit selection.
 Its FP32 intermediate-buffer configuration must also match dense arithmetic;
 sharing the compute source alone does not prove numerical equivalence.
@@ -105,14 +105,26 @@ sharing the compute source alone does not prove numerical equivalence.
 | --- | --- | --- |
 | 34731978621 | Rejected by shape validation | Default sparse semantics expand both batch dimensions; single-pair mode must be explicit |
 | 34732171781 | Numerical failure, clean teardown | Four inactive chip/replay outputs exactly zero; all six active comparisons differ from dense FP32 bits |
-| 34732469080 | Submitted, pending result | Scoped `UnpackToDestFp32` correction for rank-256 sparse partial reloads |
+| 34732469080 | Passed, 5m32s including factory build | All six active comparisons bit-exact to dense; all four inactive outputs zero under changed-input replay |
 
 The active mismatch affects all 64 output values per comparison, with maximum
 absolute differences of 0.00225–0.00310. No tolerance was relaxed. Native-source
 inspection shows that dense matmul marks partials CB5 for FP32-to-destination
 unpack, while the sparse factory omits this flag. The new factory trial adds
-that flag only for the paired Markov geometry; the simulator must confirm the
-hypothesis before any integration. Source and rebuilt-library hashes are retained.
+that flag only for the paired Markov geometry. The corrected simulator run
+passes all ten comparisons with zero mismatches and clean teardown. The
+original and corrected factories share the same native compute kernel.
+Source and rebuilt-library hashes are retained and were reconciled locally.
+
+Report SHA256: `24c67f8ddb688f7b3ac61ae4733275369515c9c0f7011011e0c555da4014ab37`.
+Corrected factory SHA256: `5340ab7cfc29dc858f189bb83ee6aff71e79eab5fae8a0c661cbb94847cc0079`.
+Both loaded library paths: `3f6bd505e052af45c07c7e48470f2b51075cd7e22baed9f23b4c166325e2bbc5`.
+
+This gate uses rank 256 and 64 output columns. It does not qualify full-vocabulary
+cache payloads, real-weight proposals, or runtime performance. Next connect the
+controller's miss decision to a device-owned sparse mask and separate cached
+FP32 bias payload, then check eviction/replay and the production per-worker tile
+count before promoting a complete candidate to matched hardware PP/CTX/TG.
 
 The inactive zero fill is an operation-level output initialization, not a
 zeroing operation in the matmul writer. At full vocabulary this still writes
