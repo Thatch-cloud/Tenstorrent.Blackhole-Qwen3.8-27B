@@ -14,6 +14,10 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertNotIn('docker cp "$container:/experiment/results/."', runner)
         self.assertIn('timeout -k 5 20 docker logs', runner)
         self.assertIn('timeout -k 5 20 docker rm -f', runner)
+        self.assertIn('results_gid=$(stat -c %g "$results")', runner)
+        self.assertEqual(runner.count('--group-add "$results_gid"'), 2)
+        self.assertNotIn('chown -R', runner)
+        self.assertLess(runner.index('result-write-preflight.txt'), runner.index('docker create'))
 
     def test_ladder_runs_explicit_contexts_without_weights(self):
         root = Path(__file__).resolve().parents[2]

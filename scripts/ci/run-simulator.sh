@@ -7,6 +7,14 @@ mkdir -p experiment-results
 results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+results_gid=$(stat -c %g "$results")
+[[ "$results_gid" =~ ^[0-9]+$ ]]
+chmod g+rwx "$results"
+timeout -k 5 30 docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+    --group-add "$results_gid" \
+    --mount "type=bind,src=$results,dst=/experiment/results" --entrypoint /bin/bash "$image" \
+    -c 'printf "container_uid=%s\n" "$(id -u)" > /experiment/results/result-write-preflight.txt'
+test -r "$results/result-write-preflight.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
@@ -41,6 +49,7 @@ trap 'exit 130' INT
 memory_options=()
 if [[ "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention ]]; then memory_options=(--memory-swap 64g); fi
 container=$(docker create --network none --cap-drop ALL --security-opt no-new-privileges \
+    --group-add "$results_gid" \
     --pids-limit 4096 --memory 64g --cpus 16 --shm-size 8g \
     "${memory_options[@]}" \
     --mount "type=bind,src=$assets,dst=/simulator-assets,readonly" \
