@@ -1,7 +1,31 @@
-# 8K draft attention: not qualified
+# 8K draft attention: 256-key component qualified
 
-The 8K target-attention replay gate passes, but draft attention does not yet
-pass its unchanged FP32-reference tolerance. There is no 8K PP/TG result.
+The 8K target-attention replay gate and the 256-key draft-attention component
+now pass. The original 64-key draft path remains rejected at 8K. Combined-runtime
+integration and hardware validation are still required: there is no 8K PP/TG result.
+
+## Accepted synthetic component
+
+Run **34728453080**, commit **d029589**, passes the unchanged FP32 tolerance,
+changed-input trace replays and clean teardown. Independent gate verification
+matches all **44 source hashes**, factory-builder hashes and complete coordinates.
+
+| Evidence | Result |
+| --- | --- |
+| Eager comparisons, both chips / both fixtures | 4/4 pass; zero failed elements |
+| Changed-input trace replays | 4/4 exact and numerically passing |
+| Borrowed inputs / physical KV layouts | 48/48 exact; 16/16 exact |
+| Oldest/proposal/gap/frontier controls | 8/8 detected |
+| Stale replay controls | 2/2 detected |
+| Case 0 maximum absolute errors | Chip 0: 0.40828; chip 1: 0.40487 |
+
+Raw absolute maxima are evaluated with unchanged `rtol=0.01, atol=0.01`, not
+an absolute-only threshold. No reference values or live operands were changed.
+Report SHA256: `2baa47c721607fac512b72413024c15a510ef475954cab976ee6d59222ab61af`.
+`dspark_attention_8k_gate.py` rejects changed sources, incomplete coordinate
+matrices, failed comparisons and non-exact replay. This is **not** full-request,
+coding-quality or performance qualification. Next integrate this exact candidate
+and its FP32-statistics factory into the bounded combined-runtime hardware trial.
 
 | Draft configuration | CI run | First failing comparison |
 | --- | --- | --- |
