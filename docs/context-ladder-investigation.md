@@ -52,3 +52,18 @@ the previous lower-context passes do not qualify a changed native build.
 Sixteen host checks now also lock down the exact long-context padding and
 key-count/chunk-size pairs. These additional test-only changes do not change
 the running candidate. Hardware admission remains closed pending the reports.
+
+## 512-key result
+
+Run 34740697532 completed with numerical failure, not timeout. At 32K the
+first eager case passes on chip 0 but fails on chip 1: 17 elements, maximum
+absolute error 0.4752197265625. The previous 256-key candidate failed 271
+elements with maximum error 0.504302978515625. This is an improvement in the
+same fixture, not qualification. Replay was not reached and 64K was not run.
+The process closed cleanly. Constant-value diagnostic error on chip 1 remains
+0.019531190395355225; fewer chunks alone have not eliminated the drift.
+
+Retain the tolerance and hardware block. Investigate normalization and partial
+output precision before assuming a further chunk-size increase is sufficient.
+Future CI revisions run 32K first, then 64K and all smaller regressions, with
+per-stage elapsed times; this completed run used the old ascending order.
