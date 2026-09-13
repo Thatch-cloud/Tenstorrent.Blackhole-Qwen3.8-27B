@@ -653,3 +653,23 @@ exponentiated values immediately after it. Each slice stays below the
 16-value debug limit. This reduces log pressure and separates QK/exp error
 from partial PV matmul error at row 8. Retain identical arithmetic and
 compare eager hashes again. Eighteen CPU preflight tests pass.
+
+### QK/exp evidence
+
+Run **34785336947** (20aa0ce) retains the exact one-failure eager hash and
+clean teardown. Report SHA256:
+`fc42c85c9a927d0b1fed05528dc6f0f103d8a3e6261b45b4d0f6df01c90d0a16`.
+At chip 0 / row 8, final proposal score is **162.125**, versus CPU FP32
+**162.189453125**. With native maximum 162, its exponentiated value is
+**1.011108637**, versus reference **1.016886473** at that maximum.
+Chip 1 records score 170 and exponent 1, versus reference score
+170.119140625 and exponent 1.010586262 at native maximum 170.
+
+The logged scores are after provided-mask addition and max reduction, not
+raw matmul output. Native `add_block_inplace(cb_qk_im, cb_mask_in, ...)`
+reloads scores through source registers and repacks them; default FP32
+unpacking uses TF32. That is a candidate source of score truncation, but this
+capture does not separate matmul packing from mask-add reload. The exp
+function also reloads scores, so changing mask addition alone cannot be
+assumed to preserve FP32 arithmetic through normalization. Avoid another
+output-recurrence change as a remedy for this observed upstream score loss.
