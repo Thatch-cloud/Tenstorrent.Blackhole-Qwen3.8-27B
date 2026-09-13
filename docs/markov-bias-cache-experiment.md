@@ -216,4 +216,16 @@ The live-anchor controller/payload tests passed at all three widths, but the
 fifteen-step chain failed its first pattern/step/chip score comparison and
 closed cleanly. This is not admitted to hardware. Run 34734406268 adds first-dot
 shape, cache-state and dense-reference diagnostics, plus score/token mismatch
-details. It is currently running; exactness checks are unchanged.
+details. That diagnostic completed with the same failure and clean teardown.
+
+It identifies a concrete geometry mismatch: native embedding/tilize returns
+`[1, 1, 256]`, while the scoped FP32 reload guard accepted only `[1, 1, 1, 256]`.
+The cache tags were correct on both chips, but the first sparse dot differed
+from the dense dot by up to 0.000304. The guard therefore missed the native
+feedback path even though the four-dimensional synthetic fixtures passed.
+
+Run 34734814212 tests a guard accepting both exact single-row forms, with no
+reshape, dtype conversion or added data movement. It repeats every size and
+feedback gate, and now explicitly requires the diagnostic three-dimensional
+first-dot comparisons to be bit-exact. Sixteen host tests pass; hardware
+promotion remains disabled pending this result.
