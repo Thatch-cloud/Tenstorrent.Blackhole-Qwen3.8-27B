@@ -105,6 +105,10 @@ on:
         description: Compare captured history projection; requires score layout and T16 fusion
         type: boolean
         default: false
+      dspark_bias_cache:
+        description: Compare cold bias cache; requires captured publication and T16 fusion
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -200,6 +204,7 @@ jobs:
           QWEN_DSPARK_NATIVE_SLOT: ${{ inputs.dspark_native_slot && '1' || '0' }}
           QWEN_DSPARK_FUSION_T16: ${{ inputs.dspark_fusion_t16 && '1' || '0' }}
           QWEN_DSPARK_CAPTURED_PUBLICATION: ${{ inputs.dspark_captured_publication && '1' || '0' }}
+          QWEN_DSPARK_BIAS_CACHE: ${{ inputs.dspark_bias_cache && '1' || '0' }}
           GH_TOKEN: ${{ github.token }}
           QWEN_DSPARK_MLP_FOOTPRINT: ${{ inputs.dspark_mlp_footprint && '1' || '0' }}
           QWEN_DSPARK_DRAFT_PROFILE: ${{ inputs.dspark_draft_profile && '1' || '0' }}

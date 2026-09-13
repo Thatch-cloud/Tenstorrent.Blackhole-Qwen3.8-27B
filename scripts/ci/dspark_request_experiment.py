@@ -282,6 +282,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 raise ValueError('Shared Q/K must be isolated from other candidates')
             from gdn_shared_qk_variants import SCHEDULE, POLICIES, summarize_variants
             report['comparison_axis'] = 'Native versus shared Q/K preparation and recurrence; complete combined runtime'
+            if os.environ.get('QWEN_DSPARK_BIAS_CACHE', '0') == '1':
+                from dspark_cached_markov_variants import SCHEDULE, POLICIES, summarize_variants
+                report['comparison_axis'] = 'Uncached versus cold request-owned Markov bias cache; shared Q/K in both arms'
         if os.environ.get('QWEN_GDN_OUTER_ADD_EXPERIMENT') == '1':
             if any(os.environ.get(name) == '1' for name in (
                     'QWEN_GDN_COPY_PAIRS_EXPERIMENT', 'QWEN_GDN_OUTPUT_L1_EXPERIMENT', 'QWEN_GDN_OUTPUT_GRID_EXPERIMENT')):
@@ -353,6 +356,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                     **(dict(profile_verifier=True) if profile_verifier else {}),
                     **(dict(combined_profile=True) if combined_profile else {}),
                     **(dict(history_profile=True) if history_profile else {}),
+                    **(dict(bias_cache_build=json.loads(Path('/experiment/results/dspark-cached-markov-hardware-build.json').read_text()))
+                       if POLICIES[arm].get('bias_cache') else {}),
                     **(dict(score_layout_evidence=report['score_layout_hardware_audit']) if score_layout else {}))
                 if native:
                     result['native_attention_kernel'] = kernel_audit

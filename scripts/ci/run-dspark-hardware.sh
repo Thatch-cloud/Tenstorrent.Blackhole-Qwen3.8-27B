@@ -20,6 +20,15 @@ banked_proposal=${QWEN_DSPARK_BANKED_PROPOSAL:-0}
 native_slot=${QWEN_DSPARK_NATIVE_SLOT:-0}
 fusion=${QWEN_DSPARK_FUSION_T16:-0}
 publication=${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}
+bias_cache=${QWEN_DSPARK_BIAS_CACHE:-0}
+[[ "$bias_cache" = 0 || "$bias_cache" = 1 ]]
+if [ "$bias_cache" = 1 ]; then
+    test "$publication" = 1
+    cache_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-bias-cache.XXXXXX")
+    gh run download 34735206013 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34735206013 --dir "$cache_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_cached_markov_gate import qualify; qualify(sys.argv[1], "scripts/ci")' "$cache_evidence"
+fi
 [[ "$publication" = 0 || "$publication" = 1 ]]
 publication_report=''
 if [ "$publication" = 1 ]; then
@@ -159,6 +168,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_NATIVE_SLOT=$native_slot" \
     -e "QWEN_DSPARK_FUSION_T16=$fusion" \
     -e "QWEN_DSPARK_CAPTURED_PUBLICATION=$publication" \
+    -e "QWEN_DSPARK_BIAS_CACHE=$bias_cache" \
     -e "QWEN_DSPARK_MLP_FOOTPRINT=$mlp_footprint" \
     -e "QWEN_DSPARK_CODING_TASK=$task" \
     -e "QWEN_SOURCE_REVISION=${GITHUB_SHA:-untracked}" -e "QWEN_WORKFLOW_RUN=${GITHUB_RUN_ID:-untracked}" \
@@ -168,6 +178,11 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "$bias_cache" = 1 ]; then
+    for name in dspark-cached-markov markov-cache-pipeline markov-cache-pipeline-4992 markov-cache-pipeline-3712; do
+        docker cp "$cache_evidence/$name.json" "$test_id:/experiment-scripts/ci/$name.json"
+    done
+fi
 if [ "$publication" = 1 ]; then
     docker cp "$publication_report" "$test_id:/experiment-scripts/ci/dspark-publication-simulator.json"
     docker cp "$output_evidence/gdn-output-l1.json" "$test_id:/experiment-scripts/ci/gdn-output-l1.json"
