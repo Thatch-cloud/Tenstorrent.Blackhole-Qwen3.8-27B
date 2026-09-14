@@ -22,7 +22,7 @@ class ScreenTests(unittest.TestCase):
         measure = Mock(return_value='result')
         self.assertEqual(measure_bounded(measure, 'model', max_new_tokens=256,
             audit_features=True, captured_publication=True), 'result')
-        measure.assert_called_once_with('model', max_new_tokens=32,
+        measure.assert_called_once_with('model', max_new_tokens=16,
             audit_features=True, captured_publication=True)
         for options in (dict(max_new_tokens=32, audit_features=True),
                 dict(max_new_tokens=256, audit_features=False)):
@@ -44,7 +44,7 @@ class ScreenTests(unittest.TestCase):
             lambda value: value['captured_publication']['checks'].pop(),
             lambda value: value['gdn_verify_checks'][0].update(unchanged=False),
             lambda value: value['norm_scatter_kernel'].update(restored=False),
-            lambda value: value.update(emitted=list(range(33)))]
+            lambda value: value.update(emitted=list(range(17)))]
         for mutation in mutations:
             value = deepcopy(source)
             mutation(value)

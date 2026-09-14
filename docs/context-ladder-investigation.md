@@ -1148,3 +1148,13 @@ The immutable report SHA256 is
 `dspark_score_sfpu_request_gate.py` verifies this report and current source/build
 dependencies before admitting request experiments. Full-request correctness,
 committed throughput and held-out coding quality remain separate open gates.
+
+The initial 32-token combined correctness screen (`34818606754`) reached
+audited commits but timed out at the unchanged eight-minute limit. Per-block
+instrumented draft time was approximately 22 seconds, unlike the 574 ms
+uninstrumented replay. These include independent eager execution and state
+readbacks; they are not throughput measurements. No correctness assertion was
+reported before termination, but final output/state acceptance was not reached.
+Use a 16-token fully audited screen to keep this prerequisite bounded. It is
+explicitly not full-request acceptance: the subsequent uninstrumented request
+must retain the original 256-token budget, exact output and final-state checks.

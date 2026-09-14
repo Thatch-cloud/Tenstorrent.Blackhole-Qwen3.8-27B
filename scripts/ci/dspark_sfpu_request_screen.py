@@ -15,7 +15,7 @@ def summarize_screen(requests):
     if (value.get('arm') != 'scatter' or value.get('instrumented_timing') is not True
             or any(value.get(name) is not True for name in ('exact', 'state_exact', 'inactive_exact'))
             or value.get('length') != 65536 or len(value.get('prompt_tokens', [])) != 65536
-            or not 2 <= len(value.get('emitted', [])) <= 32
+            or not 2 <= len(value.get('emitted', [])) <= 16
             or value.get('committed_decode_tokens') != len(value['emitted']) - 1):
         raise ValueError('Exact 64K bounded request outputs and target state required')
     blocks = value['blocks']
@@ -43,7 +43,7 @@ def summarize_screen(requests):
         raise ValueError('Executed and restored norm scatter required')
     return dict(arms=dict(scatter=dict(pp=None, ctx=65536, committed_tg=None)),
         correctness_screen_passed=True, full_request_qualified=False,
-        performance_qualified=False, serving_qualified=False, output_limit=32)
+        performance_qualified=False, serving_qualified=False, output_limit=16)
 
 
 @contextmanager
@@ -67,7 +67,7 @@ def screen_scope(directory):
         bound.arguments['report'].update(scope=__doc__, diagnostic_only=True,
             full_request_passed=False, performance_qualified=False,
             sfpu_numerical_admission=admission, correctness_screen_passed=True,
-            allocated_output_budget=256, request_output_limit=32,
+            allocated_output_budget=256, request_output_limit=16,
             pp=None, committed_tg=None)
         return result
 
@@ -84,4 +84,4 @@ def screen_scope(directory):
 def measure_bounded(measure, *args, **kwargs):
     if kwargs.get('max_new_tokens') != 256 or kwargs.get('audit_features') is not True:
         raise ValueError('Reserved 256-token capacity and complete feature audits required')
-    return measure(*args, **dict(kwargs, max_new_tokens=32))
+    return measure(*args, **dict(kwargs, max_new_tokens=16))
