@@ -911,3 +911,23 @@ Other context kernels retain native normalization. The factory creates one
 dedicated FP32 scratch tile per compute core and routes only that operand
 through direct FP32 unpack. Full combined-kernel compilation and 64K hardware
 correctness remain pending; this is not a performance-qualified change.
+
+### Hardware 64K correctness passes: 34797353681
+
+Revision 770bc5a passed on the two-card hardware runner. The device probe took
+28 seconds (excluding native rebuild). All four eager and four replay checks
+pass; replay is exact against eager, with zero out-of-tolerance elements.
+All 48 input-integrity checks, 16 layout checks, eight fixture controls and two
+stale-data controls pass. Devices closed cleanly. Tolerances remain rtol=0.01,
+atol=0.01, including padded query rows. Report context is 65,536, capacity
+66,560, and normalization mode is `sfpu-column-scratch`.
+
+Report SHA256: `bcf40ffe3834298526dee40daefe1dee88bdd8d05f76c5c3f2fab8885d8a7c20`.
+Artifact: `qwen-hardware-inventory-34797353681`,
+`dspark-ladder-hardware-65536.json`.
+
+This qualifies the synthetic draft-attention correctness fixture, not the full
+Qwen request or coding quality. It provides no PP/TG measurement. Next move
+this exact candidate through full-history runtime admission and the combined
+context ladder; do not substitute more isolated arithmetic sweeps for that
+integration. The 200 committed-token/s objective remains unachieved.
