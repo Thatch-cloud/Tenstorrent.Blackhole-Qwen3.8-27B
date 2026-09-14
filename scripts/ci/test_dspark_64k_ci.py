@@ -1,9 +1,24 @@
 from pathlib import Path
 import subprocess
 import unittest
+import yaml
 
 
 class HardwareEntryTests(unittest.TestCase):
+    def test_workflow_dispatch_stays_within_input_limit(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = yaml.safe_load((root / '.github/workflows/qwen-experiments.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertLessEqual(len(inputs), 25)
+        self.assertIn('dspark-64k-request', inputs['suite']['options'])
+        step = next(step for step in workflow['jobs']['inventory']['steps']
+            if step.get('run', '').endswith('bash scripts/ci/run-dspark-hardware.sh'))
+        self.assertIn("inputs.suite == 'dspark-64k-request'", step['if'])
+        self.assertIn("inputs.suite == 'dspark-64k-request'", step['env']['QWEN_DSPARK_64K_TRIAL'])
+        self.assertIn("inputs.suite == 'dspark-64k-request' && 'request-norm-scatter'",
+            step['env']['QWEN_DSPARK_MODE'])
+
     def test_incompatible_trials_fail_before_evidence_or_device_access(self):
         script = Path(__file__).with_name('run-dspark-hardware.sh')
         environment = dict(PATH='/usr/bin:/bin', QWEN_CARDS_ALLOCATED='1',
