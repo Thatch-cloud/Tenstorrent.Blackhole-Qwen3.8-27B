@@ -1377,3 +1377,25 @@ Both requests pass exact outputs/state, audited prefix and repeat-proposal check
 with clean close. These remain synthetic offline requests, not held-out coding
 or sustained-serving acceptance. Serving defaults remain unchanged.
 Report SHA256: `cae5c637cbdc6ece2d26578d7b11e875797c92a1b10f0efc00a3db0ecf6b4027`.
+
+### Center tile-fill: correct, no meaningful end-to-end gain
+
+Simulator `34840912016` passes in 125 seconds with unchanged output hashes;
+hardware `34841454010` passes in 45 seconds, followed by combined audit
+`34841889707`. Full-response timing `34842710242` passes in 342 seconds:
+**PP 2630.56 / CTX 65536 / committed TG 14.3005**, two exact 135-token EOS
+responses and clean close. All 984 script hashes match the checkout and the
+summary independently recomputes exactly.
+
+Mean T16 times: draft 344.30 ms, verifier 81.32 ms, selection/commit 44.98 ms,
+total 471.95 ms. The 0.37% historical TG difference from normalization staging
+does not establish a speedup; it is also essentially unchanged from direct
+staging's recovered 14.3145 TG. Stop spending full cycles on similarly small
+substitutions without attribution evidence.
+
+Next measure draft input/history update, blocking replay and readback separately
+inside the combined runtime. Existing `profile_proposals` supports bounded
+records, including an optional fence that separates queued update work from
+replay. Label instrumented requests separately from clean timing. Do not infer
+that the entire 344 ms draft timer is attention-kernel compute.
+Report SHA256: `13961b5ce710eb3f002a57350c3f0cca09d3fe87d4154707f502d9f875b5bcc5`.
