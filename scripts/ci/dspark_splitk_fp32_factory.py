@@ -24,6 +24,7 @@ def transform(source):
          '    add_cb(CBIndex::c_24, qk_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
          '    if (qwen_splitk_fp32) {\n'
          '        add_cb(CBIndex::c_32, Sk_chunk_t_cb_size * stats_tile_size, stats_df, stats_tile_size, &stats_tile);\n'
+         '        add_cb(CBIndex::c_33, statistics_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
          '    }'),
         ('        .dst_full_sync_en = dst_full_sync_en,\n        .math_approx_mode = math_approx_mode,',
          '        .dst_full_sync_en = dst_full_sync_en,\n'
