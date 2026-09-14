@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34906756708 attempt 1 fails during simulator fabric startup. Attempt 2 launches the reduced-diagnostic kernel and fails accuracy with exactly the same 773 elements, 0.689598 maximum error and output hash as run 34906073385. The FP32 merge scale change therefore has no observable output benefit on this fixture. Attempt-2 artifact ID is 10372368988; the run also contains an older same-named artifact, so unqualified `gh run download` can retrieve stale attempt-1 evidence. Next keep 256-key chunks but use one worker per KV lane: this is a diagnostic control separating local multi-chunk accumulation from cross-worker transfer/merge, not a substitute for the required parallel implementation.
+
 Run 34906539929 cannot launch the new merge kernel: program size 70,752 bytes exceeds the 70,656-byte kernel-config buffer by 96 bytes. No numerical result exists for the merge-scale change yet. Remove the temporary read-only per-row probability-sum audit from the generated kernel; keep the precise merge candidate, layouts, numerical comparisons, replay checks and native target gate unchanged. Do not enlarge hardware limits.
 
 Run 34906073385 fails the first two-worker eager comparison on chip 0: 773 elements outside the retained tolerance, maximum absolute error 0.689598. Original-order single-worker run 34905622466 passed. The change introduced partitioning and cross-core reduction together; this does not yet distinguish partial-statistics rounding, transfer precision, or merge arithmetic. Do not promote or relax the tolerance.
