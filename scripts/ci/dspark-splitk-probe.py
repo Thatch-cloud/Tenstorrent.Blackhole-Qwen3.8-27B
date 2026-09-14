@@ -11,6 +11,7 @@ from unittest.mock import patch
 import dspark_score_bitwise
 import dspark_splitk_attention
 from dspark_splitk_device_audit import audit_layout
+from dspark_splitk_correction_stride import correction_stride_scope
 from dspark_splitk_attention import splitk_scope
 from dspark_splitk_layout import scheduling
 
@@ -26,10 +27,10 @@ def main():
 
     def execute(*args, **kwargs):
         nonlocal audited
-        kwargs.update(key_chunk_size=32, max_cores_per_head=16, stripe_keys=True, fp32_dest_acc=False)
+        kwargs.update(key_chunk_size=32, max_cores_per_head=16, stripe_keys=True, fp32_dest_acc=True)
         if not audited:
             print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=32,
-                max_cores_per_head=16, stripe_keys=True, fp32_dest_acc=False,
+                max_cores_per_head=16, stripe_keys=True, fp32_dest_acc=True,
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
@@ -38,22 +39,22 @@ def main():
     def entrypoint(unused_script):
         return original_entrypoint(Path(__file__).resolve())
 
-    with splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint), \
+    with correction_stride_scope(), splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint), \
             patch.object(dspark_splitk_attention, 'execute_folded',
                 wraps=execute) as execution:
         runpy.run_path(str(directory / 'dspark-center-tile-fill-probe.py'), run_name='__main__')
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-striped-bf16-dest-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-correction-stride-diagnostic', performance_qualified=False,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
         diagnostic_override=dict(key_chunk_size=32, max_cores_per_head=16, stripe_keys=True,
-            fp32_dest_acc=False, purpose='isolate fused correction destination mode'))
+            fp32_dest_acc=True, purpose='test mode-aware fused correction register stride'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
-            'dspark_splitk_device_audit.py', Path(__file__).name)})
+            'dspark_splitk_device_audit.py', 'dspark_splitk_correction_stride.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
 
