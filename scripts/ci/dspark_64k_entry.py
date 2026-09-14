@@ -58,9 +58,16 @@ def run(main):
         qualify(directory, directory / 'dspark-score-bitwise.json')
         candidate_scope = bitwise_infinity_checks()
     request_screen = os.environ.get('QWEN_DSPARK_SFPU_REQUEST_SCREEN', '0')
+    timed_requests = os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0')
+    if (timed_requests not in ('0', '1') or timed_requests == '1'
+            and (score_sfpu != '1' or request_screen != '0')):
+        raise ValueError('Timed requests require isolated qualified SFPU candidate')
     if request_screen not in ('0', '1') or request_screen == '1' and score_sfpu != '1':
         raise ValueError('Request screen requires qualified SFPU candidate')
-    if request_screen == '1':
+    if timed_requests == '1':
+        from dspark_sfpu_timed_requests import timed_scope
+        probe_scope = timed_scope(directory)
+    elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope
         probe_scope = screen_scope(directory)
     elif phase_probe == '1':

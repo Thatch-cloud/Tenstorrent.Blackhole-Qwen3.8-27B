@@ -1158,3 +1158,12 @@ reported before termination, but final output/state acceptance was not reached.
 Use a 16-token fully audited screen to keep this prerequisite bounded. It is
 explicitly not full-request acceptance: the subsequent uninstrumented request
 must retain the original 256-token budget, exact output and final-state checks.
+
+The 16-token screen (`34819480314`, `203f1ba`) passed in **359 seconds**.
+All 15 committed tokens matched the independent target; final active and
+inactive state checks, per-block audits and clean close passed. This is still
+only a bounded correctness screen. Its report hash is
+`800f211f5258a4bccd1dbacd4641f3f67d025709e68c951d667f475f1878ecee`.
+The next measurement module requires two 256-budget EOS requests, matching
+audited prefixes, exact output/final state, and repeatable proposal histories.
+It reports measured PP/CTX/TG separately from sustained or held-out acceptance.
