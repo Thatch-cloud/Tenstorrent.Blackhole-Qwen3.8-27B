@@ -8,6 +8,7 @@ from pathlib import Path
 from dspark_splitk_fp32_mask import transform as transform_mask
 from dspark_splitk_copy_formats import transform as transform_copies
 from dspark_splitk_sum_input import transform as transform_sum_input
+from dspark_splitk_final_input import transform as transform_final_input
 
 
 HEADER = 'ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/kernels/compute/sdpa_flash_decode.cpp'
@@ -80,8 +81,8 @@ def transform(source):
     include = '#include "api/compute/eltwise_unary/recip.h"'
     if result.count(include) != 1:
         raise ValueError('Unique diagnostic include required')
-    return transform_sum_input(transform_copies(transform_mask(result.replace(reciprocal, snapshot + precise).replace(include,
-        include + '\n#include "api/debug/dprint.h"'))))
+    return transform_final_input(transform_sum_input(transform_copies(transform_mask(result.replace(reciprocal, snapshot + precise).replace(include,
+        include + '\n#include "api/debug/dprint.h"')))))
 
 
 @contextmanager

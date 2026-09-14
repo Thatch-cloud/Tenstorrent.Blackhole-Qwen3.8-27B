@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34896898132 fits L1 and removes the observed alternating zero sums. Chip 0 sums are now 1.203125, 1.1171875, 1.234375, 1.234375; first numerator remains about -59.47361. All reported outputs are finite, but the first output is -1728 rather than -49.758987. The final normalization/output path is therefore still incorrect even relative to its own numerator and denominator. The next candidate copies the numerator into existing BF16 c16 scratch before final broadcast normalization, with no extra allocation and no changes to score or value matmul. This remains an accuracy diagnostic, not runtime qualification.
+
 Run 34896117815 did not execute the new sum arithmetic: its extra BF16 probability copy exceeded L1 by 11,136 bytes (1,584,000 required versus 1,572,864 available). The revised diagnostic streams one 32-query tile-row through the scratch buffer, reducing allocation from 128 KiB to 32 KiB at the same 512-key geometry. It retains all four tile-rows and the FP32 input used by value matmul. Local transform tests pass; allocation and correctness still require simulator verification.
 
 Run 34895661245 provides the first stage-value localization (single worker, single partition; failed, not hardware-admitted):
