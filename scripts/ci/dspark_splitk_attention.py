@@ -39,6 +39,9 @@ def execute_folded(operations, query, key, value, mask, owned, *, audit=None,
         key_lanes = stripe(key_lanes, (4, 32, 16, 128), (0, 2, 1, 3), (4, 1, 512, 128))
         value_lanes = stripe(value_lanes, (4, 32, 16, 128), (0, 2, 1, 3), (4, 1, 512, 128))
         folded_mask = stripe(folded_mask, (4, 128, 32, 16), (0, 1, 3, 2), (4, 1, 128, 512))
+        if audit is not None:
+            audit(operations, (query, key, value, mask),
+                (folded, key_lanes, value_lanes, folded_mask), stripe_keys=True)
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
