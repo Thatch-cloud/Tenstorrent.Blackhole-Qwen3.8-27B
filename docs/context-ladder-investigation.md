@@ -1136,3 +1136,15 @@ must retain those checks and the child-process candidate scope; synthesizing
 legacy provenance fields would not establish build provenance. Reuse the
 existing full 64K fixtures, including poisoned padding and stale-cache controls,
 without loading model weights or rebuilding the already qualified library.
+
+Hardware numerical run `34817498912` (`0d225f1`) completed in **37 seconds**
+using that combined-build validator. Context is 65536, capacity 66560, tested
+positions 65536 and 66545. All four eager, four exact replay, 48 unchanged-input,
+16 layout, eight fixture-control and two stale-cache checks passed; clean close
+and source restoration passed. Numerical tolerances remain rtol=0.01,
+atol=0.01, not a claim of bitwise equality to the reference calculation.
+The immutable report SHA256 is
+`04d6333660a92e9eeb717e39915f0fb5f6ac954b6a855818e303890c472858e9`.
+`dspark_score_sfpu_request_gate.py` verifies this report and current source/build
+dependencies before admitting request experiments. Full-request correctness,
+committed throughput and held-out coding quality remain separate open gates.

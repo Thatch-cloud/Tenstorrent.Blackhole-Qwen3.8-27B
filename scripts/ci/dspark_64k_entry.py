@@ -57,7 +57,13 @@ def run(main):
         from dspark_score_bitwise import bitwise_infinity_checks
         qualify(directory, directory / 'dspark-score-bitwise.json')
         candidate_scope = bitwise_infinity_checks()
-    if phase_probe == '1':
+    request_screen = os.environ.get('QWEN_DSPARK_SFPU_REQUEST_SCREEN', '0')
+    if request_screen not in ('0', '1') or request_screen == '1' and score_sfpu != '1':
+        raise ValueError('Request screen requires qualified SFPU candidate')
+    if request_screen == '1':
+        from dspark_sfpu_request_screen import screen_scope
+        probe_scope = screen_scope(directory)
+    elif phase_probe == '1':
         from dspark_proposal_phase_profile import stop_after_prepared_probe
 
         def checkpoint(report):
