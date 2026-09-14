@@ -9,13 +9,21 @@ phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
 direct_fp32_stage=${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}
 [[ "$direct_fp32_stage" = 0 || "$direct_fp32_stage" = 1 ]]
 if [ "$direct_fp32_stage" = 1 ]; then
-    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
     test "${QWEN_DSPARK_MASK_BITS:-0}" = 1
     direct_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-direct-fp32.XXXXXX")
     gh run download 34834165490 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34834165490 --dir "$direct_evidence"
     cp "$direct_evidence/dspark-direct-fp32-stage.json" scripts/ci/dspark-direct-fp32-stage.json
     PYTHONPATH=scripts/ci python3 -c 'from dspark_direct_fp32_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-direct-fp32-stage.json")'
+    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+        test "${QWEN_TARGET_T16_64K_REQUEST:-0}" = 1
+        direct_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-direct-fp32-hardware.XXXXXX")
+        gh run download 34834720985 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            --name qwen-hardware-inventory-34834720985 --dir "$direct_hardware_evidence"
+        cp "$direct_hardware_evidence/dspark-direct-fp32-stage-hardware.json" scripts/ci/dspark-direct-fp32-stage-hardware.json
+        PYTHONPATH=scripts/ci python3 -c 'from dspark_direct_fp32_request_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-direct-fp32-stage-hardware.json")'
+    fi
 fi
 target_request=${QWEN_TARGET_T16_64K_REQUEST:-0}
 [[ "$target_request" = 0 || "$target_request" = 1 ]]
