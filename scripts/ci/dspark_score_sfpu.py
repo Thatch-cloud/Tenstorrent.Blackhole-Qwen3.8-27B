@@ -38,6 +38,7 @@ def kernel_scope():
 
 HELPER = r'''
 void qwen_prepare_center_scratch(uint32_t maxima_cb, uint32_t scratch_cb) {
+    DEVICE_PRINT("QWEN_SFPU_CENTER_PREPARE\n");
     CircularBuffer(maxima_cb).wait_front(1);
     CircularBuffer(scratch_cb).reserve_back(1);
     reconfig_data_format_srca(maxima_cb);
@@ -51,6 +52,7 @@ void qwen_prepare_center_scratch(uint32_t maxima_cb, uint32_t scratch_cb) {
     tile_regs_release();
     CircularBuffer(scratch_cb).push_back(1);
     CircularBuffer(scratch_cb).wait_front(1);
+    DEVICE_PRINT("QWEN_SFPU_CENTER_SCRATCH_READY\n");
 #if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
     const auto source_address = get_local_cb_interface(maxima_cb).fifo_rd_ptr << cb_addr_shift;
     const auto scratch_address = get_local_cb_interface(scratch_cb).fifo_rd_ptr << cb_addr_shift;
@@ -105,6 +107,7 @@ def sfpu_score_center(*, key_tiles):
                     raise ValueError('Existing scalar centering branch required')
                 after = after.replace(call,
                     '        static_assert(rows == 1);\n'
+                    '        DEVICE_PRINT("QWEN_SFPU_CENTER_ENTER\\n");\n'
                     '        qwen_prepare_center_scratch(in1_cb, get_compile_time_arg_val(42));')
                 replaced_center += 1
             if before == '                sub_tiles_bcast_cols(in0_cb, in1_cb, j, i, j);':
