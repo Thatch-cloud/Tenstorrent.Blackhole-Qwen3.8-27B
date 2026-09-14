@@ -6,6 +6,17 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+normalization_direct_stage=${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}
+[[ "$normalization_direct_stage" = 0 || "$normalization_direct_stage" = 1 ]]
+if [ "$normalization_direct_stage" = 1 ]; then
+    test "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    normalization_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-normalization-stage.XXXXXX")
+    gh run download 34838104802 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34838104802 --dir "$normalization_evidence"
+    cp "$normalization_evidence/dspark-normalization-direct-stage.json" scripts/ci/dspark-normalization-direct-stage.json
+    PYTHONPATH=scripts/ci python3 -c 'from dspark_normalization_stage_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-normalization-direct-stage.json")'
+fi
 direct_fp32_stage=${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}
 [[ "$direct_fp32_stage" = 0 || "$direct_fp32_stage" = 1 ]]
 if [ "$direct_fp32_stage" = 1 ]; then
@@ -345,6 +356,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_DSPARK_MASK_BITS=$mask_bits" \
     -e "QWEN_DSPARK_DIRECT_FP32_STAGE=$direct_fp32_stage" \
+    -e "QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
     -e "QWEN_DSPARK_SFPU_REQUEST_SCREEN=$request_screen" \
     -e "QWEN_DSPARK_SFPU_TIMED=$timed_requests" \
     -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \

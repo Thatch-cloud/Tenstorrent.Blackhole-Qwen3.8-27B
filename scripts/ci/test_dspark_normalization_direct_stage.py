@@ -7,6 +7,21 @@ from dspark_normalization_direct_stage import END, normalization_stage_scope, tr
 
 
 class NormalizationStageTests(unittest.TestCase):
+    def test_hardware_workflow_selection(self):
+        workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/qwen-experiments.yml').read_text()
+        step = workflow.split('      - name: DSpark backbone, target-bound proposal or full-request integration\n', 1)[1].split('      - name:', 1)[0]
+        inputs = SimpleNamespace(suite='dspark-normalization-direct-stage-hardware')
+        condition = step.split('        if: ', 1)[1].splitlines()[0]
+        self.assertTrue(eval(condition.replace('&&', ' and ').replace('||', ' or '),
+            {'__builtins__': {}}, {'inputs': inputs}))
+        expected = {'QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE': '1', 'QWEN_DSPARK_DIRECT_FP32_STAGE': '1',
+            'QWEN_DSPARK_SFPU_NUMERICAL': '1', 'QWEN_DSPARK_MASK_BITS': '1',
+            'QWEN_DSPARK_SFPU_REQUEST_SCREEN': '0', 'QWEN_DSPARK_SFPU_TIMED': '0'}
+        for name, setting in expected.items():
+            expression = step.split(name + ': ${{ ', 1)[1].split(' }}', 1)[0]
+            self.assertEqual(eval(expression.replace('&&', ' and ').replace('||', ' or '),
+                {'__builtins__': {}}, {'inputs': inputs}), setting, name)
+
     def test_simulator_workflow_selection(self):
         workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/qwen-experiments.yml').read_text()
         step = workflow.split('      - name: CPU-only draft simulator\n', 1)[1]
