@@ -8,7 +8,7 @@ from dspark_full_attention import validate_inputs
 
 
 def execute_folded(operations, query, key, value, mask, owned, *, audit=None,
-        key_chunk_size=32, max_cores_per_head=16):
+        key_chunk_size=32, max_cores_per_head=16, stripe_keys=False):
     def retain(tensor):
         owned.append(tensor)
         return tensor
@@ -25,6 +25,20 @@ def execute_folded(operations, query, key, value, mask, owned, *, audit=None,
     value_lanes = retain(operations.reshape(value, (4, 1, value.shape[2], 128)))
     if audit is not None:
         audit(operations, (query, key, value, mask), (folded, key_lanes, value_lanes, folded_mask))
+    if stripe_keys:
+        if key.shape[2] != 512:
+            raise ValueError('Key redistribution is restricted to the 512-key simulator diagnostic')
+
+        def stripe(tensor, shape, order, result_shape):
+            linear = retain(operations.to_layout(tensor, operations.ROW_MAJOR_LAYOUT, memory_config=memory))
+            grouped = retain(operations.reshape(linear, shape))
+            swapped = retain(operations.permute(grouped, order, memory_config=memory))
+            restored = retain(operations.reshape(swapped, result_shape))
+            return retain(operations.to_layout(restored, operations.TILE_LAYOUT, memory_config=memory))
+
+        key_lanes = stripe(key_lanes, (4, 32, 16, 128), (0, 2, 1, 3), (4, 1, 512, 128))
+        value_lanes = stripe(value_lanes, (4, 32, 16, 128), (0, 2, 1, 3), (4, 1, 512, 128))
+        folded_mask = stripe(folded_mask, (4, 128, 32, 16), (0, 1, 3, 2), (4, 1, 128, 512))
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
