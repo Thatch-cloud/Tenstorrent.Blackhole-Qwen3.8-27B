@@ -38,8 +38,7 @@ def main():
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
-        with patch.dict(os.environ, {'QWEN_SPLITK_FP32_INTERMEDIATES': '1',
-                'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1'}):
+        with patch.dict(os.environ, {'QWEN_SPLITK_FP32_INTERMEDIATES': '1'}):
             return original_execute(*args, **kwargs)
 
     def entrypoint(unused_script):
@@ -73,6 +72,7 @@ def main():
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
             local_denominator_storage='float32', transfer_statistics_storage='float32',
             transfer_output_storage='float32', child_denominator_workspace='float32',
+            tree_scratch_allocation='one-payload-per-reduction-round',
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             temporary_per_row_sum_audit=False,

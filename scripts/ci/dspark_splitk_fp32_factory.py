@@ -58,8 +58,9 @@ def promote_tree_transfers(source):
         before = f'add_cb(CBIndex::c_{index}, {count} * stats_tile_size, stats_df, stats_tile_size, &stats_tile);'
         if source.count(before) != 1:
             raise ValueError('Exact tree transfer buffer required')
+        allocation = '(out_tiles + 2 * PNHt) * num_tree_reduction_rounds' if index == 19 else count
         after = ('if (qwen_splitk_fp32) {\n'
-            f'        add_cb(CBIndex::c_{index}, {count} * im_tile_size, im_df, im_tile_size, &im_tile);\n'
+            f'        add_cb(CBIndex::c_{index}, {allocation} * im_tile_size, im_df, im_tile_size, &im_tile);\n'
             '    } else {\n        ' + before + '\n    }')
         source = source.replace(before, after)
     return source

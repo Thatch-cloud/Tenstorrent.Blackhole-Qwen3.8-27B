@@ -12,7 +12,8 @@ class TreeTransfersTests(unittest.TestCase):
         self.assertEqual(result.count('if (qwen_splitk_fp32)'), 7)
         self.assertEqual(result.count('} else {'), 7)
         for index, count in TREE_BUFFERS.items():
-            self.assertIn(f'add_cb(CBIndex::c_{index}, {count} * im_tile_size, im_df, im_tile_size, &im_tile);', result)
+            allocation = '(out_tiles + 2 * PNHt) * num_tree_reduction_rounds' if index == 19 else count
+            self.assertIn(f'add_cb(CBIndex::c_{index}, {allocation} * im_tile_size, im_df, im_tile_size, &im_tile);', result)
             self.assertIn(f'add_cb(CBIndex::c_{index}, {count} * stats_tile_size, stats_df, stats_tile_size, &stats_tile);', result)
         with self.assertRaises(ValueError):
             promote_tree_transfers(source.replace('CBIndex::c_18', 'CBIndex::c_99'))
