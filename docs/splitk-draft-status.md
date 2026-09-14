@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34906539929 cannot launch the new merge kernel: program size 70,752 bytes exceeds the 70,656-byte kernel-config buffer by 96 bytes. No numerical result exists for the merge-scale change yet. Remove the temporary read-only per-row probability-sum audit from the generated kernel; keep the precise merge candidate, layouts, numerical comparisons, replay checks and native target gate unchanged. Do not enlarge hardware limits.
+
 Run 34906073385 fails the first two-worker eager comparison on chip 0: 773 elements outside the retained tolerance, maximum absolute error 0.689598. Original-order single-worker run 34905622466 passed. The change introduced partitioning and cross-core reduction together; this does not yet distinguish partial-statistics rounding, transfer precision, or merge arithmetic. Do not promote or relax the tolerance.
 
 Source inspection finds that the cross-worker `sub_exp_block` still truncates the scale to BF16 (`scale_fp32 >> 16`), whereas local softmax now multiplies by the original FP32 scale and uses the precise exponential. Next replace only the two tree-merge exponent calls with explicit FP32 scaling and precise exponentiation. Keep statistics/transfer formats, worker count, key order, tolerances and target gates unchanged; this is a tested hypothesis, not an established root cause.

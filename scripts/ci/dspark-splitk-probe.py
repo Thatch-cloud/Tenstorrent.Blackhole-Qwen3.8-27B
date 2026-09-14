@@ -73,6 +73,7 @@ def main():
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
+            temporary_per_row_sum_audit=False,
             probability_rounding='unchanged-fp32-exponent-storage',
             purpose='validate two-worker cross-core softmax merging in original key order'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
