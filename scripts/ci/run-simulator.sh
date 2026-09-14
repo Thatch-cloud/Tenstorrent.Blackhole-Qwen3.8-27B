@@ -15,6 +15,11 @@ attention_boundary=0
 direct_fp32_stage=0
 normalization_direct_stage=0
 center_tile_fill=0
+splitk_attention=0
+if [ "${QWEN_SIM_CASE:-stack}" = dspark-splitk ]; then
+    splitk_attention=1
+    export QWEN_SIM_CASE=dspark-center-tile-fill
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = dspark-center-tile-fill ]; then
     center_tile_fill=1
     export QWEN_SIM_CASE=dspark-normalization-direct-stage
@@ -124,6 +129,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_DIRECT_FP32_STAGE=$direct_fp32_stage" \
     -e "QWEN_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
     -e "QWEN_CENTER_TILE_FILL=$center_tile_fill" \
+    -e "QWEN_SPLITK_ATTENTION=$splitk_attention" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
