@@ -11,12 +11,13 @@ import dspark_fp32_build as baseline
 import dspark_ladder_build as ladder
 from dspark_hardware_gate import digest
 from dspark_runtime_cache import IMAGE, cache_key, inspect_entry, store_entry
+from dspark_score_smoke_geometry import small_score_fixture
 
 
 def build_inputs(root, scripts):
     transformer = root / 'ttnn/cpp/ttnn/operations/transformer'
     names = set(ladder.BUILDERS) | {'dspark_fp32_build.py', 'dspark_fp32_intermediates.py',
-        'dspark_sim_build_cache.py', 'dspark_runtime_cache.py'}
+        'dspark_sim_build_cache.py', 'dspark_runtime_cache.py', 'dspark_score_smoke_geometry.py'}
     return dict(image=IMAGE, backend='simulator', builders={name: digest(scripts / name) for name in sorted(names)},
         factory=digest(root / baseline.SOURCE), registration=digest(transformer / 'sources.cmake'),
         implementations={name: digest(transformer / name) for name in baseline.implementation_sources()},
@@ -49,7 +50,7 @@ def main():
             shutil.copy2(binary, root / name)
         return subprocess.CompletedProcess(command, 0)
 
-    with patch.object(baseline.subprocess, 'run', run):
+    with small_score_fixture(), patch.object(baseline.subprocess, 'run', run):
         ladder.main()
     if not state:
         raise ValueError('Factory build was not intercepted')

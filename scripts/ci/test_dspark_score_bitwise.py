@@ -38,7 +38,8 @@ class BitwiseScoreTests(baseline.ScoreCenterTests):
     def test_smoke_exits_before_full_ladder(self):
         directory = Path(__file__).parent
         suite = (directory / 'simulator-suite.sh').read_text()
-        start = suite.index('if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then')
+        start = suite.index('if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then',
+            suite.index('export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000'))
         end = suite.index('fi', start)
         branch = suite[start:end]
         self.assertIn('timeout -k 15 105', branch)
