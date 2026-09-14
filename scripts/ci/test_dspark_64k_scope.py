@@ -11,6 +11,28 @@ import dspark_stable_history
 
 
 class ScopeTests(unittest.TestCase):
+    def test_ordered_writer_requires_exact_admitted_page_geometry(self):
+        import ordered_cache
+
+        with patch.object(candidate, 'current_admission', return_value={
+                'context': 65536, 'capacity': 66560, 'output_tokens': 256}):
+            for rows in (1, 2, 4, 8, 16, 32):
+                self.assertEqual(candidate.validate_ordered_cache_shapes(
+                    (1048, 2, 64, 256), (1, rows, 32, 256), (rows,), (rows, 1040)), rows)
+            cases = [((1048, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 1024)),
+                ((1048, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 1041)),
+                ((1024, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 1040)),
+                ((1048, 2, 64, 256), (1, 16, 32, 256), (1,), (16, 1040)),
+                ((1048, 2, 64, 256), (1, 3, 32, 256), (3,), (3, 1040)),
+                ((1048, 1, 64, 256), (1, 16, 32, 256), (16,), (16, 1040))]
+            for shapes in cases:
+                with self.assertRaises(ValueError):
+                    candidate.validate_ordered_cache_shapes(*shapes)
+        with self.assertRaises(ValueError):
+            candidate.validate_ordered_cache_shapes((1048, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 1040))
+        with self.assertRaises(ValueError):
+            ordered_cache.validate_shapes((1048, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 1040))
+
     def test_kv_audit_includes_admitted_decode_headroom(self):
         caches = [SimpleNamespace(shape=(1048, 2, 64, 256))]
         with patch.object(candidate, 'current_admission', return_value={

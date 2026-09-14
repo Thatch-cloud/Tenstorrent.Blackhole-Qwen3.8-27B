@@ -988,3 +988,16 @@ capacity and verifies that physical cache pages cover the requested prefix.
 The existing non-64K bound is unchanged; no audit is skipped or truncated.
 Boundary tests cover 65537, the final admitted position, overflow, undersized
 storage, and calls outside the admitted request scope.
+
+### Retry 34800917218: ordered writer's page-table validation
+
+The request passed the prior KV-digest failure and reached verifier warmup.
+The ordered BF8 cache writer then rejected the 1040-column page table because
+its fixture validator permits at most 1024 columns. Its buffer allocation and
+reader/writer compile arguments already use the actual padded page-table width.
+
+The 64K request scope now installs an exact 1040-page validator for this writer,
+retaining row pairing, supported tile geometry, cache capacity and active
+admission checks. Outside that scope the original validator remains unchanged.
+Twelve local scope and ordered-cache tests pass. Physical 1040-page writer
+execution still requires the combined hardware retry; no PP/TG is accepted.

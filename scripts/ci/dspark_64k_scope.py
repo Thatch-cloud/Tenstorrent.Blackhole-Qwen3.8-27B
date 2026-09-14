@@ -36,6 +36,19 @@ def validate_target_kv_prefix(valid, caches):
         raise ValueError('Target KV storage must cover every audited page')
 
 
+def validate_ordered_cache_shapes(cache, packed, positions, pages):
+    allocation = target_allocation()
+    rows = packed[1] if len(packed) == 4 else 0
+    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or tuple(packed) != (1, rows, 32, 256):
+        raise ValueError('Native prepared T=1/2/4/8/16/32 KV tiles required')
+    if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (2, 64, 256):
+        raise ValueError('Expected two-head 64-row BF8 paged cache')
+    if (tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows
+            or pages[1] != allocation['page_count'] or pages[1] > cache[0]):
+        raise ValueError('Paired positions and admitted 1040-page table required')
+    return rows
+
+
 def stable_history_class(original):
     class SixtyFourKHistory(original):
         def __init__(self, operations, mesh, collectives, parameters, layer_weights, chunks, rotary, *, position, capacity):
@@ -94,6 +107,7 @@ def runtime_scope(directory, report_path, *, context, output_tokens, factory_roo
     import dspark_prefill
     import dspark_stable_history
     import native_draft_sdpa
+    import ordered_cache
     import full_dspark_request
     from dspark_ladder_attention import adapter
     from dspark_ladder_factory import scoped_stats_pack, selector_assert
@@ -106,6 +120,7 @@ def runtime_scope(directory, report_path, *, context, output_tokens, factory_roo
     with ExitStack() as stack:
         evidence = stack.enter_context(admitted_request(directory, report_path, context=context,
             output_tokens=output_tokens, factory_root=factory_root, build_path=build_path))
+        stack.enter_context(patch.object(ordered_cache, 'validate_shapes', validate_ordered_cache_shapes))
         stack.enter_context(patch.object(dspark_full_attention, 'MAX_CONTEXT', 66560))
         stack.enter_context(patch.object(dspark_stable_history, 'StableHistoryKV',
             stable_history_class(dspark_stable_history.StableHistoryKV)))
