@@ -1167,3 +1167,29 @@ only a bounded correctness screen. Its report hash is
 The next measurement module requires two 256-budget EOS requests, matching
 audited prefixes, exact output/final state, and repeatable proposal histories.
 It reports measured PP/CTX/TG separately from sustained or held-out acceptance.
+
+### Combined SFPU result: full requests
+
+Run `34820424369` (`9b9ad85`) passed in **331 seconds** with clean close.
+Both requests retained a 256-token budget and reached EOS after 135 committed
+tokens. Output, active state and inactive state matched the target; the two
+requests reproduced proposal histories and the earlier audited prefix.
+
+| Runtime | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Previous 64K native + scatter | 2589.66 | 65536 | 4.3939 |
+| SFPU centering + bitwise checks + scatter | 2621.39 | 65536 | 8.9792 |
+
+This is about 2.04x committed throughput, not 200 tok/s acceptance. It is a
+historical comparison, not a fresh matched A/B. The 270 total committed tokens
+take 30.069 seconds across both measured decode loops. Acceptance is unchanged
+at 116/300 proposed tokens per request (38.67%). Mean block timings over 40
+speculative blocks: draft 580.61 ms, verification/readback 117.89 ms,
+selection/commit 51.51 ms, complete cycle 751.67 ms. Drafting accounts for
+approximately 77% of measured block time and remains the next bottleneck.
+
+Next kernel target: remaining scalar online-softmax sum update, preserving
+exact FP32 staging and the established numerical/replay/request gates. Current
+SFPU runtime remains the combined control; no serving defaults change. These
+two EOS requests do not establish sustained long-output or held-out coding
+quality acceptance.

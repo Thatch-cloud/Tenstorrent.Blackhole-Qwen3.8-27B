@@ -52,6 +52,7 @@ PY
             if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then
                 build_script=dspark_sim_build_cache.py
                 if [ "${QWEN_SCORE_SFPU:-0}" = 1 ]; then build_script=dspark_score_sfpu_build.py; fi
+                if [ "${QWEN_SUM_SFPU:-0}" = 1 ]; then build_script=dspark_sum_sfpu_build.py; fi
                 timeout -k 15 330 python3 -u "/experiment-scripts/ci/$build_script"
             else
                 timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
@@ -68,6 +69,7 @@ PY
                     export TT_METAL_DPRINT_RISCVS=TR0
                     export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
                 fi
+                if [ "${QWEN_SUM_SFPU:-0}" = 1 ]; then score_name=dspark-sum-sfpu; fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
                     --output "/experiment/results/$score_name.json"

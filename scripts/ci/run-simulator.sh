@@ -4,6 +4,11 @@ test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
 score_bitwise=0
 score_sfpu=0
+sum_sfpu=0
+if [ "${QWEN_SIM_CASE:-stack}" = dspark-sum-sfpu ]; then
+    sum_sfpu=1
+    export QWEN_SIM_CASE=dspark-score-sfpu
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-sfpu ]; then
     score_sfpu=1
     export QWEN_SIM_CASE=dspark-score-bitwise
@@ -82,6 +87,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     -e "QWEN_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_SCORE_SFPU=$score_sfpu" \
+    -e "QWEN_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
