@@ -1209,3 +1209,30 @@ selection/commit 43.93 ms, cycle 723.29 ms. The modest draft improvement
 does not explain away the remaining bottleneck. Next inspect scalar mask
 addition for negative-infinity masks; retain zero-mask behavior and the
 arithmetic fallback for arbitrary biases, positive infinities and NaNs.
+
+### Exact mask result and remaining latency budget
+
+Mask simulator `34825080088` passed in 66 seconds; full 64K numerical run
+`34825617040` passed in 39 seconds, both using cached libraries. Combined
+per-block audit `34825996484` passed in 364 seconds. Full-budget measurement
+`34826937360` (`53b3d6d`) passed in **328 seconds** with clean close.
+
+| PP tok/s | CTX | Committed TG tok/s | Requests / output |
+| ---: | ---: | ---: | --- |
+| 2622.59 | 65536 | 11.1557 | Two exact 135-token EOS responses; 256-token budget each |
+
+Output, active state, inactive state and repeated proposal histories pass;
+acceptance remains 116/300 per request. This is approximately 19.55% above
+9.3315 TG and 2.54x the original 4.3939 TG, using historical comparisons.
+It is not held-out coding, sustained long-output or serving acceptance.
+
+Mean block costs: draft **441.08 ms**, verification/readback **117.78 ms**,
+selection/commit **44.54 ms**, total **605.01 ms**. At 6.75 committed tokens
+per block, 200 TG requires about **33.75 ms per complete block**. Even removing
+all current draft time leaves approximately 164 ms: optimizing drafting alone
+cannot meet the target while verification and commit stay unchanged.
+
+Next priorities are exact score-staging/packing overhead and the 64K target
+verifier path, rather than another small scalar cleanup. Keep this combined
+runtime as the measured control. Do not extrapolate its performance to the
+different 4K/8K T16 runtime, or promote a component timing to committed TG.

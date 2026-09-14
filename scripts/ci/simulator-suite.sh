@@ -121,6 +121,11 @@ PY
             export QWEN_DRAFT_FP32_INTERMEDIATES=1
         fi
         if [[ "$QWEN_SIM_CASE" = markov-sparse-dot || "$QWEN_SIM_CASE" = gdn-copy-pairs || "$QWEN_SIM_CASE" = gdn-outer-add || "$QWEN_SIM_CASE" = dspark-ladder-attention || "$QWEN_SIM_CASE" = dspark-native-8k-attention || "$QWEN_SIM_CASE" = target-t16-attention-8k || "$QWEN_SIM_CASE" = gdn-shared-recurrence || "$QWEN_SIM_CASE" = gdn-shared-qk ]]; then limit=900; fi
+        if [ "${QWEN_TARGET_T16_64K:-0}" = 1 ]; then
+            test "$QWEN_SIM_CASE" = target-t16-attention-8k
+            QWEN_SIM_CASE=target-t16-attention-64k
+            limit=360
+        fi
         timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py" \
             --output "/experiment/results/$QWEN_SIM_CASE.json" || status=$?
         printf '%s\n' "$status" > "/experiment/results/$QWEN_SIM_CASE.exit-status"

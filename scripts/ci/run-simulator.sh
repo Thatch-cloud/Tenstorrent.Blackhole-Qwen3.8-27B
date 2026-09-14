@@ -3,6 +3,11 @@ set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
 score_bitwise=0
+target_64k=0
+if [ "${QWEN_SIM_CASE:-stack}" = target-t16-attention-64k ]; then
+    target_64k=1
+    export QWEN_SIM_CASE=target-t16-attention-8k
+fi
 score_sfpu=0
 sum_sfpu=0
 mask_bits=0
@@ -58,7 +63,7 @@ cleanup() {
     status=$?
     trap - EXIT
     if [ -n "$container" ]; then
-        if [ "$score_bitwise" = 1 ] && [ "$status" != 0 ]; then
+        if [[ "$score_bitwise" = 1 || "$target_64k" = 1 ]] && [ "$status" != 0 ]; then
             timeout -k 1 5 docker kill "$container" >/dev/null 2>&1 || true
         fi
         timeout -k 5 20 docker logs "$container" > experiment-results/simulator-final-container.log 2>&1 || true
@@ -91,6 +96,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     -e "QWEN_SCORE_BITWISE=$score_bitwise" \
+    -e "QWEN_TARGET_T16_64K=$target_64k" \
     -e "QWEN_SCORE_SFPU=$score_sfpu" \
     -e "QWEN_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_MASK_BITS=$mask_bits" \
