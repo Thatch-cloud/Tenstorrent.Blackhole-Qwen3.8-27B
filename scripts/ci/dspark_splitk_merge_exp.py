@@ -32,6 +32,10 @@ def transform(source):
     if source.count(marker) != 1:
         raise ValueError('Unique tree reduction boundary required')
     prefix, suffix = source.split(marker)
+    local_call = 'sub_exp_block<scale_fp32>(cb_prev_max, cb_cur_max, cb_exp_max_diff, Sq_chunk_t);'
+    if prefix.count(local_call) != 1:
+        raise ValueError('Unique local recurrence exponent required')
+    prefix = prefix.replace(local_call, local_call.replace('sub_exp_block', 'qwen_splitk_merge_exp'))
     for arguments in ('cb_prev_max, cb_cur_max, cb_exp_max_diff',
             'cb_m_in, cb_cur_max, cb_exp_max_diff_2'):
         before = '                    sub_exp_block<scale_fp32>(' + arguments + ', Sq_chunk_t);'

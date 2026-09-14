@@ -6,8 +6,9 @@ from dspark_splitk_unfused_correction import REPLACEMENT
 
 class MergeExpTests(unittest.TestCase):
     def test_full_scale_and_unchanged_input_ownership(self):
-        result = transform('TREE REDUCTION LOGIC\n' + REPLACEMENT + '\nvoid kernel_main() {}')
-        self.assertEqual(result.count('qwen_splitk_merge_exp<scale_fp32>'), 2)
+        local_call = 'sub_exp_block<scale_fp32>(cb_prev_max, cb_cur_max, cb_exp_max_diff, Sq_chunk_t);'
+        result = transform(local_call + '\nTREE REDUCTION LOGIC\n' + REPLACEMENT + '\nvoid kernel_main() {}')
+        self.assertEqual(result.count('qwen_splitk_merge_exp<scale_fp32>'), 3)
         self.assertIn('mul_unary_tile(0, scale_fp32);', result)
         self.assertIn('exp_tile_init<false>();', result)
         self.assertIn('exp_tile<false>(0);', result)
