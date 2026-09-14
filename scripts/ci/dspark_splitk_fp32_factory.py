@@ -20,6 +20,11 @@ def transform(source):
         ('    const tt::DataFormat im_df = tt::DataFormat::Float16_b;\n'
          '    const tt::DataFormat stats_df = tt::DataFormat::Float16_b;', precision),
         ('    compute_desc.config = ComputeConfigDescriptor{', modes),
+        ('    add_cb(CBIndex::c_24, qk_tiles * im_tile_size, im_df, im_tile_size, &im_tile);',
+         '    add_cb(CBIndex::c_24, qk_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
+         '    if (qwen_splitk_fp32) {\n'
+         '        add_cb(CBIndex::c_32, qk_tiles * stats_tile_size, stats_df, stats_tile_size, &stats_tile);\n'
+         '    }'),
         ('        .dst_full_sync_en = dst_full_sync_en,\n        .math_approx_mode = math_approx_mode,',
          '        .dst_full_sync_en = dst_full_sync_en,\n'
          '        .unpack_to_dest_mode = qwen_splitk_unpack_modes,\n        .math_approx_mode = math_approx_mode,'))
