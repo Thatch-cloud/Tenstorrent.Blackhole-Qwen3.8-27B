@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34898339559 confirms the reciprocal initialization repair: chip 0 reciprocal is now 0.83203125 rather than 29.125. The first eager gate remains finite but fails 2,299 elements, maximum absolute error 0.770657. Next remove the BF16 numerator staging introduced to investigate final normalization; retain the corrected reciprocal and BF16 sum input. The prior gross normalization failure was not evidence that the FP32 numerator itself needed conversion. Accuracy tolerances remain unchanged.
+
 Run 34898037968 locates the remaining gross error in reciprocal calculation: chip 0 denominator 1.203125 becomes reciprocal 29.125 (expected about 0.83117), then the BF16 numerator -59.5 correctly multiplies to about -1736. Source inspection finds the diagnostic paired `recip_tile_first_column<false>` with default `recip_tile_init()` (legacy mode true). The next candidate changes initialization to `<false>` to match calculation; it does not change buffers, geometry, tolerances or downstream multiplication. This is a concrete mismatch in our diagnostic, not a validated native-runtime defect.
 
 Run 34897663062 remains finite but inaccurate after BF16 numerator staging (first output -1736 versus -49.758987). That conversion is not sufficient. Next instrument the post-reciprocal denominator, copied numerator and post-multiply output independently, keeping arithmetic unchanged, to distinguish reciprocal corruption from multiplication/output transfer. No hardware admission.
