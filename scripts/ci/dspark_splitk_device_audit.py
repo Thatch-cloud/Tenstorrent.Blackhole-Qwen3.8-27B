@@ -18,6 +18,17 @@ def audit_layout(operations, original, folded, *, stripe_keys=False):
         expected = (fold_query(query).reshape(1, 4, 128, 128),
             key.reshape(4, 1, key.shape[2], 128), value.reshape(4, 1, value.shape[2], 128),
             fold_mask(mask).reshape(4, 1, 128, mask.shape[3]))
+        if not stripe_keys:
+            scores = expected[0][0, 0, :4].float() @ expected[1][0, 0].float().transpose(0, 1)
+            scores = scores * (128 ** -.5) + expected[3][0, 0, :4].float()
+            maximum = scores.amax(dim=-1, keepdim=True)
+            weights = torch.exp(scores - maximum)
+            denominator = weights.sum(dim=-1)
+            numerator = weights @ expected[2][0, 0].float()
+            print(json.dumps(dict(stage='splitk-normalization-reference', chip=chip,
+                lane=0, rows=list(range(4)), denominator=denominator.tolist(),
+                numerator=numerator[:, :4].tolist(),
+                output=(numerator[:, :4] / denominator[:, None]).tolist())), flush=True)
         if stripe_keys:
             if key.shape[2] != 512:
                 raise ValueError('Exact 512-key redistribution audit required')
