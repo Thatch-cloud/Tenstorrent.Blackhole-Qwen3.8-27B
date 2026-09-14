@@ -1335,3 +1335,26 @@ A source-generation preflight now checks the real request scope before model
 loading, with a 30-second cap. Its host regression tests reject late staging
 installation and accept the corrected ordering; seven targeted tests pass in
 0.614 seconds. This avoids spending a hardware cycle on that wiring error.
+
+### Direct staging full-response measurement
+
+Run `34836856211` completes both full-budget requests and closes cleanly, but CI
+fails in final aggregation: live compile-signature dictionary keys are integers,
+whereas the downloaded audit has JSON string keys. Original and patched kernel
+hashes match exactly. Canonicalizing the serialization fixes this comparison;
+a regression test still rejects changed signature values and kernel hashes.
+
+Reprocessing the saved requests with the corrected strict summarizer gives:
+
+| PP (tokens/s) | CTX | Committed TG | Output | Status |
+| ---: | ---: | ---: | --- | --- |
+| 2629.40 | 65536 | 14.3145 | 2 × 135 decode tokens, EOS | Recovered measurement; original CI failed aggregation |
+
+Both requests pass exact outputs, active/inactive state, audited-prefix and
+repeat-proposal checks. Mean T16 block times are draft 344.35 ms, verifier
+81.38 ms, selection/commit 44.47 ms, total 471.48 ms. The previous control's
+draft was 443.49 ms: staging removes about 99 ms, but drafting remains dominant.
+This is not held-out coding acceptance or sustained-throughput qualification.
+The source-generation preflight takes 0.134 seconds; no model weights are loaded
+by that check. Preserve the failed run and do not label it a green CI result.
+Report SHA256: `4ef57fda296f622c63d067731cd2b3fd8009080ead38ad74ec6d8473e97abb6d`.

@@ -8,7 +8,8 @@ class DirectTimingTests(unittest.TestCase):
     def fixture(self):
         audited, values = FoldedTimingTests().fixture()
         for value in [audited, *values]:
-            value['native_attention_kernel'] = {'patched': {'header': 'qualified'}}
+            value['native_attention_kernel'] = {'original': {'header': 'native'},
+                'patched': {'header': 'qualified'}, 'signature': {'0': 1}}
         return audited, values
 
     def test_full_decode_loop_and_corrected_audit(self):
@@ -26,6 +27,14 @@ class DirectTimingTests(unittest.TestCase):
             values[0][name] = setting
             with self.assertRaises(ValueError):
                 summarize_timed(values, audited)
+
+    def test_live_integer_signature_matches_serialized_audit(self):
+        audited, values = self.fixture()
+        values[0]['native_attention_kernel']['signature'] = {0: 1}
+        self.assertTrue(summarize_timed(values, audited)['direct_fp32_stage'])
+        values[0]['native_attention_kernel']['signature'] = {0: 2}
+        with self.assertRaises(ValueError):
+            summarize_timed(values, audited)
 
 
 if __name__ == '__main__':

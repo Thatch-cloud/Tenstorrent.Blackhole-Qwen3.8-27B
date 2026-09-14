@@ -36,8 +36,12 @@ def qualify(directory, report_directory=None):
 
 
 def summarize_timed(requests, audited):
+    expected = audited.get('native_attention_kernel')
+    if not isinstance(expected, dict) or not all(name in expected for name in ('original', 'patched', 'signature')):
+        raise ValueError('Complete audited native kernel identity required')
     for value in requests:
-        if value.get('native_attention_kernel') != audited.get('native_attention_kernel'):
+        actual = json.loads(json.dumps(value.get('native_attention_kernel')))
+        if actual != json.loads(json.dumps(expected)):
             raise ValueError('Timed request must use the exact audited native kernel')
     with patch.object(target, 'SCREEN_RUN', SCREEN_RUN):
         result = target.summarize_timed(requests, audited)
