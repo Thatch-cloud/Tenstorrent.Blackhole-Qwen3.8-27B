@@ -1,6 +1,8 @@
 """Explicit hardware-only 64K combined-request entry; no folded target attention."""
 
 import os
+import json
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 
@@ -35,7 +37,24 @@ def run(main):
     if '--preflight' in sys.argv:
         return main()
     directory = Path(__file__).parent
+    phase_probe = os.environ.get('QWEN_DSPARK_PHASE_PROBE', '0')
+    if phase_probe not in ('0', '1'):
+        raise ValueError('Explicit zero or one phase probe selection required')
+    probe_scope = nullcontext()
+    if phase_probe == '1':
+        from dspark_proposal_phase_profile import stop_after_prepared_probe
+
+        def checkpoint(report):
+            destination = Path('/experiment/results/dspark-proposal-phases.json')
+            temporary = destination.with_suffix('.tmp')
+            temporary.write_text(json.dumps(report, indent=2) + '\n')
+            temporary.replace(destination)
+            print(json.dumps(dict(stage='proposal-phase-probe', phase=report['phase'],
+                completed_replays=report['completed_replays'])), flush=True)
+
+        probe_scope = stop_after_prepared_probe(checkpoint)
     with runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
-        return main()
+        with probe_scope:
+            return main()

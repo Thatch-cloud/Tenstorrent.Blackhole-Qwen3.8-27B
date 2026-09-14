@@ -13,7 +13,10 @@ class HardwareEntryTests(unittest.TestCase):
         self.assertLessEqual(len(inputs), 25)
         self.assertIn('dspark-64k-request', inputs['suite']['options'])
         step = next(step for step in workflow['jobs']['inventory']['steps']
-            if step.get('run', '').endswith('bash scripts/ci/run-dspark-hardware.sh'))
+            if 'bash scripts/ci/run-dspark-hardware.sh' in step.get('run', ''))
+        self.assertIn('dspark-64k-phase-probe', inputs['suite']['options'])
+        self.assertIn('timeout -k 15 465 bash scripts/ci/run-dspark-hardware.sh', step['run'])
+        self.assertIn("inputs.suite == 'dspark-64k-phase-probe'", step['env']['QWEN_DSPARK_PHASE_PROBE'])
         self.assertIn("inputs.suite == 'dspark-64k-request'", step['if'])
         self.assertIn("inputs.suite == 'dspark-64k-request'", step['env']['QWEN_DSPARK_64K_TRIAL'])
         self.assertIn("inputs.suite == 'dspark-64k-request' && 'request-norm-scatter'",

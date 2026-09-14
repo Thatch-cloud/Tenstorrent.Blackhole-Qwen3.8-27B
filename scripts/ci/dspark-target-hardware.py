@@ -624,10 +624,16 @@ def main():
         check_parameters('after')
         report['passed'] = True
     except BaseException as error:
-        report['error'] = f'{type(error).__name__}: {error}'
-        if hasattr(error, 'evidence'):
-            report['failure_evidence'] = error.evidence
-        raise
+        from dspark_proposal_phase_profile import ProposalProbeComplete
+        if isinstance(error, ProposalProbeComplete) and os.environ.get('QWEN_DSPARK_PHASE_PROBE') == '1':
+            report.update(passed=True, diagnostic_only=True, full_request_passed=False,
+                performance_qualified=False, pp=None, committed_tg=None,
+                proposal_phase_probe=error.evidence)
+        else:
+            report['error'] = f'{type(error).__name__}: {error}'
+            if hasattr(error, 'evidence'):
+                report['failure_evidence'] = error.evidence
+            raise
     finally:
         try:
             if capture is not None:

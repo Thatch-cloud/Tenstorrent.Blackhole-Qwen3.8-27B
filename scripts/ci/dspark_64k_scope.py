@@ -100,7 +100,10 @@ def prefill_capture_class(original):
 
 
 @contextmanager
-def runtime_scope(directory, report_path, *, context, output_tokens, factory_root, build_path):
+def runtime_scope(directory, report_path, *, context, output_tokens, factory_root, build_path,
+        diagnostic_snapshots=True):
+    if type(diagnostic_snapshots) is not bool:
+        raise ValueError('Explicit diagnostic snapshot policy required')
     import dspark_full_attention
     import dspark_native_cached_layer
     import dspark_native_fixed_gate
@@ -137,8 +140,11 @@ def runtime_scope(directory, report_path, *, context, output_tokens, factory_roo
             return {'dspark-ladder-hardware-65536.json': REPORT_SHA256}
 
         stack.enter_context(patch.object(dspark_native_fixed_gate, 'qualify', admitted_qualification))
-        for scope in (scalar_reciprocal(), scalar_sum_update(), scalar_score_center(),
-                stage_snapshots(row=3, column=0), scratch_normalization(), scoped_stats_pack()):
+        for scope in (scalar_reciprocal(), scalar_sum_update(), scalar_score_center()):
+            stack.enter_context(scope)
+        if diagnostic_snapshots:
+            stack.enter_context(stage_snapshots(row=3, column=0))
+        for scope in (scratch_normalization(), scoped_stats_pack()):
             stack.enter_context(scope)
         qualified = native_draft_sdpa.replacements
 

@@ -1043,3 +1043,16 @@ selection/commit per block. Unlike the expensive audit timings, these establish
 that the draft path itself is slow. No held-out quality or serving qualification
 is claimed. Next optimisation must address the 64K draft execution path rather
 than repeat the norm-reader comparison or attribute all delay to audit overhead.
+
+### Fast diagnostic cycle
+
+- Local regression tests use fixtures, not model weights; aim for seconds.
+- The `dspark-64k-phase-probe` hardware suite loads once and stops after three
+  fixed-input proposal replays. It separates input/history updates, blocking
+  trace replay, and token readback. It does not measure committed TG.
+- Its host script has a 465-second timeout plus 15-second kill grace, including
+  setup. Queueing, checkout and artifact upload are outside that budget.
+- Phase JSON is checkpointed to a host bind mount after each replay so completed
+  measurements survive timeout. A timeout is not a successful benchmark.
+- Full correctness audits and context ladders follow a demonstrated candidate
+  improvement, rather than running on every diagnostic edit.

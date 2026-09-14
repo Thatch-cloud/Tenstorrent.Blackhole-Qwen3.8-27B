@@ -5,6 +5,9 @@ test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
+phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+[[ "$phase_probe" = 0 || "$phase_probe" = 1 ]]
+if [ "$phase_probe" = 1 ]; then test "$trial_64k" = 1; fi
 [[ "$trial_64k" = 0 || "$trial_64k" = 1 ]]
 if [ "$trial_64k" = 1 ]; then
     test "$mode" = request-norm-scatter
@@ -127,6 +130,11 @@ if [ "$mode" != backbone ]; then
 fi
 output=experiment-results
 mkdir -p "$output"
+result_mount=()
+if [ "$phase_probe" = 1 ]; then
+    chmod g+rwx "$output"
+    result_mount=(--mount "type=bind,src=$PWD/$output,dst=/experiment/results" --group-add "$(stat -c %g "$output")")
+fi
 PYTHONPATH=scripts/ci python3 -c \
     'import json; from dspark_hardware_gate import simulator_preflight; print(json.dumps(simulator_preflight("scripts/ci"),indent=2))' \
     > "$output/dspark-simulator-preflight.json"
@@ -149,8 +157,11 @@ cleanup() {
     status=$?
     trap - EXIT
     if [ -n "$test_id" ]; then
+        if [ "$phase_probe" = 1 ] && [ "$status" != 0 ]; then
+            timeout -k 1 5 docker kill "$test_id" >/dev/null 2>&1 || true
+        fi
         docker logs "$test_id" > "$output/dspark-container.log" 2>&1 || true
-        docker cp "$test_id:/experiment/results/." "$output/" || true
+        if [ "$phase_probe" = 0 ]; then docker cp "$test_id:/experiment/results/." "$output/" || true; fi
         docker inspect --format '{{json .State}}' "$test_id" > "$output/dspark-container-state.json" || true
         docker rm -f "$test_id" >/dev/null || true
     fi
@@ -173,6 +184,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
     --mount "type=bind,src=$fixture,dst=/dspark,readonly" \
     "${target_mount[@]}" \
+    "${result_mount[@]}" \
     --mount "type=volume,src=$volume,dst=/experiment-cache" \
     --label thatch.qwen.baseline=true --workdir /opt/vllm-tt-plugin \
     --label "thatch.qwen.workflow-run=${GITHUB_RUN_ID:-untracked}" \
@@ -180,6 +192,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
+    -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_HISTORY_PROFILE=$history_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \

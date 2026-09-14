@@ -11,6 +11,26 @@ import dspark_stable_history
 
 
 class ScopeTests(unittest.TestCase):
+    def test_snapshot_free_candidate_keeps_numerical_corrections(self):
+        import native_draft_sdpa
+
+        root = Path(os.environ.get('TT_NATIVE_TEST_ROOT', '/opt/ttsim/tt-metal'))
+        directory = root / native_draft_sdpa.KERNEL_DIRECTORY
+        original = {name: (directory / name).read_bytes() for name in native_draft_sdpa.SOURCE_HASHES}
+        with patch.object(candidate, 'admitted_request', return_value=nullcontext({})):
+            with candidate.runtime_scope('.', '/report', context=65536, output_tokens=256,
+                    factory_root=str(root), build_path='/build', diagnostic_snapshots=False):
+                sources = native_draft_sdpa.patched_sources(original)
+                common = sources['compute_common.hpp'].decode()
+                self.assertNotIn('QWEN_OUTPUT_BEFORE', common)
+                self.assertNotIn('QWEN_QK_SCORES', common)
+                self.assertNotIn('QWEN_NORMALIZATION_FORMATS', common)
+                self.assertIn('qwen_scalar_score_transform', common)
+                self.assertIn('values[offset] = 1.0f / values[offset]', common)
+                self.assertIn('current[offset] = current[offset] + previous[offset] * correction', common)
+                self.assertIn('qwen_normalize_scratch', common)
+                self.assertIn('#ifndef QWEN_DRAFT_EXP_APPROX', common)
+
     def test_ordered_writer_requires_exact_admitted_page_geometry(self):
         import ordered_cache
 
