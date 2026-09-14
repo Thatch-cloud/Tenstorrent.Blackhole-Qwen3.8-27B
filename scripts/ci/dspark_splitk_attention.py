@@ -7,7 +7,7 @@ import dspark_ladder_attention
 from dspark_full_attention import validate_inputs
 
 
-def execute_folded(operations, query, key, value, mask, owned):
+def execute_folded(operations, query, key, value, mask, owned, *, audit=None):
     def retain(tensor):
         owned.append(tensor)
         return tensor
@@ -22,6 +22,8 @@ def execute_folded(operations, query, key, value, mask, owned):
     folded_mask = retain(operations.repeat(mask_rows, (4, 1, 1, 1), memory_config=memory))
     key_lanes = retain(operations.reshape(key, (4, 1, key.shape[2], 128)))
     value_lanes = retain(operations.reshape(value, (4, 1, value.shape[2], 128)))
+    if audit is not None:
+        audit(operations, (query, key, value, mask), (folded, key_lanes, value_lanes, folded_mask))
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
