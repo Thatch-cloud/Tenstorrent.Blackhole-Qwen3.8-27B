@@ -124,7 +124,7 @@ def factory_transform(source, *, reverse=False):
          '    }\n    cb_ids.qk_im = allocate_tile_cb(qk_tiles, qk_im_tile_size, qk_im_df);'),
         ('    compute_desc.defines = defines;',
          '    compute_desc.defines = defines;\n'
-         '    compute_desc.defines["QWEN_SCORE_SCRATCH_CB"] = std::to_string(qwen_score_scratch_cb);'))
+         '    compute_desc.defines.emplace_back("QWEN_SCORE_SCRATCH_CB", std::to_string(qwen_score_scratch_cb));'))
     for before, after in (reversed(changes) if reverse else changes):
         if reverse:
             before, after = after, before

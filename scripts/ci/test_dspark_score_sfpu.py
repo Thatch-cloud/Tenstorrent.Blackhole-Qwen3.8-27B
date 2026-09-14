@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import unittest
+import subprocess
 
 import dspark_fp32_build
 import dspark_ladder_build
@@ -43,6 +44,16 @@ class SfpuScoreSourceTests(unittest.TestCase):
         self.assertNotIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
         self.assertEqual([line for line in candidate.splitlines() if b'tt::DataFormat im_df =' in line],
             [line for line in baseline.splitlines() if b'tt::DataFormat im_df =' in line])
+        define = next(line.decode() for line in candidate.splitlines() if b'"QWEN_SCORE_SCRATCH_CB"' in line)
+        source = '''#include <string>
+#include <vector>
+#include <utility>
+#include <cstdint>
+struct Descriptor { std::vector<std::pair<std::string, std::string>> defines; };
+int main() { Descriptor compute_desc; uint32_t qwen_score_scratch_cb = 1;
+''' + define + '\n}\n'
+        subprocess.run(['g++', '-std=c++17', '-x', 'c++', '-fsyntax-only', '-'],
+            input=source, text=True, capture_output=True, check=True, timeout=10)
 
     def test_small_kernel_composition_removes_scalar_center_not_mask(self):
         root = Path(os.environ['TT_NATIVE_TEST_ROOT']) / native_draft_sdpa.KERNEL_DIRECTORY
