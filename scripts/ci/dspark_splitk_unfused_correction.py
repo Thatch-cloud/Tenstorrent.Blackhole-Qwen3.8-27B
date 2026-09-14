@@ -39,7 +39,31 @@ def transform(source):
     block = source[begin:end]
     if block.count('cb_exp_max_diff_2') != 1 or block.count('cb_prev_sum_2') != 1:
         raise ValueError('Native correction arguments changed')
-    return source[:begin] + REPLACEMENT + source[end:]
+    result = source[:begin] + REPLACEMENT + source[end:]
+    reciprocal = '            recip_block_inplace(cb_prev_sum, Sq_chunk_t);'
+    precise = '''            {
+                CircularBuffer denominator(cb_prev_sum);
+                reconfig_data_format_srca(cb_prev_sum);
+                copy_tile_to_dst_init_short(cb_prev_sum);
+                recip_tile_init();
+                pack_reconfig_data_format(cb_prev_sum);
+                denominator.wait_front(Sq_chunk_t);
+                for (uint32_t tile = 0; tile < Sq_chunk_t; ++tile) {
+                    tile_regs_acquire();
+                    copy_tile(cb_prev_sum, tile, 0);
+                    MATH((recip_tile_first_column<false>(0)));
+                    tile_regs_commit();
+                    tile_regs_wait();
+                    pack_tile(0, cb_prev_sum);
+                    tile_regs_release();
+                }
+                denominator.pop_front(Sq_chunk_t);
+                denominator.reserve_back(Sq_chunk_t);
+                denominator.push_back(Sq_chunk_t);
+            }'''
+    if result.count(reciprocal) != 1:
+        raise ValueError('Unique final decode reciprocal required')
+    return result.replace(reciprocal, precise)
 
 
 @contextmanager
