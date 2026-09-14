@@ -759,3 +759,20 @@ Do not rerun the same small probe merely to rediscover this outcome.
 
 Progress records now include context and smoke mode. Cancellation-safe result
 retention still needs improvement before another costly full-context run.
+
+### Cancellation retention verified: run 34791208534
+
+After user cancellation, the artifact retained the streamed container log,
+write-preflight record and partial `dspark-ladder-score-smoke.json`.
+Both simulated chips reached `QWEN_SCORE_DONE` for masking and centering.
+The labelled 128-token probe reached eager stages 0/1, capture and replay 0;
+its partial report correctly remained `passed=false`, `closed_cleanly=false`.
+There is no completed acceptance or 64K result from this run.
+
+The permission preflight recorded the image's default UID as 0; dropping
+capabilities does not change UID. The group-access fix allowed writes without
+adding capabilities or changing that existing container identity. Result
+retention now has cancellation evidence, not only local source assertions.
+No further full-context simulation is planned; prepare a separately guarded
+hardware correctness entrypoint rather than spoofing simulator environment
+flags on physical cards.
