@@ -1300,3 +1300,25 @@ configuration. This remains a hypothesis, not an implemented speedup.
 The full target context and serving defaults remain unchanged. The 200 TG goal,
 remaining context ladder and concurrency/held-out coding gates are still open.
 Report SHA256: `a504802fdeb1c7f4bc62ef2d393973d6f2d0e5e9924b00d587faf359b0547b02`.
+
+### Direct FP32 staging qualification
+
+The first simulator attempt `34833512089` fails numerically in 29 seconds.
+Read-only diagnostics `34833842777` show that positive source values copy exactly,
+but negative values become zero: the surrounding exponential kernel leaves
+packer ReLU enabled. Staging now disables ReLU while packing raw scores and
+restores the caller's setting afterward; source-CB matmul formats stay unchanged.
+
+Corrected mixed-kernel simulation `34834165490` passes in 124 seconds. All four
+draft output hashes match the previous simulator exactly, and folded target
+checks pass. Full 64K hardware `34834720985` passes in 42 seconds; all four draft
+output hashes also match the previous hardware control. No throughput is claimed
+from these numerical gates.
+
+Combined audit `34835194013` passes output/state checks, but is not promoted:
+request scope ordering installed the helper too late to retain the qualified
+score caller's explicit ReLU-restoration argument. The fix installs staging
+before the runtime arithmetic scopes. A host test now assembles the actual
+64K runtime source, and the request gate requires that restoration call in
+addition to exact compiled-source fingerprints. Rerun the corrected audited
+request before full-response timing; retain **11.8252 TG** as the accepted control.

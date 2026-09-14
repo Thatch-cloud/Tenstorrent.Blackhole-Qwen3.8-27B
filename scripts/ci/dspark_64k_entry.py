@@ -78,9 +78,13 @@ def run(main):
     target_scope = nullcontext()
     target_request = os.environ.get('QWEN_TARGET_T16_64K_REQUEST', '0')
     direct_staging = os.environ.get('QWEN_DSPARK_DIRECT_FP32_STAGE', '0')
+    direct_candidate_scope = nullcontext()
     if (direct_staging not in ('0', '1') or direct_staging == '1'
             and (target_request != '1' or request_screen != '1' or timed_requests != '0')):
         raise ValueError('Direct staging requires its isolated folded-T16 correctness screen')
+    if direct_staging == '1':
+        from dspark_direct_fp32_stage import staging_scope
+        direct_candidate_scope = staging_scope()
     if (target_request not in ('0', '1') or target_request == '1'
             and ((request_screen, timed_requests) not in (('1', '0'), ('0', '1')) or mask_bits != '1')):
         raise ValueError('Folded 64K verifier requires its isolated audited or qualified timed runtime')
@@ -122,7 +126,7 @@ def run(main):
                 completed_replays=report['completed_replays'])), flush=True)
 
         probe_scope = stop_after_prepared_probe(checkpoint)
-    with hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
+    with direct_candidate_scope, hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
         with candidate_scope, probe_scope, target_scope:

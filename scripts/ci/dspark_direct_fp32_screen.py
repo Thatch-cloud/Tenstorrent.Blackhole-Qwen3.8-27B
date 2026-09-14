@@ -9,7 +9,6 @@ from unittest.mock import patch
 import native_draft_sdpa
 import target_t16_64k_screen as baseline
 from dspark_direct_fp32_request_gate import qualify
-from dspark_direct_fp32_stage import staging_scope
 
 
 BASE_SUMMARIZE = baseline.summarize_screen
@@ -36,9 +35,11 @@ def screen_scope(directory):
     def summarize(requests):
         root = Path(os.environ['TT_METAL_HOME']) / native_draft_sdpa.KERNEL_DIRECTORY
         original = {name: (root / name).read_bytes() for name in native_draft_sdpa.SOURCE_HASHES}
-        expected = {name: hashlib.sha256(source).hexdigest()
-            for name, source in native_draft_sdpa.patched_sources(original).items()}
+        patched = native_draft_sdpa.patched_sources(original)
+        if b'qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB, true);' not in patched['compute_common.hpp']:
+            raise ValueError('Qualified caller-specific ReLU restoration must reach the compiled kernel')
+        expected = {name: hashlib.sha256(source).hexdigest() for name, source in patched.items()}
         return summarize_screen(requests, expected=expected, admission=admission, sources=sources)
 
-    with staging_scope(), patch.object(baseline, 'summarize_screen', summarize), baseline.screen_scope(directory):
+    with patch.object(baseline, 'summarize_screen', summarize), baseline.screen_scope(directory):
         yield
