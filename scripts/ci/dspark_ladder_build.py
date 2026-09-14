@@ -9,10 +9,11 @@ from unittest.mock import patch
 import dspark_fp32_build as baseline
 from dspark_hardware_gate import digest
 from dspark_ladder_factory import geometry_predicate, transform
+from dspark_ladder_normalization import factory_transform
 
 
 BUILDERS = ('dspark_ladder_build.py', 'dspark_ladder_factory.py', 'dspark_ladder_geometry.py',
-    'dspark_ladder_backend.py')
+    'dspark_ladder_backend.py', 'dspark_ladder_normalization.py')
 BASELINE_VALIDATE = baseline.validate_manifest
 
 
@@ -26,9 +27,15 @@ def factory_scope():
     def selected(source, *, enabled=True):
         if enabled is not True:
             raise ValueError('Ladder requires the enabled FP32 statistics factory')
-        return transform(source)
+        return factory_transform(transform(source))
 
-    with patch.object(baseline, 'REPLACEMENT', replacement), patch.object(baseline, 'transform', selected):
+    restore_original = baseline.restore_factory_source
+
+    def restore(source, replacement):
+        return restore_original(factory_transform(source, reverse=True), replacement)
+
+    with patch.object(baseline, 'REPLACEMENT', replacement), patch.object(baseline, 'transform', selected), \
+            patch.object(baseline, 'restore_factory_source', restore):
         yield
 
 

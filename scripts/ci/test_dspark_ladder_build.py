@@ -34,4 +34,4 @@ class LadderBuildTests(unittest.TestCase):
         with factory_scope():
             candidate = baseline.transform(original, enabled=True)
             self.assertEqual(candidate.count(baseline.REPLACEMENT.encode()), 1)
-            self.assertEqual(candidate.replace(baseline.REPLACEMENT.encode(), baseline.ANCHOR.encode()), original)
+            self.assertEqual(baseline.restore_factory_source(candidate, baseline.REPLACEMENT), original)

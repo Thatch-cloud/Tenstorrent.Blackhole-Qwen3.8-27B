@@ -26,6 +26,10 @@ def restore_registrations(root):
     return evidence
 
 
+def restore_factory_source(source, replacement):
+    return source.replace(replacement.encode(), ANCHOR.encode())
+
+
 def validate_manifest(root, output):
     report = json.loads(Path(output).read_text())
     root = Path(root)
@@ -39,7 +43,7 @@ def validate_manifest(root, output):
         'qwen_draft_fp32_intermediates =\n', 'qwen_draft_fp32_intermediates = false &&\n')
     if source.count(replacement.encode()) != 1:
         raise ValueError('Unique rebuilt factory variant required')
-    original = source.replace(replacement.encode(), ANCHOR.encode())
+    original = restore_factory_source(source, replacement)
     if transform(original, enabled=enabled) != source or digest(root / SOURCE) != report.get('source_after'):
         raise ValueError('Rebuilt factory differs from exact transformation')
     expected = {'build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'}

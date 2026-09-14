@@ -90,6 +90,14 @@ RECIPROCAL_SNAPSHOT = '''
                     TSLICE(alias_prev_sum, 0,
                         (SliceRange{.h0=2, .h1=3, .hs=1, .w0=0, .w1=1, .ws=1}),
                         true, true));
+                DEVICE_PRINT("QWEN_NORMALIZATION_FORMATS q={} numerator_cb={} numerator_src={} numerator_dst={} reciprocal_cb={} reciprocal_src={} reciprocal_dst={}\\n",
+                    local_q_start + q_iter - iter_q_start,
+                    alias_mm2_prev_out,
+                    static_cast<uint32_t>(unpack_src_format[get_operand_id(alias_mm2_prev_out)]),
+                    static_cast<uint32_t>(unpack_dst_format[get_operand_id(alias_mm2_prev_out)]),
+                    alias_prev_sum,
+                    static_cast<uint32_t>(unpack_src_format[get_operand_id(alias_prev_sum)]),
+                    static_cast<uint32_t>(unpack_dst_format[get_operand_id(alias_prev_sum)]));
 #endif
             }
 '''

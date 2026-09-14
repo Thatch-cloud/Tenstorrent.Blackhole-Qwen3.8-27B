@@ -20,6 +20,7 @@ from dspark_ladder_scalar_reciprocal import scalar_reciprocal
 from dspark_ladder_stage_print import stage_snapshots
 from dspark_ladder_sum_update import scalar_sum_update
 from dspark_ladder_score_center import scalar_score_center
+from dspark_ladder_normalization import scratch_normalization
 
 
 def main():
@@ -56,7 +57,8 @@ def main():
                 sum_update_mode='tr0-scalar-fp32' if context == 65536 else 'native',
                 score_center_mode='tr0-fp32-before-reload' if context == 65536 or smoke == '1' else 'native',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
-                reciprocal_reload_rounding='native-truncate',
+                reciprocal_reload_rounding='dedicated-fp32-scratch' if context == 65536 else 'native-truncate',
+                normalization_mode='sfpu-column-scratch' if context == 65536 else 'native',
                 output_recurrence='native-l1-pack-accumulation-bf16',
                 final_output_rounding='unchanged',
                 key_chunk_size=fixture['key_chunk'],
@@ -70,12 +72,13 @@ def main():
             'dspark_ladder_attention.py', 'dspark_ladder_geometry.py', 'dspark_ladder_fixtures.py',
             'dspark_ladder_factory.py', 'dspark_ladder_build.py', 'dspark_ladder_scalar_reciprocal.py',
             'dspark_ladder_stage_print.py', 'dspark_ladder_sum_update.py', 'dspark_ladder_score_center.py',
-            'dspark_ladder_output_rounding.py'))))
+            'dspark_ladder_output_rounding.py', 'dspark_ladder_normalization.py'))))
         probe.__file__ = str(Path(__file__).resolve())
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 scalar_sum_update(), \
                 (stage_snapshots(row=diagnostic_row, column=diagnostic_column) if context == 65536 else nullcontext()), \
                 scalar_score_center(key_tiles=40 if smoke == '1' else 2112), \
+                (scratch_normalization() if context == 65536 else nullcontext()), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \

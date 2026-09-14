@@ -60,6 +60,9 @@ struct CircularBuffer {
     void wait_front(uint32_t) {}
 };
 int TSLICE(uint32_t, int, const SliceRange&, bool, bool) { return 0; }
+uint32_t get_operand_id(uint32_t operand) { return operand; }
+constexpr uint8_t unpack_src_format[8]={};
+constexpr uint8_t unpack_dst_format[8]={};
 template <typename... Arguments> void DEVICE_PRINT(const char*, Arguments...) {}
 void snapshot() {
     uint32_t alias_prev_sum=0, alias_prev_max=1, alias_mm2_prev_out=2;
@@ -84,6 +87,7 @@ void snapshot() {
             patched = native_draft_sdpa.patched_sources(source)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_STAGE'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_RECIP'), 1)
+        self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_NORMALIZATION_FORMATS'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_PARTIAL_SUM'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_OUTPUT_BEFORE'), 1)
         self.assertEqual(patched['compute_common.hpp'].count(b'QWEN_QK_SCORES'), 1)

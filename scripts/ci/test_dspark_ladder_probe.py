@@ -41,7 +41,9 @@ class LadderProbeTests(unittest.TestCase):
                     self.assertEqual(report['sum_update_mode'], 'tr0-scalar-fp32' if context == 65536 else 'native')
                     self.assertEqual(report['score_center_mode'], 'tr0-fp32-before-reload' if context == 65536 else 'native')
                     self.assertEqual(report['reciprocal_reload_rounding'],
-                        'native-truncate')
+                        'dedicated-fp32-scratch' if context == 65536 else 'native-truncate')
+                    self.assertEqual(report['normalization_mode'],
+                        'sfpu-column-scratch' if context == 65536 else 'native')
                     self.assertEqual(report['reciprocal_mode'], 'tr0-scalar-fp32-diagnostic')
                     self.assertIn('dspark_ladder_scalar_reciprocal.py', stub.SOURCES)
                     self.assertFalse(report['ladder_geometry']['runtime_admitted'])

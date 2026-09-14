@@ -817,3 +817,97 @@ intermediates. First failing coordinate was head 0, row 3, channel 1:
 -46.75 versus -46.277095794677734. Devices closed cleanly. This is not an
 aggregate comparison against the prior 65 errors: execution stopped on the
 earlier shard. Reject the candidate and restore BF16 output intermediates.
+
+### Normalization format audit
+
+The pinned native source selects TF32 for FP32 CB operands when FP32 destination
+accumulation is enabled and the format family is B (`jit_build/genfiles.cpp`,
+`compute_data_formats`). `jit_build/data_format.cpp` preserves that selection
+per operand; it does not automatically narrow an FP32 reciprocal to BF16 just
+because the numerator is BF16. The broadcast multiply passes both operand IDs
+through the generated unpack-format arrays.
+
+Therefore, BF16 reciprocal truncation is not established by the observed -45
+output. The read-only `QWEN_NORMALIZATION_FORMATS` snapshot now records the
+actual numerator and reciprocal CB IDs and generated source/destination formats
+alongside the reciprocal value. Five local source-composition and C++ syntax
+tests pass. This is instrumentation, not a numerical fix or hardware result;
+no additional hardware run was launched solely for this change.
+
+### One-tile normalization reproduction
+
+`scripts/ci/dspark_normalization_microprobe.py` now reproduces the normalization
+multiply without weights, attention history or a native library rebuild. It
+uses the same column-broadcast multiply, HiFi4, FP32 destination accumulation,
+BF16 numerator -56 and FP32 reciprocal 0.8060624599456787. One simulated core,
+one tile; invocation was externally bounded to 120 seconds.
+
+| Output CB | All 1024 output elements | FP32 reference product |
+| --- | ---: | ---: |
+| BF16 | -45 | -45.13949775695801 |
+| FP32 | -45.1171875 | -45.13949775695801 |
+
+Both simulator invocations finished successfully and closed the device. The
+FP32 output equals -56 multiplied by 0.8056640625, the reciprocal truncated to
+TF32. That product rounds to BF16 -45, whereas the full-precision product rounds
+to -45.25. This explains why rounding only after the multiply did not change
+the observed coordinate. It does not establish all 65 errors have this cause,
+nor qualify a fix: output accumulation and denominator already differ from the
+reference before normalization. Next isolate a normalization implementation
+that avoids this source-register precision loss, without changing shared
+intermediate formats or globally overriding unpack behavior.
+
+The same microprobe now has `--sfpu-scalar`, which copies the BF16 numerator
+into DST and calls native `mul_unary_tile` with an FP32 runtime scalar. It
+returns -45.25 with BF16 output and -45.139495849609375 with `--fp32-output`.
+The FP32 variant passes exact equality to the FP32-rounded reference for all
+1024 elements; both executions close cleanly. The scalar is deliberately
+supplied as a runtime argument to isolate arithmetic, not read from the
+attention denominator CB. This is not yet a drop-in SDPA normalization: the
+real operation needs independent per-row reciprocals, correct synchronization
+and no shared-CB format changes. No full-context or hardware retry is justified
+by the constant-scalar test alone.
+
+`--sfpu-column --vary-rows` now tests the native `sfpu_mul_bcast_col` operation
+with 32 independent FP32 reciprocals in a dedicated CB. Only that CB has
+`UnpackToDestFp32` enabled (the descriptor requires 64 mode entries); the BF16
+numerator retains its default format. Values outside reciprocal column zero
+are deliberately set to 7, not duplicated from column zero. Both BF16 and
+`--fp32-output` simulator executions pass exact equality at every one of 1024
+coordinates and close cleanly. The cached BF16 invocation completed in about
+eight seconds wall-clock, including simulator startup; this is not device
+performance evidence.
+
+This establishes a per-row primitive candidate, not integration. In SDPA the
+existing denominator CB is also consumed by matrix/binary operations, so do not
+enable full-FP32 unpack globally on that shared CB. Integration needs a dedicated
+normalization scratch CB with explicit copy/publication and lifetime ownership,
+followed by the unchanged 64K correctness gate before any model ladder claim.
+
+The `--scratch-copy` microprobe now exercises that handoff: publish an FP32
+scratch tile through the existing unpack/math/pack handshake, wait for it on
+TR0, replace its bits from the still-owned denominator tile, then unpack only
+the scratch at full FP32 for the SFPU operation. The original denominator CB
+keeps its default TF32 unpack format. With 32 different reciprocals and poisoned
+non-column-zero values, all 1024 FP32 outputs match exactly in simulation.
+
+`dspark_ladder_normalization.py` contains the shared helper and narrowly scoped
+factory/kernel transformations. Source composition against the pinned factory
+and kernels passes. These transformations are not activated in the ladder yet:
+the next checks must cover four numerator tiles (D=128), repeated scratch reuse,
+and the composed kernel build before dispatching hardware correctness.
+
+D=128 and scratch reuse are now covered by `--tiles 4 --repeats 3`: each
+numerator tile/cycle has a different value, reciprocals differ by row, and
+unused reciprocal columns remain poisoned. Both BF16 and FP32 simulator runs
+pass exact equality across 12,288 outputs and close cleanly. Seventeen focused
+tests cover source composition, report selection, factory restoration and
+existing baseline selectors. The first broader test pass exposed stale report
+expectations and the need for an explicit reversible factory transform; those
+were corrected without relaxing source-hash validation.
+
+The candidate is now selected only for the experimental 64K ladder probe.
+Other context kernels retain native normalization. The factory creates one
+dedicated FP32 scratch tile per compute core and routes only that operand
+through direct FP32 unpack. Full combined-kernel compilation and 64K hardware
+correctness remain pending; this is not a performance-qualified change.
