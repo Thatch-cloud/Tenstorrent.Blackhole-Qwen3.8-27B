@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34901934714 also times out during simulator fabric initialization with four-core DPRINT enabled. No attention arithmetic ran. Retry the unchanged candidate with only core (2,0), the failing lane for the current single-worker geometry, restoring the one-core logging footprint used by successful-startup controls. Do not extend the fabric timeout or treat these startup failures as numerical regressions.
+
 Run 34901550212 fails in simulator fabric startup (60-second local-router handshake timeout), before attention arithmetic. It supplies no accuracy evidence. Narrow DPRINT from all worker cores to (0,0), (1,0), (2,0), (3,0): source assigns the current DRAM-query, four-batch, one-worker-per-batch geometry linearly across these four cores. This includes failing lane 2 without enabling diagnostics on idle/dispatch cores. The logging change is a bounded mitigation, not proof of what caused the startup timeout.
 
 Run 34901206746 successfully emits read-only probability sums, but the inherited DPRINT selection only includes core (0,0). It therefore does not expose the failing folded lane 2; do not attribute lane-0 row-55 values to that lane. The next diagnostic enables all worker-core DPRINT for the split-K simulator suite only, retaining TR0-only printing, six audited rows and the existing 165-second probe limit. Arithmetic remains unchanged.
