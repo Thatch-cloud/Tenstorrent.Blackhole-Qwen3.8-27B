@@ -1358,3 +1358,22 @@ This is not held-out coding acceptance or sustained-throughput qualification.
 The source-generation preflight takes 0.134 seconds; no model weights are loaded
 by that check. Preserve the failed run and do not label it a green CI result.
 Report SHA256: `4ef57fda296f622c63d067731cd2b3fd8009080ead38ad74ec6d8473e97abb6d`.
+
+### Normalization staging: correct, no demonstrated speedup
+
+Simulation `34838104802` passes in 126 seconds; hardware numerical gate
+`34838689973` passes in 42 seconds. All four draft output hashes match their
+respective controls. Combined 64K audit `34839119120` also passes.
+
+Full-response run `34839886957` (revision `62c3466`) passes in 336 seconds:
+**PP 2632.04 / CTX 65536 / committed TG 14.2476**, two 135-token EOS responses.
+Downloaded results recompute exactly, and all 975 script hashes match the checkout.
+Mean T16 block costs: draft 346.26 ms, verifier 81.36 ms, selection/commit
+44.80 ms, total 473.70 ms. This is about 0.47% below the recovered direct-staging
+result, so removing the normalization copy is not a demonstrated performance win.
+Do not attribute the earlier direct-staging gain to this additional change.
+
+Both requests pass exact outputs/state, audited prefix and repeat-proposal checks,
+with clean close. These remain synthetic offline requests, not held-out coding
+or sustained-serving acceptance. Serving defaults remain unchanged.
+Report SHA256: `cae5c637cbdc6ece2d26578d7b11e875797c92a1b10f0efc00a3db0ecf6b4027`.

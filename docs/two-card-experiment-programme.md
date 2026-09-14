@@ -7,14 +7,16 @@
 | Earlier optimized T16 runtime | 4096 | 3279.29 | 106.58 | Repeated short EOS fixture |
 | Earlier optimized T16 runtime | 8192 | 3304.32 | 101.59 | Repeated short EOS fixture |
 | Full-history mask/SFPU + folded T16 | 65536 | 2629.74 | 11.83 | `34832226545`; two exact 135-token EOS responses |
+| Direct FP32 staging + normalization staging | 65536 | 2632.04 | 14.25 | `34839886957`; two exact 135-token EOS responses; green CI |
 
 These are different runtime configurations, not a matched context-scaling curve.
-The 64K measurement finishes in 5m34s. Its mixed-kernel simulator takes 134 seconds
-and its combined correctness audit 343 seconds. Runs retain an eight-minute
+The latest 64K measurement finishes in 5m36s. Normalization staging's mixed-kernel
+simulator takes 126 seconds and its numerical hardware gate 42 seconds. Runs retain an eight-minute
 execution cap, excluding queue time. Serving defaults are unchanged.
 
-Next: attack the dominant 443 ms draft cost through FP32 staging, then measure
-the complete combined runtime again. Do not count a kernel-only gain as TG.
+Next: inspect the remaining per-chunk scalar work within the dominant 346 ms
+draft cost. Normalization staging alone shows no gain; prioritize repeated
+inner-loop work before another full-request comparison. Do not count kernel-only gains as TG.
 The remaining context ladder (including 131K/262K capacity), concurrency and
 held-out coding acceptance remain open; **200 committed TG is not achieved**.
 See [the current evidence and failure analysis](context-ladder-investigation.md).
