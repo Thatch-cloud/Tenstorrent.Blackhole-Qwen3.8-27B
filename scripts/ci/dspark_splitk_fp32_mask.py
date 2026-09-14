@@ -66,6 +66,11 @@ void qwen_splitk_copy_fp32(uint32_t source_cb, uint32_t tile, uint32_t destinati
         marker = ('\n#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0\n'
             f'                CircularBuffer({buffer}).wait_front({tiles});\n'
             f'                DEVICE_PRINT("QWEN_SPLITK_STAGE {stage}\\n");\n'
+            '                if (k_chunk == k_chunk_start) {\n'
+            f'                    DEVICE_PRINT("QWEN_SPLITK_VALUES {stage}={{:.9f}}\\n",\n'
+            f'                        TSLICE({buffer}, 0,\n'
+            '                            (SliceRange{.h0=0, .h1=4, .hs=1, .w0=0, .w1=4, .ws=1}), true, true));\n'
+            '                }\n'
             '#endif\n')
         result = result.replace(anchor, marker + anchor)
     return result
