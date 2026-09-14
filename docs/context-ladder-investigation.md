@@ -1050,9 +1050,19 @@ than repeat the norm-reader comparison or attribute all delay to audit overhead.
 - The `dspark-64k-phase-probe` hardware suite loads once and stops after three
   fixed-input proposal replays. It separates input/history updates, blocking
   trace replay, and token readback. It does not measure committed TG.
+- From revision `7ee6e29`, the third replay drains queued updates before starting
+  the trace timer. The first two retain normal scheduling. Without that fence,
+  replay wall time can include pending history copies; it is not kernel time.
 - Its host script has a 465-second timeout plus 15-second kill grace, including
   setup. Queueing, checkout and artifact upload are outside that budget.
 - Phase JSON is checkpointed to a host bind mount after each replay so completed
   measurements survive timeout. A timeout is not a successful benchmark.
 - Full correctness audits and context ladders follow a demonstrated candidate
   improvement, rather than running on every diagnostic edit.
+
+Run `34807274468` (`74add75`) passed all three fixed-input replays and closed
+cleanly. The hardware step took 246 seconds including setup. At context 65536,
+input/history submission took 2.02–8.49 ms, blocking replay 1372.82–1372.87 ms,
+and token readback 0.51–0.55 ms. These unfenced measurements exclude token
+readback as the main bottleneck, but do not distinguish queued copies from
+compute. No committed tokens or new TG result are claimed.

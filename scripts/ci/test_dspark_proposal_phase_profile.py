@@ -51,6 +51,7 @@ class PhaseProfileTests(unittest.TestCase):
         self.assertTrue(result['passed'])
         self.assertEqual(result['completed_replays'], 3)
         self.assertEqual(len(result['records']), 3)
+        self.assertEqual([record['updates_fenced'] for record in result['records']], [False, False, True])
         self.assertFalse(result['performance_qualified'])
         self.assertIsNone(result['committed_tg'])
         self.assertEqual([item['ordinal'] for item in checkpoints if item['phase'] == 'replay'
