@@ -11,6 +11,11 @@ fi
 score_sfpu=0
 sum_sfpu=0
 mask_bits=0
+attention_boundary=0
+if [ "${QWEN_SIM_CASE:-stack}" = dspark-attention-boundary ]; then
+    attention_boundary=1
+    export QWEN_SIM_CASE=dspark-mask-bits
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = dspark-mask-bits ]; then
     mask_bits=1
     export QWEN_SIM_CASE=dspark-sum-sfpu
@@ -100,6 +105,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_SCORE_SFPU=$score_sfpu" \
     -e "QWEN_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_MASK_BITS=$mask_bits" \
+    -e "QWEN_ATTENTION_BOUNDARY=$attention_boundary" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"

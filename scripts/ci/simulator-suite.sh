@@ -71,6 +71,7 @@ PY
                 fi
                 if [ "${QWEN_SUM_SFPU:-0}" = 1 ]; then score_name=dspark-sum-sfpu; fi
                 if [ "${QWEN_MASK_BITS:-0}" = 1 ]; then score_name=dspark-mask-bits; fi
+                if [ "${QWEN_ATTENTION_BOUNDARY:-0}" = 1 ]; then score_name=dspark-attention-boundary; fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
                     --output "/experiment/results/$score_name.json"

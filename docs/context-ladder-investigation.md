@@ -1256,3 +1256,17 @@ The execution cap remains 465 seconds plus 15 seconds for forced cleanup;
 queue time is separate. Only after this combined audit passes should the
 candidate proceed to repeated full-response PP/CTX/TG measurement. The current
 accepted 64K control remains **11.1557 committed TG**.
+
+The first combined audit failed after 248 seconds, before producing a request
+result. Draft SFPU helpers had been inserted into `compute_common.hpp`, which
+the folded target decode kernel also includes. That target factory has neither
+the draft scratch-buffer defines nor compile-time argument 42; its compiler
+correctly rejected the shared header. The separate component gates did not
+exercise this combination. This is a source-integration failure, not evidence
+of a hardware hang or lower TG.
+
+The correction selects the draft header only for factories defining both draft
+scratch buffers; other translation units receive the exact pinned native header.
+The new tiny simulator test compiles and checks both draft attention and folded
+target attention while that same header is installed. It must pass before the
+combined hardware audit is retried.
