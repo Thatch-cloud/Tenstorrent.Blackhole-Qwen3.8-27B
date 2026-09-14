@@ -50,7 +50,33 @@ def transform(source):
     return source[:first] + REPLACEMENT + source[last:]
 
 
+DIAGNOSTIC = r'''
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+    static uint32_t diagnostic_calls = 0;
+    if (diagnostic_calls++ < 3) {
+        const volatile uint32_t* source = reinterpret_cast<const volatile uint32_t*>(
+            get_local_cb_interface(source_cb).fifo_rd_ptr << cb_addr_shift);
+        const volatile uint32_t* destination = reinterpret_cast<const volatile uint32_t*>(
+            get_local_cb_interface(scratch_cb).fifo_rd_ptr << cb_addr_shift);
+        DEVICE_PRINT("QWEN_STAGE_BITS call={} source_cb={} scratch_cb={} srcfmt={} dstfmt={} source={},{},{},{},{} staged={},{},{},{},{}\n",
+            diagnostic_calls, source_cb, scratch_cb, unpack_src_format[get_operand_id(scratch_cb)],
+            unpack_dst_format[get_operand_id(scratch_cb)], source[0], source[1], source[16], source[256], source[512],
+            destination[0], destination[1], destination[16], destination[256], destination[512]);
+    }
+#endif
+'''
+
+
 @contextmanager
-def staging_scope():
-    with patch.object(dspark_score_sfpu, 'HELPER', transform(dspark_score_sfpu.HELPER)):
+def staging_scope(*, diagnostic=False):
+    if type(diagnostic) is not bool:
+        raise ValueError('Explicit staging diagnostic policy required')
+    candidate = transform(dspark_score_sfpu.HELPER)
+    if diagnostic:
+        anchor = '    CircularBuffer(scratch_cb).wait_front(1);\n}\n\nvoid qwen_prepare_center_scratch'
+        if candidate.count(anchor) != 1:
+            raise ValueError('Unique completed staging boundary required')
+        candidate = candidate.replace(anchor,
+            '    CircularBuffer(scratch_cb).wait_front(1);\n' + DIAGNOSTIC + '}\n\nvoid qwen_prepare_center_scratch')
+    with patch.object(dspark_score_sfpu, 'HELPER', candidate):
         yield

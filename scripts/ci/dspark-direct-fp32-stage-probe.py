@@ -29,7 +29,7 @@ def main():
         raise ValueError('Explicit small CPU-only sum-update simulator required')
     directory = Path(__file__).parent
     output = Path(sys.argv[sys.argv.index('--output') + 1])
-    with staging_scope(), boundary_scope(os.environ['TT_METAL_HOME']), mask_scope(), sum_scope(), small_score_fixture(), bitwise_infinity_checks(), factory_scope(), kernel_scope(), \
+    with staging_scope(diagnostic=True), boundary_scope(os.environ['TT_METAL_HOME']), mask_scope(), sum_scope(), small_score_fixture(), bitwise_infinity_checks(), factory_scope(), kernel_scope(), \
             candidate_entrypoint(Path(__file__).resolve()):
         runpy.run_path(str(directory / 'dspark-ladder-attention-probe.py'), run_name='__main__')
         if os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1':
