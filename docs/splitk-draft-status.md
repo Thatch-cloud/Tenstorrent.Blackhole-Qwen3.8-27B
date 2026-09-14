@@ -20,6 +20,18 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34895661245 provides the first stage-value localization (single worker, single partition; failed, not hardware-admitted):
+
+| Chip 0, first folded row | Observed | Interpretation |
+|---|---|---|
+| Raw QK, first four striped keys | 146.37890625, -72.838562012, -73.574417114, -72.647857666 | Matches the independently calculated CPU fixture samples. |
+| After mask addition | 146.375, -72.8125, -73.5625, -72.625 | Arithmetic reload rounds scores despite FP32 storage. |
+| Maximum, first four rows | 170, 170, 163, 164 | BF16-rounded; reference maxima are about 170.7754, 170.1055, 163.9053, 164.9717. |
+| First exponent per row | 0.121582031, 0.116455078, 0.133789062, 0.133789062 | Positive on every sampled row. Not a full-exponent accuracy check. |
+| Reduced sum per row | 0.243164062, 0, 0.234375, 0 | Zero sums contradict positive sampled exponents; the sum path is demonstrably incorrect. |
+
+Next isolate mixed-format reduction with a separate BF16 exponent buffer, retaining FP32 raw scores. Do not assume fixing sum alone repairs final output: weighted-value accumulation and normalization still require the same retained reference gate. This is a producer/consumer format investigation, not evidence for weakening precision or reducing context. Artifacts are retained under `runner-evidence.local/34895661245/qwen-hardware-inventory-34895661245/`.
+
 Run 34895417818 fails even with one 512-key partition: first outputs -8768, nonfinite outputs elsewhere, clean close. Neither cross-core correction nor online chunk recurrence is required for the hybrid error. The next run retains that geometry and adds read-only first-chunk tile snapshots at score, masked-score, maximum, exponent and sum stages. This locates the earliest divergent arithmetic stage rather than making another format guess; no accuracy threshold or serving path changes.
 
 Run 34895149662 retains the single-worker failure after explicit copy-format transitions: first outputs remain -248, and nonfinite outputs remain elsewhere. Before normalization chip 0 shows sum 0.240234375 and numerator -59.5625. Copy-format state was not sufficient to fix the local error. The next control uses one 512-key partition, keeping key ordering, geometry and tolerances unchanged, to remove online recurrence as well as cross-core reduction. Simulator execution reported 15.7 seconds; no hardware admission.
