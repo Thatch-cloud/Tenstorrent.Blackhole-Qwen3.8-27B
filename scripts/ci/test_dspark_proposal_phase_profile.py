@@ -26,7 +26,7 @@ class PhaseProfileTests(unittest.TestCase):
         def advance(seconds):
             elapsed[0] += seconds
 
-        operations = SimpleNamespace(execute_trace=lambda: advance(.020))
+        operations = SimpleNamespace(execute_trace=lambda: advance(.020), synchronize_device=lambda mesh: None)
         prepared = SimpleNamespace(trace=1, closed=False, audit=False,
             update=lambda anchor: advance(.003), read_tokens=lambda output: advance(.002))
 
@@ -41,7 +41,7 @@ class PhaseProfileTests(unittest.TestCase):
 
         prepared.propose = propose
         prepared.expected_warmup = (7,) * 15
-        return SimpleNamespace(prepared=prepared, operations=operations, position=65536,
+        return SimpleNamespace(prepared=prepared, operations=operations, position=65536, mesh=object(),
             max_drafts=15, history=SimpleNamespace(pending=None)), lambda: elapsed[0]
 
     def test_bounded_probe_checkpoints_each_replay_without_claiming_tg(self):
@@ -94,6 +94,24 @@ class PhaseProfileTests(unittest.TestCase):
                 device.prepared.propose(7, 15)
         self.assertFalse(records[0]['passed'])
         self.assertIs(device.prepared.propose, original)
+
+    def test_fence_drains_updates_before_trace(self):
+        device, clock = self.fixture()
+        device.mesh = object()
+        order = []
+        original_trace = device.operations.execute_trace
+        device.operations.synchronize_device = lambda mesh: order.append(('fence', mesh))
+
+        def trace():
+            order.append(('trace', device.mesh))
+            original_trace()
+
+        device.operations.execute_trace = trace
+        records = []
+        with profile_proposals(device, records, clock=clock, fence_updates=True):
+            device.prepared.propose(7, 15)
+        self.assertEqual(order, [('fence', device.mesh), ('trace', device.mesh)])
+        self.assertTrue(records[0]['updates_fenced'])
 
     def test_audit_mode_is_rejected(self):
         device, clock = self.fixture()

@@ -38,8 +38,8 @@ def probe_three_replays(device, anchor, checkpoint, *, clock=perf_counter):
     position = device.position
     expected = tuple(device.prepared.expected_warmup)
     try:
-        with profile_proposals(device, report['records'], clock=clock):
-            for ordinal in range(3):
+        for ordinal in range(3):
+            with profile_proposals(device, report['records'], clock=clock, fence_updates=ordinal == 2):
                 report.update(phase='replay', ordinal=ordinal)
                 checkpoint(report)
                 tokens = tuple(device.prepared.propose(anchor, 15))
@@ -59,12 +59,14 @@ def probe_three_replays(device, anchor, checkpoint, *, clock=perf_counter):
 
 
 @contextmanager
-def profile_proposals(device, records, *, clock=perf_counter):
+def profile_proposals(device, records, *, clock=perf_counter, fence_updates=False):
     prepared = device.prepared
     if prepared is None or prepared.trace is None or prepared.closed or prepared.audit:
         raise ValueError('Live captured proposal with audit disabled required for phase attribution')
     if not isinstance(records, list):
         raise ValueError('Explicit phase record list required')
+    if type(fence_updates) is not bool:
+        raise ValueError('Explicit boolean update fence required')
     operations = device.operations
     active = None
 
@@ -74,7 +76,10 @@ def profile_proposals(device, records, *, clock=perf_counter):
                 return operation(*args, **kwargs)
             started = clock()
             try:
-                return operation(*args, **kwargs)
+                result = operation(*args, **kwargs)
+                if fence_updates and name == 'update_inputs_history_ms':
+                    operations.synchronize_device(device.mesh)
+                return result
             finally:
                 active[name] += (clock() - started) * 1000
         return invoke
@@ -97,8 +102,9 @@ def profile_proposals(device, records, *, clock=perf_counter):
             elapsed = (clock() - started) * 1000
             record, active = active, None
             record.update(position=position, proposals=count, passed=passed,
+                updates_fenced=fence_updates,
                 total_ms=elapsed, other_host_ms=elapsed - sum(record.values()),
-                scope='Instrumented host timings; replay includes its blocking wait; not device-kernel timing')
+                scope='Instrumented host timings; unfenced replay can include queued input/history work; not device-kernel timing')
             records.append(record)
 
     with ExitStack() as stack:
