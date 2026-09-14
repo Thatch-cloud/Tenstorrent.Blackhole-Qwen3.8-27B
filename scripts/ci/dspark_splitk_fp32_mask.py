@@ -36,12 +36,15 @@ def transform(source):
     result = source.replace(before, after).replace(include,
         include + '\n#include "api/compute/eltwise_binary_sfpu.h"')
     markers = (
+        ('                if (!add_mask_fusion) {', 'scores-ready', 'cb_qk_im', 'qk_chunk_tiles_dynamic'),
+        ('                reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(',
+         'masked-scores-ready', 'cb_qk_im', 'qk_chunk_tiles_dynamic'),
         ('                /* QK -= cb_cur_max */', 'maximum-ready', 'cb_cur_max', 'Sq_chunk_t'),
         ('                CircularBuffer(cb_qk_im).wait_front(qk_chunk_tiles_dynamic);',
          'exponents-ready', 'cb_qk_im', 'qk_chunk_tiles_dynamic'),
         ('                /* OUT_IM = QK @ V_CHUNK */', 'sum-ready', 'cb_cur_sum', 'Sq_chunk_t'),
     )
-    for anchor, stage, buffer, tiles in markers:
+    for anchor, stage, buffer, tiles in sorted(markers, key=lambda entry: result.index(entry[0]), reverse=True):
         if result.count(anchor) != 1:
             raise ValueError('Unique split-K stage marker anchor required')
         marker = ('\n#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0\n'
