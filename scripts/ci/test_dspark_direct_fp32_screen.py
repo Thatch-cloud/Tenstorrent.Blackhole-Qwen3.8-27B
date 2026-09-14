@@ -18,6 +18,8 @@ class DirectScreenTests(unittest.TestCase):
         from dspark_score_sfpu import kernel_scope
         from dspark_score_bitwise import bitwise_infinity_checks
         from dspark_mask_bits import mask_scope
+        from dspark_attention_header_boundary import boundary_scope
+        from dspark_direct_fp32_preflight import validate_active_sources
 
         root = Path(os.environ['TT_NATIVE_TEST_ROOT'])
         original = {name: (root / native_draft_sdpa.KERNEL_DIRECTORY / name).read_bytes()
@@ -38,9 +40,15 @@ class DirectScreenTests(unittest.TestCase):
                     stack.enter_context(scope)
                 if not early:
                     stack.enter_context(staging_scope())
+                stack.enter_context(boundary_scope(root))
                 source = native_draft_sdpa.patched_sources(original)['compute_common.hpp']
                 self.assertEqual(source.count(b'qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB, true);'),
                     1 if early else 0)
+                if early:
+                    self.assertTrue(validate_active_sources(root)['passed'])
+                else:
+                    with self.assertRaises(ValueError):
+                        validate_active_sources(root)
 
     def test_staging_installed_before_runtime_arithmetic_contexts(self):
         entry = Path(__file__).with_name('dspark_64k_entry.py').read_text()

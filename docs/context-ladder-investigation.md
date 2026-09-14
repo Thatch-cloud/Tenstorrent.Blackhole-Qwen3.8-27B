@@ -1322,3 +1322,16 @@ before the runtime arithmetic scopes. A host test now assembles the actual
 64K runtime source, and the request gate requires that restoration call in
 addition to exact compiled-source fingerprints. Rerun the corrected audited
 request before full-response timing; retain **11.8252 TG** as the accepted control.
+
+Corrected combined audit `34835869483` (revision `6b89bcc`) passes at 65,536
+context tokens: 16 committed decode tokens, exact outputs and active/inactive
+state, all five verifier buckets, and clean close. The downloaded audit summary
+recomputes exactly; all three direct-staging dependency hashes match the checkout.
+Report SHA256: `a5b53a54dde816f1d738075ef565349a2eac7449ad423bd08b8dc477944f8ac1`.
+This is correctness evidence, not a new TG measurement. Full-response timing
+must use this corrected audit rather than `34835194013`.
+
+A source-generation preflight now checks the real request scope before model
+loading, with a 30-second cap. Its host regression tests reject late staging
+installation and accept the corrected ordering; seven targeted tests pass in
+0.614 seconds. This avoids spending a hardware cycle on that wiring error.

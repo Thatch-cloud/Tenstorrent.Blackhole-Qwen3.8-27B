@@ -80,8 +80,8 @@ def run(main):
     direct_staging = os.environ.get('QWEN_DSPARK_DIRECT_FP32_STAGE', '0')
     direct_candidate_scope = nullcontext()
     if (direct_staging not in ('0', '1') or direct_staging == '1'
-            and (target_request != '1' or request_screen != '1' or timed_requests != '0')):
-        raise ValueError('Direct staging requires its isolated folded-T16 correctness screen')
+            and (target_request != '1' or (request_screen, timed_requests) not in (('1', '0'), ('0', '1')))):
+        raise ValueError('Direct staging requires its isolated folded-T16 audit or qualified timing')
     if direct_staging == '1':
         from dspark_direct_fp32_stage import staging_scope
         direct_candidate_scope = staging_scope()
@@ -104,6 +104,8 @@ def run(main):
             from dspark_mask_timed_requests import timed_scope
         if target_request == '1':
             from target_t16_64k_timed import timed_scope
+        if direct_staging == '1':
+            from dspark_direct_fp32_timed import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope

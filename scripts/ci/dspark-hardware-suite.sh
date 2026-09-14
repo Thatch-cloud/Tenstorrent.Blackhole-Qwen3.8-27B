@@ -141,6 +141,9 @@ if [ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 ]; then
         --hardware --output "/experiment/results/$numerical_name.json"
     exit "$?"
 fi
+if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then
+    timeout -k 5 30 python3 -u /experiment-scripts/ci/dspark_direct_fp32_preflight.py || exit "$?"
+fi
 runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
     --checkpoint /dspark/model.safetensors --config /dspark/config.json
     --output "/experiment/results/$report_name.json")
