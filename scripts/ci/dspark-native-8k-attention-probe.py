@@ -15,7 +15,7 @@ from draft_attention import draft_sdpa
 from native_draft_sdpa import run_precise_probe
 from dspark_hardware_gate import digest
 from dspark_projection import tensor_digest
-from dspark_ladder_backend import require_backend
+from dspark_ladder_backend import require_backend, require_packer_mode
 from gdn_multitoken_conv import addresses, release_owned
 from sim_memory_budget import require_clean, snapshot
 
@@ -48,8 +48,8 @@ def source_hashes():
 
 def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
     from native_draft_sdpa import audit_active_kernel
-    if packer_compat is not True or precise_native is not True:
-        raise ValueError('Explicit compatible packer and precise native kernel required')
+    hardware = os.environ.get('QWEN_LADDER_BACKEND') == 'hardware'
+    require_packer_mode(hardware=hardware, packer_compat=packer_compat, precise_native=precise_native)
     audit_active_kernel(root)
     binaries = {
         'build_Release/lib/_ttnncpp.so': 'f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3',
@@ -71,8 +71,9 @@ def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
         raise ValueError('Native SDPA sources required')
     result = {str(path): digest(root / path) for path in sorted(
         [Path(NATIVE.PACKER), *map(Path, binaries), *sources])}
-    if result[NATIVE.PACKER] != NATIVE.COMPAT_PACKER or any(result[name] != value for name, value in binaries.items()):
-        raise ValueError('Pinned CI simulator binaries and compatible packer required')
+    expected_packer = NATIVE.ORIGINAL_PACKER if hardware else NATIVE.COMPAT_PACKER
+    if result[NATIVE.PACKER] != expected_packer or any(result[name] != value for name, value in binaries.items()):
+        raise ValueError('Pinned rebuilt binaries and backend-specific packer required')
     return result
 
 

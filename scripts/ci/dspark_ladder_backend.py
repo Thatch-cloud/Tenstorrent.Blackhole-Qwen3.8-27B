@@ -3,6 +3,13 @@
 from feature_projection import require_projection_environment
 
 
+def require_packer_mode(*, hardware, packer_compat, precise_native):
+    if (any(type(value) is not bool for value in (hardware, packer_compat, precise_native))
+            or not precise_native or packer_compat == hardware):
+        raise ValueError('Precise native kernel with stock hardware or compatible simulator packer required')
+    return 'stock' if hardware else 'simulator-compatible'
+
+
 def require_backend(environment, *, hardware, device_present):
     if type(hardware) is not bool or type(device_present) is not bool:
         raise ValueError('Explicit backend and device presence required')

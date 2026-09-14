@@ -1,9 +1,18 @@
 import unittest
 
-from dspark_ladder_backend import require_backend
+from dspark_ladder_backend import require_backend, require_packer_mode
 
 
 class LadderBackendTests(unittest.TestCase):
+    def test_backend_specific_packer_and_precise_arithmetic(self):
+        self.assertEqual(require_packer_mode(hardware=True, packer_compat=False, precise_native=True), 'stock')
+        self.assertEqual(require_packer_mode(hardware=False, packer_compat=True, precise_native=True), 'simulator-compatible')
+        for hardware in (True, False):
+            with self.assertRaises(ValueError):
+                require_packer_mode(hardware=hardware, packer_compat=hardware, precise_native=True)
+            with self.assertRaises(ValueError):
+                require_packer_mode(hardware=hardware, packer_compat=not hardware, precise_native=False)
+
     def test_hardware_requires_allocation_and_rejects_simulator_state(self):
         environment = dict(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1',
             QWEN_LADDER_BACKEND='hardware', QWEN_LADDER_CONTEXT='65536', QWEN_PROJECTION_LINKS='4')
