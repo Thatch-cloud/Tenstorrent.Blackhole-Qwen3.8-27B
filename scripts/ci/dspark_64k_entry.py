@@ -65,6 +65,14 @@ def run(main):
         from dspark_score_bitwise import bitwise_infinity_checks
         qualify(directory, directory / 'dspark-score-bitwise.json')
         candidate_scope = bitwise_infinity_checks()
+    mask_bits = os.environ.get('QWEN_DSPARK_MASK_BITS', '0')
+    if mask_bits not in ('0', '1') or mask_bits == '1' and (sum_sfpu != '1' or score_bitwise != '0'):
+        raise ValueError('Mask candidate requires isolated qualified sum-update runtime')
+    if mask_bits == '1':
+        from dspark_mask_request_gate import qualify
+        from dspark_mask_bits import mask_scope
+        qualify(directory, directory / 'dspark-mask-bits-hardware.json')
+        candidate_scope = mask_scope()
     request_screen = os.environ.get('QWEN_DSPARK_SFPU_REQUEST_SCREEN', '0')
     timed_requests = os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0')
     if (timed_requests not in ('0', '1') or timed_requests == '1'
