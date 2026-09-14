@@ -13,6 +13,7 @@ from dspark_splitk_precise_exp import transform as transform_precise_exp
 from dspark_splitk_output_rounding import transform as transform_output_rounding
 from dspark_splitk_reciprocal_storage import transform as transform_reciprocal_storage
 from dspark_splitk_merge_exp import transform as transform_merge_exp
+from dspark_splitk_accumulator_add import transform as transform_accumulator_add
 
 
 HEADER = 'ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/kernels/compute/sdpa_flash_decode.cpp'
@@ -85,8 +86,9 @@ def transform(source):
     include = '#include "api/compute/eltwise_unary/recip.h"'
     if result.count(include) != 1:
         raise ValueError('Unique diagnostic include required')
-    return transform_reciprocal_storage(transform_output_rounding(transform_precise_exp(transform_final_input(transform_sum_input(transform_copies(transform_mask(result.replace(reciprocal, snapshot + precise).replace(include,
+    result = transform_reciprocal_storage(transform_output_rounding(transform_precise_exp(transform_final_input(transform_sum_input(transform_copies(transform_mask(result.replace(reciprocal, snapshot + precise).replace(include,
         include + '\n#include "api/debug/dprint.h"'))))))))
+    return transform_accumulator_add(result)
 
 
 @contextmanager

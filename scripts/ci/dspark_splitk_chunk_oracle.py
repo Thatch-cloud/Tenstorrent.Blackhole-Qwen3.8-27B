@@ -7,7 +7,8 @@ import torch
 from dspark_ladder_fixtures import fixture_probe
 
 
-def compare_chunk_statistics(*, round_maxima=False, truncate_correction_scale=False):
+def compare_chunk_statistics(*, round_maxima=False, truncate_correction_scale=False, tf32_reload=False,
+        fp32_accumulation=False):
     reports = []
     with fixture_probe(128, 256) as probe:
         fixture = probe.fixtures()[0]
@@ -16,7 +17,12 @@ def compare_chunk_statistics(*, round_maxima=False, truncate_correction_scale=Fa
         value = probe.joined(fixture, 'value')[0:1].float().repeat_interleave(4, 1)
         scale = 128 ** -.5
         correction_scale = float(torch.tensor(scale).view(torch.int32).bitwise_and(-65536).view(torch.float32)) if truncate_correction_scale else scale
-        scores = query @ key.transpose(-1, -2) + fixture['mask'].float()
+        def reload(tensor):
+            if not tf32_reload:
+                return tensor
+            return tensor.contiguous().view(torch.int32).bitwise_and(-8192).view(torch.float32)
+
+        scores = reload(query @ key.transpose(-1, -2)) + fixture['mask'].float()
         expected = probe.reference(fixture, 0)
         for chunk_size in (512, 256):
             for bf16_statistics in (False, True):
@@ -34,19 +40,22 @@ def compare_chunk_statistics(*, round_maxima=False, truncate_correction_scale=Fa
                     probabilities = torch.where(torch.isneginf(next_maximum), 0.,
                         torch.exp((chunk - next_maximum) * scale))
                     partial_sum = rounded(probabilities.sum(-1, keepdim=True))
-                    partial_output = probabilities @ value[..., start:start + chunk_size, :]
+                    partial_output = reload(probabilities) @ value[..., start:start + chunk_size, :]
                     if maximum is None:
                         total, numerator = partial_sum, partial_output
                     else:
                         correction = rounded(torch.where(torch.isneginf(maximum), 0.,
                             torch.exp((maximum - next_maximum) * correction_scale)))
                         total = rounded(rounded(total * correction) + partial_sum)
-                        numerator = numerator * correction + partial_output
+                        corrected = reload(numerator) * correction
+                        numerator = corrected + partial_output if fp32_accumulation else reload(corrected) + reload(partial_output)
                     maximum = next_maximum
-                actual = (numerator / total).bfloat16().float()
+                actual = (reload(numerator) * reload(total.reciprocal())).bfloat16().float()
                 close = torch.isclose(actual, expected, rtol=.01, atol=.01)
                 reports.append(dict(chunk_size=chunk_size, bf16_statistics=bf16_statistics,
                     round_maxima=round_maxima, truncate_correction_scale=truncate_correction_scale,
+                    tf32_reload=tf32_reload,
+                    fp32_accumulation=fp32_accumulation,
                     failed_elements=int((~close).sum()),
                     max_abs=float((actual - expected).abs().max()), device_qualified=False))
     return reports
