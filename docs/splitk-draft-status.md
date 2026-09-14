@@ -20,6 +20,10 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34852917157 snapshots show the remaining error already exists before final normalization. For chip 0, lane 0, first row, device numerator is -55.75 and denominator 1.109375 (ratio about -50.2535); the FP32 reference ratio is -49.7590. Individual numerator/sum magnitudes can depend on the chosen softmax maximum, so their ratio is the relevant comparison. Replacing the reciprocal alone did not reduce the 9,939 failing elements or 1.15783 maximum error.
+
+Explicit cross-core correction (34851806253) reduced the redistributed-key maximum error from 93,699.83 to 1.15783 without changing FP32 destination mode. The proposed doubled register stride (34851366019) worsened error to about 1.08e37 and was rejected. An SFPU final-normalization replacement (34852498907) produced infinities and was removed. Next inspect score packing, exponent/sum precision and weighted-value accumulation rather than continuing to change the final division.
+
 The one-core chunked control retains the same maximum error as one full-history chunk, while sixteen cores produce a much larger error. Cross-core reduction or independently initialized masked partitions therefore account for the large additional failure in this fixture; ordinary serial chunk recurrence alone does not reproduce it. A separate smaller numerical error remains even without cross-core reduction. Neither control qualifies the runtime.
 
 Next isolate empty partitions by distributing the same valid and masked keys across partitions without dropping or duplicating any key. Retain a separate precision investigation for the single-core error. These controls must not be promoted as the final low-parallelism runtime.
