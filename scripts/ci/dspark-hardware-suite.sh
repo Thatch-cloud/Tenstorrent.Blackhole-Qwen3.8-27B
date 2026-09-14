@@ -118,7 +118,9 @@ python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
-if [ "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 ]; then
+if [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then
+    python3 /experiment-scripts/ci/dspark_sum_sfpu_hardware.py
+elif [ "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 ]; then
     python3 /experiment-scripts/ci/dspark_score_sfpu_hardware.py
 else
     python3 /experiment-scripts/ci/dspark_runtime_cache.py
@@ -130,8 +132,10 @@ if [ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 ]; then
     test "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 || exit 1
     export QWEN_LADDER_CONTEXT=65536
     export QWEN_DRAFT_FP32_INTERMEDIATES=1
-    timeout -k 15 180 python3 -u /experiment-scripts/ci/dspark-score-sfpu-hardware-probe.py \
-        --hardware --output /experiment/results/dspark-score-sfpu-hardware.json
+    numerical_name=dspark-score-sfpu-hardware
+    if [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then numerical_name=dspark-sum-sfpu-hardware; fi
+    timeout -k 15 180 python3 -u "/experiment-scripts/ci/$numerical_name-probe.py" \
+        --hardware --output "/experiment/results/$numerical_name.json"
     exit "$?"
 fi
 runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"

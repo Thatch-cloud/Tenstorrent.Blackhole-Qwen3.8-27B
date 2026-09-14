@@ -7,6 +7,17 @@ mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
 score_sfpu=${QWEN_DSPARK_SCORE_SFPU:-0}
+sum_sfpu=${QWEN_DSPARK_SUM_SFPU:-0}
+[[ "$sum_sfpu" = 0 || "$sum_sfpu" = 1 ]]
+if [ "$sum_sfpu" = 1 ]; then
+    test "$score_sfpu" = 1
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    sum_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sum-sfpu.XXXXXX")
+    gh run download 34821692776 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34821692776 --dir "$sum_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_sum_sfpu_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+        "$sum_evidence/dspark-sum-sfpu.json"
+fi
 request_screen=${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}
 timed_requests=${QWEN_DSPARK_SFPU_TIMED:-0}
 [[ "$timed_requests" = 0 || "$timed_requests" = 1 ]]
@@ -238,6 +249,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_DSPARK_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_DSPARK_SCORE_SFPU=$score_sfpu" \
+    -e "QWEN_DSPARK_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_DSPARK_SFPU_REQUEST_SCREEN=$request_screen" \
     -e "QWEN_DSPARK_SFPU_TIMED=$timed_requests" \
     -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \
@@ -282,6 +294,9 @@ fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [ "$score_sfpu" = 1 ]; then
     docker cp "$sfpu_evidence/dspark-score-sfpu.json" "$test_id:/experiment-scripts/ci/dspark-score-sfpu.json"
+fi
+if [ "$sum_sfpu" = 1 ]; then
+    docker cp "$sum_evidence/dspark-sum-sfpu.json" "$test_id:/experiment-scripts/ci/dspark-sum-sfpu.json"
 fi
 if [[ "$request_screen" = 1 || "$timed_requests" = 1 ]]; then
     docker cp "$request_evidence/dspark-score-sfpu-hardware.json" "$test_id:/experiment-scripts/ci/dspark-score-sfpu-hardware.json"
