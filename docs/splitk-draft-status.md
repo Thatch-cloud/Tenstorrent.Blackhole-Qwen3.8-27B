@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34893131735 clears the unsupported FP32 unpack trap using the JIT's default TF32 arithmetic inputs, and reaches all instrumented stages. It still fails: 65,408 elements, infinite maximum error. Before normalization, statistic rows alternate between nonzero values and zero, while numerators remain nonzero. The next hybrid diagnostic keeps scores/output intermediates in FP32 but restores native BF16 statistics. This isolates a statistics-format mismatch; it is not an accuracy or performance qualification.
+
 The CPU-only `dspark_splitk_precision_oracle.py` reproduces the exact 128-context fixture. Keeping all arithmetic FP32 passes; rounding only QK scores to BF16 produces 7,936 failing elements and maximum error 1.06045 (truncation: 7,808 and 1.00553). This establishes that BF16 score storage alone is insufficient for the retained tolerance on this fixture. It is not a complete emulator or proof that all device error comes from that operation. Next preserve FP32 scores through centering/exponentiation rather than trying more final-normalization changes.
 
 Run 34852917157 snapshots show the remaining error already exists before final normalization. For chip 0, lane 0, first row, device numerator is -55.75 and denominator 1.109375 (ratio about -50.2535); the FP32 reference ratio is -49.7590. Individual numerator/sum magnitudes can depend on the chosen softmax maximum, so their ratio is the relevant comparison. Replacing the reciprocal alone did not reduce the 9,939 failing elements or 1.15783 maximum error.

@@ -10,7 +10,7 @@ def transform(source):
         DH == 128 && vDH == 128 && fp32_dest_acc_en && !is_causal && use_attention_mask),
         "Explicit folded split-K geometry required for FP32 intermediates");
     const tt::DataFormat im_df = qwen_splitk_fp32 ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
-    const tt::DataFormat stats_df = qwen_splitk_fp32 ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;'''
+    const tt::DataFormat stats_df = tt::DataFormat::Float16_b;'''
     modes = '''    std::vector<tt::tt_metal::UnpackToDestMode> qwen_splitk_unpack_modes;
     if (qwen_splitk_fp32) {
         qwen_splitk_unpack_modes.resize(64, tt::tt_metal::UnpackToDestMode::Default);
