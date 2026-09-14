@@ -1073,3 +1073,20 @@ Run `34807645660` (`e9071aa`) passed the fenced comparison. Normal replay was
 External queued history updates therefore do not explain the 1.37-second
 draft delay. Work inside the captured trace remains the target; these timings
 do not separate its internal copies from attention or other compute kernels.
+
+### Scalar score candidate: simulator status
+
+The isolated bitwise infinity check removes two software floating-point
+comparison call sites from Blackhole compiler output. Subtraction and addition
+are unchanged and still compile to software floating-point calls. This is not
+a measured runtime speedup; moving the arithmetic to SFPU remains separate work.
+
+| Run | Outcome | Next action |
+| --- | --- | --- |
+| `34808847890` | Child launcher lost candidate scope; source audit rejected it | Re-enter through candidate wrapper; keep audit |
+| `34809473922` | First eager case passed on both simulated chips; timed out before completion, CI simulator step 395 seconds | Reduce synthetic history, not timeout |
+| `34810126959` | Both eager cases and first replay passed; timeout during final replay, CI step 371 seconds | Reuse populated build cache; assign simulation 165 seconds plus 15-second kill grace, within unchanged 480-second outer limit |
+
+None of these simulator runs admits the candidate into a 64K production request
+or proves committed TG. The smaller fixture changes only simulator geometry;
+the qualified hardware baseline and serving defaults remain unchanged.

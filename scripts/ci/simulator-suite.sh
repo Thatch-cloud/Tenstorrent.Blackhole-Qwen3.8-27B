@@ -59,7 +59,7 @@ PY
             unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
             if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then
-                QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 105 python3 -u \
+                QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     /experiment-scripts/ci/dspark-score-bitwise-probe.py \
                     --output /experiment/results/dspark-score-bitwise.json
                 exit 0

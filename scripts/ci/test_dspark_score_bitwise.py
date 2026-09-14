@@ -42,7 +42,7 @@ class BitwiseScoreTests(baseline.ScoreCenterTests):
             suite.index('export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000'))
         end = suite.index('fi', start)
         branch = suite[start:end]
-        self.assertIn('timeout -k 15 105', branch)
+        self.assertIn('timeout -k 15 165', branch)
         self.assertIn('exit 0', branch)
         self.assertLess(end, suite.index('for context in 65536'))
         workflow = (directory.parents[1] / '.github/workflows/qwen-ttsim.yml').read_text()
