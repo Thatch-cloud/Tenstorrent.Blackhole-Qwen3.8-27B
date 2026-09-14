@@ -83,6 +83,10 @@ def run(main):
     center_candidate_scope = nullcontext()
     center_fill = os.environ.get('QWEN_DSPARK_CENTER_TILE_FILL', '0')
     combined_phases = os.environ.get('QWEN_DSPARK_COMBINED_PHASES', '0')
+    device_profile = os.environ.get('QWEN_DSPARK_COMBINED_DEVICE_PROFILE', '0')
+    if (device_profile not in ('0', '1') or device_profile == '1'
+            and (combined_phases != '0' or center_fill != '1' or timed_requests != '1' or request_screen != '0')):
+        raise ValueError('Device attribution requires the isolated qualified full-response runtime')
     if (combined_phases not in ('0', '1') or combined_phases == '1'
             and (center_fill != '1' or timed_requests != '1' or request_screen != '0')):
         raise ValueError('Combined phase profiling requires the qualified full-response runtime')
@@ -133,6 +137,8 @@ def run(main):
             from dspark_center_fill_timed import timed_scope
         if combined_phases == '1':
             from dspark_combined_phase_profile import timed_scope
+        if device_profile == '1':
+            from dspark_combined_device_profile import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope

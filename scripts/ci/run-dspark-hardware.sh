@@ -394,6 +394,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
     -e "QWEN_DSPARK_CENTER_TILE_FILL=$center_tile_fill" \
     -e "QWEN_DSPARK_COMBINED_PHASES=${QWEN_DSPARK_COMBINED_PHASES:-0}" \
+    -e "QWEN_DSPARK_COMBINED_DEVICE_PROFILE=${QWEN_DSPARK_COMBINED_DEVICE_PROFILE:-0}" \
     -e "QWEN_DSPARK_SFPU_REQUEST_SCREEN=$request_screen" \
     -e "QWEN_DSPARK_SFPU_TIMED=$timed_requests" \
     -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \

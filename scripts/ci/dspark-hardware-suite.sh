@@ -155,6 +155,12 @@ fi
 if [ "${QWEN_COMBINED_TRACE_PROFILE:-0}" = 1 ]; then
     runner=(bash /experiment-scripts/ci/dspark-combined-profile.sh)
 fi
+if [ "${QWEN_DSPARK_COMBINED_DEVICE_PROFILE:-0}" = 1 ]; then
+    runner=(timeout -k 15 390 bash /experiment-scripts/ci/dspark-combined-device-profile.sh
+        "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
+        --checkpoint /dspark/model.safetensors --config /dspark/config.json
+        --output "/experiment/results/$report_name.json")
+fi
 "${runner[@]}" 2>&1 | tee "/experiment/results/$report_name.log"
 status=${PIPESTATUS[0]}
 set -e
