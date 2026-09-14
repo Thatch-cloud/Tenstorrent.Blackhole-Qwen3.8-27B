@@ -797,3 +797,13 @@ denominator 1.240598679; the CPU reference gives -56.38211441040039 and
 1.2374624013900757. The raw QK score matches; investigate accumulated output,
 denominator precision and final output rounding. Do not infer corrupted QK
 or a normalization race from the mismatched device-1 diagnostic stream.
+
+### Rejected final-output rounding: run 34794628077
+
+Candidate 6656de4 inserted native FP32-to-BF16 round-to-nearest in DST only
+after the final normalization multiply at 64K. Hardware completed in 22 seconds
+and closed cleanly, but retained the same 65 failing elements in shard 1,
+head 4, row 3. The first actual/reference pair remained -45 / -45.56269454956055.
+This does not establish that the normalization operands retain full precision.
+It does show that this final rounding change is insufficient. Remove it from
+the active probe; retain the experiment module and test for provenance.

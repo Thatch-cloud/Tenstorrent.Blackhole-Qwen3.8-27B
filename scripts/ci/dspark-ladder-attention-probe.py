@@ -20,7 +20,6 @@ from dspark_ladder_scalar_reciprocal import scalar_reciprocal
 from dspark_ladder_stage_print import stage_snapshots
 from dspark_ladder_sum_update import scalar_sum_update
 from dspark_ladder_score_center import scalar_score_center
-from dspark_ladder_output_rounding import final_output_rounding
 
 
 def main():
@@ -59,7 +58,7 @@ def main():
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
                 reciprocal_reload_rounding='native-truncate',
                 output_recurrence='native-l1-pack-accumulation-bf16',
-                final_output_rounding='native-sfpu-bf16-rne' if context == 65536 else 'unchanged',
+                final_output_rounding='unchanged',
                 key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
         return json.dumps(value, *arguments, **keywords)
@@ -77,7 +76,6 @@ def main():
                 scalar_sum_update(), \
                 (stage_snapshots(row=diagnostic_row, column=diagnostic_column) if context == 65536 else nullcontext()), \
                 scalar_score_center(key_tiles=40 if smoke == '1' else 2112), \
-                final_output_rounding(), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
                 patch.object(dspark_fp32_build, 'validate_manifest', validate_manifest), \
