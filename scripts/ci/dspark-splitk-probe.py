@@ -26,8 +26,10 @@ def main():
 
     def execute(*args, **kwargs):
         nonlocal audited
-        kwargs.update(key_chunk_size=512, max_cores_per_head=1)
+        kwargs.update(key_chunk_size=32, max_cores_per_head=1)
         if not audited:
+            print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=32,
+                max_cores_per_head=1, performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
         return original_execute(*args, **kwargs)
@@ -42,12 +44,12 @@ def main():
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-single-partition-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-single-core-chunked-diagnostic', performance_qualified=False,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
-        diagnostic_override=dict(key_chunk_size=512, max_cores_per_head=1,
-            purpose='isolate native math from cross-core and empty-partition reduction'))
+        diagnostic_override=dict(key_chunk_size=32, max_cores_per_head=1,
+            purpose='isolate chunk accumulation from cross-core reduction'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', Path(__file__).name)})

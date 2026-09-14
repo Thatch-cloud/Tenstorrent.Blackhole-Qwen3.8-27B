@@ -9,6 +9,8 @@ The objective remains 200 committed tokens/s for one coding stream on two P150A 
 | 34847925528 | Observed split-K execution, 256-key tiles | L1 allocation rejected: 5,131,136 bytes against 1,572,864. |
 | 34848216379 | 32-key tiles | L1 allocation still rejected: 4,443,008 bytes. |
 | 34848579371 | Four KV groups mapped to batch lanes | Allocation succeeded; first eager numerical gate failed. |
+| 34849128703 | Exact input layout audit | All eight query/KV/mask checks passed across two chips; attention still failed. |
+| 34849417468 | One core, one 512-key partition per lane | 8,023 elements failed; maximum absolute error 1.15783. |
 
 The batch-lane representation preserves all 32 padded query rows, all four query heads per KV group, full history and the capacity-gap mask. KV tensors are reshaped, not replicated. CPU equivalence tests pass; this does not establish correct device execution.
 
