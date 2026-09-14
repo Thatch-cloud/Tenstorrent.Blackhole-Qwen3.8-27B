@@ -74,6 +74,8 @@ def run(main):
         raise ValueError('Request screen requires qualified SFPU candidate')
     if timed_requests == '1':
         from dspark_sfpu_timed_requests import timed_scope
+        if sum_sfpu == '1':
+            from dspark_sum_timed_requests import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope

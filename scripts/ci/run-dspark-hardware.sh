@@ -11,13 +11,13 @@ sum_sfpu=${QWEN_DSPARK_SUM_SFPU:-0}
 [[ "$sum_sfpu" = 0 || "$sum_sfpu" = 1 ]]
 if [ "$sum_sfpu" = 1 ]; then
     test "$score_sfpu" = 1
-    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]
     sum_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sum-sfpu.XXXXXX")
     gh run download 34821692776 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34821692776 --dir "$sum_evidence"
     PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_sum_sfpu_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
         "$sum_evidence/dspark-sum-sfpu.json"
-    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+    if [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
         sum_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sum-hardware.XXXXXX")
         gh run download 34822563217 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
             --name qwen-hardware-inventory-34822563217 --dir "$sum_hardware_evidence"
@@ -40,10 +40,17 @@ if [[ "$request_screen" = 1 || "$timed_requests" = 1 ]]; then
 fi
 if [ "$timed_requests" = 1 ]; then
     screen_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sfpu-screen.XXXXXX")
-    gh run download 34819480314 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
-        --name qwen-hardware-inventory-34819480314 --dir "$screen_evidence"
+    screen_run=34819480314
+    timing_gate=dspark_sfpu_timed_requests
+    if [ "$sum_sfpu" = 1 ]; then
+        screen_run=34823325684
+        timing_gate=dspark_sum_timed_requests
+        cp "$sum_hardware_evidence/dspark-sum-sfpu-hardware.json" "$request_evidence/dspark-sum-sfpu-hardware.json"
+    fi
+    gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name "qwen-hardware-inventory-$screen_run" --dir "$screen_evidence"
     cp "$screen_evidence/dspark-64k-request-hardware.json" "$request_evidence/dspark-sfpu-request-screen.json"
-    PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_sfpu_timed_requests import qualify; qualify("scripts/ci", sys.argv[1])' "$request_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import importlib, sys; importlib.import_module(sys.argv[2]).qualify("scripts/ci", sys.argv[1])' "$request_evidence" "$timing_gate"
 fi
 sfpu_numerical=${QWEN_DSPARK_SFPU_NUMERICAL:-0}
 [[ "$sfpu_numerical" = 0 || "$sfpu_numerical" = 1 ]]
@@ -304,7 +311,7 @@ if [ "$score_sfpu" = 1 ]; then
 fi
 if [ "$sum_sfpu" = 1 ]; then
     docker cp "$sum_evidence/dspark-sum-sfpu.json" "$test_id:/experiment-scripts/ci/dspark-sum-sfpu.json"
-    if [ "$request_screen" = 1 ]; then
+    if [[ "$request_screen" = 1 || "$timed_requests" = 1 ]]; then
         docker cp "$sum_hardware_evidence/dspark-sum-sfpu-hardware.json" "$test_id:/experiment-scripts/ci/dspark-sum-sfpu-hardware.json"
     fi
 fi
