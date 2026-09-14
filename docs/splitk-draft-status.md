@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34902252785 reaches lane 2 with single-core logging. On chip 0, failing rows 12/55 have stored-probability sums 1.167067885/1.167143703 but reduced denominators 1.171875. This is direct evidence of denominator error, not proof it explains every remaining output difference. Adapt the repo's `draft_row_sum_compute.cpp` SFPU accumulation/reduce sequence to consume the original FP32 probabilities directly, eliminating the BF16 temporary-copy reduction; keep BF16 sum output and all other arithmetic unchanged. The temporary CB allocation remains for this kernel-only diagnostic to avoid another factory rebuild.
+
 Run 34901934714 also times out during simulator fabric initialization with four-core DPRINT enabled. No attention arithmetic ran. Retry the unchanged candidate with only core (2,0), the failing lane for the current single-worker geometry, restoring the one-core logging footprint used by successful-startup controls. Do not extend the fabric timeout or treat these startup failures as numerical regressions.
 
 Run 34901550212 fails in simulator fabric startup (60-second local-router handshake timeout), before attention arithmetic. It supplies no accuracy evidence. Narrow DPRINT from all worker cores to (0,0), (1,0), (2,0), (3,0): source assigns the current DRAM-query, four-batch, one-worker-per-batch geometry linearly across these four cores. This includes failing lane 2 without enabling diagnostics on idle/dispatch cores. The logging change is a bounded mitigation, not proof of what caused the startup timeout.

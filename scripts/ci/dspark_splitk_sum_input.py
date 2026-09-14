@@ -1,4 +1,4 @@
-"""Isolate FP32-input row reduction using a separate BF16 probability copy."""
+"""Preserve FP32 probabilities through SFPU row reduction in the simulator."""
 
 
 def transform(source):
@@ -12,24 +12,28 @@ def transform(source):
         if source.count(anchor) != 1:
             raise ValueError('Exact decode sum-input anchors required')
     replacement = '''                for (uint32_t row = 0; row < Sq_chunk_t; ++row) {
-                    reconfig_data_format_srca(cb_qk_im);
-                    copy_tile_to_dst_init_short(cb_qk_im);
-                    pack_reconfig_data_format(cb_exponent_sum);
-                    CircularBuffer(cb_exponent_sum).reserve_back(Sk_chunk_t_dynamic);
-                    for (uint32_t column = 0; column < Sk_chunk_t_dynamic; ++column) {
-                        tile_regs_acquire();
-                        copy_tile(cb_qk_im, row * Sk_chunk_t_dynamic + column, 0);
-                        tile_regs_commit();
-                        tile_regs_wait();
-                        pack_tile(0, cb_exponent_sum);
-                        tile_regs_release();
-                        CircularBuffer(cb_exponent_sum).push_back(1);
+                    tile_regs_acquire();
+                    qwen_splitk_copy_fp32_init(cb_qk_im);
+                    qwen_splitk_copy_fp32(cb_qk_im, row * Sk_chunk_t_dynamic, 0);
+                    for (uint32_t column = 1; column < Sk_chunk_t_dynamic; ++column) {
+                        qwen_splitk_copy_fp32_init(cb_qk_im);
+                        qwen_splitk_copy_fp32(cb_qk_im, row * Sk_chunk_t_dynamic + column, 1);
+                        add_binary_tile_init();
+                        add_binary_tile(0, 1, 0);
                     }
-                    reconfig_data_format(cb_exponent_sum, cb_identity_scale_in);
+                    MATH((sfpu::init_reduce<PoolType::SUM, DataFormat::Float32, true>()));
+                    MATH((_llk_math_eltwise_sfpu_start_(0)));
+                    MATH((sfpu::calculate_reduce<PoolType::SUM, ReduceDim::REDUCE_ROW,
+                        DataFormat::Float32, true, DataFormat::Float32>(1, 1)));
+                    MATH((_llk_math_eltwise_sfpu_done_()));
+                    tile_regs_commit();
+                    CircularBuffer(cb_cur_sum).reserve_back(1);
+                    tile_regs_wait();
                     pack_reconfig_data_format(cb_cur_sum);
-                    reduce_c<PoolType::SUM, ReduceDim::REDUCE_ROW, cb_exponent_sum, cb_identity_scale_in, 1, vector_mode>(
-                        cb_cur_sum, cb_cur_sum, Sk_chunk_t_dynamic, false);
-                    CircularBuffer(cb_exponent_sum).pop_front(Sk_chunk_t_dynamic);
+                    pack_tile(0, cb_cur_sum);
+                    tile_regs_release();
+                    CircularBuffer(cb_cur_sum).push_back(1);
                 }'''
     return source.replace(declaration, declaration + '\n    constexpr uint32_t cb_exponent_sum = tt::CBIndex::c_32;').replace(
-        before, after).replace(reduce, replacement)
+        before, after).replace(reduce, replacement).replace('#include "api/compute/eltwise_unary/recip.h"',
+        '#include "api/compute/eltwise_unary/recip.h"\n#include "llk_sfpu/ckernel_sfpu_reduce.h"')

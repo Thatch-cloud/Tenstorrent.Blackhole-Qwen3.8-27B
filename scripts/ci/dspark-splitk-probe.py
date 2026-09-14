@@ -50,14 +50,14 @@ def main():
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-fp32-reciprocal-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-fp32-sfpu-row-sum-diagnostic', performance_qualified=False,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
         diagnostic_override=dict(key_chunk_size=512, max_cores_per_head=1, stripe_keys=True,
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
-            arithmetic_unpack='tf32', sum_input_storage='bfloat16', normalization_input_storage='float32',
+            arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             probability_rounding='unchanged-fp32-exponent-storage',
             purpose='retain precise exponents while investigating reduction accuracy'))
