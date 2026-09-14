@@ -140,13 +140,20 @@ The quoted TG results use a 121-token EOS coding fixture, one stream, not a
 - The outstanding ladder includes 32K/64K and capacity-qualified 131K/262K
   windows, followed by concurrency investigation. Neither a synthetic pass
   nor the existing 4K/8K measurements substitutes for these requirements.
-- Treat cached-build reuse as pending until implemented and validated; the
-  existing recommendation below is not evidence that CI currently reuses builds.
+- Content-addressed build reuse is now implemented for this experiment runtime.
+  Mask simulator `34825080088` completes in 66 seconds and the full 64K numerical
+  check `34825617040` in 39 seconds with cached libraries. Reuse still requires
+  exact builder, factory and binary fingerprints; this is not permission to
+  reuse a cache across unrelated runtimes.
 
 - Run cheap host checks locally; use CPU CI for synthetic tensors, not full-model simulation.
 - Build once per compatible shape family; run each risky probe in a fresh bounded process.
 - Cache native builds by image, builder, patch and source hashes; verify both library locations on hits.
 - Reserve hardware for simulator-qualified arithmetic and complete-runtime comparisons.
+- Size short audits to exercise the intended path. Here, one token comes from
+  prefill: a 16-token output budget leaves only 15 verifier positions. The folded
+  T16 screen therefore needs 17 output tokens and explicitly checks that a
+  16-row block actually ran. A green shorter screen cannot qualify that path.
 - Distinguish queued, running, timed out and failed. Check the exact handle before retrying; no duplicate runs or unrelated resets.
 - Archive failure evidence before cleanup. Keep compact reports and hashes beyond CI artifact expiry; do not rely only on local evidence folders.
 

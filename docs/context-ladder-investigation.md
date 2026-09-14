@@ -1236,3 +1236,23 @@ Next priorities are exact score-staging/packing overhead and the 64K target
 verifier path, rather than another small scalar cleanup. Keep this combined
 runtime as the measured control. Do not extrapolate its performance to the
 different 4K/8K T16 runtime, or promote a component timing to committed TG.
+
+### Folded T16 verifier: component qualified, combined audit pending
+
+Tiny simulator `34828115400` passes in 66 seconds. Full-context hardware run
+`34828634864` (`51e1e61`) passes in 35 seconds: eight exact attention comparisons,
+16 mask checks, unchanged KV on both chips, stale-input and mask-poison controls,
+and clean shutdown. The hardware reader covers a 65792-token capture family
+starting at context 65536. Neither run measures committed TG.
+
+Combined audit `34829739931` (`b49430b`) adds this reader to the measured mask/SFPU
+runtime, with no serving changes. It reserves the existing 256-token output
+capacity but generates at most **17 tokens**, including the prefill seed.
+The previous 16-token screen leaves only 15 decode positions and cannot capture
+a T16 verifier bucket. The new gate requires five capture buckets and an actual
+16-row block, plus all output, state, proposal and publication audits.
+
+The execution cap remains 465 seconds plus 15 seconds for forced cleanup;
+queue time is separate. Only after this combined audit passes should the
+candidate proceed to repeated full-response PP/CTX/TG measurement. The current
+accepted 64K control remains **11.1557 committed TG**.
