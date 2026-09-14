@@ -48,6 +48,14 @@ def run(main):
     if score_sfpu == '1':
         from dspark_score_sfpu_hardware import hardware_scope
         hardware_candidate_scope = hardware_scope(directory)
+    sum_sfpu = os.environ.get('QWEN_DSPARK_SUM_SFPU', '0')
+    if sum_sfpu not in ('0', '1') or sum_sfpu == '1' and score_sfpu != '1':
+        raise ValueError('Sum update requires qualified SFPU hardware mode')
+    if sum_sfpu == '1':
+        from dspark_sum_request_gate import qualify
+        from dspark_sum_sfpu_hardware import hardware_scope
+        qualify(directory, directory / 'dspark-sum-sfpu-hardware.json')
+        hardware_candidate_scope = hardware_scope(directory)
     candidate_scope = nullcontext()
     score_bitwise = os.environ.get('QWEN_DSPARK_SCORE_BITWISE', '0')
     if score_bitwise not in ('0', '1') or score_bitwise == '1' and phase_probe != '1':

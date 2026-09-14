@@ -11,12 +11,19 @@ sum_sfpu=${QWEN_DSPARK_SUM_SFPU:-0}
 [[ "$sum_sfpu" = 0 || "$sum_sfpu" = 1 ]]
 if [ "$sum_sfpu" = 1 ]; then
     test "$score_sfpu" = 1
-    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
     sum_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sum-sfpu.XXXXXX")
     gh run download 34821692776 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34821692776 --dir "$sum_evidence"
     PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_sum_sfpu_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
         "$sum_evidence/dspark-sum-sfpu.json"
+    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+        sum_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-sum-hardware.XXXXXX")
+        gh run download 34822563217 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            --name qwen-hardware-inventory-34822563217 --dir "$sum_hardware_evidence"
+        PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_sum_request_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+            "$sum_hardware_evidence/dspark-sum-sfpu-hardware.json"
+    fi
 fi
 request_screen=${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}
 timed_requests=${QWEN_DSPARK_SFPU_TIMED:-0}
@@ -297,6 +304,9 @@ if [ "$score_sfpu" = 1 ]; then
 fi
 if [ "$sum_sfpu" = 1 ]; then
     docker cp "$sum_evidence/dspark-sum-sfpu.json" "$test_id:/experiment-scripts/ci/dspark-sum-sfpu.json"
+    if [ "$request_screen" = 1 ]; then
+        docker cp "$sum_hardware_evidence/dspark-sum-sfpu-hardware.json" "$test_id:/experiment-scripts/ci/dspark-sum-sfpu-hardware.json"
+    fi
 fi
 if [[ "$request_screen" = 1 || "$timed_requests" = 1 ]]; then
     docker cp "$request_evidence/dspark-score-sfpu-hardware.json" "$test_id:/experiment-scripts/ci/dspark-score-sfpu-hardware.json"
