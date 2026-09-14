@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from dspark_splitk_fp32_mask import transform as transform_mask
 
 
 HEADER = 'ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/kernels/compute/sdpa_flash_decode.cpp'
@@ -77,8 +78,8 @@ def transform(source):
     include = '#include "api/compute/eltwise_unary/recip.h"'
     if result.count(include) != 1:
         raise ValueError('Unique diagnostic include required')
-    return result.replace(reciprocal, snapshot + precise).replace(include,
-        include + '\n#include "api/debug/dprint.h"')
+    return transform_mask(result.replace(reciprocal, snapshot + precise).replace(include,
+        include + '\n#include "api/debug/dprint.h"'))
 
 
 @contextmanager

@@ -60,6 +60,7 @@ def main():
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
+            'dspark_splitk_fp32_mask.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
