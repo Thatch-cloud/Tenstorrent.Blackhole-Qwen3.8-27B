@@ -13,6 +13,11 @@ sum_sfpu=0
 mask_bits=0
 attention_boundary=0
 direct_fp32_stage=0
+normalization_direct_stage=0
+if [ "${QWEN_SIM_CASE:-stack}" = dspark-normalization-direct-stage ]; then
+    normalization_direct_stage=1
+    export QWEN_SIM_CASE=dspark-direct-fp32-stage
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = dspark-direct-fp32-stage ]; then
     direct_fp32_stage=1
     export QWEN_SIM_CASE=dspark-attention-boundary
@@ -112,6 +117,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_MASK_BITS=$mask_bits" \
     -e "QWEN_ATTENTION_BOUNDARY=$attention_boundary" \
     -e "QWEN_DIRECT_FP32_STAGE=$direct_fp32_stage" \
+    -e "QWEN_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"

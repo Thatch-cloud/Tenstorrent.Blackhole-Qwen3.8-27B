@@ -73,6 +73,7 @@ PY
                 if [ "${QWEN_MASK_BITS:-0}" = 1 ]; then score_name=dspark-mask-bits; fi
                 if [ "${QWEN_ATTENTION_BOUNDARY:-0}" = 1 ]; then score_name=dspark-attention-boundary; fi
                 if [ "${QWEN_DIRECT_FP32_STAGE:-0}" = 1 ]; then score_name=dspark-direct-fp32-stage; fi
+                if [ "${QWEN_NORMALIZATION_DIRECT_STAGE:-0}" = 1 ]; then score_name=dspark-normalization-direct-stage; fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
                     --output "/experiment/results/$score_name.json"
