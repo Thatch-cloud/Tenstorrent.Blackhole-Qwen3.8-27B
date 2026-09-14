@@ -76,8 +76,32 @@ for kind in $kinds; do
     test -d "$cache/dflash2-$kind-$revision"
     mounts+=(--mount "type=bind,src=$cache/dflash2-$kind-$revision,dst=/fixture-$kind,readonly")
 done
-curl --fail --location --max-time 180 https://github.com/tenstorrent/ttsim/releases/download/v1.10.3/libttsim_bh_x2.so -o "$assets/libttsim_bh_x2.so"
-curl --fail --location --max-time 180 https://raw.githubusercontent.com/tenstorrent/tt-umd/115b809170ff762182f925a07636887e5afb910e/tests/cluster_descriptor_examples/blackhole_P300_both_mmio.yaml -o "$assets/cluster_descriptor.yaml"
+fetch_simulator_asset() {
+    local url=$1 digest=$2 destination=$3 cached temporary
+    mkdir -p "$cache/simulator-assets"
+    cached="$cache/simulator-assets/$digest"
+    if [ -f "$cached" ] && printf '%s  %s\n' "$digest" "$cached" | sha256sum -c - >/dev/null 2>&1; then
+        cp -- "$cached" "$destination"
+        return
+    fi
+    temporary=$(mktemp "$cache/simulator-assets/download.XXXXXX")
+    if ! curl --fail --location --connect-timeout 10 --max-time 30 --retry 2 --retry-max-time 65 \
+            "$url" -o "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$digest" "$temporary" | sha256sum -c -; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    chmod 0644 "$temporary"
+    mv -- "$temporary" "$cached"
+    cp -- "$cached" "$destination"
+}
+fetch_simulator_asset https://github.com/tenstorrent/ttsim/releases/download/v1.10.3/libttsim_bh_x2.so \
+    79287bd7cc1fc0fab28ca7b82567c39311f0dcc6ec2704ab7c4386dfc71abfd4 "$assets/libttsim_bh_x2.so"
+fetch_simulator_asset https://raw.githubusercontent.com/tenstorrent/tt-umd/115b809170ff762182f925a07636887e5afb910e/tests/cluster_descriptor_examples/blackhole_P300_both_mmio.yaml \
+    27b7ec074f81fe4b4a1be89a5c39fd6c7eaf2c2d68da8f49bd8faf02a7d3df15 "$assets/cluster_descriptor.yaml"
 printf '%s\n' "79287bd7cc1fc0fab28ca7b82567c39311f0dcc6ec2704ab7c4386dfc71abfd4  $assets/libttsim_bh_x2.so" \
     "27b7ec074f81fe4b4a1be89a5c39fd6c7eaf2c2d68da8f49bd8faf02a7d3df15  $assets/cluster_descriptor.yaml" | sha256sum -c -
 sha256sum "$assets/"* > experiment-results/simulator-assets.sha256
