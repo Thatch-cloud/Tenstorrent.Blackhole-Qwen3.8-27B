@@ -74,7 +74,7 @@ def main():
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             temporary_per_row_sum_audit=False,
-            local_numerator_add='sfpu-fp32',
+            local_numerator_add='native-fpu',
             probability_rounding='unchanged-fp32-exponent-storage',
             purpose='isolate two-chunk local accumulation from cross-worker merging; not a performance candidate'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
