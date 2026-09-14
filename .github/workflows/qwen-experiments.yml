@@ -151,6 +151,17 @@ jobs:
             [[ "${{ inputs.suite }}" = learned-attention || "${{ inputs.suite }}" = gdn-output-l1-sim || "${{ inputs.suite }}" = gdn-output-grid-sim || "${{ inputs.suite }}" = gdn-copy-pairs-sim || "${{ inputs.suite }}" = gdn-outer-add-sim || "${{ inputs.suite }}" = markov-sparse-dot-sim || "${{ inputs.suite }}" = markov-cache-control-sim || "${{ inputs.suite }}" = dspark-splitk-sim || "${{ inputs.suite }}" = dspark-center-tile-fill-sim || "${{ inputs.suite }}" = dspark-normalization-direct-stage-sim || "${{ inputs.suite }}" = dspark-direct-fp32-stage-sim || "${{ inputs.suite }}" = dspark-attention-boundary-sim || "${{ inputs.suite }}" = dspark-mask-bits-sim || "${{ inputs.suite }}" = dspark-sum-sfpu-sim || "${{ inputs.suite }}" = dspark-score-sfpu-sim || "${{ inputs.suite }}" = dspark-score-bitwise-sim || "${{ inputs.suite }}" = dspark-ladder-attention-sim || "${{ inputs.suite }}" = dspark-native-8k-attention-sim || "${{ inputs.suite }}" = target-t16-attention-64k-sim || "${{ inputs.suite }}" = target-t16-attention-8k-sim || "${{ inputs.suite }}" = gdn-shared-recurrence-sim || "${{ inputs.suite }}" = gdn-shared-qk-sim ]]
             test "${{ inputs.reset_authorized }}" = false
           fi
+      - name: Restore ownership of container-produced experiment results
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h -- "$(id -u):$(id -g)" "$results"
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
