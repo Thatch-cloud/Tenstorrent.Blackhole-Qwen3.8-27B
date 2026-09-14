@@ -13,8 +13,8 @@ def main():
 
     def inputs(root, scripts):
         result = original(root, scripts)
-        result['sfpu_center_builders'] = {name: digest(Path(scripts) / name)
-            for name in ('dspark_score_sfpu.py', 'dspark_score_sfpu_build.py')}
+        result['sfpu_center_builders'] = {'dspark_score_sfpu_build.py':
+            digest(Path(scripts) / 'dspark_score_sfpu_build.py')}
         return result
 
     with factory_scope(), patch.object(dspark_sim_build_cache, 'build_inputs', inputs):

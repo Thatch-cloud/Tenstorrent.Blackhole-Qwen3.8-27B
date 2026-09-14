@@ -25,6 +25,8 @@ class SfpuScoreSourceTests(unittest.TestCase):
                 patched = native_draft_sdpa.patched_sources(sources)['compute_common.hpp']
         self.assertIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
         self.assertIn(b'sfpu_sub_bcast_col(j, 1)', patched)
+        self.assertLess(patched.index(b'void qwen_prepare_center_scratch('),
+            patched.index(b'void sub_exp_block_bcast_cols_inplace('))
         self.assertNotIn(b'qwen_scalar_score_transform(in0_cb, in1_cb, rows * cols, cols, false)', patched)
 
     def test_factory_roundtrip_preserves_output_precision(self):

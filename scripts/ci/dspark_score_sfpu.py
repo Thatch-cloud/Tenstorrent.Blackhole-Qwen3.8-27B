@@ -126,7 +126,8 @@ def sfpu_score_center(*, key_tiles):
         substitutions.extend((
             ('#include "api/compute/bcast.h"',
              '#include "api/compute/bcast.h"\n#include "api/compute/sfpu_binary_bcast.h"'),
-            ('enum SDPAType {', HELPER + '\nenum SDPAType {'),
+            ('void recip_block_inplace(uint32_t in_cb, uint32_t num_tiles) {',
+             HELPER + '\nvoid recip_block_inplace(uint32_t in_cb, uint32_t num_tiles) {'),
             ('    PACK((llk_pack_relu_config(ReluConfig::none())));\n}',
              f'    if constexpr ({condition}) {{ CircularBuffer(get_compile_time_arg_val(42)).pop_front(1); }}\n'
              '    PACK((llk_pack_relu_config(ReluConfig::none())));\n}'),
