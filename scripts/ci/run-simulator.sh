@@ -2,6 +2,11 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
+score_bitwise=0
+if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-bitwise ]; then
+    score_bitwise=1
+    export QWEN_SIM_CASE=dspark-ladder-attention
+fi
 case "${QWEN_SIM_CASE:-stack}" in dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 results=$(cd experiment-results && pwd -P)
@@ -38,6 +43,9 @@ cleanup() {
     status=$?
     trap - EXIT
     if [ -n "$container" ]; then
+        if [ "$score_bitwise" = 1 ] && [ "$status" != 0 ]; then
+            timeout -k 1 5 docker kill "$container" >/dev/null 2>&1 || true
+        fi
         timeout -k 5 20 docker logs "$container" > experiment-results/simulator-final-container.log 2>&1 || true
         timeout -k 5 20 docker rm -f "$container" >/dev/null || true
     fi
@@ -57,6 +65,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
+    -e "QWEN_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"

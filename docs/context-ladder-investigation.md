@@ -1066,3 +1066,10 @@ input/history submission took 2.02–8.49 ms, blocking replay 1372.82–1372.87 
 and token readback 0.51–0.55 ms. These unfenced measurements exclude token
 readback as the main bottleneck, but do not distinguish queued copies from
 compute. No committed tokens or new TG result are claimed.
+
+Run `34807645660` (`e9071aa`) passed the fenced comparison. Normal replay was
+1372.73-1372.83 ms. After draining input/history updates, replay was still
+1369.62 ms; the fenced update itself took 5.61 ms and readback 1.14 ms.
+External queued history updates therefore do not explain the 1.37-second
+draft delay. Work inside the captured trace remains the target; these timings
+do not separate its internal copies from attention or other compute kernels.
