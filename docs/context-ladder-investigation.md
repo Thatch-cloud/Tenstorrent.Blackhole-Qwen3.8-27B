@@ -1425,3 +1425,36 @@ history concat/padding, projections and Markov selection before another math
 change; if profiler compilation exceeds the cap, report it rather than widening
 the timeout or running an hour-long simulator request.
 Report SHA256: `d5bbb18550dd29c153131562e28d46f3fd597277af73ba938f9e8580e6cdab64`.
+
+### Device profile: attention dominates, later samples are incomplete
+
+Run `34844846714` reaches both full-response completions but hits the bounded
+profiler timeout during final parameter auditing. Its request report is not
+passed/closed, the profiler logs dropped markers, and host Tracy metadata is
+missing. Do not treat this as a new correctness or throughput acceptance run.
+
+The retained device CSV nevertheless contains consistent early slices for
+traces 2 and 43, replay session 2, on both chips: each has 753 unique operation
+calls and five SDPA calls. Later sessions lose rows and must not be aggregated
+as complete traces. These early slices support provisional bottleneck diagnosis:
+
+| Operation family | Approximate time per chip / draft replay |
+| --- | ---: |
+| Five SDPA calls, each reporting 64 cores | 275.7–275.8 ms |
+| Matmuls | 14.6 ms |
+| Tilize with padding | 10.2 ms |
+| Untilize with unpadding | 10.1 ms |
+| Concatenation | 10.1 ms |
+| Padding | 7.5 ms |
+
+Early kernel-duration totals are about 337 ms, consistent with the separately
+measured fenced replay. Each SDPA takes about 55.1 ms. Prioritize the long-history
+attention implementation (parallel work assignment, chunking, remaining scalar
+mask/sum work), then history layout conversions. Host-transfer optimization
+cannot explain or remove the dominant cost. Do not sum both chips' times when
+estimating single-stream latency.
+
+No rerun is needed merely to obtain a green profiler job before inspecting the
+attention source. A future profiler run must drain buffers outside selected
+replays and reserve time for teardown rather than increasing the cap.
+Device CSV SHA256: `fda2e565673c8e71d01da6ae40b4c270df26b0fff716e21c17290ffb1c6212f1`.
