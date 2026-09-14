@@ -61,8 +61,8 @@ def main():
             patch.object(dspark_splitk_attention, 'execute_folded',
                 wraps=execute) as execution:
         runpy.run_path(str(directory / 'dspark-center-tile-fill-probe.py'), run_name='__main__')
-        if execution.call_count < 4:
-            raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
+        if execution.call_count != 3:
+            raise ValueError(f'Split-K requires two eager calls and one capture call; got {execution.call_count}')
     report = json.loads(output.read_text())
     report.update(candidate='native-decode-fp32-sfpu-row-sum-diagnostic', performance_qualified=False,
         splitk_factory=factory,
