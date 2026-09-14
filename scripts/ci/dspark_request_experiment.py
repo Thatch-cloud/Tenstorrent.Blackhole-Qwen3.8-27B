@@ -106,16 +106,22 @@ def summarize(requests):
         held_out_coding_quality=False, serving_qualified=False)
 
 
-def warm_native_control(generator, kv_cache, report, progress):
+def warm_native_control(generator, kv_cache, report, progress, *, num_blocks=1024):
+    if type(num_blocks) is not int or num_blocks not in (1024, 1040):
+        raise ValueError('Qualified native control page count required')
+    if num_blocks == 1040:
+        from dspark_64k_scope import target_allocation
+        if target_allocation()['page_count'] != num_blocks:
+            raise ValueError('Native control must match admitted page geometry')
     progress('warm_native_control_before_fresh_request_prefill')
     started = time.perf_counter()
     generator.warmup_model_decode(kv_cache=kv_cache, enable_trace=True, max_batch_size=1,
-        num_blocks=1024, can_sample_on_device=False)
+        num_blocks=num_blocks, can_sample_on_device=False)
     traces = generator.trace_ids_decode[False]
     if not traces or any(value is None for value in traces.values()):
         raise AssertionError('Native control must not first capture a state-mutating trace inside gold decode')
     report['native_control_warmup'] = dict(milliseconds=(time.perf_counter() - started) * 1000,
-        trace_count=len(traces), before_fresh_prefill=True, charged_to_candidate_decode=False)
+        trace_count=len(traces), page_count=num_blocks, before_fresh_prefill=True, charged_to_candidate_decode=False)
 
 
 def cache_formats(operations, caches, recurrent):
@@ -348,8 +354,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     control_warmed = False
     with sampler_links(sampler.tt_sampling, 4):
         for ordinal, (arm, audit) in enumerate(schedule):
-            if not audit and not control_warmed:
-                warm_native_control(generator, kv_cache, report, progress)
+            if (request_64k or not audit) and not control_warmed:
+                warm_native_control(generator, kv_cache, report, progress,
+                    num_blocks=1040 if request_64k else 1024)
                 control_warmed = True
             progress(f'full_request_{ordinal}_{arm}_' + ('feature_audit' if audit else 'timed'))
             from native_draft_sdpa import precise_draft_kernel

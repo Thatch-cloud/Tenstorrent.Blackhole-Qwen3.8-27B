@@ -1001,3 +1001,22 @@ retaining row pairing, supported tile geometry, cache capacity and active
 admission checks. Outside that scope the original validator remains unchanged.
 Twelve local scope and ordered-cache tests pass. Physical 1040-page writer
 execution still requires the combined hardware retry; no PP/TG is accepted.
+
+### Run 34801544880: two audits pass, timed control trace shape fails
+
+Both 64K audit arms completed 20 blocks and emitted 135 identical-to-oracle
+tokens with exact target-state checks. This is full-request audit evidence,
+not held-out coding quality or a completed timed benchmark. Instrumented draft
+time averaged 27.04 seconds/block for control and 25.40 seconds/block for scatter;
+these include audit work and cannot be reported as production TG.
+
+The native build cache hit reduced build time to three seconds. Device-probe
+failure occurred at 1891.74 seconds, after the two expensive audits, when the
+first timed gold decode tried copying a 1040-page table into the native control
+trace captured by hardcoded `num_blocks=1024` warmup.
+
+Warmup now uses the admitted 1040-page count and records it in the report.
+For the 64K experiment it executes before the first audit, still before fresh
+prefill resets model state. This surfaces warmup failures earlier without
+removing either audit or changing the A/B/B/A timed comparison. Twelve local
+request tests pass; a hardware retry must validate the corrected trace reuse.

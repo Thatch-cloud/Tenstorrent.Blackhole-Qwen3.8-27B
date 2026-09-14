@@ -9,6 +9,20 @@ from dspark_request_experiment import PREREQUISITES, cache_formats, request_pref
 
 
 class DSparkRequestExperimentTests(unittest.TestCase):
+    def test_64k_native_trace_uses_admitted_page_width(self):
+        generator = SimpleNamespace(trace_ids_decode={False: {0: 17}}, warmup_model_decode=Mock())
+        report = {}
+        with patch('dspark_64k_scope.current_admission', return_value={
+                'context': 65536, 'capacity': 66560, 'output_tokens': 256}):
+            warm_native_control(generator, 'kv', report, Mock(), num_blocks=1040)
+        self.assertEqual(generator.warmup_model_decode.call_args.kwargs['num_blocks'], 1040)
+        self.assertEqual(report['native_control_warmup']['page_count'], 1040)
+        generator.warmup_model_decode.reset_mock()
+        for pages in (1040, 1041, True):
+            with self.assertRaises(ValueError):
+                warm_native_control(generator, 'kv', {}, Mock(), num_blocks=pages)
+        generator.warmup_model_decode.assert_not_called()
+
     def test_cache_inventory_records_actual_shards_not_requested_precision(self):
         operations = SimpleNamespace(get_device_tensors=lambda value: value)
         pair = [SimpleNamespace(dtype=dtype, shape=(1, 4, 64, 128))
