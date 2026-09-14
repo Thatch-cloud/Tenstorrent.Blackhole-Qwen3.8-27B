@@ -55,11 +55,21 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 memory_options=()
+build_cache_mount=()
+if [ "$score_bitwise" = 1 ]; then
+    volume=qwen-simulator-factory-f1e9b1a64b4f
+    if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+        docker volume create --label thatch.qwen.simulator-cache=true "$volume" >/dev/null
+    fi
+    test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.simulator-cache"}}' "$volume")" = true
+    build_cache_mount=(--mount "type=volume,src=$volume,dst=/simulator-build-cache")
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention ]]; then memory_options=(--memory-swap 64g); fi
 container=$(docker create --network none --cap-drop ALL --security-opt no-new-privileges \
     --group-add "$results_gid" \
     --pids-limit 4096 --memory 64g --cpus 16 --shm-size 8g \
     "${memory_options[@]}" \
+    "${build_cache_mount[@]}" \
     --mount "type=bind,src=$assets,dst=/simulator-assets,readonly" \
     --mount "type=bind,src=$results,dst=/experiment/results" \
     "${mounts[@]}" \
