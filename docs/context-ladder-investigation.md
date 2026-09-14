@@ -950,8 +950,8 @@ in both arms, captured publication, and the norm reader/scatter comparison.
 The combined CCL/GDN cache now creates its own 64K build manifest; the component
 ladder manifest is not substituted for it.
 
-Dispatch configuration is `suite=dspark-norm-scatter-request`,
-`dspark_64k_trial=true`, `dspark_captured_publication=true`,
+Dispatch configuration is `suite=dspark-64k-request`,
+`dspark_captured_publication=true`,
 `cards_allocated=true`, and `simulator_only=false`. Other candidate flags remain
 false. The hardware script rejects incompatible options before downloading
 evidence or opening devices. Serving defaults are unchanged. Local admission,
