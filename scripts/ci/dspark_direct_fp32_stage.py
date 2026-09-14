@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import dspark_score_sfpu
+import native_draft_sdpa
 
 
 START = 'void qwen_stage_score_tile(uint32_t source_cb, uint32_t scratch_cb) {'
@@ -22,7 +23,7 @@ REPLACEMENT = r'''void qwen_unpack_fp32_at(uint32_t source_cb, uint32_t format_c
 #endif
 }
 
-void qwen_stage_score_tile(uint32_t source_cb, uint32_t scratch_cb) {
+void qwen_stage_score_tile(uint32_t source_cb, uint32_t scratch_cb, bool restore_relu = false) {
     CircularBuffer(source_cb).wait_front(1);
     CircularBuffer(scratch_cb).reserve_back(1);
     qwen_copy_fp32_init(scratch_cb);
@@ -32,7 +33,9 @@ void qwen_stage_score_tile(uint32_t source_cb, uint32_t scratch_cb) {
     MATH((llk_math_eltwise_unary_datacopy<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE, true>(0, scratch_cb)));
     tile_regs_commit();
     tile_regs_wait();
+    PACK((llk_pack_relu_config(ReluConfig::none())));
     pack_tile(0, scratch_cb);
+    PACK((llk_pack_relu_config(restore_relu ? ReluConfig::zero() : ReluConfig::none())));
     tile_regs_release();
     CircularBuffer(scratch_cb).push_back(1);
     CircularBuffer(scratch_cb).wait_front(1);
@@ -78,5 +81,26 @@ def staging_scope(*, diagnostic=False):
             raise ValueError('Unique completed staging boundary required')
         candidate = candidate.replace(anchor,
             '    CircularBuffer(scratch_cb).wait_front(1);\n' + DIAGNOSTIC + '}\n\nvoid qwen_prepare_center_scratch')
-    with patch.object(dspark_score_sfpu, 'HELPER', candidate):
+    original_center = dspark_score_sfpu.sfpu_score_center
+
+    @contextmanager
+    def centered(*, key_tiles):
+        with original_center(key_tiles=key_tiles):
+            previous = native_draft_sdpa.replacements
+
+            def replacements():
+                substitutions = previous()
+                before = 'qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB);'
+                after = 'qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB, true);'
+                if sum(value.count(before) for _, value in substitutions['compute_common.hpp']) != 1:
+                    raise ValueError('Exactly one score-staging ReLU restoration site required')
+                substitutions['compute_common.hpp'] = tuple((anchor, value.replace(before, after))
+                    for anchor, value in substitutions['compute_common.hpp'])
+                return substitutions
+
+            with patch.object(native_draft_sdpa, 'replacements', replacements):
+                yield
+
+    with patch.object(dspark_score_sfpu, 'HELPER', candidate), \
+            patch.object(dspark_score_sfpu, 'sfpu_score_center', centered):
         yield

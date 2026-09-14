@@ -39,6 +39,8 @@ class StagingTests(unittest.TestCase):
                 dspark_ladder_score_center.scalar_score_center(key_tiles=40), scoped_stats_pack():
             patched = native_draft_sdpa.patched_sources(sources)['compute_common.hpp']
         self.assertTrue(REPLACEMENT.encode() in patched, 'Direct staging must reach the generated kernel')
+        self.assertTrue(b'qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB, true);' in patched)
+        self.assertTrue(b'qwen_stage_score_tile(previous_cb, previous_scratch);' in patched)
         self.assertEqual(patched.split(SEPARATOR.encode())[1][:-len(SUFFIX)], sources['compute_common.hpp'])
 
 
