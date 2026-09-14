@@ -8,7 +8,7 @@ from dspark_full_attention import validate_inputs
 
 
 def execute_folded(operations, query, key, value, mask, owned, *, audit=None,
-        key_chunk_size=32, max_cores_per_head=16, stripe_keys=False):
+        key_chunk_size=32, max_cores_per_head=16, stripe_keys=False, fp32_dest_acc=True):
     def retain(tensor):
         owned.append(tensor)
         return tensor
@@ -43,7 +43,7 @@ def execute_folded(operations, query, key, value, mask, owned, *, audit=None,
             audit(operations, (query, key, value, mask),
                 (folded, key_lanes, value_lanes, folded_mask), stripe_keys=True)
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
-        math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+        math_approx_mode=False, fp32_dest_acc_en=fp32_dest_acc, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
         q_chunk_size=0, k_chunk_size=key_chunk_size, exp_approx_mode=False,
         max_cores_per_head_batch=max_cores_per_head)
