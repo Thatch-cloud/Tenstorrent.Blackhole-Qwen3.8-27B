@@ -53,6 +53,7 @@ PY
                 build_script=dspark_sim_build_cache.py
                 if [ "${QWEN_SCORE_SFPU:-0}" = 1 ]; then build_script=dspark_score_sfpu_build.py; fi
                 if [ "${QWEN_SUM_SFPU:-0}" = 1 ]; then build_script=dspark_sum_sfpu_build.py; fi
+                if [ "${QWEN_SPLITK_ATTENTION:-0}" = 1 ]; then build_script=dspark_splitk_fp32_build.py; fi
                 timeout -k 15 330 python3 -u "/experiment-scripts/ci/$build_script"
             else
                 timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py

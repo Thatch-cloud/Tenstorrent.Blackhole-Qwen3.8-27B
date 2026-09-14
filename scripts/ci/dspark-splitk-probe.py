@@ -12,6 +12,7 @@ import dspark_score_bitwise
 import dspark_splitk_attention
 from dspark_splitk_device_audit import audit_layout
 from dspark_splitk_unfused_correction import unfused_correction_scope
+from dspark_splitk_fp32_build import validate as validate_factory
 from dspark_splitk_attention import splitk_scope
 from dspark_splitk_layout import scheduling
 
@@ -19,6 +20,7 @@ from dspark_splitk_layout import scheduling
 def main():
     if os.environ.get('QWEN_SPLITK_ATTENTION') != '1':
         raise ValueError('Explicit split-K experiment required')
+    factory = validate_factory(os.environ['TT_METAL_HOME'])
     directory = Path(__file__).resolve().parent
     output = Path(sys.argv[sys.argv.index('--output') + 1])
     original_entrypoint = dspark_score_bitwise.candidate_entrypoint
@@ -34,7 +36,9 @@ def main():
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
-        return original_execute(*args, **kwargs)
+        with patch.dict(os.environ, {'QWEN_SPLITK_FP32_INTERMEDIATES': '1',
+                'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1'}):
+            return original_execute(*args, **kwargs)
 
     def entrypoint(unused_script):
         return original_entrypoint(Path(__file__).resolve())
@@ -46,7 +50,8 @@ def main():
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-unfused-correction-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-fp32-intermediates-diagnostic', performance_qualified=False,
+        splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
@@ -54,7 +59,8 @@ def main():
             fp32_dest_acc=True, purpose='isolate fused correction using explicit equivalent operations'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
-            'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py', Path(__file__).name)})
+            'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
+            'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
 
