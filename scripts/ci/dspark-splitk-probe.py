@@ -50,7 +50,7 @@ def main():
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-fp32-reciprocal-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-matched-probabilities-diagnostic', performance_qualified=False,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
@@ -59,7 +59,8 @@ def main():
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
             arithmetic_unpack='tf32', sum_input_storage='bfloat16', normalization_input_storage='float32',
             reciprocal_storage='float32',
-            purpose='isolate approximate exponent with explicit FP32 scaling and precise exponential'))
+            probability_rounding='bf16-before-both-consumers',
+            purpose='use identical rounded probabilities in numerator and denominator'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
