@@ -37,6 +37,43 @@ def kernel_scope():
 
 
 HELPER = r'''
+void qwen_copy_fp32_init(uint32_t source_cb) {
+    reconfig_data_format_srca(source_cb);
+    state_configure(source_cb, __builtin_LINE());
+    UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(0, 0, source_cb)));
+    MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(source_cb)));
+}
+
+void qwen_copy_fp32(uint32_t source_cb, uint32_t destination) {
+    UNPACK((llk_unpack_A<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(source_cb, 0)));
+    MATH((llk_math_eltwise_unary_datacopy<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE, true>(destination, source_cb)));
+}
+
+void qwen_stage_score_tile(uint32_t source_cb, uint32_t scratch_cb) {
+    CircularBuffer(source_cb).wait_front(1);
+    CircularBuffer(scratch_cb).reserve_back(1);
+    reconfig_data_format_srca(source_cb);
+    copy_tile_init(source_cb);
+    pack_reconfig_data_format(scratch_cb);
+    tile_regs_acquire();
+    copy_tile(source_cb, 0, 0);
+    tile_regs_commit();
+    tile_regs_wait();
+    pack_tile(0, scratch_cb);
+    tile_regs_release();
+    CircularBuffer(scratch_cb).push_back(1);
+    CircularBuffer(scratch_cb).wait_front(1);
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+    const auto source_address = get_local_cb_interface(source_cb).fifo_rd_ptr << cb_addr_shift;
+    const auto scratch_address = get_local_cb_interface(scratch_cb).fifo_rd_ptr << cb_addr_shift;
+    const volatile uint32_t* source = reinterpret_cast<const volatile uint32_t*>(source_address);
+    volatile uint32_t* scratch = reinterpret_cast<volatile uint32_t*>(scratch_address);
+    for (uint32_t index = 0; index < 1024; ++index) {
+        scratch[index] = source[index];
+    }
+#endif
+}
+
 void qwen_prepare_center_scratch(uint32_t maxima_cb, uint32_t scratch_cb) {
     DEVICE_PRINT("QWEN_SFPU_CENTER_PREPARE\n");
     CircularBuffer(maxima_cb).wait_front(1);
@@ -79,7 +116,15 @@ def factory_transform(source, *, reverse=False):
          '    if (qwen_draft_fp32_intermediates && (Skt == 2112 || Skt == 16)) {'),
         ('        qwen_normalization_modes.at(cb_ids.recip_scratch) = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;',
          '        qwen_normalization_modes.at(cb_ids.recip_scratch) = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;\n'
-         '        qwen_normalization_modes.at(cb_ids.qk_im) = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;'))
+         '        qwen_normalization_modes.at(qwen_score_scratch_cb) = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;'),
+        ('    cb_ids.qk_im = allocate_tile_cb(qk_tiles, qk_im_tile_size, qk_im_df);',
+         '    uint32_t qwen_score_scratch_cb = cb_ids.q_in;\n'
+         '    if (qwen_draft_fp32_intermediates && (Skt == 2112 || Skt == 16)) {\n'
+         '        qwen_score_scratch_cb = allocate_tile_cb(1, tt::tile_size(tt::DataFormat::Float32), tt::DataFormat::Float32);\n'
+         '    }\n    cb_ids.qk_im = allocate_tile_cb(qk_tiles, qk_im_tile_size, qk_im_df);'),
+        ('    compute_desc.defines = defines;',
+         '    compute_desc.defines = defines;\n'
+         '    compute_desc.defines["QWEN_SCORE_SCRATCH_CB"] = std::to_string(qwen_score_scratch_cb);'))
     for before, after in (reversed(changes) if reverse else changes):
         if reverse:
             before, after = after, before
@@ -114,12 +159,10 @@ def sfpu_score_center(*, key_tiles):
                 call = '                    copy_tile(in0_cb, j, j);'
                 if after.count(call) != 1:
                     raise ValueError('Existing scalar corrected score reload required')
-                after = after.replace(call, '''                    reconfig_data_format_srca(in0_cb);
-                    copy_tile_init(in0_cb);
-                    copy_tile(in0_cb, j, j);
-                    reconfig_data_format_srca(get_compile_time_arg_val(42));
-                    copy_tile_init(get_compile_time_arg_val(42));
-                    copy_tile(get_compile_time_arg_val(42), 0, 1);
+                after = after.replace(call, '''                    qwen_copy_fp32_init(QWEN_SCORE_SCRATCH_CB);
+                    qwen_copy_fp32(QWEN_SCORE_SCRATCH_CB, j);
+                    qwen_copy_fp32_init(get_compile_time_arg_val(42));
+                    qwen_copy_fp32(get_compile_time_arg_val(42), 1);
                     sfpu_sub_bcast_col(j, 1);
                     exp_tile_init<QWEN_DRAFT_EXP_APPROX, scale_fp32, InputClamping::None>();''')
                 replaced_copy += 1
@@ -127,6 +170,10 @@ def sfpu_score_center(*, key_tiles):
         if (replaced_center, replaced_copy) != (1, 1):
             raise ValueError('Exactly one scalar centering and reload site required')
         substitutions.extend((
+            ('            tile_regs_release();\n            if constexpr (do_reduce) {',
+             '            tile_regs_release();\n'
+             f'            if constexpr ({condition}) {{ CircularBuffer(QWEN_SCORE_SCRATCH_CB).pop_front(1); }}\n'
+             '            if constexpr (do_reduce) {'),
             ('#include "api/compute/bcast.h"',
              '#include "api/compute/bcast.h"\n#include "api/compute/sfpu_binary_bcast.h"'),
             ('void recip_block_inplace(uint32_t in_cb, uint32_t num_tiles) {',
@@ -137,6 +184,7 @@ def sfpu_score_center(*, key_tiles):
             ('    for (uint32_t i = 0; i < rows; ++i) {\n        for (uint32_t u = 0; u < granularity; u++) {\n            tile_regs_acquire();',
              f'    if constexpr ({condition}) {{ dst_tiles = 1; granularity = cols; }}\n'
              '    for (uint32_t i = 0; i < rows; ++i) {\n        for (uint32_t u = 0; u < granularity; u++) {\n'
+             f'            if constexpr ({condition}) {{ qwen_stage_score_tile(in0_cb, QWEN_SCORE_SCRATCH_CB); }}\n'
              f'            if constexpr ({condition}) {{ sfpu_sub_bcast_col_init(); }}\n'
              '            tile_regs_acquire();')))
         result['compute_common.hpp'] = tuple(substitutions)

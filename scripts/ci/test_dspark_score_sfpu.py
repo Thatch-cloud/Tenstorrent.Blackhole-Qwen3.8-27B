@@ -23,8 +23,11 @@ class SfpuScoreSourceTests(unittest.TestCase):
                 candidate = dspark_fp32_build.transform(original)
             with dspark_ladder_score_center.scalar_score_center(key_tiles=40), scoped_stats_pack():
                 patched = native_draft_sdpa.patched_sources(sources)['compute_common.hpp']
-        self.assertIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
+        self.assertIn(b'qwen_normalization_modes.at(qwen_score_scratch_cb)', candidate)
+        self.assertNotIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
         self.assertIn(b'sfpu_sub_bcast_col(j, 1)', patched)
+        self.assertIn(b'EltwiseBinaryReuseDestType::NONE, true>(source_cb, 0)', patched)
+        self.assertIn(b'CircularBuffer(QWEN_SCORE_SCRATCH_CB).pop_front(1)', patched)
         self.assertLess(patched.index(b'void qwen_prepare_center_scratch('),
             patched.index(b'void sub_exp_block_bcast_cols_inplace('))
         self.assertNotIn(b'qwen_scalar_score_transform(in0_cb, in1_cb, rows * cols, cols, false)', patched)
@@ -36,7 +39,8 @@ class SfpuScoreSourceTests(unittest.TestCase):
             baseline = dspark_fp32_build.transform(original)
         candidate = factory_transform(baseline)
         self.assertEqual(factory_transform(candidate, reverse=True), baseline)
-        self.assertIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
+        self.assertIn(b'qwen_normalization_modes.at(qwen_score_scratch_cb)', candidate)
+        self.assertNotIn(b'qwen_normalization_modes.at(cb_ids.qk_im)', candidate)
         self.assertEqual([line for line in candidate.splitlines() if b'tt::DataFormat im_df =' in line],
             [line for line in baseline.splitlines() if b'tt::DataFormat im_df =' in line])
 
