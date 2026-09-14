@@ -6,6 +6,17 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+direct_fp32_stage=${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}
+[[ "$direct_fp32_stage" = 0 || "$direct_fp32_stage" = 1 ]]
+if [ "$direct_fp32_stage" = 1 ]; then
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    test "${QWEN_DSPARK_MASK_BITS:-0}" = 1
+    direct_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-direct-fp32.XXXXXX")
+    gh run download 34834165490 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34834165490 --dir "$direct_evidence"
+    cp "$direct_evidence/dspark-direct-fp32-stage.json" scripts/ci/dspark-direct-fp32-stage.json
+    PYTHONPATH=scripts/ci python3 -c 'from dspark_direct_fp32_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-direct-fp32-stage.json")'
+fi
 target_request=${QWEN_TARGET_T16_64K_REQUEST:-0}
 [[ "$target_request" = 0 || "$target_request" = 1 ]]
 if [ "$target_request" = 1 ]; then
@@ -321,6 +332,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_SCORE_SFPU=$score_sfpu" \
     -e "QWEN_DSPARK_SUM_SFPU=$sum_sfpu" \
     -e "QWEN_DSPARK_MASK_BITS=$mask_bits" \
+    -e "QWEN_DSPARK_DIRECT_FP32_STAGE=$direct_fp32_stage" \
     -e "QWEN_DSPARK_SFPU_REQUEST_SCREEN=$request_screen" \
     -e "QWEN_DSPARK_SFPU_TIMED=$timed_requests" \
     -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \

@@ -136,6 +136,7 @@ if [ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 ]; then
     if [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then numerical_name=dspark-sum-sfpu-hardware; fi
     if [ "${QWEN_DSPARK_MASK_BITS:-0}" = 1 ]; then numerical_name=dspark-mask-bits-hardware; fi
     if [ "${QWEN_TARGET_T16_64K:-0}" = 1 ]; then numerical_name=target-t16-attention-64k; fi
+    if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then numerical_name=dspark-direct-fp32-stage-hardware; fi
     timeout -k 15 180 python3 -u "/experiment-scripts/ci/$numerical_name-probe.py" \
         --hardware --output "/experiment/results/$numerical_name.json"
     exit "$?"
