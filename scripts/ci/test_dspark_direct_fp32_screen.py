@@ -52,7 +52,7 @@ class DirectScreenTests(unittest.TestCase):
 
     def test_staging_installed_before_runtime_arithmetic_contexts(self):
         entry = Path(__file__).with_name('dspark_64k_entry.py').read_text()
-        self.assertIn('with normalization_candidate_scope, direct_candidate_scope, hardware_candidate_scope, runtime_scope(', entry)
+        self.assertIn('with center_candidate_scope, normalization_candidate_scope, direct_candidate_scope, hardware_candidate_scope, runtime_scope(', entry)
         screen = Path(__file__).with_name('dspark_direct_fp32_screen.py').read_text()
         self.assertNotIn('with staging_scope()', screen)
 

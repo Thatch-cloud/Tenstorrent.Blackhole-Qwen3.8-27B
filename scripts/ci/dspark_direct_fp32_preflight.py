@@ -18,6 +18,9 @@ def validate_active_sources(root):
     original = {name: (directory / name).read_bytes() for name in native_draft_sdpa.SOURCE_HASHES}
     patched = native_draft_sdpa.patched_sources(original)
     header = patched['compute_common.hpp']
+    if os.environ.get('QWEN_DSPARK_CENTER_TILE_FILL') == '1':
+        if b'fill_tile(0, 0.0f);' not in header or b'scratch[index] = 0;' in header:
+            raise ValueError('Center tile-fill must replace the actual scalar scratch clear')
     if os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE') == '1':
         if b'qwen_stage_score_tile(reciprocal_cb, scratch_cb, false);' not in header:
             raise ValueError('Normalization staging must reach the actual request kernel')

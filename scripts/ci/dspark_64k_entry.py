@@ -80,6 +80,15 @@ def run(main):
     direct_staging = os.environ.get('QWEN_DSPARK_DIRECT_FP32_STAGE', '0')
     direct_candidate_scope = nullcontext()
     normalization_candidate_scope = nullcontext()
+    center_candidate_scope = nullcontext()
+    center_fill = os.environ.get('QWEN_DSPARK_CENTER_TILE_FILL', '0')
+    if (center_fill not in ('0', '1') or center_fill == '1'
+            and (os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE') != '1'
+                or request_screen != '1' or timed_requests != '0')):
+        raise ValueError('Center tile-fill requires its isolated combined audit')
+    if center_fill == '1':
+        from dspark_center_tile_fill import center_fill_scope
+        center_candidate_scope = center_fill_scope()
     normalization_staging = os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE', '0')
     if (normalization_staging not in ('0', '1') or normalization_staging == '1'
             and (direct_staging != '1' or (request_screen, timed_requests) not in (('1', '0'), ('0', '1')))):
@@ -125,6 +134,8 @@ def run(main):
             from dspark_direct_fp32_screen import screen_scope
         if normalization_staging == '1':
             from dspark_normalization_screen import screen_scope
+        if center_fill == '1':
+            from dspark_center_fill_screen import screen_scope
         probe_scope = screen_scope(directory)
     elif phase_probe == '1':
         from dspark_proposal_phase_profile import stop_after_prepared_probe
@@ -140,7 +151,7 @@ def run(main):
                 completed_replays=report['completed_replays'])), flush=True)
 
         probe_scope = stop_after_prepared_probe(checkpoint)
-    with normalization_candidate_scope, direct_candidate_scope, hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
+    with center_candidate_scope, normalization_candidate_scope, direct_candidate_scope, hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
         with candidate_scope, probe_scope, target_scope:
