@@ -17,7 +17,8 @@ def compare_score_precision():
         raw = query @ key.transpose(-1, -2)
         expected = probe.reference(values, 0)
         variants = (('fp32', raw), ('bf16_rne', raw.bfloat16().float()),
-            ('bf16_truncate', (raw.contiguous().view(torch.int32) & -65536).view(torch.float32)))
+            ('bf16_truncate', (raw.contiguous().view(torch.int32) & -65536).view(torch.float32)),
+            ('tf32_nearest', ((raw.contiguous().view(torch.int32) + 4096) & -8192).view(torch.float32)))
         for name, scores in variants:
             result = torch.softmax(scores * (128 ** -.5) + values['mask'].float(), dim=-1) @ value
             close = torch.isclose(result, expected, rtol=.01, atol=.01)

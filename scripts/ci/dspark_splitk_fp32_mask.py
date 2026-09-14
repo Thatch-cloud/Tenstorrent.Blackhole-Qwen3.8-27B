@@ -1,7 +1,7 @@
 """Preserve FP32 scores through explicit SFPU mask addition in decode."""
 
 
-def transform(source):
+def transform(source, *, fp32_mask=False):
     before = '                            add_block_inplace<true>(cb_qk_im, cb_mask_in, qk_chunk_tiles_dynamic);'
     after = '''                            {
                                 CircularBuffer scores(cb_qk_im);
@@ -32,7 +32,7 @@ def transform(source):
     include = '#include "api/compute/eltwise_binary.h"'
     if source.count(before) != 1 or source.count(include) != 1:
         raise ValueError('Exact explicit decode mask path required')
-    result = source.replace(before, after).replace(include,
+    result = (source.replace(before, after) if fp32_mask else source).replace(include,
         include + '\n#include "api/compute/eltwise_binary_sfpu.h"')
     entry = 'void kernel_main() {'
     helper = '''void qwen_splitk_copy_fp32_init(uint32_t source_cb) {

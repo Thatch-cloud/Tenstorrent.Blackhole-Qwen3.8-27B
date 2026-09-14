@@ -14,10 +14,6 @@ def transform(source):
     modes = '''    std::vector<tt::tt_metal::UnpackToDestMode> qwen_splitk_unpack_modes;
     if (qwen_splitk_fp32) {
         qwen_splitk_unpack_modes.resize(64, tt::tt_metal::UnpackToDestMode::Default);
-        for (uint32_t cb : {4u, 6u, 7u, 16u, 17u, 18u, 19u, 21u, 22u, 23u,
-                24u, 25u, 26u, 27u, 28u, 29u, 30u, 31u}) {
-            qwen_splitk_unpack_modes.at(cb) = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        }
     }
     compute_desc.config = ComputeConfigDescriptor{'''
     substitutions = (
