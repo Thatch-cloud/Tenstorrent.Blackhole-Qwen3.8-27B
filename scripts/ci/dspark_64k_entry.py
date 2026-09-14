@@ -82,6 +82,10 @@ def run(main):
     normalization_candidate_scope = nullcontext()
     center_candidate_scope = nullcontext()
     center_fill = os.environ.get('QWEN_DSPARK_CENTER_TILE_FILL', '0')
+    combined_phases = os.environ.get('QWEN_DSPARK_COMBINED_PHASES', '0')
+    if (combined_phases not in ('0', '1') or combined_phases == '1'
+            and (center_fill != '1' or timed_requests != '1' or request_screen != '0')):
+        raise ValueError('Combined phase profiling requires the qualified full-response runtime')
     if (center_fill not in ('0', '1') or center_fill == '1'
             and (os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE') != '1'
                 or (request_screen, timed_requests) not in (('1', '0'), ('0', '1')))):
@@ -127,6 +131,8 @@ def run(main):
             from dspark_normalization_timed import timed_scope
         if center_fill == '1':
             from dspark_center_fill_timed import timed_scope
+        if combined_phases == '1':
+            from dspark_combined_phase_profile import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope
