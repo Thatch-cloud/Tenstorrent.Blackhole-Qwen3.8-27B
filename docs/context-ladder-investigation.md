@@ -1086,7 +1086,10 @@ a measured runtime speedup; moving the arithmetic to SFPU remains separate work.
 | `34808847890` | Child launcher lost candidate scope; source audit rejected it | Re-enter through candidate wrapper; keep audit |
 | `34809473922` | First eager case passed on both simulated chips; timed out before completion, CI simulator step 395 seconds | Reduce synthetic history, not timeout |
 | `34810126959` | Both eager cases and first replay passed; timeout during final replay, CI step 371 seconds | Reuse populated build cache; assign simulation 165 seconds plus 15-second kill grace, within unchanged 480-second outer limit |
+| `34810827485` | Passed, clean close, build-cache hit; complete CI simulator step 122 seconds | Bounded 64K hardware diagnostic, not full-request qualification |
 
+The completed simulator run has four eager and four replay checks, 48 input
+checks, 16 layout checks, eight fixture controls and two stale-cache controls.
 None of these simulator runs admits the candidate into a 64K production request
 or proves committed TG. The smaller fixture changes only simulator geometry;
 the qualified hardware baseline and serving defaults remain unchanged.

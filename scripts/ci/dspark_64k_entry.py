@@ -41,10 +41,20 @@ def run(main):
     if phase_probe not in ('0', '1'):
         raise ValueError('Explicit zero or one phase probe selection required')
     probe_scope = nullcontext()
+    candidate_scope = nullcontext()
+    score_bitwise = os.environ.get('QWEN_DSPARK_SCORE_BITWISE', '0')
+    if score_bitwise not in ('0', '1') or score_bitwise == '1' and phase_probe != '1':
+        raise ValueError('Score candidate requires bounded hardware diagnostic mode')
+    if score_bitwise == '1':
+        from dspark_score_candidate_gate import qualify
+        from dspark_score_bitwise import bitwise_infinity_checks
+        qualify(directory, directory / 'dspark-score-bitwise.json')
+        candidate_scope = bitwise_infinity_checks()
     if phase_probe == '1':
         from dspark_proposal_phase_profile import stop_after_prepared_probe
 
         def checkpoint(report):
+            report['candidate'] = 'bitwise-infinity-checks' if score_bitwise == '1' else 'baseline'
             destination = Path('/experiment/results/dspark-proposal-phases.json')
             temporary = destination.with_suffix('.tmp')
             temporary.write_text(json.dumps(report, indent=2) + '\n')
@@ -56,5 +66,5 @@ def run(main):
     with runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
-        with probe_scope:
+        with candidate_scope, probe_scope:
             return main()

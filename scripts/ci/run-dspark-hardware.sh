@@ -6,6 +6,16 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+score_bitwise=${QWEN_DSPARK_SCORE_BITWISE:-0}
+[[ "$score_bitwise" = 0 || "$score_bitwise" = 1 ]]
+if [ "$score_bitwise" = 1 ]; then
+    test "$phase_probe" = 1
+    score_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-score-candidate.XXXXXX")
+    gh run download 34810827485 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34810827485 --dir "$score_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_score_candidate_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+        "$score_evidence/dspark-score-bitwise.json"
+fi
 [[ "$phase_probe" = 0 || "$phase_probe" = 1 ]]
 if [ "$phase_probe" = 1 ]; then test "$trial_64k" = 1; fi
 [[ "$trial_64k" = 0 || "$trial_64k" = 1 ]]
@@ -193,6 +203,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
+    -e "QWEN_DSPARK_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_HISTORY_PROFILE=$history_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \
@@ -232,6 +243,9 @@ if [ "$trial_64k" = 1 ]; then
     docker cp "$draft_64k_evidence/dspark-ladder-hardware-65536.json" "$test_id:/experiment-scripts/ci/dspark-ladder-hardware-65536.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
+if [ "$score_bitwise" = 1 ]; then
+    docker cp "$score_evidence/dspark-score-bitwise.json" "$test_id:/experiment-scripts/ci/dspark-score-bitwise.json"
+fi
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
     docker cp speculative-decoding "$test_id:/speculative-decoding"
 fi
