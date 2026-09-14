@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34901206746 successfully emits read-only probability sums, but the inherited DPRINT selection only includes core (0,0). It therefore does not expose the failing folded lane 2; do not attribute lane-0 row-55 values to that lane. The next diagnostic enables all worker-core DPRINT for the split-K simulator suite only, retaining TR0-only printing, six audited rows and the existing 165-second probe limit. Arithmetic remains unchanged.
+
 Run 34900711534 worsens the first-fixture result to 64 failing elements and maximum error 0.535671. Reject the probability-rounding candidate; restore the prior precise FP32 exponent path (25 failures). The CPU ablation did not predict native behavior closely enough to establish a fix. Next compare the actual device probability sums against the native reduced sums before changing arithmetic again; retain intermediate snapshots and unchanged reference tolerances. No runtime or hardware qualification.
 
 CPU probability-consistency controls on the first fixture show 138 failures (maximum 0.54427) when the denominator uses BF16-truncated probabilities but the numerator uses TF32 probabilities; using identical truncated probabilities in both yields zero failures (maximum 0.35075). RNE variants pass both ways, so this does not prove native truncation is the cause. The next simulator candidate rounds exponent results once to BF16-representable values in FP32 storage, before either consumer, preserving FP32 raw scores. Exact fixture gates still decide acceptance. Exponent initialization is repeated before each tile because the following typecast may change SFPU initialization state.
