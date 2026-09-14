@@ -23,7 +23,7 @@ def execute_folded(operations, query, key, value, mask, owned):
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
-        q_chunk_size=0, k_chunk_size=256, exp_approx_mode=False, max_cores_per_head_batch=16)
+        q_chunk_size=0, k_chunk_size=32, exp_approx_mode=False, max_cores_per_head_batch=16)
     output = retain(operations.transformer.scaled_dot_product_attention_decode(folded, key, value,
         attn_mask=folded_mask, is_causal=False, scale=128 ** -.5, program_config=program,
         compute_kernel_config=kernel, memory_config=memory))
