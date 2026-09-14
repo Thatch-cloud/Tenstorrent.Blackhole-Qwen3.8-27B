@@ -119,6 +119,10 @@ def runtime_scope(directory, report_path, *, context, output_tokens, factory_roo
 
         def replacements():
             result = qualified()
+            result['compute_common.hpp'] += (('#pragma once', '''#pragma once
+#ifndef QWEN_DRAFT_EXP_APPROX
+#define QWEN_DRAFT_EXP_APPROX true
+#endif'''),)
             before, after = result['sdpa.cpp'][0]
             assertion = selector_assert()
             if after.count(assertion) != 1:

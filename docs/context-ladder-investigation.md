@@ -956,3 +956,22 @@ Dispatch configuration is `suite=dspark-64k-request`,
 false. The hardware script rejects incompatible options before downloading
 evidence or opening devices. Serving defaults are unchanged. Local admission,
 scope, build-fixture and policy tests pass; no 64K full-model PP/TG is recorded yet.
+
+### Combined 64K attempt 34799480361: shared-header compilation failure
+
+The real tokenizer produced exactly 65536 prompt tokens and preflight passed.
+The combined native build took 308 seconds. Model/draft upload reached the first
+audited request at 196.24 seconds of device-probe elapsed time; the run failed
+at 229.88 seconds during the first prefill and closed devices cleanly.
+
+Native target `sdpa_flash_decode.cpp` includes the patched shared attention
+header without the draft selector macro. The new reciprocal and centering code
+used `QWEN_DRAFT_EXP_APPROX` before the existing late fallback defined it.
+This is a combined-runtime include-order bug, not a 64K numerical failure or
+device hang. PP and committed TG remain unavailable.
+
+The correction puts an `#ifndef`-guarded native default at the shared header
+start within the 64K runtime scope. Draft SDPA still defines its qualified
+selector before including that header. Nine local scope/entry tests pass,
+including application to the pinned native sources and definition-order checks;
+these are not a replacement for a hardware compiler/execution check.

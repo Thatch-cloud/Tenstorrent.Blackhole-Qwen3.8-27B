@@ -1,5 +1,7 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
+import os
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -9,6 +11,25 @@ import dspark_stable_history
 
 
 class ScopeTests(unittest.TestCase):
+    def test_shared_header_defaults_before_use_without_overriding_draft(self):
+        import native_draft_sdpa
+
+        root = Path(os.environ.get('TT_NATIVE_TEST_ROOT', '/opt/ttsim/tt-metal'))
+        directory = root / native_draft_sdpa.KERNEL_DIRECTORY
+        original = {name: (directory / name).read_bytes() for name in native_draft_sdpa.SOURCE_HASHES}
+        with patch.object(candidate, 'admitted_request', return_value=nullcontext({})):
+            with candidate.runtime_scope('.', '/report', context=65536, output_tokens=256,
+                    factory_root=str(root), build_path='/build'):
+                sources = native_draft_sdpa.patched_sources(original)
+                common = sources['compute_common.hpp'].decode()
+                first_use = common.index('QWEN_DRAFT_EXP_APPROX')
+                self.assertEqual(common[first_use - len('#ifndef '):first_use], '#ifndef ')
+                self.assertLess(common.index('#define QWEN_DRAFT_EXP_APPROX true'),
+                    common.index('void recip_block_inplace'))
+                draft = sources['sdpa.cpp'].decode()
+                self.assertLess(draft.index('#define QWEN_DRAFT_EXP_APPROX'),
+                    draft.index('#include "compute_common.hpp"'))
+
     def test_target_allocation_includes_decode_headroom(self):
         with patch.object(candidate, 'current_admission', return_value={
                 'context': 65536, 'capacity': 66560, 'output_tokens': 256}):
