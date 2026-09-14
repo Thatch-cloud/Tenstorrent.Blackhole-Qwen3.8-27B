@@ -7,6 +7,15 @@ from target_t16_attention_gate import validate_request_option
 
 
 class ContextTests(unittest.TestCase):
+    def test_64k_selection_does_not_admit_execution(self):
+        with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': '65536', 'QWEN_DSPARK_64K_TRIAL': '0'}):
+            with self.assertRaises(ValueError):
+                request_context()
+        with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': '65536', 'QWEN_DSPARK_64K_TRIAL': '1'}):
+            self.assertEqual(request_context(), 65536)
+            with self.assertRaisesRegex(ValueError, 'active qualified'):
+                validate_history_capacity(65536, 256)
+
     def test_output_headroom_is_part_of_capacity(self):
         validate_history_capacity(4096, 256)
         validate_history_capacity(7936, 256)

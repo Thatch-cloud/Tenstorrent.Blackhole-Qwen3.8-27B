@@ -931,3 +931,28 @@ Qwen request or coding quality. It provides no PP/TG measurement. Next move
 this exact candidate through full-history runtime admission and the combined
 context ladder; do not substitute more isolated arithmetic sweeps for that
 integration. The 200 committed-token/s objective remains unachieved.
+
+### Combined-request integration status after the passing component gate
+
+| Area | Implemented | Remaining hardware/runtime gate |
+| --- | --- | --- |
+| Component evidence | Pinned report, all matrices and dependency hashes | No full-request inference from this gate |
+| Request admission | Exact 65536 prompt / 256 output, request-local state and combined build validation | Execute the admitted hardware request |
+| Draft history | Scoped capacity 66560, transactional publication and cleanup | Execute real learned prefill projection |
+| Target headroom | Scoped 66560 positions, 1040 mapped pages, 1048 cache blocks | Verify model initialization and rotary limits |
+| Prompt selection | Explicit `QWEN_DSPARK_64K_TRIAL=1`, bounded 12-file corpus | Validate exact length with the real tokenizer |
+| Combined entry/CI | Explicit trial input, pinned artifact staging, scoped cache build and CLI guards | Hardware build, real-tokenizer preflight and dispatch |
+
+The folded T16 target-attention gate is separately limited to 4K/8K. Do not
+claim the draft-attention pass qualifies that target kernel at 64K, or silently
+widen its existing gate. The first 64K comparison uses native target attention
+in both arms, captured publication, and the norm reader/scatter comparison.
+The combined CCL/GDN cache now creates its own 64K build manifest; the component
+ladder manifest is not substituted for it.
+
+Dispatch configuration is `suite=dspark-norm-scatter-request`,
+`dspark_64k_trial=true`, `dspark_captured_publication=true`,
+`cards_allocated=true`, and `simulator_only=false`. Other candidate flags remain
+false. The hardware script rejects incompatible options before downloading
+evidence or opening devices. Serving defaults are unchanged. Local admission,
+scope, build-fixture and policy tests pass; no 64K full-model PP/TG is recorded yet.

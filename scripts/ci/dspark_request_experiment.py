@@ -144,7 +144,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         short_default=target_attention_variants or combined_variants or profile_drafter or profile_verifier)
     import torch
     from full_dspark_request import measure_dspark_request
-    if type(captured_publication) is not bool or (captured_publication and (
+    request_64k = len(prompt) == 65536
+    if request_64k:
+        from dspark_64k_scope import require_scope
+        require_scope()
+        if (not norm_scatter_variants or not captured_publication or output_limit != 256
+                or any((target_attention_variants, combined_variants, score_layout, fused_t16_mlp,
+                    history_profile, banked_proposal, native_slot_gdn, profile_drafter, profile_verifier, mlp_down))):
+            raise ValueError('64K requires captured native-attention norm comparison without other candidates')
+    if type(captured_publication) is not bool or (captured_publication and not request_64k and (
             not target_attention_variants or not score_layout or not fused_t16_mlp
             or history_profile or banked_proposal or native_slot_gdn or profile_drafter or profile_verifier or mlp_down)):
         raise ValueError('Captured publication requires matched fused score-layout requests without other candidates')
@@ -269,7 +277,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from dspark_fusion_variants import SCHEDULE, POLICIES, summarize_variants
         from fused_t16_admission import qualify_simulator
         report['fusion_simulator_evidence'] = qualify_simulator()
-    if captured_publication:
+    if captured_publication and not request_64k:
         from dspark_publication_variants import SCHEDULE, POLICIES, summarize_variants
         shared_flag = os.environ.get('QWEN_GDN_SHARED_QK_EXPERIMENT', '0')
         if shared_flag not in ('0', '1'):
@@ -316,6 +324,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         qualify_target(Path(__file__).parent)
         POLICIES = {'native': dict(POLICIES['native'], target_attention_t16=True)}
 
+    if request_64k:
+        from dspark_64k_variants import SCHEDULE, POLICIES, summarize_variants
     if type(variants) is not bool:
         raise ValueError('Explicit matched proposal experiment selection required')
     combined_profile = os.environ.get('QWEN_COMBINED_TRACE_PROFILE', '0')
@@ -386,7 +396,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants:
         report['request_comparison'] = summarize_variants(report['request_checks'])
         report['request_summary'] = report['request_comparison']['arms'][
-            'publication' if captured_publication else 'fusion' if fused_t16_mlp else 'direct' if native_slot_gdn else 'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
+            'publication' if captured_publication and not request_64k else 'fusion' if fused_t16_mlp else 'direct' if native_slot_gdn else 'banked' if banked_proposal else 'scores' if score_layout else 'down' if mlp_down else 'scatter' if combined_variants else 'parallel' if target_attention_variants else 'scatter' if norm_scatter_variants else 'native' if native_attention_variants else 'trace_commit']
     else:
         report['request_summary'] = summarize(report['request_checks'])
     report.update(ctx_tokens=len(prompt), drafter_history_rows=len(prompt), proposal_rows=15,

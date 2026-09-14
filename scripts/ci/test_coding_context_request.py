@@ -6,6 +6,18 @@ from coding_request import TASK
 
 
 class CodingContextRequestTests(unittest.TestCase):
+    def test_64k_corpus_preserves_task_and_records_sources(self):
+        tokenizer = Mock()
+        def encode(messages, **kwargs):
+            self.assertTrue(messages[1]['content'].endswith(TASK))
+            self.assertIs(kwargs['enable_thinking'], False)
+            return [ord(character) for character in messages[1]['content']]
+        tokenizer.apply_chat_template.side_effect = encode
+        tokens, metadata = make_context_prompt(tokenizer, context_tokens=65536)
+        self.assertEqual(len(tokens), 65536)
+        self.assertEqual(metadata['actual_context'], 65536)
+        self.assertEqual(len(metadata['sources']), 12)
+
     def test_full_template_and_task_survive_bounded_recorded_repository_excerpt(self):
         tokenizer = Mock()
         def encode(messages, **kwargs):

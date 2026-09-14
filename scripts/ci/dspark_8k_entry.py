@@ -9,6 +9,9 @@ from dspark_context_selection import request_context
 
 
 def run(main):
+    if request_context() == 65536:
+        from dspark_64k_entry import run as run_64k
+        return run_64k(main)
     if request_context() != 8192 or '--preflight' in sys.argv:
         return main()
     if (os.environ.get('QWEN_HARDWARE_TESTS') != '1'

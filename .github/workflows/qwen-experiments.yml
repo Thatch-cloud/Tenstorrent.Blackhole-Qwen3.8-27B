@@ -12,6 +12,10 @@ on:
         description: Inventory only; recover exact pinned image by verified registry digest, without card access
         type: boolean
         default: false
+      dspark_64k_trial:
+        description: Offline 64K norm-scatter request; requires captured publication and no other candidate flags
+        type: boolean
+        default: false
       dram_mlp_profile:
         description: Operation attribution only for dram-mlp-sharded; never qualifies throughput
         type: boolean
@@ -200,6 +204,7 @@ jobs:
         shell: bash
         env:
           QWEN_DSPARK_CODING_TASK: ${{ inputs.dspark_coding_task }}
+          QWEN_DSPARK_64K_TRIAL: ${{ inputs.dspark_64k_trial && '1' || '0' }}
           QWEN_DSPARK_MLP_DOWN: ${{ inputs.dspark_mlp_down && '1' || '0' }}
           QWEN_DSPARK_SCORE_LAYOUT: ${{ inputs.dspark_score_layout && '1' || '0' }}
           QWEN_DSPARK_BANKED_PROPOSAL: ${{ inputs.dspark_banked_proposal && '1' || '0' }}

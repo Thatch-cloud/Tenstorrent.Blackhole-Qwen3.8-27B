@@ -264,10 +264,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if banked_proposal:
             from dspark_banked_device import BankedDSparkDevice
             implementation = BankedDSparkDevice
+        history_capacity = ((len(prompt) + max_new_tokens + 31) // 32) * 32
+        if len(prompt) == 65536:
+            from dspark_64k_scope import require_scope
+            history_capacity = require_scope()['capacity']
         drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
             capture.outputs(), rotary, position=len(prompt), proposals=15,
             **(dict(native_attention=True) if native_attention else {}),
-            history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)
+            history_capacity=history_capacity)
         proposal_device = drafter
         if captured_publication:
             from dspark_publication_scope import CapturedPublicationArm

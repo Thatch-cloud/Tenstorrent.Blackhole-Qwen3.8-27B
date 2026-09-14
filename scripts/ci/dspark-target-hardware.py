@@ -148,7 +148,11 @@ def main():
     if options.max_new_tokens is not None and not options.request:
         parser.error('An output budget requires full-request mode')
     if options.captured_publication:
-        if (not options.request or not options.target_attention_variants or not options.score_layout
+        from dspark_context_selection import request_context
+        if request_context() == 65536:
+            from dspark_64k_entry import validate_options
+            validate_options(options)
+        elif (not options.request or not options.target_attention_variants or not options.score_layout
                 or not options.fused_t16_mlp or options.history_profile or options.profile_verifier
                 or options.profile_drafter or options.banked_proposal or options.native_slot_gdn or options.mlp_down):
             parser.error('Captured publication requires the isolated combined fusion request')
@@ -262,6 +266,17 @@ def main():
         gate['request_prerequisites']['draft_8k_factory'] = dict(
             original_sha256=SOURCE_SHA256, qualified_sha256=qualified_factory)
         gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})
+    if options.request and not options.preflight and request_context() == 65536:
+        from dspark_64k_scope import require_scope
+        from dspark_64k_build import verify_factory
+        from dspark_fp32_intermediates import SOURCE, SOURCE_SHA256
+        require_scope()
+        if gate['native_reference'].get(SOURCE) != SOURCE_SHA256:
+            raise ValueError('Original pinned factory reference required for 64K admission')
+        qualified_factory = verify_factory(root)
+        gate['request_prerequisites']['draft_64k_factory'] = dict(
+            original_sha256=SOURCE_SHA256, qualified_sha256=qualified_factory)
+        gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})
     if options.request and not options.preflight and os.environ.get('QWEN_DSPARK_BIAS_CACHE') == '1':
         from dspark_cached_markov_build import admitted_reference
         cache_build = json.loads(Path('/experiment/results/dspark-cached-markov-hardware-build.json').read_text())
@@ -271,7 +286,13 @@ def main():
     require_compatible_native(native, gate['native_reference'], require_built_library=not options.preflight)
     if options.request:
         from dspark_context_selection import request_context, validate_history_capacity
-        if options.preflight and request_context() == 8192:
+        if options.preflight and request_context() == 65536:
+            from dspark_64k_admission import validate_request
+            from dspark_attention_64k_gate import qualify as qualify_64k
+            validate_request(request_context(), request_limit(options.max_new_tokens))
+            gate['request_prerequisites']['draft_64k'] = qualify_64k(Path(__file__).parent,
+                Path(__file__).with_name('dspark-ladder-hardware-65536.json'))
+        elif options.preflight and request_context() == 8192:
             from dspark_8k_admission import validate_request
             from dspark_attention_8k_gate import qualify as qualify_8k
             validate_request(request_context(), request_limit(options.max_new_tokens))
@@ -355,12 +376,19 @@ def main():
         mesh.enable_program_cache()
         collectives = TT_CCL(mesh)
         progress('load_target_once')
-        generator = Qwen36ForCausalLM.initialize_vllm_model(config, mesh, max_batch_size=8, max_seq_len=65536)
+        target_capacity = dict(max_seq_len=65536, page_count=1024, cache_blocks=1032, block_size=64)
+        if options.request and len(prompts[0]) == 65536:
+            from dspark_64k_scope import target_allocation
+            target_capacity = target_allocation()
+        generator = Qwen36ForCausalLM.initialize_vllm_model(config, mesh, max_batch_size=8,
+            max_seq_len=target_capacity['max_seq_len'])
         model = generator.model[0]
         if len(model.layers) != 64 or model.vocab_size != VOCABULARY or model._lmhead_vocab_sharded is not True:
             raise ValueError('Complete TP2 target with borrowed vocabulary-sharded head required')
-        kv_cache = generator.allocate_kv_cache((1032, model.args.n_local_kv_heads, 64, model.args.head_dim), ttnn.bfloat16, 64)
-        pages = torch.arange(1024, dtype=torch.int32).reshape(1, 1024)
+        kv_cache = generator.allocate_kv_cache((target_capacity['cache_blocks'], model.args.n_local_kv_heads,
+            target_capacity['block_size'], model.args.head_dim), ttnn.bfloat16, target_capacity['block_size'])
+        pages = torch.arange(target_capacity['page_count'], dtype=torch.int32).reshape(1, target_capacity['page_count'])
+        report['target_capacity'] = target_capacity
         recurrent = [value for layer in model.layers if not layer.is_full_attention
             for value in (layer.attention.rec_state, *layer.attention.conv_states)]
         caches = [value for pair in model._paged_kv_caches for value in pair]

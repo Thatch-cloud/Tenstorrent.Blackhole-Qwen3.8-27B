@@ -10,12 +10,16 @@ from coding_request import TASK
 
 CONTEXT_FILES = ('target_features.py', 'feature_projection.py', 'dflash_request_runtime.py', 'verifier_engine.py')
 EXTENDED_CONTEXT_FILES = (*CONTEXT_FILES, 'model_batch.py', 'full_request.py')
+LADDER_CONTEXT_FILES = (*EXTENDED_CONTEXT_FILES, 'full-prefix.py', 'full_dflash_request.py',
+    'full_dspark_request.py', 'dspark_request_experiment.py', 'gdn-prefix.py', 'learned-attention-probe.py')
 
 
 def make_context_prompt(tokenizer, *, context_tokens=4096):
-    if type(context_tokens) is not int or context_tokens not in (4096, 8192):
-        raise ValueError('Only the explicit 4K and 8K context qualification pilots are enabled')
+    if type(context_tokens) is not int or context_tokens not in (4096, 8192, 65536):
+        raise ValueError('Only the explicit 4K, 8K and 64K context qualification pilots are enabled')
     filenames = CONTEXT_FILES if context_tokens == 4096 else EXTENDED_CONTEXT_FILES
+    if context_tokens == 65536:
+        filenames = LADDER_CONTEXT_FILES
     sources = {name: Path(__file__).with_name(name).read_bytes() for name in filenames}
     context = '\n\n'.join(f'File: {name}\n{payload.decode("utf-8")}' for name, payload in sources.items())
 

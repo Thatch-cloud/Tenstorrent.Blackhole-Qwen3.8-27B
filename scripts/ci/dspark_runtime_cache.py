@@ -66,6 +66,11 @@ def main():
     factory = prepare(root, scripts, enabled=request_context() == 8192)
     if factory is not None:
         inputs['draft_8k_factory'] = factory
+    factory_64k = None
+    if request_context() == 65536:
+        from dspark_64k_build import prepare as prepare_64k
+        factory_64k = prepare_64k(root, scripts, scripts / 'dspark-ladder-hardware-65536.json')
+        inputs['draft_64k_factory'] = factory_64k
     cache_selection = os.environ.get('QWEN_DSPARK_BIAS_CACHE', '0')
     if cache_selection not in ('0', '1'):
         raise ValueError('Explicit zero or one bias cache selection required')
@@ -101,6 +106,11 @@ def main():
         evidence = completed(root, factory, manifest['binary_sha256'], import_passed=True)
         evidence['cache_key'] = cache_key(inputs)
         (output/'dspark-8k-hardware-build.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    if factory_64k is not None:
+        from dspark_64k_build import completed as completed_64k
+        evidence = completed_64k(root, factory_64k, manifest['binary_sha256'], import_passed=True)
+        evidence['cache_key'] = cache_key(inputs)
+        (output/'dspark-64k-hardware-build.json').write_text(json.dumps(evidence,indent=2)+'\n')
     if cache_factory is not None:
         from dspark_cached_markov_build import completed as completed_cache
         subprocess.run([sys.executable, '-c', 'import ttnn; assert callable(ttnn.sparse_matmul)'], check=True)

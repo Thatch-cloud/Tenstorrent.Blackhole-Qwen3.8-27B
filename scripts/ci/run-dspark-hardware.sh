@@ -4,6 +4,21 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
+trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
+[[ "$trial_64k" = 0 || "$trial_64k" = 1 ]]
+if [ "$trial_64k" = 1 ]; then
+    test "$mode" = request-norm-scatter
+    test "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1
+    for flag in QWEN_DSPARK_FUSION_T16 QWEN_DSPARK_SCORE_LAYOUT QWEN_DSPARK_BANKED_PROPOSAL QWEN_DSPARK_NATIVE_SLOT QWEN_DSPARK_MLP_DOWN QWEN_DSPARK_BIAS_CACHE QWEN_DSPARK_HISTORY_PROFILE QWEN_DSPARK_DRAFT_PROFILE QWEN_DSPARK_MLP_FOOTPRINT; do
+        test "${!flag:-0}" = 0
+    done
+    test "${QWEN_DSPARK_CODING_TASK:-merge_intervals}" = merge_intervals
+    draft_64k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-draft-attention-64k.XXXXXX")
+    gh run download 34797353681 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34797353681 --dir "$draft_64k_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_attention_64k_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+        "$draft_64k_evidence/dspark-ladder-hardware-65536.json"
+fi
 draft_profile=${QWEN_DSPARK_DRAFT_PROFILE:-0}
 history_profile=${QWEN_DSPARK_HISTORY_PROFILE:-0}
 [[ "$history_profile" = 0 || "$history_profile" = 1 ]]
@@ -32,13 +47,16 @@ fi
 [[ "$publication" = 0 || "$publication" = 1 ]]
 publication_report=''
 if [ "$publication" = 1 ]; then
-    test "$fusion" = 1
-    test "$mode" = request-target-attention
+    if [ "$trial_64k" = 0 ]; then
+        test "$fusion" = 1
+        test "$mode" = request-target-attention
+    fi
     test "$history_profile" = 0
     evidence=$(mktemp -d "$RUNNER_TEMP/qwen-publication-evidence.XXXXXX")
     gh run download 34677941763 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34677941763 --dir "$evidence"
     publication_report="$evidence/t32-publication.json"
+    if [ "$trial_64k" = 0 ]; then
     output_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-gdn-output-l1.XXXXXX")
     gh run download 34693525557 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34693525557 --dir "$output_evidence"
@@ -74,6 +92,7 @@ if [ "$publication" = 1 ]; then
         --name qwen-hardware-inventory-34699176210 --dir "$outer_evidence"
     printf '%s  %s\n' 036be9bbfa0c8de8e5f0415beb2d5d6447a5755ac894e6e0cd6ba238d4eada52 "$outer_evidence/gdn-outer-add.json" | sha256sum -c -
     test "$(cat "$outer_evidence/gdn-outer-add.exit-status")" = 0
+    fi
     printf '%s  %s\n' 4bd749d6381cb7e1f5be69276d5a5011c9e6cfa7c30182b44dd09f3d1b115914 "$publication_report" | sha256sum -c -
 fi
 [[ "$fusion" = 0 || "$fusion" = 1 ]]
@@ -160,6 +179,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e "QWEN_DSPARK_MODE=$mode" \
+    -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_HISTORY_PROFILE=$history_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \
@@ -185,6 +205,7 @@ if [ "$bias_cache" = 1 ]; then
 fi
 if [ "$publication" = 1 ]; then
     docker cp "$publication_report" "$test_id:/experiment-scripts/ci/dspark-publication-simulator.json"
+    if [ "$trial_64k" = 0 ]; then
     docker cp "$output_evidence/gdn-output-l1.json" "$test_id:/experiment-scripts/ci/gdn-output-l1.json"
     docker cp "$grid_evidence/gdn-output-grid.json" "$test_id:/experiment-scripts/ci/gdn-output-grid.json"
     docker cp "$copy_evidence/gdn-copy-pairs.json" "$test_id:/experiment-scripts/ci/gdn-copy-pairs.json"
@@ -192,6 +213,10 @@ if [ "$publication" = 1 ]; then
     docker cp "$shared_evidence/gdn-shared-recurrence.json" "$test_id:/experiment-scripts/ci/gdn-shared-recurrence.json"
     docker cp "$attention_8k_evidence/target-t16-attention-8k.json" "$test_id:/experiment-scripts/ci/target-t16-attention-8k.json"
     docker cp "$draft_8k_evidence/dspark-native-8k-attention.json" "$test_id:/experiment-scripts/ci/dspark-native-8k-attention.json"
+    fi
+fi
+if [ "$trial_64k" = 1 ]; then
+    docker cp "$draft_64k_evidence/dspark-ladder-hardware-65536.json" "$test_id:/experiment-scripts/ci/dspark-ladder-hardware-65536.json"
 fi
 docker cp optimisation "$test_id:/experiment-optimisation"
 if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then

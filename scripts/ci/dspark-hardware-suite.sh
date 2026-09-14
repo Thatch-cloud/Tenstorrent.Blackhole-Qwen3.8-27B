@@ -86,6 +86,20 @@ fi
 if [ "$mode" = request-norm-scatter ]; then
     report_name=dspark-norm-scatter-request-hardware
     request_options+=(--norm-scatter-variants)
+    if [ "${QWEN_DSPARK_64K_TRIAL:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1
+        report_name=dspark-64k-request-hardware
+        request_options+=(--captured-publication --max-new-tokens 256)
+        export QWEN_DSPARK_REQUEST_CONTEXT=65536
+        export QWEN_LADDER_BACKEND=hardware
+        export QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1
+        export QWEN_GDN_OUTPUT_L1_EXPERIMENT=0
+        export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
+        export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
+        export QWEN_GDN_OUTER_ADD_EXPERIMENT=0
+        export QWEN_GDN_SHARED_QK_EXPERIMENT=0
+        export QWEN_COMBINED_TRACE_PROFILE=0
+    fi
 fi
 if [ "$mode" = request-verifier-profile ]; then
     report_name=dspark-verifier-profile-hardware
