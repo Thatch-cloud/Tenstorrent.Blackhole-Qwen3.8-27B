@@ -82,8 +82,8 @@ def run(main):
     normalization_candidate_scope = nullcontext()
     normalization_staging = os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE', '0')
     if (normalization_staging not in ('0', '1') or normalization_staging == '1'
-            and (direct_staging != '1' or request_screen != '1' or timed_requests != '0')):
-        raise ValueError('Normalization staging requires its isolated combined correctness screen')
+            and (direct_staging != '1' or (request_screen, timed_requests) not in (('1', '0'), ('0', '1')))):
+        raise ValueError('Normalization staging requires its isolated audit or qualified timing')
     if normalization_staging == '1':
         from dspark_normalization_direct_stage import normalization_stage_scope
         normalization_candidate_scope = normalization_stage_scope()
@@ -114,6 +114,8 @@ def run(main):
             from target_t16_64k_timed import timed_scope
         if direct_staging == '1':
             from dspark_direct_fp32_timed import timed_scope
+        if normalization_staging == '1':
+            from dspark_normalization_timed import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope
