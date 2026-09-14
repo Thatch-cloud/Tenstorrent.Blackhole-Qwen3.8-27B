@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 import runpy
 import sys
+from unittest.mock import patch
 
+import dspark_score_bitwise
 from dspark_splitk_attention import splitk_scope
 from dspark_splitk_layout import scheduling
 
@@ -16,7 +18,12 @@ def main():
         raise ValueError('Explicit split-K experiment required')
     directory = Path(__file__).resolve().parent
     output = Path(sys.argv[sys.argv.index('--output') + 1])
-    with splitk_scope():
+    original_entrypoint = dspark_score_bitwise.candidate_entrypoint
+
+    def entrypoint(unused_script):
+        return original_entrypoint(Path(__file__).resolve())
+
+    with splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint):
         runpy.run_path(str(directory / 'dspark-center-tile-fill-probe.py'), run_name='__main__')
     report = json.loads(output.read_text())
     report.update(candidate='native-decode-split-k', performance_qualified=False,
