@@ -1,5 +1,9 @@
 # Qwen3.8-27B: two-card experiment programme
 
+The [combined-runtime reintegration checklist](combined-runtime-reintegration.md)
+tracks which short-context optimisations remain absent at 64K and the gates for
+restoring one matched runtime across the context ladder.
+
 ## Current combined-runtime position - 2026-09-14
 
 | One offline coding stream | CTX | PP tok/s | Committed TG tok/s | Evidence |

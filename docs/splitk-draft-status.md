@@ -20,6 +20,10 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34906073385 fails the first two-worker eager comparison on chip 0: 773 elements outside the retained tolerance, maximum absolute error 0.689598. Original-order single-worker run 34905622466 passed. The change introduced partitioning and cross-core reduction together; this does not yet distinguish partial-statistics rounding, transfer precision, or merge arithmetic. Do not promote or relax the tolerance.
+
+Source inspection finds that the cross-worker `sub_exp_block` still truncates the scale to BF16 (`scale_fp32 >> 16`), whereas local softmax now multiplies by the original FP32 scale and uses the precise exponential. Next replace only the two tree-merge exponent calls with explicit FP32 scaling and precise exponentiation. Keep statistics/transfer formats, worker count, key order, tolerances and target gates unchanged; this is a tested hypothesis, not an established root cause.
+
 Run 34905622466 passes in original key order: four eager checks, four exact replay checks, three adapter calls, and the native target gate; both scopes close cleanly. Next use two 256-key partitions and up to two workers per KV lane to exercise cross-core softmax merging on the same 512-key fixture. No arithmetic, tolerance, target-gate or timeout changes. This is still simulator correctness, not a TG measurement.
 
 Run 34905137219 is green: four eager numerical checks, four exact replay checks, exactly three Python adapter calls, and the native target-attention gate all pass; both scopes close cleanly. This validates the isolated striped single-partition diagnostic only. Next remove key striping while retaining the 512-key partition, one worker per KV lane, FP32 arithmetic changes and all correctness gates. Original-order correctness must pass before restoring parallel split-K and measuring the combined runtime on hardware.

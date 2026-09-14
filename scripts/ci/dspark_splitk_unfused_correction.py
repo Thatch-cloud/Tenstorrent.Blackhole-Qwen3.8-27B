@@ -13,6 +13,7 @@ from dspark_splitk_precise_exp import transform as transform_precise_exp
 from dspark_splitk_output_rounding import transform as transform_output_rounding
 from dspark_splitk_reciprocal_storage import transform as transform_reciprocal_storage
 from dspark_splitk_sum_audit import transform as transform_sum_audit
+from dspark_splitk_merge_exp import transform as transform_merge_exp
 
 
 HEADER = 'ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/kernels/compute/sdpa_flash_decode.cpp'
@@ -47,7 +48,7 @@ def transform(source):
     block = source[begin:end]
     if block.count('cb_exp_max_diff_2') != 1 or block.count('cb_prev_sum_2') != 1:
         raise ValueError('Native correction arguments changed')
-    result = source[:begin] + REPLACEMENT + source[end:]
+    result = transform_merge_exp(source[:begin] + REPLACEMENT + source[end:])
     reciprocal = '            recip_block_inplace(cb_prev_sum, Sq_chunk_t);'
     precise = '''            {
                 CircularBuffer denominator(cb_prev_sum);
