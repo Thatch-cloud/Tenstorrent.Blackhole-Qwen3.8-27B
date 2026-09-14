@@ -776,3 +776,24 @@ retention now has cancellation evidence, not only local source assertions.
 No further full-context simulation is planned; prepare a separately guarded
 hardware correctness entrypoint rather than spoofing simulator environment
 flags on physical cards.
+
+### Hardware padding fix and remaining live-row error
+
+Run 34793296815 (5afb298) completed in 23 seconds with clean device closure.
+The fully masked-chunk centering fix removed the padded-row failures. The
+first case passed tensor shard 0, then failed 65 elements in shard 1, head 4,
+row 3 (maximum absolute error 0.5759735107421875). Later cases and replay
+remain unqualified. Run 34793805954 reproduced those failures with snapshots.
+
+Do not equate the report's `chip` (tensor-list index) to the DPRINT device ID.
+For this fixture, shard 1's independently recomputed final proposal score is
+166.0517578125, matching DPRINT device 0, not device 1 (166.837890625).
+This identifies the matching diagnostic stream by data; explicit mesh-to-device
+identity reporting is still needed. Earlier comparisons against device 1's
+numerator and reciprocal were invalid.
+
+At maximum 166, the matching device-0 diagnostics give numerator -56 and
+denominator 1.240598679; the CPU reference gives -56.38211441040039 and
+1.2374624013900757. The raw QK score matches; investigate accumulated output,
+denominator precision and final output rounding. Do not infer corrupted QK
+or a normalization race from the mismatched device-1 diagnostic stream.
