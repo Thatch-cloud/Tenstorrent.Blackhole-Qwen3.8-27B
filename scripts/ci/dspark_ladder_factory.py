@@ -11,6 +11,15 @@ import dspark_stats_pack
 KEY_TILES = tuple(sorted({272, *(row['native_keys'] // 32 for row in ladder())}))
 
 
+def output_precision(source):
+    before = '    tt::DataFormat im_df = tt::DataFormat::Float16_b;'
+    after = ('    tt::DataFormat im_df = qwen_draft_fp32_intermediates && Skt == 2112\n'
+        '        ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;')
+    if source.count(before) != 1:
+        raise ValueError('Unique output-intermediate format selector required')
+    return source.replace(before, after)
+
+
 def predicate(expression):
     return '(' + ' || '.join(f'{expression} == {tiles}' for tiles in KEY_TILES) + ')'
 
@@ -27,7 +36,7 @@ def transform(source):
     if candidate.count(before) != 1:
         raise ValueError('Unique qualified baseline factory selector required')
     after = (geometry_predicate('Skt', 'Sk_chunk_t') + ' && Sq_chunk_t == 1 &&').encode()
-    return candidate.replace(before, after)
+    return output_precision(candidate.replace(before, after).decode()).encode()
 
 
 def selector_assert():

@@ -57,7 +57,7 @@ def main():
                 score_center_mode='tr0-fp32-before-reload' if context == 65536 or smoke == '1' else 'native',
                 reciprocal_mode='tr0-scalar-fp32-diagnostic',
                 reciprocal_reload_rounding='native-truncate',
-                output_recurrence='native-l1-pack-accumulation-bf16',
+                output_recurrence='native-l1-pack-accumulation-fp32' if context == 65536 else 'native-l1-pack-accumulation-bf16',
                 final_output_rounding='unchanged',
                 key_chunk_size=fixture['key_chunk'],
                 native_padded_keys=fixture['native_keys'], added_masked_poison_rows=fixture['extra_masked_keys'])
