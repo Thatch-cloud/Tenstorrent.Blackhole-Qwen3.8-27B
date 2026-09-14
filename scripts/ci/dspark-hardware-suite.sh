@@ -126,6 +126,14 @@ fi
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e
+if [ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 ]; then
+    test "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 || exit 1
+    export QWEN_LADDER_CONTEXT=65536
+    export QWEN_DRAFT_FP32_INTERMEDIATES=1
+    timeout -k 15 180 python3 -u /experiment-scripts/ci/dspark-score-sfpu-hardware-probe.py \
+        --hardware --output /experiment/results/dspark-score-sfpu-hardware.json
+    exit "$?"
+fi
 runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
     --checkpoint /dspark/model.safetensors --config /dspark/config.json
     --output "/experiment/results/$report_name.json")

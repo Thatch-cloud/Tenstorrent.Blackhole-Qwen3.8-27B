@@ -7,6 +7,9 @@ mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
 score_sfpu=${QWEN_DSPARK_SCORE_SFPU:-0}
+sfpu_numerical=${QWEN_DSPARK_SFPU_NUMERICAL:-0}
+[[ "$sfpu_numerical" = 0 || "$sfpu_numerical" = 1 ]]
+if [ "$sfpu_numerical" = 1 ]; then test "$score_sfpu" = 1; fi
 [[ "$score_sfpu" = 0 || "$score_sfpu" = 1 ]]
 if [ "$score_sfpu" = 1 ]; then
     test "$phase_probe" = 1
@@ -215,6 +218,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_DSPARK_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_DSPARK_SCORE_SFPU=$score_sfpu" \
+    -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \
     -e "QWEN_DSPARK_DRAFT_PROFILE=$draft_profile" \
     -e "QWEN_DSPARK_HISTORY_PROFILE=$history_profile" \
     -e "QWEN_DSPARK_MLP_DOWN=$mlp_down" \

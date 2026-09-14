@@ -1099,5 +1099,40 @@ proposal replays with the bitwise infinity check. Fenced replay decreased from
 1369.62 ms in `34807645660` to 977.42 ms, about 28.6% less time (1.40x speed).
 The two unfenced samples were 977.75 and 980.20 ms. This is a captured draft-path
 measurement at context 65536, not committed TG, a full-request correctness gate,
-or coding-quality acceptance. It supports replacing the remaining scalar
-arithmetic with correctly loaded SFPU operations; that change is not yet implemented.
+or coding-quality acceptance. It motivated the SFPU score-centering candidate below.
+
+### SFPU score-centering: simulator and hardware diagnostic
+
+The candidate stages exact FP32 score bits in a dedicated scratch tile and uses
+SFPU subtraction, without changing the original score buffer's unpack format.
+Tiny simulator run `34815143244` passed numerical and replay checks with clean
+close before hardware execution. Serving defaults remain unchanged.
+
+| 64K draft candidate | Fenced replay | Change from original |
+| --- | ---: | ---: |
+| Original scalar path (`34807645660`) | 1369.62 ms | Baseline |
+| Bitwise infinity checks (`34811230273`) | 977.42 ms | 28.6% less time |
+| SFPU score centering (`34815969358`, attempt 2, `ac70763`) | 573.56 ms | 58.1% less time |
+
+SFPU is 41.3% lower latency than the bitwise candidate. All three fixed-input
+replays passed, with clean device close; unfenced samples were 576.74 and
+576.61 ms. Input/history synchronization took 5.71 ms on the fenced sample.
+This measures 15 draft proposals at context 65536: **not committed TG**, full
+request correctness, or coding-quality acceptance.
+
+Attempt 1 reached prefill but exhausted the eight-minute budget after a cold
+runtime build. The compiled library was cached. Attempt 2 reused it and its
+hardware step finished in **222 seconds**, with the same timeout and code.
+Artifacts are retained under `runner-evidence.local/34815969358-attempt2`.
+Next admission requires 64K numerical and full-request output/state validation
+before a bounded combined PP/CTX/TG comparison; no throughput result is inferred
+from these draft-only timings.
+
+The next numerical gate must validate the cached combined-runtime manifest,
+not reuse the standalone ladder build manifest unchanged. The numerical probe
+currently expects `binaries_before`/`binaries_after`, while the combined build
+validates `binaries` plus exact factory inputs and builder hashes. Its adapter
+must retain those checks and the child-process candidate scope; synthesizing
+legacy provenance fields would not establish build provenance. Reuse the
+existing full 64K fixtures, including poisoned padding and stale-cache controls,
+without loading model weights or rebuilding the already qualified library.
