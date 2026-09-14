@@ -12,13 +12,13 @@ mask_bits=${QWEN_DSPARK_MASK_BITS:-0}
 [[ "$mask_bits" = 0 || "$mask_bits" = 1 ]]
 if [ "$mask_bits" = 1 ]; then
     test "$sum_sfpu" = 1
-    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]
     mask_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-mask-bits.XXXXXX")
     gh run download 34825080088 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34825080088 --dir "$mask_evidence"
     PYTHONPATH=scripts/ci python3 -c 'import sys; from dspark_mask_bits_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
         "$mask_evidence/dspark-mask-bits.json"
-    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+    if [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
         mask_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-mask-hardware.XXXXXX")
         gh run download 34825617040 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
             --name qwen-hardware-inventory-34825617040 --dir "$mask_hardware_evidence"
@@ -64,6 +64,11 @@ if [ "$timed_requests" = 1 ]; then
         screen_run=34823325684
         timing_gate=dspark_sum_timed_requests
         cp "$sum_hardware_evidence/dspark-sum-sfpu-hardware.json" "$request_evidence/dspark-sum-sfpu-hardware.json"
+    fi
+    if [ "$mask_bits" = 1 ]; then
+        screen_run=34825996484
+        timing_gate=dspark_mask_timed_requests
+        cp "$mask_hardware_evidence/dspark-mask-bits-hardware.json" "$request_evidence/dspark-mask-bits-hardware.json"
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "qwen-hardware-inventory-$screen_run" --dir "$screen_evidence"
@@ -336,7 +341,7 @@ if [ "$sum_sfpu" = 1 ]; then
 fi
 if [ "$mask_bits" = 1 ]; then
     docker cp "$mask_evidence/dspark-mask-bits.json" "$test_id:/experiment-scripts/ci/dspark-mask-bits.json"
-    if [ "$request_screen" = 1 ]; then
+    if [[ "$request_screen" = 1 || "$timed_requests" = 1 ]]; then
         docker cp "$mask_hardware_evidence/dspark-mask-bits-hardware.json" "$test_id:/experiment-scripts/ci/dspark-mask-bits-hardware.json"
     fi
 fi
