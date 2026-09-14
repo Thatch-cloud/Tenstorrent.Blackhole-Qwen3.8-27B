@@ -9,12 +9,13 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest combined result: 64K context reaches 8.98 committed tok/s**, up from
+**Latest combined result: 64K context reaches 9.33 committed tok/s**, up from
 4.39 on the previous native 64K runtime. SFPU score centering removes scalar
 work from the draft attention path. Two full-budget requests each commit 135
 tokens and reach EOS, with exact output and final-state checks. Hardware run
-[34820424369](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34820424369)
-finishes in 5m31s. Still well below the target; draft execution remains dominant.
+[34824124447](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34824124447)
+finishes in 5m29s. Online-sum SFPU arithmetic adds a modest gain over 8.98 TG;
+this is a historical comparison, not a matched A/B. Draft execution remains dominant.
 
 The 4K/8K results below use a different, optimized T16 runtime. These figures
 are not a like-for-like context-scaling curve or concurrent-serving benchmark.
@@ -25,7 +26,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
-| One stream, batch 1, 135-token EOS response | 65536 | 2621.39 | 8.98 | Two exact combined requests; native 64K runtime |
+| One stream, batch 1, 135-token EOS response | 65536 | 2617.59 | 9.33 | Two exact combined requests; native 64K runtime |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 

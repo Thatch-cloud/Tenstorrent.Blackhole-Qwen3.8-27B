@@ -1193,3 +1193,19 @@ exact FP32 staging and the established numerical/replay/request gates. Current
 SFPU runtime remains the combined control; no serving defaults change. These
 two EOS requests do not establish sustained long-output or held-out coding
 quality acceptance.
+
+### Online-sum SFPU result
+
+Tiny simulator `34821692776`, full 64K hardware numerical gate `34822563217`,
+and fully audited bounded request `34823325684` all passed. Full-budget run
+`34824124447` (`03bb2b9`) then completed two exact 135-token EOS requests in
+329 seconds, including setup and final-state checks. PP is **2617.59**, CTX
+**65536**, committed TG **9.3315**; both requests retain a 256-token budget.
+Acceptance remains 116/300 per request. This is 3.92% above the previous
+8.9792 TG in a historical comparison, not a fresh matched A/B.
+
+Mean block timing: draft 559.80 ms, verification/readback 117.87 ms,
+selection/commit 43.93 ms, cycle 723.29 ms. The modest draft improvement
+does not explain away the remaining bottleneck. Next inspect scalar mask
+addition for negative-infinity masks; retain zero-mask behavior and the
+arithmetic fallback for arbitrary biases, positive infinities and NaNs.
