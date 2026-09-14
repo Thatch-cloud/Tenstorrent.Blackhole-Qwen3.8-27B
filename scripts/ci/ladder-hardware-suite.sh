@@ -18,7 +18,7 @@ ln -s /experiment-optimisation /optimisation
 export QWEN_DRAFT_FP32_CONTROL=0
 timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
 export QWEN_DRAFT_FP32_INTERMEDIATES=1
-export TT_METAL_DPRINT_CORES='(0,0)'
+export TT_METAL_DPRINT_CORES='(4,0)'
 export TT_METAL_DPRINT_RISCVS=TR0
 export TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC=1
 status=0

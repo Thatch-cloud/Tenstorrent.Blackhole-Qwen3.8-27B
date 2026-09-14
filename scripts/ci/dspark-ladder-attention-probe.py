@@ -37,6 +37,7 @@ def main():
     if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') != '1':
         raise ValueError('Rebuilt ladder statistics factory required')
     context = int(context_text)
+    diagnostic_row, diagnostic_column = (3, 0) if '--hardware' in sys.argv else (8, 116)
     fixture = geometry(context)
     smoke = os.environ.get('QWEN_LADDER_SCORE_SMOKE', '0')
     if smoke not in ('0', '1') or (smoke == '1' and context != 128):
@@ -49,7 +50,7 @@ def main():
             value = dict(value, scope=__doc__, ladder_geometry=fixture,
                 score_center_smoke=smoke == '1',
                 stage_instrumented=context == 65536, performance_qualified=False,
-                stage_coordinates=dict(row=8, column=116) if context == 65536 else None,
+                stage_coordinates=dict(row=diagnostic_row, column=diagnostic_column) if context == 65536 else None,
                 value_diagnostics_enabled=diagnostics == '1',
                 sum_unpack_mode='native-tf32',
                 sum_update_mode='tr0-scalar-fp32' if context == 65536 else 'native',
@@ -71,7 +72,7 @@ def main():
         probe.__file__ = str(Path(__file__).resolve())
         with scalar_reciprocal(), patch.object(dspark_stats_pack, 'SELECTOR_ASSERT', selector_assert()), \
                 scalar_sum_update(), \
-                (stage_snapshots(row=8, column=116) if context == 65536 else nullcontext()), \
+                (stage_snapshots(row=diagnostic_row, column=diagnostic_column) if context == 65536 else nullcontext()), \
                 scalar_score_center(key_tiles=40 if smoke == '1' else 2112), \
                 patch.object(dspark_attention_value_diagnostics, 'KINDS',
                     dspark_attention_value_diagnostics.KINDS if diagnostics == '1' else ()), \
