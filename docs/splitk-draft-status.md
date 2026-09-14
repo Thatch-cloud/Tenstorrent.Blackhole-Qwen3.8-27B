@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34905622466 passes in original key order: four eager checks, four exact replay checks, three adapter calls, and the native target gate; both scopes close cleanly. Next use two 256-key partitions and up to two workers per KV lane to exercise cross-core softmax merging on the same 512-key fixture. No arithmetic, tolerance, target-gate or timeout changes. This is still simulator correctness, not a TG measurement.
+
 Run 34905137219 is green: four eager numerical checks, four exact replay checks, exactly three Python adapter calls, and the native target-attention gate all pass; both scopes close cleanly. This validates the isolated striped single-partition diagnostic only. Next remove key striping while retaining the 512-key partition, one worker per KV lane, FP32 arithmetic changes and all correctness gates. Original-order correctness must pass before restoring parallel split-K and measuring the combined runtime on hardware.
 
 Run 34904225195 passes draft numerical/replay checks and the native target gate with clean close after the isolation fix. The final wrapper fails because it incorrectly requires at least four Python adapter calls: the fixture performs two eager calls plus one capture; replay executes the device trace without a Python adapter call. Require exactly three calls, retaining all per-chip numerical and replay checks. This remains a striped, single-partition simulator diagnostic, not multicore or performance acceptance.
