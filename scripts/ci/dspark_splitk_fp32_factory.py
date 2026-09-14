@@ -46,4 +46,20 @@ def transform(source):
             f'        add_cb(CBIndex::c_{index}, statistics_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
             '    } else {\n    ' + before + '\n    }')
         source = source.replace(before, after)
+    return promote_tree_transfers(source)
+
+
+TREE_BUFFERS = {6: 'statistics_tiles', 7: 'statistics_tiles', 16: 'out_tiles',
+    17: 'statistics_tiles', 18: 'statistics_tiles', 19: 'intermed_output_tiles', 21: 'statistics_tiles'}
+
+
+def promote_tree_transfers(source):
+    for index, count in TREE_BUFFERS.items():
+        before = f'add_cb(CBIndex::c_{index}, {count} * stats_tile_size, stats_df, stats_tile_size, &stats_tile);'
+        if source.count(before) != 1:
+            raise ValueError('Exact tree transfer buffer required')
+        after = ('if (qwen_splitk_fp32) {\n'
+            f'        add_cb(CBIndex::c_{index}, {count} * im_tile_size, im_df, im_tile_size, &im_tile);\n'
+            '    } else {\n        ' + before + '\n    }')
+        source = source.replace(before, after)
     return source
