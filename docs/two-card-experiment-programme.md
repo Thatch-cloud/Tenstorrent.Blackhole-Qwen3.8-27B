@@ -1,5 +1,24 @@
 # Qwen3.8-27B: two-card experiment programme
 
+## Current combined-runtime position - 2026-09-14
+
+| One offline coding stream | CTX | PP tok/s | Committed TG tok/s | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| Earlier optimized T16 runtime | 4096 | 3279.29 | 106.58 | Repeated short EOS fixture |
+| Earlier optimized T16 runtime | 8192 | 3304.32 | 101.59 | Repeated short EOS fixture |
+| Full-history mask/SFPU + folded T16 | 65536 | 2629.74 | 11.83 | `34832226545`; two exact 135-token EOS responses |
+
+These are different runtime configurations, not a matched context-scaling curve.
+The 64K measurement finishes in 5m34s. Its mixed-kernel simulator takes 134 seconds
+and its combined correctness audit 343 seconds. Runs retain an eight-minute
+execution cap, excluding queue time. Serving defaults are unchanged.
+
+Next: attack the dominant 443 ms draft cost through FP32 staging, then measure
+the complete combined runtime again. Do not count a kernel-only gain as TG.
+The remaining context ladder (including 131K/262K capacity), concurrency and
+held-out coding acceptance remain open; **200 committed TG is not achieved**.
+See [the current evidence and failure analysis](context-ladder-investigation.md).
+
 ## Matched short-output combined runtime - 2026-09-12
 
 ### Wider GDN output grid: exact, slower

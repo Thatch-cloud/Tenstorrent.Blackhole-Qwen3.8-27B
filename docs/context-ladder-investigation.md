@@ -1270,3 +1270,33 @@ scratch buffers; other translation units receive the exact pinned native header.
 The new tiny simulator test compiles and checks both draft attention and folded
 target attention while that same header is installed. It must pass before the
 combined hardware audit is retried.
+
+### Folded verifier: combined result
+
+Mixed-header simulator `34830639528` passes in 134 seconds. Combined audit
+`34831200764` (`9864924`) passes in 343 seconds, including an actual T16 block,
+all five capture buckets, exact target output/state, and per-block proposal and
+publication checks. Full-response run `34832226545` (`eeff7c0`) then passes in
+334 seconds with clean shutdown. All 955 recorded script hashes were verified.
+
+| Runtime | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Previous mask/SFPU with native target attention | 2622.59 | 65536 | 11.1557 |
+| Mask/SFPU with folded T16 target attention | 2629.74 | 65536 | 11.8252 |
+
+Two 256-token-budget requests each commit 135 tokens and reach EOS. They match
+native target output, active/inactive state, the audited prefix and each other's
+proposal history. Acceptance stays 116/300 per request. The 6.00% TG gain is a
+historical comparison, not a fresh interleaved A/B or held-out coding acceptance.
+
+Mean block costs: draft **443.49 ms**, verification/readback **81.37 ms**,
+selection/commit **44.40 ms**, complete cycle **570.75 ms**. Verification drops
+from 117.78 ms and wide blocks require zero singleton-position uploads. Drafting
+still consumes about 78% of the cycle. The next high-value kernel experiment is
+FP32 score/sum staging: replace the dummy conversion plus 1024-word scalar copy
+with direct full-precision unpack/pack, retaining the source CB's normal matmul
+configuration. This remains a hypothesis, not an implemented speedup.
+
+The full target context and serving defaults remain unchanged. The 200 TG goal,
+remaining context ladder and concurrency/held-out coding gates are still open.
+Report SHA256: `a504802fdeb1c7f4bc62ef2d393973d6f2d0e5e9924b00d587faf359b0547b02`.

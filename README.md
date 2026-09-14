@@ -9,12 +9,12 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest combined result: 64K context reaches 11.16 committed tok/s**, up from
+**Latest combined result: 64K context reaches 11.83 committed tok/s**, up from
 4.39 on the previous native 64K runtime. SFPU score centering removes scalar
 work from the draft attention path. Two full-budget requests each commit 135
 tokens and reach EOS, with exact output and final-state checks. Hardware run
-[34826937360](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34826937360)
-finishes in 5m28s. Exact mask handling improves on the previous 9.33 TG;
+[34832226545](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34832226545)
+finishes in 5m34s. Folded T16 verification improves on the previous 11.16 TG;
 this is a historical comparison, not a matched A/B. Both drafting and verification
 still need substantial improvements to reach the target.
 
@@ -27,7 +27,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
-| One stream, batch 1, 135-token EOS response | 65536 | 2622.59 | 11.16 | Two exact combined requests; native 64K runtime |
+| One stream, batch 1, 135-token EOS response | 65536 | 2629.74 | 11.83 | Two exact combined requests; folded T16 + mask/SFPU runtime |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 
