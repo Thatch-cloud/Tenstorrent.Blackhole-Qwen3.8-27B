@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34896117815 did not execute the new sum arithmetic: its extra BF16 probability copy exceeded L1 by 11,136 bytes (1,584,000 required versus 1,572,864 available). The revised diagnostic streams one 32-query tile-row through the scratch buffer, reducing allocation from 128 KiB to 32 KiB at the same 512-key geometry. It retains all four tile-rows and the FP32 input used by value matmul. Local transform tests pass; allocation and correctness still require simulator verification.
+
 Run 34895661245 provides the first stage-value localization (single worker, single partition; failed, not hardware-admitted):
 
 | Chip 0, first folded row | Observed | Interpretation |

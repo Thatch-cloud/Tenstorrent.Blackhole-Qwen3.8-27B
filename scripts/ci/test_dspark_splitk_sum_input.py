@@ -15,7 +15,9 @@ SOURCE = '''    constexpr uint32_t cb_qk_im = tt::CBIndex::c_24;
 class SumInputTests(unittest.TestCase):
     def test_preserves_original_for_value_matmul(self):
         result = transform(SOURCE)
-        self.assertIn('move_block<false>(cb_qk_im, cb_exponent_sum, qk_chunk_tiles_dynamic);', result)
+        self.assertIn('copy_tile(cb_qk_im, row * Sk_chunk_t_dynamic + column, 0);', result)
+        self.assertIn('row < Sq_chunk_t', result)
+        self.assertIn('reserve_back(Sk_chunk_t_dynamic)', result)
         self.assertIn('matmul_blocks(cb_qk_im, cb_v_in, cb_out_mm);', result)
         self.assertEqual(result.count('CircularBuffer(cb_exponent_sum).pop_front'), 1)
         self.assertEqual(result.count('CircularBuffer(cb_qk_im).pop_front'), 1)
