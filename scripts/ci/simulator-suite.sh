@@ -78,7 +78,7 @@ PY
                 if [ "${QWEN_CENTER_TILE_FILL:-0}" = 1 ]; then score_name=dspark-center-tile-fill; fi
                 if [ "${QWEN_SPLITK_ATTENTION:-0}" = 1 ]; then
                     score_name=dspark-splitk
-                    export TT_METAL_DPRINT_CORES=all
+                    export TT_METAL_DPRINT_CORES='(0,0),(1,0),(2,0),(3,0)'
                 fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
