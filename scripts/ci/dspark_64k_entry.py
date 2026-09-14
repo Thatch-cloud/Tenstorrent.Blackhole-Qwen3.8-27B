@@ -78,8 +78,8 @@ def run(main):
     target_scope = nullcontext()
     target_request = os.environ.get('QWEN_TARGET_T16_64K_REQUEST', '0')
     if (target_request not in ('0', '1') or target_request == '1'
-            and (request_screen != '1' or timed_requests != '0' or mask_bits != '1')):
-        raise ValueError('Folded 64K verifier requires the isolated audited combined mask runtime')
+            and ((request_screen, timed_requests) not in (('1', '0'), ('0', '1')) or mask_bits != '1')):
+        raise ValueError('Folded 64K verifier requires its isolated audited or qualified timed runtime')
     if target_request == '1':
         from target_t16_64k_request import request_scope
         target_scope = request_scope(directory)
@@ -94,6 +94,8 @@ def run(main):
             from dspark_sum_timed_requests import timed_scope
         if mask_bits == '1':
             from dspark_mask_timed_requests import timed_scope
+        if target_request == '1':
+            from target_t16_64k_timed import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope

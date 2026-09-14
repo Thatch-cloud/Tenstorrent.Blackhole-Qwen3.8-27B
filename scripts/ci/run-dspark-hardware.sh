@@ -9,9 +9,9 @@ phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
 target_request=${QWEN_TARGET_T16_64K_REQUEST:-0}
 [[ "$target_request" = 0 || "$target_request" = 1 ]]
 if [ "$target_request" = 1 ]; then
-    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 && "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0 || \
+       "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 0 && "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]
     test "${QWEN_DSPARK_MASK_BITS:-0}" = 1
-    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
     test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 0
     target_request_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-target64-request.XXXXXX")
     gh run download 34828634864 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
@@ -96,6 +96,10 @@ if [ "$timed_requests" = 1 ]; then
         screen_run=34825996484
         timing_gate=dspark_mask_timed_requests
         cp "$mask_hardware_evidence/dspark-mask-bits-hardware.json" "$request_evidence/dspark-mask-bits-hardware.json"
+    fi
+    if [ "$target_request" = 1 ]; then
+        screen_run=34831200764
+        timing_gate=target_t16_64k_timed
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "qwen-hardware-inventory-$screen_run" --dir "$screen_evidence"
