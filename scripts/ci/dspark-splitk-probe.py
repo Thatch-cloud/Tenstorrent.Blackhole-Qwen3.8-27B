@@ -31,10 +31,10 @@ def main():
 
     def execute(*args, **kwargs):
         nonlocal audited
-        kwargs.update(key_chunk_size=256, max_cores_per_head=2, stripe_keys=False, fp32_dest_acc=True)
+        kwargs.update(key_chunk_size=32, max_cores_per_head=16, stripe_keys=False, fp32_dest_acc=True)
         if not audited:
-            print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=256,
-                max_cores_per_head=2, stripe_keys=False, fp32_dest_acc=True,
+            print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=32,
+                max_cores_per_head=16, stripe_keys=False, fp32_dest_acc=True,
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
@@ -69,7 +69,7 @@ def main():
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
-        diagnostic_override=dict(key_chunk_size=256, max_cores_per_head=2, stripe_keys=False,
+        diagnostic_override=dict(key_chunk_size=32, max_cores_per_head=16, stripe_keys=False,
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
             local_denominator_storage='float32', transfer_statistics_storage='bfloat16',
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
@@ -77,7 +77,7 @@ def main():
             temporary_per_row_sum_audit=False,
             local_numerator_add='native-fpu',
             probability_rounding='unchanged-fp32-exponent-storage',
-            purpose='validate two-worker merging with FP32 local denominators and original key order'))
+            purpose='validate sixteen-worker split-K with original key order and masked partitions'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
