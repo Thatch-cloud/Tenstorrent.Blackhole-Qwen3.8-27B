@@ -40,7 +40,7 @@ class BitwiseScoreTests(baseline.ScoreCenterTests):
         suite = (directory / 'simulator-suite.sh').read_text()
         start = suite.index('if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then',
             suite.index('export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000'))
-        end = suite.index('fi', start)
+        end = suite.index('\n            fi', start)
         branch = suite[start:end]
         self.assertIn('timeout -k 15 165', branch)
         self.assertIn('exit 0', branch)

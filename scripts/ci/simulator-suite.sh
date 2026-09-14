@@ -50,7 +50,9 @@ PY
             build_started=$SECONDS
             printf 'ladder build started %s\n' "$(date -u +%FT%TZ)"
             if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then
-                timeout -k 15 330 python3 -u /experiment-scripts/ci/dspark_sim_build_cache.py
+                build_script=dspark_sim_build_cache.py
+                if [ "${QWEN_SCORE_SFPU:-0}" = 1 ]; then build_script=dspark_score_sfpu_build.py; fi
+                timeout -k 15 330 python3 -u "/experiment-scripts/ci/$build_script"
             else
                 timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
             fi
@@ -59,9 +61,11 @@ PY
             unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
             export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000
             if [ "${QWEN_SCORE_BITWISE:-0}" = 1 ]; then
+                score_name=dspark-score-bitwise
+                if [ "${QWEN_SCORE_SFPU:-0}" = 1 ]; then score_name=dspark-score-sfpu; fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
-                    /experiment-scripts/ci/dspark-score-bitwise-probe.py \
-                    --output /experiment/results/dspark-score-bitwise.json
+                    "/experiment-scripts/ci/$score_name-probe.py" \
+                    --output "/experiment/results/$score_name.json"
                 exit 0
             fi
             smoke_status=0

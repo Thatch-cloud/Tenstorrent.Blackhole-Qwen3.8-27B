@@ -6,6 +6,36 @@ from unittest.mock import patch
 import native_draft_sdpa
 
 
+@contextmanager
+def factory_scope():
+    import dspark_ladder_build
+
+    original = dspark_ladder_build.factory_transform
+
+    def transformed(source, *, reverse=False):
+        if reverse:
+            return original(factory_transform(source, reverse=True), reverse=True)
+        return factory_transform(original(source))
+
+    with patch.object(dspark_ladder_build, 'factory_transform', transformed):
+        yield
+
+
+@contextmanager
+def kernel_scope():
+    import dspark_ladder_score_center
+
+    original = dspark_ladder_score_center.scalar_score_center
+
+    @contextmanager
+    def centered(key_tiles=2112):
+        with original(key_tiles=key_tiles), sfpu_score_center(key_tiles=16 if key_tiles == 40 else key_tiles):
+            yield
+
+    with patch.object(dspark_ladder_score_center, 'scalar_score_center', centered):
+        yield
+
+
 HELPER = r'''
 void qwen_prepare_center_scratch(uint32_t maxima_cb, uint32_t scratch_cb) {
     CircularBuffer(maxima_cb).wait_front(1);
