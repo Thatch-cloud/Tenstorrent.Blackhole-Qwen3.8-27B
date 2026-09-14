@@ -31,10 +31,10 @@ def main():
 
     def execute(*args, **kwargs):
         nonlocal audited
-        kwargs.update(key_chunk_size=512, max_cores_per_head=1, stripe_keys=True, fp32_dest_acc=True)
+        kwargs.update(key_chunk_size=512, max_cores_per_head=1, stripe_keys=False, fp32_dest_acc=True)
         if not audited:
             print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=512,
-                max_cores_per_head=1, stripe_keys=True, fp32_dest_acc=True,
+                max_cores_per_head=1, stripe_keys=False, fp32_dest_acc=True,
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
             audited = True
@@ -69,12 +69,12 @@ def main():
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
-        diagnostic_override=dict(key_chunk_size=512, max_cores_per_head=1, stripe_keys=True,
+        diagnostic_override=dict(key_chunk_size=512, max_cores_per_head=1, stripe_keys=False,
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             probability_rounding='unchanged-fp32-exponent-storage',
-            purpose='retain precise exponents while investigating reduction accuracy'))
+            purpose='validate original key order before parallel split-K execution'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
