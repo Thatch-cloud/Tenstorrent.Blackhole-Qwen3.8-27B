@@ -16,6 +16,9 @@ def summarize_variants(requests):
         expected = 1 + len(value['blocks']) if value.get('instrumented_timing') is True else 0
         if len(checks) != expected or any(check.get('exact') is not True or check.get('tensors') != 20 for check in checks):
             raise ValueError('Complete captured publication correctness checks required')
-        if value.get('prompt_tokens') != 65536:
+        tokens = value.get('prompt_tokens')
+        if (not isinstance(tokens, list) or len(tokens) != 65536
+                or any(type(token) is not int or token < 0 for token in tokens)
+                or value.get('length') != 65536):
             raise ValueError('Exact 64K context required in both arms')
     return summarize_norm(requests)

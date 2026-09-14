@@ -1020,3 +1020,26 @@ For the 64K experiment it executes before the first audit, still before fresh
 prefill resets model state. This surfaces warmup failures earlier without
 removing either audit or changing the A/B/B/A timed comparison. Twelve local
 request tests pass; a hardware retry must validate the corrected trace reuse.
+
+### Run 34803729259: complete measurements recovered after summary schema error
+
+All six requests completed. CI failed only when the 64K summary compared
+`prompt_tokens` (the token-ID list) with integer 65536. The corrected check
+requires a 65536-element integer list and matching `length`. Local reprocessing
+of the retained report passes all existing publication, output/state, proposal
+repeatability, norm-loader and A/B/B/A checks. The original CI result remains
+failed; the raw artifact is not modified or relabelled.
+
+| CTX | Mode | PP input tok/s | Committed TG tok/s | Timed requests |
+| --- | --- | ---: | ---: | ---: |
+| 65536 | Single-stream control, native target attention | 2591.52 | 4.38 | 2 |
+| 65536 | Single-stream norm-scatter, native target attention | 2589.66 | 4.39 | 2 |
+
+Each timed request has 135 committed decode tokens. Acceptance is 38.67%; the
+scatter change is +0.395%, not a meaningful demonstrated speedup from this small
+sample. This runtime is far below the 200 tok/s target. Timed log samples show
+roughly 1.38 seconds drafting versus 120 ms verification/readback and 40 ms
+selection/commit per block. Unlike the expensive audit timings, these establish
+that the draft path itself is slow. No held-out quality or serving qualification
+is claimed. Next optimisation must address the 64K draft execution path rather
+than repeat the norm-reader comparison or attribute all delay to audit overhead.
