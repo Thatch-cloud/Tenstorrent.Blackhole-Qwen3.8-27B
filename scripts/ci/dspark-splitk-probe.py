@@ -67,6 +67,7 @@ def main():
             'dspark_splitk_fp32_mask.py', 'dspark_splitk_copy_formats.py', 'dspark_splitk_sum_input.py',
             'dspark_splitk_final_input.py', 'dspark_splitk_precise_exp.py', 'dspark_splitk_output_rounding.py',
             'dspark_splitk_reciprocal_storage.py',
+            'dspark_splitk_sum_audit.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
