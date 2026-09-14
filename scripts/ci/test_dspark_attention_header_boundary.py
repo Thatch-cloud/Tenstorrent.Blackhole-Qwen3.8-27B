@@ -12,7 +12,7 @@ class HeaderTests(unittest.TestCase):
     def test_draft_math_and_native_header_are_preserved_and_reversible(self):
         from dspark_ladder_factory import scoped_stats_pack
         from dspark_ladder_sum_update import scalar_sum_update
-        from dspark_ladder_score_center import scalar_score_center
+        import dspark_ladder_score_center
         from dspark_mask_bits import mask_scope
         from dspark_score_bitwise import bitwise_infinity_checks
         from dspark_score_sfpu import kernel_scope
@@ -28,7 +28,7 @@ class HeaderTests(unittest.TestCase):
             for name, source in sources.items():
                 (directory / name).write_bytes(source)
             with mask_scope(), sum_scope(), small_score_fixture(), bitwise_infinity_checks(), kernel_scope(), \
-                    scalar_sum_update(), scalar_score_center(key_tiles=40), scoped_stats_pack():
+                    scalar_sum_update(), dspark_ladder_score_center.scalar_score_center(key_tiles=40), scoped_stats_pack():
                 unguarded = native_draft_sdpa.patched_sources(sources)
                 with boundary_scope(temporary):
                     guarded = native_draft_sdpa.patched_sources(sources)
