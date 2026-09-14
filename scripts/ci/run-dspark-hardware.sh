@@ -6,6 +6,17 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+center_tile_fill=${QWEN_DSPARK_CENTER_TILE_FILL:-0}
+[[ "$center_tile_fill" = 0 || "$center_tile_fill" = 1 ]]
+if [ "$center_tile_fill" = 1 ]; then
+    test "${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    center_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-center-fill.XXXXXX")
+    gh run download 34840912016 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34840912016 --dir "$center_evidence"
+    cp "$center_evidence/dspark-center-tile-fill.json" scripts/ci/dspark-center-tile-fill.json
+    PYTHONPATH=scripts/ci python3 -c 'from dspark_center_fill_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-center-tile-fill.json")'
+fi
 normalization_direct_stage=${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}
 [[ "$normalization_direct_stage" = 0 || "$normalization_direct_stage" = 1 ]]
 if [ "$normalization_direct_stage" = 1 ]; then
@@ -369,6 +380,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MASK_BITS=$mask_bits" \
     -e "QWEN_DSPARK_DIRECT_FP32_STAGE=$direct_fp32_stage" \
     -e "QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
+    -e "QWEN_DSPARK_CENTER_TILE_FILL=$center_tile_fill" \
     -e "QWEN_DSPARK_SFPU_REQUEST_SCREEN=$request_screen" \
     -e "QWEN_DSPARK_SFPU_TIMED=$timed_requests" \
     -e "QWEN_DSPARK_SFPU_NUMERICAL=$sfpu_numerical" \
