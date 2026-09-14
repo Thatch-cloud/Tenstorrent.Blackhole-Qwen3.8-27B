@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import sys
+import subprocess
 from unittest.mock import patch
 
 import dspark_score_bitwise
@@ -25,6 +26,7 @@ def main():
     output = Path(sys.argv[sys.argv.index('--output') + 1])
     original_entrypoint = dspark_score_bitwise.candidate_entrypoint
     original_execute = dspark_splitk_attention.execute_folded
+    original_run = subprocess.run
     audited = False
 
     def execute(*args, **kwargs):
@@ -43,7 +45,19 @@ def main():
     def entrypoint(unused_script):
         return original_entrypoint(Path(__file__).resolve())
 
+    def run(*args, **kwargs):
+        command = args[0] if args else kwargs.get('args')
+        if isinstance(command, (list, tuple)) and len(command) > 1 and Path(command[1]).name == 'target-t16-attention-64k-probe.py':
+            environment = dict(kwargs.get('env', os.environ))
+            for name in ('TT_METAL_DPRINT_CORES', 'TT_METAL_DPRINT_RISCVS',
+                    'TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC', 'TT_METAL_DPRINT_FILE'):
+                environment.pop(name, None)
+            kwargs['env'] = environment
+            print(json.dumps(dict(stage='splitk-target-gate', draft_diagnostics_inherited=False)), flush=True)
+        return original_run(*args, **kwargs)
+
     with unfused_correction_scope(), splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint), \
+            patch.object(subprocess, 'run', side_effect=run), \
             patch.object(dspark_splitk_attention, 'execute_folded',
                 wraps=execute) as execution:
         runpy.run_path(str(directory / 'dspark-center-tile-fill-probe.py'), run_name='__main__')
