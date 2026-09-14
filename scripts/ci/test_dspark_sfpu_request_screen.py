@@ -1,7 +1,8 @@
 from copy import deepcopy
 import unittest
+from unittest.mock import Mock
 
-from dspark_sfpu_request_screen import summarize_screen
+from dspark_sfpu_request_screen import measure_bounded, summarize_screen
 
 
 def request():
@@ -17,6 +18,17 @@ def request():
 
 
 class ScreenTests(unittest.TestCase):
+    def test_short_generation_preserves_allocation_and_audit_contract(self):
+        measure = Mock(return_value='result')
+        self.assertEqual(measure_bounded(measure, 'model', max_new_tokens=256,
+            audit_features=True, captured_publication=True), 'result')
+        measure.assert_called_once_with('model', max_new_tokens=32,
+            audit_features=True, captured_publication=True)
+        for options in (dict(max_new_tokens=32, audit_features=True),
+                dict(max_new_tokens=256, audit_features=False)):
+            with self.assertRaises(ValueError):
+                measure_bounded(measure, **options)
+
     def test_screen_cannot_publish_throughput(self):
         result = summarize_screen([request()])
         self.assertTrue(result['correctness_screen_passed'])

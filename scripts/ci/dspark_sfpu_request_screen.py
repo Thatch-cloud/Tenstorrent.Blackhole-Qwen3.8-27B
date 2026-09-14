@@ -50,9 +50,11 @@ def summarize_screen(requests):
 def screen_scope(directory):
     import dspark_64k_variants
     import dspark_request_experiment
+    import full_dspark_request
 
     admission = qualify(directory, Path(directory) / 'dspark-score-sfpu-hardware.json')
     original = dspark_request_experiment.run_loaded_requests
+    original_measure = full_dspark_request.measure_dspark_request
     signature = inspect.signature(original)
 
     def run(*args, **kwargs):
@@ -61,15 +63,25 @@ def screen_scope(directory):
                 or bound.arguments.get('norm_scatter_variants') is not True
                 or bound.arguments.get('captured_publication') is not True):
             raise ValueError('Isolated 64K captured scatter request required')
-        bound.arguments['max_new_tokens'] = 32
         result = original(*bound.args, **bound.kwargs)
         bound.arguments['report'].update(scope=__doc__, diagnostic_only=True,
             full_request_passed=False, performance_qualified=False,
             sfpu_numerical_admission=admission, correctness_screen_passed=True,
+            allocated_output_budget=256, request_output_limit=32,
             pp=None, committed_tg=None)
         return result
 
+    def measure(*args, **kwargs):
+        return measure_bounded(original_measure, *args, **kwargs)
+
     with patch.object(dspark_64k_variants, 'SCHEDULE', (('scatter', True),)), \
             patch.object(dspark_64k_variants, 'summarize_variants', summarize_screen), \
+            patch.object(full_dspark_request, 'measure_dspark_request', measure), \
             patch.object(dspark_request_experiment, 'run_loaded_requests', run):
         yield
+
+
+def measure_bounded(measure, *args, **kwargs):
+    if kwargs.get('max_new_tokens') != 256 or kwargs.get('audit_features') is not True:
+        raise ValueError('Reserved 256-token capacity and complete feature audits required')
+    return measure(*args, **dict(kwargs, max_new_tokens=32))
