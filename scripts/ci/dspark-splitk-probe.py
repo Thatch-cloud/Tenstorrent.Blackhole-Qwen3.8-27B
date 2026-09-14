@@ -50,7 +50,7 @@ def main():
         if execution.call_count < 4:
             raise ValueError('Split-K adapter must execute every eager fixture, not the old candidate')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-precise-exponent-diagnostic', performance_qualified=False,
+    report.update(candidate='native-decode-precise-exponent-rounded-output-diagnostic', performance_qualified=False,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
@@ -63,7 +63,7 @@ def main():
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
             'dspark_splitk_fp32_mask.py', 'dspark_splitk_copy_formats.py', 'dspark_splitk_sum_input.py',
-            'dspark_splitk_final_input.py', 'dspark_splitk_precise_exp.py',
+            'dspark_splitk_final_input.py', 'dspark_splitk_precise_exp.py', 'dspark_splitk_output_rounding.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
