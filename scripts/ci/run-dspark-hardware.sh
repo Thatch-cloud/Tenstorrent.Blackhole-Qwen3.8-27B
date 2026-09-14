@@ -6,6 +6,16 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+target_64k=${QWEN_TARGET_T16_64K:-0}
+[[ "$target_64k" = 0 || "$target_64k" = 1 ]]
+if [ "$target_64k" = 1 ]; then
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    target_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-target64.XXXXXX")
+    gh run download 34828115400 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34828115400 --dir "$target_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from target_t16_64k_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+        "$target_evidence/target-t16-attention-64k.json"
+fi
 score_sfpu=${QWEN_DSPARK_SCORE_SFPU:-0}
 sum_sfpu=${QWEN_DSPARK_SUM_SFPU:-0}
 mask_bits=${QWEN_DSPARK_MASK_BITS:-0}
@@ -284,6 +294,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
+    -e "QWEN_TARGET_T16_64K=$target_64k" \
     -e "QWEN_DSPARK_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_DSPARK_SCORE_SFPU=$score_sfpu" \
     -e "QWEN_DSPARK_SUM_SFPU=$sum_sfpu" \
