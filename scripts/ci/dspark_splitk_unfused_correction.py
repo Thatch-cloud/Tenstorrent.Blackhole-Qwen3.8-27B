@@ -98,7 +98,7 @@ def unfused_correction_scope():
         raise ValueError('Unfused correction remains simulator-only')
     path = Path(os.environ['TT_METAL_HOME']) / HEADER
     original = path.read_bytes()
-    replacement = transform(original.decode()).encode()
+    replacement = guard_candidate(original.decode(), transform(original.decode())).encode()
     print(json.dumps(dict(stage='splitk-unfused-correction',
         original_sha256=hashlib.sha256(original).hexdigest(),
         patched_sha256=hashlib.sha256(replacement).hexdigest())), flush=True)
@@ -107,3 +107,7 @@ def unfused_correction_scope():
         yield
     finally:
         path.write_bytes(original)
+
+
+def guard_candidate(original, candidate):
+    return '#if defined(QWEN_SPLITK_NATIVE_EXPERIMENT)\n' + candidate + '\n#else\n' + original + '\n#endif\n'

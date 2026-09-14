@@ -20,6 +20,11 @@ def transform(source):
         ('    const tt::DataFormat im_df = tt::DataFormat::Float16_b;\n'
          '    const tt::DataFormat stats_df = tt::DataFormat::Float16_b;', precision),
         ('    compute_desc.config = ComputeConfigDescriptor{', modes),
+        ('    compute_desc.defines = std::move(compute_defines_vec);',
+         '    compute_desc.defines = std::move(compute_defines_vec);\n'
+         '    if (qwen_splitk_fp32) {\n'
+         '        compute_desc.defines.emplace_back("QWEN_SPLITK_NATIVE_EXPERIMENT", "1");\n'
+         '    }'),
         ('    add_cb(CBIndex::c_24, qk_tiles * im_tile_size, im_df, im_tile_size, &im_tile);',
          '    add_cb(CBIndex::c_24, qk_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
          '    if (qwen_splitk_fp32) {\n'
