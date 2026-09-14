@@ -38,4 +38,12 @@ def transform(source):
         if source.count(before) != 1:
             raise ValueError('Exact decode factory anchor required')
         source = source.replace(before, after)
+    for index in (29, 30):
+        before = f'    add_cb(CBIndex::c_{index}, statistics_tiles * stats_tile_size, stats_df, stats_tile_size, &stats_tile);'
+        if source.count(before) != 1:
+            raise ValueError('Exact local denominator buffer required')
+        after = ('    if (qwen_splitk_fp32) {\n'
+            f'        add_cb(CBIndex::c_{index}, statistics_tiles * im_tile_size, im_df, im_tile_size, &im_tile);\n'
+            '    } else {\n    ' + before + '\n    }')
+        source = source.replace(before, after)
     return source

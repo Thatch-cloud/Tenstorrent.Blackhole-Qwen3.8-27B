@@ -71,6 +71,7 @@ def main():
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
         diagnostic_override=dict(key_chunk_size=256, max_cores_per_head=1, stripe_keys=False,
             fp32_dest_acc=True, score_storage='float32', statistics_storage='bfloat16',
+            local_denominator_storage='float32', transfer_statistics_storage='bfloat16',
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             temporary_per_row_sum_audit=False,
@@ -86,6 +87,7 @@ def main():
             'dspark_splitk_sum_audit.py',
             'dspark_splitk_merge_exp.py',
             'dspark_splitk_accumulator_add.py',
+            'dspark_splitk_denominator.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
