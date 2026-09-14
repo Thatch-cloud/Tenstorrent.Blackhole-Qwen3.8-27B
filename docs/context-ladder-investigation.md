@@ -1399,3 +1399,29 @@ records, including an optional fence that separates queued update work from
 replay. Label instrumented requests separately from clean timing. Do not infer
 that the entire 344 ms draft timer is attention-kernel compute.
 Report SHA256: `13961b5ce710eb3f002a57350c3f0cca09d3fe87d4154707f502d9f875b5bcc5`.
+
+### Combined draft phase attribution
+
+Run `34843765328` passes both complete 64K requests with exact output/state and
+clean close. Its summary recomputes exactly and all 986 script hashes match.
+The third sampled proposal in each request fences updates before replay:
+
+| Request | Input/history update, fenced ms | Blocking replay ms | Token readback ms | Total draft ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 6.19 | 337.41 | 0.35 | 343.97 |
+| 2 | 5.37 | 337.37 | 0.47 | 343.22 |
+
+About 98% of these draft times is blocking replay. Unfenced samples measure
+338.67–340.58 ms in replay and 2.25–8.96 ms in updates; queued updates explain
+only a few milliseconds. Host input generation, history uploads and readback
+are not the main 64K bottleneck. Replay includes all captured draft operations,
+not just attention, so this does not yet identify the expensive device kernels.
+Instrumented PP/TG are separated from clean benchmark fields (which are null).
+
+Next: bounded device-profiler attribution of the actual prepared proposal trace
+inside this combined runtime, not the older short-context profile route. Preserve
+the eight-minute cap and unchanged kernel configuration. Inspect attention,
+history concat/padding, projections and Markov selection before another math
+change; if profiler compilation exceeds the cap, report it rather than widening
+the timeout or running an hour-long simulator request.
+Report SHA256: `d5bbb18550dd29c153131562e28d46f3fd597277af73ba938f9e8580e6cdab64`.
