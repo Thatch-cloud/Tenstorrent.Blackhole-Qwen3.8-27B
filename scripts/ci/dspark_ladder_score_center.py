@@ -32,6 +32,7 @@ void qwen_scalar_score_transform(uint32_t scores_cb, uint32_t operand_cb, uint32
                     scores[offset] = scores[offset] + converted.value;
                 } else {
                     const volatile float* maxima = reinterpret_cast<const volatile float*>(operand_address);
+                    if (scores[offset] == -__builtin_inff() && maxima[first] == -__builtin_inff()) continue;
                     scores[offset] = scores[offset] - maxima[first];
                 }
             }

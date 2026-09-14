@@ -78,6 +78,12 @@ int main() {
         if(mask[index]!=(index%3==0?0xff80:0)) return 7;
     }
     if(popped[0]!=0 || popped[2]!=0 || popped[1]!=(COMPILE_FOR_TRISC==0?4u:0u)) return 8;
+    for(uint32_t index=0;index<4096;++index) scores[index]=-__builtin_inff();
+    for(uint32_t index=0;index<2048;++index) maxima[index]=-__builtin_inff();
+    qwen_scalar_score_transform(0,2,4,2,false);
+    for(uint32_t index=0;index<4096;++index) {
+        if(!std::isinf(scores[index]) || scores[index]>0) return 10;
+    }
     return munmap(memory,32768)==0?0:9;
 }
 '''
