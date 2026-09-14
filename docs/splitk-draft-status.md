@@ -20,6 +20,8 @@ The last simulator report has 65,188 failing elements, maximum absolute error 14
 
 ## Next diagnostic
 
+Run 34898037968 locates the remaining gross error in reciprocal calculation: chip 0 denominator 1.203125 becomes reciprocal 29.125 (expected about 0.83117), then the BF16 numerator -59.5 correctly multiplies to about -1736. Source inspection finds the diagnostic paired `recip_tile_first_column<false>` with default `recip_tile_init()` (legacy mode true). The next candidate changes initialization to `<false>` to match calculation; it does not change buffers, geometry, tolerances or downstream multiplication. This is a concrete mismatch in our diagnostic, not a validated native-runtime defect.
+
 Run 34897663062 remains finite but inaccurate after BF16 numerator staging (first output -1736 versus -49.758987). That conversion is not sufficient. Next instrument the post-reciprocal denominator, copied numerator and post-multiply output independently, keeping arithmetic unchanged, to distinguish reciprocal corruption from multiplication/output transfer. No hardware admission.
 
 Run 34896898132 fits L1 and removes the observed alternating zero sums. Chip 0 sums are now 1.203125, 1.1171875, 1.234375, 1.234375; first numerator remains about -59.47361. All reported outputs are finite, but the first output is -1728 rather than -49.758987. The final normalization/output path is therefore still incorrect even relative to its own numerator and denominator. The next candidate copies the numerator into existing BF16 c16 scratch before final broadcast normalization, with no extra allocation and no changes to score or value matmul. This remains an accuracy diagnostic, not runtime qualification.

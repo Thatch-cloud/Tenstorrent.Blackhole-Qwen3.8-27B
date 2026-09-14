@@ -49,7 +49,7 @@ def transform(source):
                 CircularBuffer denominator(cb_prev_sum);
                 reconfig_data_format_srca(cb_prev_sum);
                 copy_tile_to_dst_init_short(cb_prev_sum);
-                recip_tile_init();
+                recip_tile_init<false>();
                 pack_reconfig_data_format(cb_prev_sum);
                 denominator.wait_front(Sq_chunk_t);
                 for (uint32_t tile = 0; tile < Sq_chunk_t; ++tile) {
