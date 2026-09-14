@@ -1,4 +1,6 @@
 import unittest
+from contextlib import nullcontext
+import os
 from unittest.mock import patch
 
 import target_t16_64k_request as candidate
@@ -22,7 +24,9 @@ class RequestTests(unittest.TestCase):
         original = attention_request_plan.validate_ticket
         policies = dspark_64k_variants.POLICIES
         gate = target_t16_attention_gate.validate_request_option
-        with patch.object(candidate, 'qualify', return_value={'hardware_qualified': True}):
+        with patch.object(candidate, 'qualify', return_value={'hardware_qualified': True}), \
+                patch.object(candidate, 'boundary_scope', return_value=nullcontext()), \
+                patch.dict(os.environ, TT_METAL_HOME='.'):
             with candidate.request_scope('.'):
                 plan = attention_request_plan.capture_plan(65536, 66560, 16, 255, max_verify_rows=16)
                 self.assertEqual({capture.capacity for capture in plan.captures}, {None, 65792})

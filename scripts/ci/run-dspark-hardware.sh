@@ -17,6 +17,10 @@ if [ "$target_request" = 1 ]; then
     gh run download 34828634864 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34828634864 --dir "$target_request_evidence"
     cp "$target_request_evidence/target-t16-attention-64k.json" scripts/ci/target-t16-attention-64k-hardware.json
+    boundary_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-attention-boundary.XXXXXX")
+    gh run download 34830639528 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34830639528 --dir "$boundary_evidence"
+    cp "$boundary_evidence/dspark-attention-boundary.json" scripts/ci/dspark-attention-boundary.json
     PYTHONPATH=scripts/ci python3 -c 'from target_t16_64k_request import qualify; qualify("scripts/ci")'
 fi
 target_64k=${QWEN_TARGET_T16_64K:-0}

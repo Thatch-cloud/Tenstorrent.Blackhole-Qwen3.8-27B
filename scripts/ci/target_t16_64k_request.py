@@ -3,10 +3,12 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 from target_t16_64k_geometry import geometry_scope, validate_ticket
+from dspark_attention_header_boundary import boundary_scope
 
 
 RUN_ID = 34828634864
@@ -14,6 +16,8 @@ REPORT_SHA256 = 'b7991eb7d6c9ffa31eb0c6922456f891419245c5d98943baf665c248df6ac2f
 
 
 def qualify(directory):
+    from dspark_attention_boundary_gate import qualify as qualify_boundary
+    boundary = qualify_boundary(directory, Path(directory) / 'dspark-attention-boundary.json')
     payload = (Path(directory) / 'target-t16-attention-64k-hardware.json').read_bytes()
     if hashlib.sha256(payload).hexdigest() != REPORT_SHA256:
         raise ValueError('Exact completed 64K folded-verifier hardware evidence required')
@@ -34,7 +38,7 @@ def qualify(directory):
         if hashlib.sha256((Path(directory) / name).read_bytes()).hexdigest() != checksum:
             raise ValueError('Hardware-qualified verifier dependency changed: ' + name)
     return dict(run_id=RUN_ID, report_sha256=REPORT_SHA256, hardware_qualified=True,
-        full_request_qualified=False, performance_qualified=False)
+        boundary_admission=boundary, full_request_qualified=False, performance_qualified=False)
 
 
 def validate_request_option(enabled, *, rows, position, remaining, replay, norm_batch,
@@ -61,7 +65,7 @@ def request_scope(directory):
     def validate(start, rows, capacity, *, short_context=False):
         return validate_ticket(start, rows, capacity, short_context=short_context, hardware=True)
 
-    with geometry_scope(hardware=True), \
+    with boundary_scope(os.environ['TT_METAL_HOME']), geometry_scope(hardware=True), \
             patch.object(attention_request_plan, 'validate_ticket', validate), \
             patch.object(dspark_64k_variants, 'POLICIES', policies), \
             patch.object(target_t16_attention_gate, 'validate_request_option', validate_request_option), \
