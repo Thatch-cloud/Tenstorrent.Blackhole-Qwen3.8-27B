@@ -84,8 +84,8 @@ def run(main):
     center_fill = os.environ.get('QWEN_DSPARK_CENTER_TILE_FILL', '0')
     if (center_fill not in ('0', '1') or center_fill == '1'
             and (os.environ.get('QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE') != '1'
-                or request_screen != '1' or timed_requests != '0')):
-        raise ValueError('Center tile-fill requires its isolated combined audit')
+                or (request_screen, timed_requests) not in (('1', '0'), ('0', '1')))):
+        raise ValueError('Center tile-fill requires its isolated audit or qualified timing')
     if center_fill == '1':
         from dspark_center_tile_fill import center_fill_scope
         center_candidate_scope = center_fill_scope()
@@ -125,6 +125,8 @@ def run(main):
             from dspark_direct_fp32_timed import timed_scope
         if normalization_staging == '1':
             from dspark_normalization_timed import timed_scope
+        if center_fill == '1':
+            from dspark_center_fill_timed import timed_scope
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope

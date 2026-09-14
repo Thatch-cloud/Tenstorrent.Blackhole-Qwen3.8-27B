@@ -10,13 +10,13 @@ center_tile_fill=${QWEN_DSPARK_CENTER_TILE_FILL:-0}
 [[ "$center_tile_fill" = 0 || "$center_tile_fill" = 1 ]]
 if [ "$center_tile_fill" = 1 ]; then
     test "${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}" = 1
-    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]
     center_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-center-fill.XXXXXX")
     gh run download 34840912016 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34840912016 --dir "$center_evidence"
     cp "$center_evidence/dspark-center-tile-fill.json" scripts/ci/dspark-center-tile-fill.json
     PYTHONPATH=scripts/ci python3 -c 'from dspark_center_fill_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-center-tile-fill.json")'
-    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+    if [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 || "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
         test "${QWEN_TARGET_T16_64K_REQUEST:-0}" = 1
         center_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-center-hardware.XXXXXX")
         gh run download 34841454010 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
@@ -165,6 +165,10 @@ if [ "$timed_requests" = 1 ]; then
     if [ "$normalization_direct_stage" = 1 ]; then
         screen_run=34839119120
         timing_gate=dspark_normalization_timed
+    fi
+    if [ "$center_tile_fill" = 1 ]; then
+        screen_run=34841889707
+        timing_gate=dspark_center_fill_timed
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "qwen-hardware-inventory-$screen_run" --dir "$screen_evidence"
