@@ -10,12 +10,20 @@ normalization_direct_stage=${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}
 [[ "$normalization_direct_stage" = 0 || "$normalization_direct_stage" = 1 ]]
 if [ "$normalization_direct_stage" = 1 ]; then
     test "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1
-    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1
+    [[ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]]
     normalization_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-normalization-stage.XXXXXX")
     gh run download 34838104802 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34838104802 --dir "$normalization_evidence"
     cp "$normalization_evidence/dspark-normalization-direct-stage.json" scripts/ci/dspark-normalization-direct-stage.json
     PYTHONPATH=scripts/ci python3 -c 'from dspark_normalization_stage_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-normalization-direct-stage.json")'
+    if [ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1 ]; then
+        test "${QWEN_TARGET_T16_64K_REQUEST:-0}" = 1
+        normalization_hardware_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-normalization-hardware.XXXXXX")
+        gh run download 34838689973 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            --name qwen-hardware-inventory-34838689973 --dir "$normalization_hardware_evidence"
+        cp "$normalization_hardware_evidence/dspark-normalization-direct-stage-hardware.json" scripts/ci/dspark-normalization-direct-stage-hardware.json
+        PYTHONPATH=scripts/ci python3 -c 'from dspark_normalization_request_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-normalization-direct-stage-hardware.json")'
+    fi
 fi
 direct_fp32_stage=${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}
 [[ "$direct_fp32_stage" = 0 || "$direct_fp32_stage" = 1 ]]
