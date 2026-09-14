@@ -1093,3 +1093,11 @@ checks, 16 layout checks, eight fixture controls and two stale-cache controls.
 None of these simulator runs admits the candidate into a 64K production request
 or proves committed TG. The smaller fixture changes only simulator geometry;
 the qualified hardware baseline and serving defaults remain unchanged.
+
+Hardware diagnostic `34811230273` (`b9fb240`) passed all three fixed-input
+proposal replays with the bitwise infinity check. Fenced replay decreased from
+1369.62 ms in `34807645660` to 977.42 ms, about 28.6% less time (1.40x speed).
+The two unfenced samples were 977.75 and 980.20 ms. This is a captured draft-path
+measurement at context 65536, not committed TG, a full-request correctness gate,
+or coding-quality acceptance. It supports replacing the remaining scalar
+arithmetic with correctly loaded SFPU operations; that change is not yet implemented.
