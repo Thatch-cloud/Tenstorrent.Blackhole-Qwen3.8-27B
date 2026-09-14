@@ -7,7 +7,7 @@ from pathlib import Path
 import runpy
 import sys
 
-from dspark_score_bitwise import bitwise_infinity_checks
+from dspark_score_bitwise import bitwise_infinity_checks, candidate_entrypoint
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
         raise ValueError('Weight-free 128-token simulator smoke required')
     directory = Path(__file__).parent
     output = Path(sys.argv[sys.argv.index('--output') + 1])
-    with bitwise_infinity_checks():
+    with bitwise_infinity_checks(), candidate_entrypoint(Path(__file__).resolve()):
         runpy.run_path(str(directory / 'dspark-ladder-attention-probe.py'), run_name='__main__')
     report = json.loads(output.read_text())
     report.update(candidate='bitwise-infinity-checks', performance_qualified=False,

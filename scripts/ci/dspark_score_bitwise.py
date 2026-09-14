@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import dspark_ladder_score_center
+import native_draft_sdpa
 
 
 def transform(source):
@@ -20,4 +21,15 @@ def transform(source):
 @contextmanager
 def bitwise_infinity_checks():
     with patch.object(dspark_ladder_score_center, 'HELPER', transform(dspark_ladder_score_center.HELPER)):
+        yield
+
+
+@contextmanager
+def candidate_entrypoint(script):
+    original = native_draft_sdpa.run_precise_probe
+
+    def run(requested):
+        return original(script)
+
+    with patch.object(native_draft_sdpa, 'run_precise_probe', run):
         yield
