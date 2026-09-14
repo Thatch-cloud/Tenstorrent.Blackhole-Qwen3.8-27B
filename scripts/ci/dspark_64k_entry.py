@@ -41,6 +41,13 @@ def run(main):
     if phase_probe not in ('0', '1'):
         raise ValueError('Explicit zero or one phase probe selection required')
     probe_scope = nullcontext()
+    hardware_candidate_scope = nullcontext()
+    score_sfpu = os.environ.get('QWEN_DSPARK_SCORE_SFPU', '0')
+    if score_sfpu not in ('0', '1') or score_sfpu == '1' and phase_probe != '1':
+        raise ValueError('SFPU candidate requires bounded hardware diagnostic mode')
+    if score_sfpu == '1':
+        from dspark_score_sfpu_hardware import hardware_scope
+        hardware_candidate_scope = hardware_scope(directory)
     candidate_scope = nullcontext()
     score_bitwise = os.environ.get('QWEN_DSPARK_SCORE_BITWISE', '0')
     if score_bitwise not in ('0', '1') or score_bitwise == '1' and phase_probe != '1':
@@ -54,7 +61,8 @@ def run(main):
         from dspark_proposal_phase_profile import stop_after_prepared_probe
 
         def checkpoint(report):
-            report['candidate'] = 'bitwise-infinity-checks' if score_bitwise == '1' else 'baseline'
+            report['candidate'] = ('sfpu-score-centering' if score_sfpu == '1'
+                else 'bitwise-infinity-checks' if score_bitwise == '1' else 'baseline')
             destination = Path('/experiment/results/dspark-proposal-phases.json')
             temporary = destination.with_suffix('.tmp')
             temporary.write_text(json.dumps(report, indent=2) + '\n')
@@ -63,7 +71,7 @@ def run(main):
                 completed_replays=report['completed_replays'])), flush=True)
 
         probe_scope = stop_after_prepared_probe(checkpoint)
-    with runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
+    with hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
         with candidate_scope, probe_scope:

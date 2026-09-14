@@ -118,7 +118,11 @@ python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
-python3 /experiment-scripts/ci/dspark_runtime_cache.py
+if [ "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 ]; then
+    python3 /experiment-scripts/ci/dspark_score_sfpu_hardware.py
+else
+    python3 /experiment-scripts/ci/dspark_runtime_cache.py
+fi
 printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
     > /experiment/results/dspark-build-time.json
 set +e
