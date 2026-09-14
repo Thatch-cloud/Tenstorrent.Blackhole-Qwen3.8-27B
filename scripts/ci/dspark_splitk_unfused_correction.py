@@ -63,7 +63,42 @@ def transform(source):
             }'''
     if result.count(reciprocal) != 1:
         raise ValueError('Unique final decode reciprocal required')
-    return result.replace(reciprocal, precise)
+    result = result.replace(reciprocal, precise)
+    normalize = '            mul_block_bcast_cols_inplace<Sq_chunk_t, vDHt>(cb_out_accumulate_im, cb_prev_sum);'
+    sfpu_normalize = '''            {
+                CircularBuffer numerator(cb_out_accumulate_im);
+                CircularBuffer reciprocal(cb_prev_sum);
+                numerator.wait_front(out_chunk_tiles);
+                reciprocal.wait_front(Sq_chunk_t);
+                pack_reconfig_data_format(cb_out_accumulate_im);
+                PACK((llk_pack_reconfig_l1_acc(false)));
+                for (uint32_t row = 0; row < Sq_chunk_t; ++row) {
+                    for (uint32_t column = 0; column < vDHt; ++column) {
+                        tile_regs_acquire();
+                        reconfig_data_format_srca(cb_out_accumulate_im);
+                        copy_tile_to_dst_init_short(cb_out_accumulate_im);
+                        copy_tile(cb_out_accumulate_im, 0, 0);
+                        reconfig_data_format_srca(cb_prev_sum);
+                        copy_tile_to_dst_init_short(cb_prev_sum);
+                        copy_tile(cb_prev_sum, row, 1);
+                        sfpu_mul_bcast_col_init();
+                        sfpu_mul_bcast_col(0, 1);
+                        tile_regs_commit();
+                        numerator.pop_front(1);
+                        numerator.reserve_back(1);
+                        tile_regs_wait();
+                        pack_tile(0, cb_out_accumulate_im);
+                        tile_regs_release();
+                        numerator.push_back(1);
+                    }
+                }
+                reciprocal.pop_front(Sq_chunk_t);
+            }'''
+    include = '#include "api/compute/eltwise_unary/recip.h"'
+    if result.count(normalize) != 1 or result.count(include) != 1:
+        raise ValueError('Unique native final normalization and include required')
+    return result.replace(normalize, sfpu_normalize).replace(include,
+        include + '\n#include "api/compute/sfpu_binary_bcast.h"')
 
 
 @contextmanager
