@@ -65,8 +65,15 @@ def validate_manifest(root, output):
     return report
 
 
-def main():
-    if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
+def main(*, hardware=False):
+    if type(hardware) is not bool:
+        raise ValueError('Explicit build backend required')
+    if hardware:
+        from dspark_ladder_backend import require_backend
+        require_backend(os.environ, hardware=True, device_present=Path('/dev/tenstorrent').exists())
+        if os.environ.get('TT_METAL_HOME') != '/opt/tt-metal':
+            raise ValueError('Disposable pinned runtime required')
+    elif (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or os.environ.get('QWEN_SIM_CASE') != 'dspark-native-8k-attention'
             or Path('/dev/tenstorrent').exists() or os.environ.get('QWEN_CARDS_ALLOCATED') == '1'
             or os.environ.get('TT_METAL_HOME') != '/opt/tt-metal'):

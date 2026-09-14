@@ -15,7 +15,7 @@ from draft_attention import draft_sdpa
 from native_draft_sdpa import run_precise_probe
 from dspark_hardware_gate import digest
 from dspark_projection import tensor_digest
-from feature_projection import require_projection_environment
+from dspark_ladder_backend import require_backend
 from gdn_multitoken_conv import addresses, release_owned
 from sim_memory_budget import require_clean, snapshot
 
@@ -26,7 +26,7 @@ SPEC.loader.exec_module(FULL)
 NATIVE_SPEC = importlib.util.spec_from_file_location('native_attention_gate', Path(__file__).with_name('dspark-attention-probe.py'))
 NATIVE = importlib.util.module_from_spec(NATIVE_SPEC)
 NATIVE_SPEC.loader.exec_module(NATIVE)
-SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_attention_chunk_trial.py', 'dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
+SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_ladder_backend.py', 'dspark_attention_chunk_trial.py', 'dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
     'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 'dspark-attention-probe.py'))))
 CAPACITY, PROPOSALS = 8448, 15
 POSITIONS = (8192, 8433)
@@ -149,24 +149,25 @@ def controls(patterns, expected):
 def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
     options = parser.parse_args()
-    require_projection_environment(os.environ, False)
+    backend = require_backend(os.environ, hardware=options.hardware,
+        device_present=Path('/dev/tenstorrent').exists())
+    if options.hardware and (CAPACITY != 66560 or POSITIONS != (65536, 66545)):
+        raise ValueError('Hardware requires the explicit 64K ladder fixture and output headroom')
     kernel_audit = run_precise_probe(__file__)
-    if (options.output.exists() or os.environ.get('QWEN_SIM_SHARED_BDF') != '1'
-            or os.environ.get('QWEN_SIM_BOUNDED_MEMORY') != '1'
-            or os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1'
-            or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):
-        raise ValueError('Fresh bounded two-chip simulator and owned precise native runtime required')
+    if options.output.exists() or os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1':
+        raise ValueError('Fresh output and owned precise native runtime required')
     import torch
     import ttnn
 
     root = Path(os.environ['TT_METAL_HOME'])
-    report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__,
+    report = dict(passed=False, closed_cleanly=False, backend=backend, scope=__doc__,
         positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
         sources=source_hashes(), native_sources=NATIVE.fingerprints(root,
             packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True),
         kernel_audit=kernel_audit, key_chunk_size=256, native_padded_keys=8704,
-        added_masked_poison_rows=192, resources_before=snapshot(bounded=True),
+        added_masked_poison_rows=192, resources_before=snapshot(bounded=not options.hardware),
         numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
         **{name: [] for name in COUNTS})
     owned, transient = [], []
@@ -334,7 +335,7 @@ def run():
                 packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True)
             if report['sources'] != report['sources_after'] or report['native_sources'] != report['native_sources_after']:
                 raise ValueError('Fixed-storage source or native runtime changed')
-            report['resources_after'] = snapshot(bounded=True)
+            report['resources_after'] = snapshot(bounded=not options.hardware)
             require_clean(report['resources_before'], report['resources_after'])
             report['closed_cleanly'] = True
         except BaseException as error:

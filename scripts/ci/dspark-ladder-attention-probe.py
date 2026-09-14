@@ -3,6 +3,7 @@
 import json
 from contextlib import nullcontext
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,9 +29,13 @@ def main():
     context_text = os.environ.get('QWEN_LADDER_CONTEXT')
     if context_text not in tuple(map(str, CONTEXTS)):
         raise ValueError('Explicit ladder context required')
-    if (os.environ.get('QWEN_SIM_CASE') != 'dspark-ladder-attention'
-            or os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') != '1'):
-        raise ValueError('Dedicated rebuilt ladder simulator required')
+    if '--hardware' in sys.argv:
+        from dspark_ladder_backend import require_backend
+        require_backend(os.environ, hardware=True, device_present=Path('/dev/tenstorrent').exists())
+    elif os.environ.get('QWEN_SIM_CASE') != 'dspark-ladder-attention':
+        raise ValueError('Dedicated ladder simulator required')
+    if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') != '1':
+        raise ValueError('Rebuilt ladder statistics factory required')
     context = int(context_text)
     fixture = geometry(context)
     smoke = os.environ.get('QWEN_LADDER_SCORE_SMOKE', '0')
