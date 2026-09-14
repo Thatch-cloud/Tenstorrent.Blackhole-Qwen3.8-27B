@@ -15,6 +15,7 @@ class FinalInputTests(unittest.TestCase):
         self.assertIn('move_block<true>(cb_out_o, cb_out_final, out_chunk_tiles);', result)
         self.assertTrue(result.endswith(source[source.index('        } else if'):]))
         self.assertEqual(result.count('pack_reconfig_data_format(cb_out_o);'), 1)
+        self.assertEqual(result.count('QWEN_SPLITK_FINAL'), 3)
 
     def test_rejects_source_drift(self):
         with self.assertRaisesRegex(ValueError, 'boundaries'):
