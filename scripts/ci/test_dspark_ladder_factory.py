@@ -43,8 +43,7 @@ class LadderFactoryTests(unittest.TestCase):
         self.assertIn(geometry_predicate('Skt', 'Sk_chunk_t'), candidate)
         self.assertIn('fp32_dest_acc_en && !exp_approx_mode', candidate)
         self.assertIn('!is_causal && compute_use_provided_mask && !is_chunked', candidate)
-        self.assertTrue('tt::DataFormat im_df = qwen_draft_fp32_intermediates && Skt == 2112\n'
-            '        ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;' in candidate)
+        self.assertTrue('tt::DataFormat im_df = tt::DataFormat::Float16_b;' in candidate)
         self.assertIn('cb_ids.out_im_A = allocate_tile_cb(out_im_tiles, im_tile_size, im_df)', candidate)
         self.assertIn('cb_ids.out_im_B = allocate_tile_cb(out_im_tiles, im_tile_size, im_df)', candidate)
         self.assertIn('cb_ids.out = allocate_tile_cb(out0_t, out_tile_size, out_df)', candidate)

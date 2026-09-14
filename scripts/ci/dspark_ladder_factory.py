@@ -36,7 +36,7 @@ def transform(source):
     if candidate.count(before) != 1:
         raise ValueError('Unique qualified baseline factory selector required')
     after = (geometry_predicate('Skt', 'Sk_chunk_t') + ' && Sq_chunk_t == 1 &&').encode()
-    return output_precision(candidate.replace(before, after).decode()).encode()
+    return candidate.replace(before, after)
 
 
 def selector_assert():

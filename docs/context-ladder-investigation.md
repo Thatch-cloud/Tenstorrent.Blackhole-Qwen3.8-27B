@@ -807,3 +807,13 @@ head 4, row 3. The first actual/reference pair remained -45 / -45.56269454956055
 This does not establish that the normalization operands retain full precision.
 It does show that this final rounding change is insufficient. Remove it from
 the active probe; retain the experiment module and test for provenance.
+
+### Rejected FP32 output accumulation with corrected masking
+
+Run 34795359685 tested 340a350: 64K FP32 output intermediates combined with
+scalar masking/centering, empty-chunk handling and scalar denominator updates.
+It failed 146 elements on first-case shard 0, which passed with BF16 output
+intermediates. First failing coordinate was head 0, row 3, channel 1:
+-46.75 versus -46.277095794677734. Devices closed cleanly. This is not an
+aggregate comparison against the prior 65 errors: execution stopped on the
+earlier shard. Reject the candidate and restore BF16 output intermediates.
