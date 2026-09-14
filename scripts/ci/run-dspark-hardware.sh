@@ -6,6 +6,19 @@ test -z "${TT_METAL_SIMULATOR:-}"
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
 phase_probe=${QWEN_DSPARK_PHASE_PROBE:-0}
+target_request=${QWEN_TARGET_T16_64K_REQUEST:-0}
+[[ "$target_request" = 0 || "$target_request" = 1 ]]
+if [ "$target_request" = 1 ]; then
+    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    test "${QWEN_DSPARK_MASK_BITS:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+    test "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 0
+    target_request_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-target64-request.XXXXXX")
+    gh run download 34828634864 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34828634864 --dir "$target_request_evidence"
+    cp "$target_request_evidence/target-t16-attention-64k.json" scripts/ci/target-t16-attention-64k-hardware.json
+    PYTHONPATH=scripts/ci python3 -c 'from target_t16_64k_request import qualify; qualify("scripts/ci")'
+fi
 target_64k=${QWEN_TARGET_T16_64K:-0}
 [[ "$target_64k" = 0 || "$target_64k" = 1 ]]
 if [ "$target_64k" = 1 ]; then
@@ -295,6 +308,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
+    -e "QWEN_TARGET_T16_64K_REQUEST=$target_request" \
     -e "QWEN_DSPARK_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_DSPARK_SCORE_SFPU=$score_sfpu" \
     -e "QWEN_DSPARK_SUM_SFPU=$sum_sfpu" \

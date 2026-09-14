@@ -75,6 +75,14 @@ def run(main):
         candidate_scope = mask_scope()
     request_screen = os.environ.get('QWEN_DSPARK_SFPU_REQUEST_SCREEN', '0')
     timed_requests = os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0')
+    target_scope = nullcontext()
+    target_request = os.environ.get('QWEN_TARGET_T16_64K_REQUEST', '0')
+    if (target_request not in ('0', '1') or target_request == '1'
+            and (request_screen != '1' or timed_requests != '0' or mask_bits != '1')):
+        raise ValueError('Folded 64K verifier requires the isolated audited combined mask runtime')
+    if target_request == '1':
+        from target_t16_64k_request import request_scope
+        target_scope = request_scope(directory)
     if (timed_requests not in ('0', '1') or timed_requests == '1'
             and (score_sfpu != '1' or request_screen != '0')):
         raise ValueError('Timed requests require isolated qualified SFPU candidate')
@@ -89,6 +97,8 @@ def run(main):
         probe_scope = timed_scope(directory)
     elif request_screen == '1':
         from dspark_sfpu_request_screen import screen_scope
+        if target_request == '1':
+            from target_t16_64k_screen import screen_scope
         probe_scope = screen_scope(directory)
     elif phase_probe == '1':
         from dspark_proposal_phase_profile import stop_after_prepared_probe
@@ -107,5 +117,5 @@ def run(main):
     with hardware_candidate_scope, runtime_scope(directory, directory / 'dspark-ladder-hardware-65536.json',
             context=65536, output_tokens=256, factory_root=os.environ['TT_METAL_HOME'],
             build_path='/experiment/results/dspark-64k-hardware-build.json'):
-        with candidate_scope, probe_scope:
+        with candidate_scope, probe_scope, target_scope:
             return main()
