@@ -975,3 +975,16 @@ start within the 64K runtime scope. Draft SDPA still defines its qualified
 selector before including that header. Nine local scope/entry tests pass,
 including application to the pinned native sources and definition-order checks;
 these are not a replacement for a hardware compiler/execution check.
+
+### Retry 34800350550: KV audit frontier excluded decode headroom
+
+The native decode compiler passed the previous failure point. The request then
+failed in the gold-output KV digest: its hardcoded 65536 upper bound rejected
+the valid prefix after generation beyond the 64K prompt. Devices closed cleanly
+and no combined PP/TG result was produced.
+
+The 64K-only correction validates the audit frontier against the admitted 66560
+capacity and verifies that physical cache pages cover the requested prefix.
+The existing non-64K bound is unchanged; no audit is skipped or truncated.
+Boundary tests cover 65537, the final admitted position, overflow, undersized
+storage, and calls outside the admitted request scope.

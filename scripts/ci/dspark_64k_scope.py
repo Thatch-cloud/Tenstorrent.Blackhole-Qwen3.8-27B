@@ -26,6 +26,16 @@ def target_allocation():
     return dict(max_seq_len=capacity, page_count=pages, cache_blocks=pages + 8, block_size=block_size)
 
 
+def validate_target_kv_prefix(valid, caches):
+    allocation = target_allocation()
+    if type(valid) is not int or not 1 <= valid <= allocation['max_seq_len']:
+        raise ValueError('Explicit valid admitted target KV prefix required')
+    pages = (valid + allocation['block_size'] - 1) // allocation['block_size']
+    if not caches or any(len(value.shape) != 4 or value.shape[0] < pages
+            or value.shape[2] != allocation['block_size'] for value in caches):
+        raise ValueError('Target KV storage must cover every audited page')
+
+
 def stable_history_class(original):
     class SixtyFourKHistory(original):
         def __init__(self, operations, mesh, collectives, parameters, layer_weights, chunks, rotary, *, position, capacity):

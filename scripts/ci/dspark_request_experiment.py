@@ -188,7 +188,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         return [tensor_digest(shard) for value in recurrent for shard in host(value)]
 
     def kv_digest(valid):
-        if type(valid) is not int or not 1 <= valid <= 65536:
+        if request_64k:
+            from dspark_64k_scope import validate_target_kv_prefix
+            validate_target_kv_prefix(valid, caches)
+        elif type(valid) is not int or not 1 <= valid <= 65536:
             raise ValueError('Explicit valid target KV prefix required')
         result = []
         for value in caches:

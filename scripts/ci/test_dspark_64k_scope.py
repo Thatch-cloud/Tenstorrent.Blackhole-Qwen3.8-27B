@@ -11,6 +11,21 @@ import dspark_stable_history
 
 
 class ScopeTests(unittest.TestCase):
+    def test_kv_audit_includes_admitted_decode_headroom(self):
+        caches = [SimpleNamespace(shape=(1048, 2, 64, 256))]
+        with patch.object(candidate, 'current_admission', return_value={
+                'context': 65536, 'capacity': 66560, 'output_tokens': 256}):
+            for valid in (65536, 65537, 65791, 66560):
+                candidate.validate_target_kv_prefix(valid, caches)
+            for valid in (True, 0, 66561):
+                with self.assertRaises(ValueError):
+                    candidate.validate_target_kv_prefix(valid, caches)
+            with self.assertRaisesRegex(ValueError, 'storage'):
+                candidate.validate_target_kv_prefix(65537,
+                    [SimpleNamespace(shape=(1024, 2, 64, 256))])
+        with self.assertRaises(ValueError):
+            candidate.validate_target_kv_prefix(65537, caches)
+
     def test_shared_header_defaults_before_use_without_overriding_draft(self):
         import native_draft_sdpa
 
