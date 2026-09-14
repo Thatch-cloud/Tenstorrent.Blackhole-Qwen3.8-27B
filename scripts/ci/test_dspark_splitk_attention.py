@@ -16,14 +16,16 @@ class SplitKAdapterTests(unittest.TestCase):
         calls = []
 
         def decode(folded, actual_keys, actual_values, **options):
-            self.assertIs(actual_keys, keys)
-            self.assertIs(actual_values, values)
+            self.assertEqual(actual_keys.data_ptr(), keys.data_ptr())
+            self.assertEqual(actual_values.data_ptr(), values.data_ptr())
+            self.assertEqual(tuple(actual_keys.shape), (4, 1, 256, 128))
+            self.assertEqual(tuple(folded.shape), (1, 4, 128, 128))
             self.assertFalse(options['is_causal'])
             self.assertEqual(options['program_config']['max_cores_per_head_batch'], 16)
             calls.append(options)
-            return torch.nn.functional.scaled_dot_product_attention(folded.reshape(1, 4, 128, 128),
-                actual_keys, actual_values, attn_mask=options['attn_mask'].reshape(1, 4, 128, 256),
-                scale=options['scale']).reshape(1, 1, 512, 128)
+            return torch.nn.functional.scaled_dot_product_attention(folded.reshape(4, 1, 128, 128),
+                actual_keys, actual_values, attn_mask=options['attn_mask'],
+                scale=options['scale']).reshape(1, 4, 128, 128)
 
         operations = SimpleNamespace(DRAM_MEMORY_CONFIG='dram', ROW_MAJOR_LAYOUT='row', TILE_LAYOUT='tile',
             MathFidelity=SimpleNamespace(HiFi4='hifi4'), WormholeComputeKernelConfig=lambda **kwargs: kwargs,

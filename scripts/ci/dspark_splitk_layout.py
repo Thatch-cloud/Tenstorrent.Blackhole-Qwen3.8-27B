@@ -26,4 +26,5 @@ def scheduling(grid=(8, 8), max_cores_per_kv_head=16):
     workers = min(cores, 4 * max_cores_per_kv_head) // 4
     return dict(prefill_query_work_items=16, configured_grid_cores=cores,
         decode_workers_per_kv_head=workers, decode_active_cores=workers * 4,
-        folded_query_heads=512, kv_heads=4, copies_of_kv=1, hardware_qualified=False)
+        folded_query_heads=512, kv_heads=4, batch_lanes=4, query_heads_per_lane=128,
+        kv_heads_per_lane=1, copies_of_kv=1, hardware_qualified=False)

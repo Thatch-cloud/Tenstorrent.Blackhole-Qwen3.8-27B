@@ -16,15 +16,17 @@ def execute_folded(operations, query, key, value, mask, owned):
     linear = retain(operations.to_layout(query, operations.ROW_MAJOR_LAYOUT, memory_config=memory))
     grouped = retain(operations.reshape(linear, (4, 4, 32, 128)))
     swapped = retain(operations.permute(grouped, (0, 2, 1, 3), memory_config=memory))
-    folded = retain(operations.reshape(swapped, (1, 1, 512, 128)))
+    folded = retain(operations.reshape(swapped, (1, 4, 128, 128)))
     folded = retain(operations.to_layout(folded, operations.TILE_LAYOUT, memory_config=memory))
     mask_rows = retain(operations.repeat_interleave(mask, 4, dim=2, memory_config=memory))
-    folded_mask = retain(operations.repeat(mask_rows, (1, 1, 4, 1), memory_config=memory))
+    folded_mask = retain(operations.repeat(mask_rows, (4, 1, 1, 1), memory_config=memory))
+    key_lanes = retain(operations.reshape(key, (4, 1, key.shape[2], 128)))
+    value_lanes = retain(operations.reshape(value, (4, 1, value.shape[2], 128)))
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     program = operations.SDPAProgramConfig(compute_with_storage_grid_size=(8, 8),
         q_chunk_size=0, k_chunk_size=32, exp_approx_mode=False, max_cores_per_head_batch=16)
-    output = retain(operations.transformer.scaled_dot_product_attention_decode(folded, key, value,
+    output = retain(operations.transformer.scaled_dot_product_attention_decode(folded, key_lanes, value_lanes,
         attn_mask=folded_mask, is_causal=False, scale=128 ** -.5, program_config=program,
         compute_kernel_config=kernel, memory_config=memory))
     linear = retain(operations.to_layout(output, operations.ROW_MAJOR_LAYOUT, memory_config=memory))
