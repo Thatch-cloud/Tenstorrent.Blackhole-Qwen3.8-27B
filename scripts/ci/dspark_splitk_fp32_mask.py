@@ -12,9 +12,8 @@ def transform(source):
                                 PACK((llk_pack_reconfig_l1_acc(false)));
                                 for (uint32_t tile = 0; tile < qk_chunk_tiles_dynamic; ++tile) {
                                     tile_regs_acquire();
-                                    reconfig_data_format_srca(cb_qk_im);
-                                    copy_tile_to_dst_init_short(cb_qk_im);
-                                    copy_tile(cb_qk_im, 0, 0);
+                                    qwen_splitk_copy_fp32_init(cb_qk_im);
+                                    qwen_splitk_copy_fp32(cb_qk_im, 0, 0);
                                     reconfig_data_format_srca(cb_mask_in);
                                     copy_tile_to_dst_init_short(cb_mask_in);
                                     copy_tile(cb_mask_in, tile, 1);
@@ -35,6 +34,23 @@ def transform(source):
         raise ValueError('Exact explicit decode mask path required')
     result = source.replace(before, after).replace(include,
         include + '\n#include "api/compute/eltwise_binary_sfpu.h"')
+    entry = 'void kernel_main() {'
+    helper = '''void qwen_splitk_copy_fp32_init(uint32_t source_cb) {
+    reconfig_data_format_srca(source_cb);
+    state_configure(source_cb, __builtin_LINE());
+    UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(0, 0, source_cb)));
+    MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(source_cb)));
+}
+
+void qwen_splitk_copy_fp32(uint32_t source_cb, uint32_t tile, uint32_t destination) {
+    UNPACK((llk_unpack_A<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(source_cb, tile)));
+    MATH((llk_math_eltwise_unary_datacopy<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE, true>(destination, source_cb)));
+}
+
+'''
+    if result.count(entry) != 1:
+        raise ValueError('Unique decode kernel entry required')
+    result = result.replace(entry, helper + entry)
     markers = (
         ('                if (!add_mask_fusion) {', 'scores-ready', 'cb_qk_im', 'qk_chunk_tiles_dynamic'),
         ('                reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(',
