@@ -486,6 +486,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_LOAD_SAMPLE=${QWEN_LOAD_SAMPLE:-0}" \
     -e "QWEN_LAZY_WEIGHT_LOAD=${QWEN_LAZY_WEIGHT_LOAD:-0}" \
     -e "QWEN_PUBLICATION_PROFILE=${QWEN_PUBLICATION_PROFILE:-0}" \
+    -e "QWEN_HISTORY_APPEND_PAIR=${QWEN_HISTORY_APPEND_PAIR:-0}" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
@@ -520,6 +521,14 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then
+    history_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-history-append.XXXXXX")
+    timeout -k 5 45 gh run download 35024279412 --repo "$GITHUB_REPOSITORY" \
+        --name qwen-history-append-hardware-35024279412 --dir "$history_evidence"
+    PYTHONPATH=scripts/ci python3 -c 'import sys; from history_append_hardware_gate import qualify; qualify("scripts/ci", sys.argv[1])' \
+        "$history_evidence/history-append-hardware.json"
+    docker cp "$history_evidence/history-append-hardware.json" "$test_id:/experiment-scripts/ci/history-append-hardware.json"
+fi
 if [[ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 && "$timed_requests" = 1 ]]; then
     lazy_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-lazy-loader.XXXXXX")
     gh run download 34936162975 --repo "$GITHUB_REPOSITORY" \

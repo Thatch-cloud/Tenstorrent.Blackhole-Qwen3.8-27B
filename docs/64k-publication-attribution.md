@@ -92,3 +92,17 @@ the 64K boundary. It pins the simulator report and checks the planner/writer
 source hashes before opening devices. It loads no model weights, has a
 180-second probe limit, and makes no TG claim. Combined-model correctness and
 matched PP/CTX/TG remain required after this addressing/replay gate.
+
+Hardware run **35024279412** completes in **42 seconds**, with all 84 checks
+passing, clean shutdown and exact changed-input trace replay across the 64K
+boundary. Report SHA256:
+`7a962f5b7cc519d61cead689a225c68995ce0a600951b65c4fe0c8f2a24301cd`.
+The first dispatch failed before device access because its artifact download
+lacked a token; the corrected workflow uses read-only Actions access.
+
+The next comparison keeps one audited lazy model load, the same 65,536-token
+prompt and 256-token output budget, and changes only publication in the second
+request. It requires identical emitted tokens, exact final active/inactive state,
+all candidate publications using the new writer, final audits and clean closure.
+It reports separate PP/CTX/committed TG for control and candidate, never pooled
+throughput. One pair is not sustained performance or held-out coding acceptance.
