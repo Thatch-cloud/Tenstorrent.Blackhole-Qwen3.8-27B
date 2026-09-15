@@ -7,9 +7,15 @@ splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
 mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
 shared_64k_audit=${QWEN_64K_SHARED_QK_AUDIT:-0}
+shared_64k_timed=${QWEN_64K_SHARED_QK_TIMED:-0}
+[[ "$shared_64k_timed" = 0 || "$shared_64k_timed" = 1 ]]
+if [ "$shared_64k_timed" = 1 ]; then
+    test "$mlp_64k_timed" = 1
+    test "$shared_64k_audit" = 0
+fi
 [[ "$shared_64k_audit" = 0 || "$shared_64k_audit" = 1 ]]
-if [ "$shared_64k_audit" = 1 ]; then
-    test "$mlp_64k_audit" = 1
+if [[ "$shared_64k_audit" = 1 || "$shared_64k_timed" = 1 ]]; then
+    if [ "$shared_64k_audit" = 1 ]; then test "$mlp_64k_audit" = 1; fi
     shared_64k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-64k-shared.XXXXXX")
     timeout -k 5 45 gh run download 34701425373 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name qwen-hardware-inventory-34701425373 --dir "$shared_64k_evidence"
@@ -225,6 +231,11 @@ if [ "$timed_requests" = 1 ]; then
             screen_run=34924260072
             screen_artifact="qwen-splitk-combined-$screen_run"
             timing_gate=dspark_64k_mlp_timed
+            if [ "$shared_64k_timed" = 1 ]; then
+                screen_run=34925963042
+                screen_artifact="qwen-splitk-combined-$screen_run"
+                timing_gate=dspark_64k_shared_timed
+            fi
         fi
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
@@ -443,6 +454,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
+    -e "QWEN_64K_SHARED_QK_TIMED=$shared_64k_timed" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \

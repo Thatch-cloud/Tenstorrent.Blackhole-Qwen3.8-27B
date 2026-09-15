@@ -149,6 +149,7 @@ if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then
     if [[ "${QWEN_SPLITK_COMBINED:-0}" = 1 && "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
         source_entry=dspark-splitk-timed-request.py
         if [ "${QWEN_64K_MLP_TIMED:-0}" = 1 ]; then source_entry=dspark-64k-mlp-timed-request.py; fi
+        if [ "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1 ]; then source_entry=dspark-64k-shared-timed-request.py; fi
         timeout -k 5 30 python3 -u "/experiment-scripts/ci/$source_entry" --source-preflight || exit "$?"
     else
         timeout -k 5 30 python3 -u /experiment-scripts/ci/dspark_direct_fp32_preflight.py || exit "$?"
@@ -163,6 +164,7 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     if [ "${QWEN_64K_SHARED_QK_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-qk-request.py; fi
     if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=dspark-splitk-timed-request.py; fi
     if [ "${QWEN_64K_MLP_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-mlp-timed-request.py; fi
+    if [ "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-timed-request.py; fi
     runner=(timeout -k 10 420 python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json
         --output "/experiment/results/$report_name.json")
