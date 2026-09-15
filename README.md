@@ -19,14 +19,16 @@ per block. The prior split-K result was 30.23 TG; this is not a matched A/B
 speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.md).
 Sustained output and held-out coding quality remain unqualified.
 
-**Latest work:** the cache-first loader passes hardware correctness, with target
-loading measured at 12.2 seconds in that run. It avoids 384 unnecessary host
-weight conversions/packing operations; this is a setup improvement, not a TG claim.
-The subsequent 64K paired run records 25.52 TG control and 8.37 TG candidate,
-then times out in final auditing. Neither is a new accepted benchmark. Score
-fusion remains unpromoted; we are isolating long history-publication stalls.
-[Loader evidence](docs/loading-diagnostic-results.md) ·
-[Failed paired comparison](docs/combined-score-pair.md).
+**Latest work:** replacing full history-bank rebuilds with updates to at most
+96 rows per block. All 84 correctness/replay checks pass on both physical cards
+across the 64K boundary, in 42 seconds. Full-model comparison **35026222541**
+is the next gate; no new TG improvement is established. The preceding control
+stalled in history preparation and stopped before testing the candidate.
+[Publication measurements and gates](docs/64k-publication-attribution.md).
+
+The cache-first loader also passes hardware correctness and avoids 384 host
+weight conversions/packing operations. This improves setup, not measured TG.
+[Loader evidence](docs/loading-diagnostic-results.md).
 
 Shared-Q/K recurrence also passes at 64K: **PP 2594.11 / CTX 65536 / TG 31.33**
 (run 34926705012). This shows no improvement over MLP alone; it is not promoted

@@ -4,7 +4,31 @@ The [combined-runtime reintegration checklist](combined-runtime-reintegration.md
 tracks which short-context optimisations remain absent at 64K and the gates for
 restoring one matched runtime across the context ladder.
 
-## Current combined-runtime position - 2026-09-14
+## Current experiment checkpoint - 2026-09-16
+
+**200 committed TG remains unachieved.** The best fully completed 64K result
+remains PP **2584.54** / CTX **65536** / TG **31.40** (run 34925118588).
+This is one offline stream, not concurrent serving or held-out coding acceptance.
+
+The active change removes repeated full-history bank rebuilding, measured at
+46.8 ms per block in a completed diagnostic. It writes at most 96 rows instead
+of rebuilding 66,560, preserving all valid history and commit/discard behaviour.
+
+| Gate | Evidence | Status |
+| --- | --- | --- |
+| CPU transactions and comparison safeguards | 11 local tests | Pass |
+| Two-chip simulator, changed-input trace replay | 35023307310; 84 checks; 30 seconds | Pass |
+| Physical cards, 64K boundary and trace replay | 35024279412; 84 checks; 42 seconds | Pass |
+| Combined model, exact output/state and PP/CTX/TG | 35026222541 | Awaiting result |
+| Repeat timing, context ladder, coding quality, concurrency | Same combined candidate required | Open |
+
+The previous combined attempt stopped after a slow control, before the candidate:
+PP 2418.94 / CTX 65536 / TG 11.66. A 5.37-second history-publication stall dominates
+that degradation. The next run may continue diagnostically only with matching
+stage evidence; a degraded baseline cannot support a speedup claim. Serving
+defaults remain unchanged. [Measurements and admission rules](64k-publication-attribution.md).
+
+## Earlier combined-runtime position - 2026-09-14
 
 | One offline coding stream | CTX | PP tok/s | Committed TG tok/s | Evidence |
 | --- | ---: | ---: | ---: | --- |
