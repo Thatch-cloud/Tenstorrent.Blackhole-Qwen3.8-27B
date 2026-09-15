@@ -13,17 +13,26 @@ from history_append_plan import BankAppendPlanner
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--hardware', action='store_true')
     options = parser.parse_args()
-    if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
+    if options.hardware:
+        if (os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1'
+                or os.environ.get('TT_METAL_SIMULATOR') or os.environ.get('QWEN_SIM_ONLY') == '1'
+                or not Path('/dev/tenstorrent').exists() or options.output.exists()):
+            raise ValueError('Fresh allocated physical two-card run required')
+        from history_append_sim_gate import qualify
+        qualify(Path(__file__).parent, Path('/experiment/results/history-append-simulator.json'))
+    elif (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or Path('/dev/tenstorrent').exists() or options.output.exists()):
         raise ValueError('Fresh device-free simulator run required')
     import torch
     import ttnn
 
-    capacity, initial = 160, 31
+    capacity, initial = (66560, 65535) if options.hardware else (160, 31)
     actions = ((3, True), (15, True), (32, False), (1, True), (32, True), (16, True))
     sources = ('history-append-probe.py', 'history_append_plan.py', 'history_append_dma.py', 'history_append_dma.cpp')
-    report = dict(passed=False, closed_cleanly=False, backend='simulator', scope=__doc__, checks=[],
+    report = dict(passed=False, closed_cleanly=False, backend='hardware' if options.hardware else 'simulator',
+        capacity=capacity, initial_position=initial, scope=__doc__, checks=[],
         performance_qualified=False, model_integrated=False, trace_qualified=False,
         sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in sources})
     mesh, owned, traces = None, [], []

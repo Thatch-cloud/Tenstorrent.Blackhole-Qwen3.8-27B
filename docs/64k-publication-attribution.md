@@ -76,4 +76,19 @@ This is a small synthetic fixture, not 64K addressing or hardware acceptance.
 
 The next probe adds changed-input captured replay with 84 checks. Run
 35022680629 attempt 1 failed in Docker preflight before executing the probe;
-attempt 2 is requested. No replay correctness or performance claim is made yet.
+attempt 2 also timed out in preflight. Run 35023307310 separates Docker create
+and start diagnostics and completes in 30 seconds. All 84 checks pass, including
+changed-input trace replay on both chips and clean shutdown. Report SHA256:
+`25db87cc6706729736699ed4a30c40c10be0f1cdfef9a0558c9dc356be47cb43`.
+
+`incremental_history_scope.py` provides a reversible opt-in combined-runtime
+binding: captured 32-row projection outputs feed the writer without slicing,
+all ten bank updates validate before execution, and commit/discard retain the
+existing bank-swap interface. A partial write failure prohibits further reuse.
+Local transaction tests pass; this binding is not hardware/model-qualified.
+
+The next hardware probe uses capacity 66,560 and starts at row 65,535, crossing
+the 64K boundary. It pins the simulator report and checks the planner/writer
+source hashes before opening devices. It loads no model weights, has a
+180-second probe limit, and makes no TG claim. Combined-model correctness and
+matched PP/CTX/TG remain required after this addressing/replay gate.
