@@ -10,16 +10,18 @@ import sys
 from dspark_fp32_build import restore_registrations
 from dspark_hardware_gate import digest
 from dspark_ladder_backend import require_backend
-from dspark_runtime_cache import IMAGE, cache_key, inspect_entry, store_entry
+from dspark_runtime_cache import IMAGE, cache_key, store_entry
 from dspark_splitk_fp32_factory import SOURCE, transform
 from dspark_splitk_sim_gate import qualify
 from sdpa_graft_build import implementation_sources
+from dspark_splitk_compile_cache import find_entry
 
 
 BUILDERS = ('dspark_splitk_hardware_build.py', 'dspark_splitk_fp32_factory.py',
     'dspark_splitk_sim_gate.py', 'dspark_runtime_cache.py', 'dspark_fp32_build.py',
     'sdpa_graft_build.py', 'dspark_ladder_backend.py', 'feature_projection.py',
-    'dspark_hardware_gate.py', 'dspark_attention_8k_gate.py', 'dspark_fp32_intermediates.py')
+    'dspark_hardware_gate.py', 'dspark_attention_8k_gate.py', 'dspark_fp32_intermediates.py',
+    'dspark_splitk_compile_cache.py')
 BINARIES = ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')
 REPORT = '/experiment/results/dspark-splitk-hardware-build.json'
 
@@ -83,7 +85,8 @@ def main():
             simulator_report=admission['report_sha256'], factory=report['source_after'],
             registration=report['registration'])
         cache = Path('/experiment-cache/splitk-hardware-v1')
-        manifest = inspect_entry(cache, inputs)
+        inputs, manifest = find_entry(cache, inputs)
+        report['compile_inputs'] = inputs
         report.update(cache_hit=manifest is not None, cache_key=cache_key(inputs))
         if manifest is None:
             subprocess.run(['ninja', '-C', str(root / 'build_Release'), '-j', '8', 'ttnncpp'],
