@@ -7,7 +7,7 @@ from pathlib import Path
 from dspark_attention_8k_gate import require_matrix
 
 
-REPORT_SHA256 = '531e32a24d060b9b62a39c5933dbe19a3e1c7fe310abfb38e7775ae64bbb0352'
+REPORT_SHA256 = '169d747c14c9fdbbd3d097ce9ccf12e79ff87ddf1fa98f2f44a528e5e78a5d15'
 
 
 def verify_sources(directory, sources):
@@ -32,6 +32,7 @@ def qualify(directory, report_path):
     configuration = report['diagnostic_override']
     if (configuration.get('key_chunk_size') != 32 or configuration.get('max_cores_per_head') != 8
             or configuration.get('local_denominator_arithmetic') != 'sfpu-fp32-multiply-add-and-copy'
+            or configuration.get('tree_denominator_arithmetic') != 'sfpu-fp32-two-products-add-and-transport'
             or configuration.get('local_numerator_add') != 'native-fpu'
             or configuration.get('correction_factor_rounding') != 'explicit-fp32-to-bf16-rne'
             or configuration.get('stripe_keys') is not False

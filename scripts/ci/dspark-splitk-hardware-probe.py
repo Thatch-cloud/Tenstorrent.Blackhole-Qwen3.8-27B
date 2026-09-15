@@ -68,6 +68,7 @@ def main():
                         expected_execution_calls=len(KINDS) + 3, key_chunk_size=32,
                         max_cores_per_head=8, native_padded_keys=fixture['native_keys'],
                         local_denominator_arithmetic='sfpu-fp32-multiply-add-and-copy',
+                        tree_denominator_arithmetic='sfpu-fp32-two-products-add-and-transport',
                         local_numerator_add='native-fpu',
                         correction_factor_rounding='explicit-fp32-to-bf16-rne',
                         added_masked_poison_rows=fixture['extra_masked_keys'],
