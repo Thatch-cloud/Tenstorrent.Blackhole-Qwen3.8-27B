@@ -61,3 +61,25 @@ decode (65,552 here), before the experimental prefill/capture. V4 admits this
 ordering, compares 65,536, 65,535 and the actual first frontier against the oracle,
 and returns the digest for the requested frontier. A regression covers the gold
 check followed by the experimental request's return to the 65,536 frontier.
+
+## V4 hardware result
+
+Run **34929473486** (`0af9f60`) passes the complete combined correctness screen
+and clean device shutdown in a 7m42s CI job, within the unchanged watchdog.
+Score-layout fusion records five construction-time calls and restores its hook.
+The full-vocabulary learned-weight audit is exact. This is not clean TG timing.
+
+Bulk KV digests match at all three frontiers, but the candidate loses:
+
+| Valid tokens | Original audit | Bulk audit |
+|---:|---:|---:|
+| 65,536 | 8.40 s | 12.86 s |
+| 65,535 | 8.43 s | 9.14 s |
+| 65,552 | 8.35 s | 12.28 s |
+
+The selector retained the original callback for every subsequent snapshot.
+**Do not attribute the pass to faster bulk readback or adopt it for speed.**
+The next clean timing excludes this admission experiment and per-block audits;
+it retains the score-layout, split-K, fused MLP and shared-Q/K runtime together.
+
+Report SHA256: `c027988a232f47f7a27bc7382aa09c02f6b9117af9e3c754e782f0d75ee23288`.
