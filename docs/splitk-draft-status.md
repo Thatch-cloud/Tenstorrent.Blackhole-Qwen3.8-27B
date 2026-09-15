@@ -1,6 +1,19 @@
-# Split-K draft attention: experimental, not admitted
+# Split-K draft attention: simulator-qualified, hardware pending
 
 The objective remains 200 committed tokens/s for one coding stream on two P150A cards. These are weight-free simulator experiments, not throughput measurements.
+
+**Current milestone:** run 34911012256 passes original-order 16-worker-per-KV-lane
+simulation with FP32 local denominators and tree payloads, and round-indexed scratch.
+Four eager numerical checks, four exact replay checks and the native target gate pass;
+both scopes close cleanly. `dspark_splitk_sim_gate.py` pins the report and verifies
+current source dependencies before hardware admission. The pinned report SHA256 is
+`90eb2538f9f97eab84d727b5d4e662fe20d0a2594e7b647dd27bbee385594d96`.
+
+Next: wire a bounded, weight-free 64K hardware numerical test with the same kernel
+and precision, then measure it inside complete combined requests. No split-K hardware
+or TG acceptance exists yet. Keep the original-order and poisoned-history checks.
+
+## Early experiment history
 
 | CI run | Candidate | Observed result |
 |---|---|---|
@@ -16,7 +29,7 @@ The objective remains 200 committed tokens/s for one coding stream on two P150A 
 
 The batch-lane representation preserves all 32 padded query rows, all four query heads per KV group, full history and the capacity-gap mask. KV tensors are reshaped, not replicated. CPU equivalence tests pass; this does not establish correct device execution.
 
-The last simulator report has 65,188 failing elements, maximum absolute error 149.92046, and finite outputs. Sample outputs are around -179 to -190 where the FP32 reference is around -49.76. Tolerances remain rtol=0.01 and atol=0.01.
+An early simulator report had 65,188 failing elements, maximum absolute error 149.92046, and finite outputs. Sample outputs were around -179 to -190 where the FP32 reference was around -49.76. That failure is superseded by the milestone above; tolerances remain rtol=0.01 and atol=0.01.
 
 ## Next diagnostic
 
