@@ -59,6 +59,13 @@ def validate_execution(records, audited_scope):
 
 
 @contextmanager
+def preflight_scope():
+    require_timed()
+    with patch.object(center, 'timed_scope', timed_scope):
+        yield
+
+
+@contextmanager
 def entry_scope(directory, records):
     require_timed()
     admission = qualify_splitk(directory, Path(directory) / 'dspark-sfpu-request-screen.json')

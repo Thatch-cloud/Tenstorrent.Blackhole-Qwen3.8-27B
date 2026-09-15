@@ -6,11 +6,15 @@ import runpy
 import sys
 
 from dspark_splitk_combined_build import digest
-from dspark_splitk_timed import entry_scope
+from dspark_splitk_timed import entry_scope, preflight_scope
 
 
 def main():
     directory = Path(__file__).parent
+    if sys.argv[1:] == ['--source-preflight']:
+        with preflight_scope():
+            runpy.run_path(str(directory / 'dspark_direct_fp32_preflight.py'), run_name='__main__')
+        return
     output = Path(sys.argv[sys.argv.index('--output') + 1])
     if output.exists() or '--preflight' in sys.argv:
         raise ValueError('Fresh post-build split-K timing output required')

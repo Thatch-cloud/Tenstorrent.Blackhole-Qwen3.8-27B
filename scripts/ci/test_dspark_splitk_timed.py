@@ -3,10 +3,22 @@ import os
 import unittest
 from unittest.mock import patch
 
-from dspark_splitk_timed import require_timed, validate_execution
+from dspark_splitk_timed import require_timed, validate_execution, preflight_scope, timed_scope
 
 
 class SplitKTimingTests(unittest.TestCase):
+    def test_preflight_selects_new_gate_and_restores_on_failure(self):
+        import dspark_center_fill_timed as center
+
+        original = center.timed_scope
+        with patch('dspark_splitk_timed.require_timed') as require:
+            with self.assertRaisesRegex(RuntimeError, 'source failed'):
+                with preflight_scope():
+                    self.assertIs(center.timed_scope, timed_scope)
+                    raise RuntimeError('source failed')
+            require.assert_called_once_with()
+        self.assertIs(center.timed_scope, original)
+
     def test_audit_selection_and_global_precision_rejected(self):
         flags = dict(QWEN_DSPARK_SFPU_TIMED='1', QWEN_DSPARK_SFPU_REQUEST_SCREEN='0',
             QWEN_TARGET_T16_64K_REQUEST='1', QWEN_DSPARK_CENTER_TILE_FILL='1')
