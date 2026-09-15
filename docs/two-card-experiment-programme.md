@@ -35,6 +35,9 @@ Draft and verifier costs remain 87.34 and 82.19 ms/block. At the measured 6.75
 committed tokens per block, 200 TG requires the entire cycle to fit 33.75 ms;
 the current cycle is 177.79 ms. Repeat this runtime, then the matched context
 ladder; further generation gains must chiefly reduce draft/verification costs.
+The [matched ladder allocation contract](matched-context-ladder.md) covers
+4K/8K/16K/32K/64K/131K/262K. Its CPU geometry tests pass, but new context runtime
+admissions and numerical/allocation gates remain work to do, not enabled flags.
 
 ## Earlier combined-runtime position - 2026-09-14
 
