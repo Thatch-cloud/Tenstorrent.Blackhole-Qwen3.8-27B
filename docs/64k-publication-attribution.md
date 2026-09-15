@@ -53,7 +53,16 @@ bank's previous accepted/discarded tail, append only accepted rows, and zero
 invalid rows within the touched tiles. A bounded planner covers at most 96 rows
 per append instead of rebuilding 66,560 rows. CPU tests compare entire banks
 through 480 randomized commit/discard transactions and tile boundaries, including
-64K positions. This is a transaction plan, **not an implemented accelerator
-kernel or a measured speedup**. Next gates: BF16 bit-copy kernel, simulator bank
-contents/address lifetime checks, then combined-runtime hardware correctness and
-matched PP/CTX/TG. Serving defaults remain unchanged.
+64K positions. An arithmetic-free BF16 DMA kernel now implements this plan,
+but it is **not hardware-qualified or a measured speedup**. Next gates:
+simulator bank contents/address lifetime and changed-input trace replay checks,
+then combined-runtime hardware correctness and matched PP/CTX/TG.
+Serving defaults remain unchanged.
+
+Simulator run 35021706331 isolated five negative-zero to positive-zero changes
+on chip 1 during input upload, before the writer executes. The revised probe
+permits only zero-sign changes at that boundary and checks the writer bitwise
+against the actual uploaded input. Nonzero upload changes still fail. This does
+not qualify signed-zero preservation through upload. Run 35022225254 attempt 1
+timed out in the 30-second Docker result-write preflight, before any simulator
+execution; it supplies no kernel evidence. A same-commit retry is requested.
