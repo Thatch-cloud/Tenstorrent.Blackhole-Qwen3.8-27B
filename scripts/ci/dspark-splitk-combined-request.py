@@ -1,5 +1,6 @@
 """Fresh combined T16 split-K request audit, retaining existing target/state gates."""
 
+import faulthandler
 import json
 from pathlib import Path
 import runpy
@@ -7,7 +8,7 @@ import sys
 
 from dspark_splitk_combined_build import digest
 from dspark_splitk_combined_runtime import entry_scope
-from dspark_audit_observer import observe_audit
+from dspark_audit_observer import observe_audit, observe_boundaries
 
 
 def main():
@@ -20,14 +21,18 @@ def main():
     sources = {name: digest(directory / name) for name in dependencies}
     records = []
     failure = None
+    faulthandler.dump_traceback_later(60, repeat=True)
     try:
         import dspark_prepared_proposal
         from dflash_request_runtime import DFlashRequestRuntime
+        from dspark_history_audit import AuditedHistoryDrafter
+        from dspark_target_state_audit import TargetStateAuditedDrafter
 
         def emit(record):
             print(json.dumps(record), flush=True)
 
-        with entry_scope(records), observe_audit(dspark_prepared_proposal, DFlashRequestRuntime, emit):
+        with entry_scope(records), observe_audit(dspark_prepared_proposal, DFlashRequestRuntime, emit), \
+                observe_boundaries(AuditedHistoryDrafter, TargetStateAuditedDrafter, emit):
             runpy.run_path(str(directory / 'dspark-target-hardware.py'), run_name='__main__')
         if len(records) != 1 or records[0]['attention_calls'] == 0 or not records[0]['kernel_restored']:
             raise ValueError('One executed and cleanly restored combined request scope required')
@@ -37,6 +42,7 @@ def main():
         failure = f'{type(error).__name__}: {error}'
         raise
     finally:
+        faulthandler.cancel_dump_traceback_later()
         if output.exists():
             report = json.loads(output.read_text())
             report.update(splitk_combined=dict(scopes=records, sources=sources,

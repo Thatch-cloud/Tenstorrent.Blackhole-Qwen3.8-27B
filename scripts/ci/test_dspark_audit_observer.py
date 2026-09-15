@@ -1,10 +1,38 @@
 from types import SimpleNamespace
 import unittest
 
-from dspark_audit_observer import observe_audit
+from dspark_audit_observer import observe_audit, observe_boundaries
 
 
 class AuditObserverTests(unittest.TestCase):
+    def test_boundary_callbacks_keep_results_failures_and_restoration(self):
+        records = []
+
+        class History:
+            def snapshot(self):
+                return 'history'
+
+            def compare(self):
+                raise AssertionError('mismatch')
+
+        class Target:
+            def __init__(self, drafter, snapshot, protected_snapshot=None):
+                self.snapshot, self.protected_snapshot = snapshot, protected_snapshot
+
+        original_init, original_snapshot = Target.__init__, History.snapshot
+        with observe_boundaries(History, Target, records.append):
+            target = Target(None, lambda: 'target', lambda: 'protected')
+            self.assertEqual(target.snapshot(), 'target')
+            self.assertEqual(target.protected_snapshot(), 'protected')
+            self.assertEqual(History().snapshot(), 'history')
+            with self.assertRaisesRegex(AssertionError, 'mismatch'):
+                History().compare()
+        self.assertIs(Target.__init__, original_init)
+        self.assertIs(History.snapshot, original_snapshot)
+        self.assertEqual(len(records), 8)
+        self.assertEqual(records[-1]['status'], 'failed')
+        self.assertTrue(all(entry['cpu_ms'] is not None for entry in records[1::2]))
+
     def test_execution_and_restoration_including_failure(self):
         for fail in (False, True):
             calls, records = [], []

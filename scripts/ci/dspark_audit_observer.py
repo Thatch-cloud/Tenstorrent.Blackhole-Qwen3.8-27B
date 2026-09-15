@@ -1,7 +1,7 @@
 """Diagnostic host intervals only; preserves audited proposal execution."""
 
 from contextlib import ExitStack, contextmanager
-from time import perf_counter
+from time import perf_counter, process_time
 from unittest.mock import patch
 
 
@@ -66,4 +66,43 @@ def observe_audit(module, publication_class, emit, *, clock=perf_counter):
         stack.enter_context(patch.object(module, 'execute', timed('eager_reference', module.execute)))
         stack.enter_context(patch.object(prepared, 'propose', propose))
         stack.enter_context(patch.object(publication_class, 'publish', publish))
+        yield
+
+
+@contextmanager
+def observe_boundaries(history_class, target_class, emit, *, clock=perf_counter, cpu_clock=process_time):
+    sequence = 0
+
+    def timed(name, operation):
+        def invoke(*args, **kwargs):
+            nonlocal sequence
+            sequence += 1
+            identifier = sequence
+            metadata = dict(event='audit_boundary', phase=name, identifier=identifier,
+                performance_qualified=False, scope='Nested host intervals; CPU time is process-wide')
+            emit(dict(metadata, status='started', elapsed_ms=None, cpu_ms=None))
+            started, cpu_started = clock(), cpu_clock()
+            passed = False
+            try:
+                result = operation(*args, **kwargs)
+                passed = True
+                return result
+            finally:
+                emit(dict(metadata, status='completed' if passed else 'failed',
+                    elapsed_ms=(clock() - started) * 1000,
+                    cpu_ms=(cpu_clock() - cpu_started) * 1000))
+        return invoke
+
+    original_init = target_class.__init__
+
+    def initialize(instance, drafter, snapshot, protected_snapshot=None):
+        return original_init(instance, drafter, timed('target_state_snapshot', snapshot),
+            protected_snapshot=timed('protected_verifier_snapshot', protected_snapshot)
+                if protected_snapshot is not None else None)
+
+    with ExitStack() as stack:
+        for name in ('snapshot', 'compare'):
+            stack.enter_context(patch.object(history_class, name,
+                timed('history_' + name, getattr(history_class, name))))
+        stack.enter_context(patch.object(target_class, '__init__', initialize))
         yield
