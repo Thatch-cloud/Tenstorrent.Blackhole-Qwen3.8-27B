@@ -7,7 +7,7 @@ from pathlib import Path
 from dspark_attention_8k_gate import require_matrix
 
 
-REPORT_SHA256 = '90eb2538f9f97eab84d727b5d4e662fe20d0a2594e7b647dd27bbee385594d96'
+REPORT_SHA256 = '99e760a6e57e9e3cabf67174d298f76d57d62df000157fbd17e8e53c32742105'
 
 
 def verify_sources(directory, sources):
@@ -21,7 +21,7 @@ def verify_sources(directory, sources):
 def qualify(directory, report_path):
     payload = Path(report_path).read_bytes()
     if hashlib.sha256(payload).hexdigest() != REPORT_SHA256:
-        raise ValueError('Pinned successful sixteen-worker simulator report required')
+        raise ValueError('Pinned successful recurrence simulator report required')
     report = json.loads(payload)
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('backend') != 'simulator' or report.get('capacity') != 384
@@ -30,7 +30,8 @@ def qualify(directory, report_path):
             or report.get('splitk_execution_calls') != 3):
         raise ValueError('Complete retained split-K simulator scope required')
     configuration = report['diagnostic_override']
-    if (configuration.get('key_chunk_size') != 32 or configuration.get('max_cores_per_head') != 16
+    if (configuration.get('key_chunk_size') != 32 or configuration.get('max_cores_per_head') != 8
+            or configuration.get('local_denominator_arithmetic') != 'sfpu-fp32-multiply-add-and-copy'
             or configuration.get('stripe_keys') is not False
             or configuration.get('local_denominator_storage') != 'float32'
             or configuration.get('transfer_statistics_storage') != 'float32'
