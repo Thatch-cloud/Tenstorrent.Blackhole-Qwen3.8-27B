@@ -19,6 +19,13 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_SIM_CASE:-stack}" = history-append ]; then
+    status=0
+    timeout -k 10 180 python3 -u /experiment-scripts/ci/history-append-probe.py \
+        --output /experiment/results/history-append.json || status=$?
+    printf '%s\n' "$status" > /experiment/results/history-append.exit-status
+    exit "$status"
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then
     status=0
     timeout -k 15 600 python3 -u /experiment-scripts/ci/markov-cache-control-probe.py \

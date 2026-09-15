@@ -52,7 +52,7 @@ if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-bitwise ]; then
     score_bitwise=1
     export QWEN_SIM_CASE=dspark-ladder-attention
 fi
-case "${QWEN_SIM_CASE:-stack}" in dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
 mkdir -p experiment-results
 results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
@@ -68,6 +68,7 @@ test -r "$results/result-write-preflight.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
+if [ "${QWEN_SIM_CASE:-stack}" = history-append ]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then kinds=''; fi
