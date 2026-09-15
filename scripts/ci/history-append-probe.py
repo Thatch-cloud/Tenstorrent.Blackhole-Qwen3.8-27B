@@ -43,7 +43,11 @@ def main():
                 actual = ttnn.to_torch(shard).contiguous().view(torch.int16)
                 golden = expected[chip:chip + 1].contiguous().view(torch.int16)
                 exact = torch.equal(actual, golden)
-                report['checks'].append(dict(ordinal=ordinal, chip=chip, name=name, exact=exact))
+                differences = torch.nonzero(actual != golden)
+                mismatches = [dict(index=index.tolist(), actual_bits=int(actual[tuple(index)]),
+                    expected_bits=int(golden[tuple(index)])) for index in differences[:16]]
+                report['checks'].append(dict(ordinal=ordinal, chip=chip, name=name, exact=exact,
+                    mismatch_count=len(differences), mismatches=mismatches))
                 if not exact:
                     raise AssertionError('Entire bank differs bitwise: ' + name)
 
@@ -57,6 +61,7 @@ def main():
             delta[1] = -delta[1]
             delta[:, :, prefix:] = 257
             device_delta = upload(delta)
+            compare(device_delta, delta, 'delta_upload_exact', ordinal)
             plan = planner.prepare(prefix)
             prepared = expected.clone()
             prepared[:, :, plan.position:plan.position + prefix] = delta[:, :, :prefix]
@@ -74,7 +79,7 @@ def main():
                     for shard in ttnn.get_device_tensors(tensor)) != bindings:
                 raise AssertionError('Persistent bank addresses changed')
             print(json.dumps(dict(stage='append', ordinal=ordinal, prefix=prefix, commit=commit)), flush=True)
-        report['passed'] = len(report['checks']) == 36 and all(check['exact'] for check in report['checks'])
+        report['passed'] = len(report['checks']) == 48 and all(check['exact'] for check in report['checks'])
     finally:
         try:
             if mesh is not None:
