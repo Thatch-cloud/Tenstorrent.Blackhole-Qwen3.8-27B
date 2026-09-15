@@ -1,15 +1,21 @@
-# Split-K draft attention: 64K accuracy repair
+# Split-K draft attention: 64K hardware gate passed
 
 The objective remains 200 committed tokens/s for one coding stream on two P150A cards. These weight-free kernel experiments are not committed-token throughput measurements.
 
-**Retained simulator milestone:** run 34911012256 passes original-order 16-worker-per-KV-lane
+**Current milestone:** hardware run **34918350712** passes full 64K history with
+256-key chunks and eight workers per KV lane. All four eager numerical checks,
+four exact changed-input replay checks, 48 input checks, 16 layout checks and
+poison/frontier controls pass; devices close cleanly. The complete CI job took
+**38 seconds**, using the verified binary cache. This is component correctness,
+not a full-model throughput result. `dspark_splitk_hardware_gate.py` pins the report.
+
+**Earlier simulator milestone:** run 34911012256 passes original-order 16-worker-per-KV-lane
 simulation with FP32 local denominators and tree payloads, and round-indexed scratch.
 Four eager numerical checks, four exact replay checks and the native target gate pass;
-both scopes close cleanly. `dspark_splitk_sim_gate.py` pins the report and verifies
-matching source dependencies before hardware admission. The pinned report SHA256 is
+both scopes close cleanly. This historical report SHA256 is
 `90eb2538f9f97eab84d727b5d4e662fe20d0a2594e7b647dd27bbee385594d96`.
 
-**64K hardware result:** run 34912625173 built and imported successfully, then
+**First 64K hardware result:** run 34912625173 built and imported successfully, then
 failed the first eager numerical check: 2,502 elements outside tolerance, maximum
 absolute error 0.727303 on chip 0. Devices closed cleanly. Constant-value, oldest-key
 and last-proposal diagnostics pass their existing tolerances on both chips; that
@@ -17,11 +23,11 @@ does not qualify the mixed-value attention output. No replay qualification was r
 
 | Current work | Status |
 | --- | --- |
-| Hardware build | Verified cache reuse; latest hardware job took 34 seconds |
+| Hardware build | Verified cache reuse; latest hardware job took 38 seconds |
 | Hardware numerical execution | Diagnostics and first eager check took about five seconds |
-| Local denominator recurrence | Small simulator passes; full 64K still fails |
-| Next isolated change | 256-key chunks after 128-key partial improvement; unchanged arithmetic, tolerances and full history |
-| Combined requests / TG | Blocked on numerical qualification; no new throughput result |
+| Qualified candidate | 256-key chunks; FP32 local/tree denominators; native numerator; unchanged tolerances |
+| Combined build | Opt-in preparation binds prefill and decode factories into one cache identity; local tests pass |
+| Combined requests / TG | Runtime binding and fresh request audit next; no new throughput result |
 
 ### Subsequent 64K results
 
@@ -33,13 +39,14 @@ does not qualify the mixed-value attention output. No replay qualification was r
 | 34916226351 | Explicit BF16 correction-factor rounding | 1,976 | 0.643814 | Identical output hash to control; ineffective |
 | 34917227924 | FP32 tree denominator arithmetic and transport | 1,624 | 0.636242 | Partial improvement, still fails; clean close, 36-second job |
 | 34917809100 | Same arithmetic, 128-key chunks | 63 | 0.472881 | Still fails; clean close, 35-second job |
+| 34918350712 | Same arithmetic, 256-key chunks | 0 | 0.402332 | All four eager and four replay checks pass; clean close, 38-second job |
 
 The fused numerator passed the small simulator gate (34914738395), but worsened
 the matched 64K hardware result. It is removed from the active candidate; its
 helper and tests remain as experiment history. Denominator-only is still not
 hardware-qualified. Do not rerun that unchanged baseline merely to reconfirm it.
 
-The latest hardware job completed in **35 seconds** with a verified compiled-binary
+The latest hardware job completed in **38 seconds** with a verified compiled-binary
 cache hit, versus 5m17s for the preceding build-heavy job. Admission reports still
 undergo current source checks; only identical compiled factory inputs are reused.
 

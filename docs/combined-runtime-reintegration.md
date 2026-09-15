@@ -9,7 +9,7 @@ and coding quality preserved. Serving defaults stay unchanged.
 | Captured draft proposal and feature publication | Retained in full requests | Keep exact changed-input replay and publication audits |
 | Commit-only GDN | Retained | Keep active/inactive state checks |
 | Folded T16 target attention | Integrated in the 64K timed path | Retain exact target outputs and state |
-| Fast draft attention | Long-history numerical repair path; split-K not admitted | Original-order multicore simulator, 64K hardware numerical gate, then combined requests |
+| Fast draft attention | Split-K 256-key component passes full 64K hardware gate | Source-matched combined build and fresh request audit, then PP/CTX/TG |
 | Fused T16 MLP | Not enabled by the isolated 64K entry | Port admission and dependencies; exact target outputs/state before matched timing |
 | Shared GDN Q/K preparation | Not enabled by the isolated 64K policy | Integrate after its fused-MLP/target dependencies; exact recurrence and full-request checks |
 | Short-context score layout | Not enabled by the isolated 64K entry | Audit long-history capacity/layout assumptions before integration |
@@ -38,9 +38,11 @@ Evidence: [64K measurements and attribution](context-ladder-investigation.md),
 
 ## Split-K hardware handoff (15 September)
 
-Simulator run **34911012256** passes original-order, sixteen-worker split-K.
-Hardware run **34912625173** is the weight-free 64K numerical/replay screen;
-its dispatch is not hardware acceptance or a throughput result.
+Simulator run **34918015135** passes the 256-key chunk gate. Hardware run
+**34918350712** passes the full-history numerical/replay screen in 38 seconds.
+`dspark_splitk_hardware_gate.py` verifies the retained report, source dependencies,
+all numerical/replay checks and input/layout/frontier controls. This does not yet
+qualify a combined model request or provide a throughput result.
 
 | Stage | Bound | Evidence required |
 | --- | --- | --- |
@@ -53,6 +55,11 @@ The combined runtime needs **both** factories in one rebuilt library: the existi
 factory. Replacing the library after producing the old build report invalidates
 that report; rebuild once, then issue and validate both manifests against the same
 binary. Preserve the existing CCL/GDN registrations and source-keyed cache inputs.
+
+`dspark_splitk_combined_build.py` now prepares both factory identities under the
+existing single-library cache build. Its validation rejects a changed decode
+factory even when the prefill manifest passes. Local gate/mutation tests pass;
+the combined library and request integration have not yet run on hardware.
 
 The request binding is `dspark_native_cached_layer.attend`, installed inside
 `dspark_64k_scope.runtime_scope`. Install the admitted split-K adapter after that
