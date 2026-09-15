@@ -35,3 +35,28 @@ the verifier/commit stack is required, not optional work after a kernel-only win
 Evidence: [64K measurements and attribution](context-ladder-investigation.md),
 [8K combined results](draft-8k-numerical-investigation.md),
 [current split-K gates](splitk-draft-status.md).
+
+## Split-K hardware handoff (15 September)
+
+Simulator run **34911012256** passes original-order, sixteen-worker split-K.
+Hardware run **34912625173** is the weight-free 64K numerical/replay screen;
+its dispatch is not hardware acceptance or a throughput result.
+
+| Stage | Bound | Evidence required |
+| --- | --- | --- |
+| Rebuild or source-keyed cache restore | 360 seconds | Matching factory, registered operations and both loaded libraries |
+| 64K hardware probe | 120 seconds | Four eager and four changed-input replay checks; poison/frontier controls; clean close |
+| Container execution | 510 seconds | Terminal exit status and retained logs; only this run's container is cleaned up |
+
+The combined runtime needs **both** factories in one rebuilt library: the existing
+64K prefill factory (`dspark_64k_build.prepare`) and the qualified split-K decode
+factory. Replacing the library after producing the old build report invalidates
+that report; rebuild once, then issue and validate both manifests against the same
+binary. Preserve the existing CCL/GDN registrations and source-keyed cache inputs.
+
+The request binding is `dspark_native_cached_layer.attend`, installed inside
+`dspark_64k_scope.runtime_scope`. Install the admitted split-K adapter after that
+scope enters, otherwise the baseline adapter overwrites it. Keep target attention,
+history publication, request correctness and state audits unchanged. The retained
+timing gate describes the old candidate: obtain a new combined request audit before
+qualifying timings for the split-K candidate. Do not relabel its old report.
