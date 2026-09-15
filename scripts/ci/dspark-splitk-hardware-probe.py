@@ -69,6 +69,7 @@ def main():
                         max_cores_per_head=8, native_padded_keys=fixture['native_keys'],
                         local_denominator_arithmetic='sfpu-fp32-multiply-add-and-copy',
                         local_numerator_add='native-fpu',
+                        correction_factor_rounding='explicit-fp32-to-bf16-rne',
                         added_masked_poison_rows=fixture['extra_masked_keys'],
                         performance_qualified=False, full_request_qualified=False,
                         wrapper_sources={name: digest(directory / name) for name in

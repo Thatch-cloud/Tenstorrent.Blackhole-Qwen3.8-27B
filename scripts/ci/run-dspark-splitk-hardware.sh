@@ -7,9 +7,8 @@ image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
 output=$(realpath -e experiment-results)
 evidence=$(mktemp -d "$RUNNER_TEMP/qwen-splitk-evidence.XXXXXX")
-timeout -k 5 45 gh run download 34913565056 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
-    --name qwen-hardware-inventory-34913565056 --dir "$evidence"
-cp "$evidence/dspark-splitk.json" scripts/ci/dspark-splitk-simulator.json
+timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376526357/zip > "$evidence/report.zip"
+python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-splitk-simulator.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read("dspark-splitk.json"))' "$evidence/report.zip"
 PYTHONPATH=scripts/ci python3 -c 'from dspark_splitk_sim_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-splitk-simulator.json")'
 volume=qwen-experiments-f1e9b1a64b4f
 if docker volume inspect "$volume" >/dev/null 2>&1; then
