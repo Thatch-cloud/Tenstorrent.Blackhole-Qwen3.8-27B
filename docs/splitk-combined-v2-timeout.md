@@ -45,3 +45,29 @@ attribution, component correctness, and combined PP / CTX / TG.
 Evidence: artifact `qwen-splitk-combined-34920122480`, especially
 `dspark-64k-request-hardware.exit-status`, `dspark-runtime-cache.json`,
 `dspark-build-time.json`, `dspark-container-state.json`, and request log.
+
+## V3 diagnostic: setup exhausted the budget
+
+Run **34921068711**, revision **89aa894**, also exits 124. The fresh-request
+audit started at elapsed **245.93 seconds**, versus 163.32 seconds in V2.
+Its only observed proposal was the warmup before verifier capture, not a
+committed generation block. The observer completed at 02:33:35.963 UTC;
+the CI step failed at 02:33:39.395 UTC.
+
+| Warmup proposal host interval | Milliseconds |
+|---|---:|
+| Input/history update | 9.52 |
+| Eager reference enqueue/execution call | 26.07 |
+| Reference snapshot, including queued work | 78.44 |
+| Blocking trace replay | 77.30 |
+| Replay snapshot | 24.76 |
+| Token readback | 0.22 |
+| Entire audited proposal | 221.96 |
+
+These are nested host observations from one warmup. They neither explain the
+V2 generation block's 30-second draft timer nor establish a speedup against a
+matched control. They do establish that this sampled proposal itself finished
+quickly; V3 did not spend its whole deadline inside that replay. Prioritize
+startup/capture budget attribution and the outer request audit wrappers before
+another kernel change. No new numerical failure or completed acceptance is
+reported. Raw evidence is in `qwen-splitk-combined-34921068711`.
