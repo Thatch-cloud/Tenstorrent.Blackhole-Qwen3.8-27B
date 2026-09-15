@@ -83,3 +83,24 @@ The next clean timing excludes this admission experiment and per-block audits;
 it retains the score-layout, split-K, fused MLP and shared-Q/K runtime together.
 
 Report SHA256: `c027988a232f47f7a27bc7382aa09c02f6b9117af9e3c754e782f0d75ee23288`.
+
+## First clean timing attempt
+
+Run `34930384229` (`a8b51d4`) reaches a complete first request, then exits 124
+while starting request two. The first request commits 135 tokens in 17.767 s;
+output, final state and inactive slots match. The overall run is incomplete,
+has no clean shutdown, and is **not a qualified combined throughput result**.
+
+Relative to the earlier shared-Q/K timing, first-request engine setup grows from
+3.44 to 33.50 s, feature setup from 19.70 to 48.73 s, and decode from 4.49 to
+17.77 s. Loading/warmup already consumes 203.72 s before request one. The request
+health record shows no cgroup CPU throttling, swap or OOM event. Whole-request
+I/O pressure increases; this does not isolate the cause of decode stalls.
+
+The retry removes a redundant *second* learned-weight score audit only when the
+operations, mesh and both retained weight objects are identical. Each score arm
+still validates the admitted hardware evidence and current allocation bindings.
+Any owner change causes a fresh audit. The first loaded-weight audit remains
+mandatory and now logs its own setup duration. Both complete requests, native
+gold runs, final-state checks and the 420-second watchdog remain unchanged.
+This setup change alone is not evidence that the decode slowdown is fixed.

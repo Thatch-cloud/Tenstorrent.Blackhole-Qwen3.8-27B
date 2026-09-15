@@ -45,9 +45,16 @@ class ScoreTimingTests(unittest.TestCase):
                 self.assertEqual(inspect.signature(module.measure_dspark_request), inspect.signature(measure))
                 result = module.measure_dspark_request([1] * 65536, None, SimpleNamespace(mesh_device=None),
                     None, None, audit_features=False, max_new_tokens=256, proposal_trace=True)
-        self.assertEqual(events, ['loaded_weight_audit', 'install', 'capture', 'complete_request', 'restore'])
+                module.measure_dspark_request([1] * 65536, None, SimpleNamespace(mesh_device=None),
+                    None, None, audit_features=False, max_new_tokens=256, proposal_trace=True)
+                module.measure_dspark_request([1] * 65536, None, SimpleNamespace(mesh_device=None),
+                    object(), None, audit_features=False, max_new_tokens=256, proposal_trace=True)
+        self.assertEqual(events, ['loaded_weight_audit', 'install', 'capture', 'complete_request', 'restore',
+            'install', 'capture', 'complete_request', 'restore',
+            'loaded_weight_audit', 'install', 'capture', 'complete_request', 'restore'])
         self.assertTrue(result['exact'])
-        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records), 3)
+        self.assertEqual([record['loaded_weight_admission']['reused'] for record in records], [False, True, False])
         self.assertIs(module.measure_dspark_request, measure)
         self.assertIs(Device.prepare_trace, original_prepare)
 

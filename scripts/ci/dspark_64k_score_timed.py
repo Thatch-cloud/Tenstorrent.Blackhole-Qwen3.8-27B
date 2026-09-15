@@ -3,7 +3,9 @@
 from contextlib import ExitStack, contextmanager
 from functools import wraps
 import inspect
+import json
 import os
+from time import perf_counter
 from unittest.mock import patch
 
 import dspark_64k_shared_timed as shared
@@ -31,6 +33,7 @@ def measurement_scope(module, device_class, arm_factory, hardware_audit, records
         raise ValueError('Explicit clean combined score-layout timing required')
     original = module.measure_dspark_request
     signature = inspect.signature(original)
+    loaded_audit = []
 
     @wraps(original)
     def measure(*args, **kwargs):
@@ -39,8 +42,17 @@ def measurement_scope(module, device_class, arm_factory, hardware_audit, records
                 or arguments.get('max_new_tokens') != 256 or arguments.get('proposal_trace') is not True
                 or arguments.get('score_layout', False)):
             raise ValueError('Same complete clean 64K native-score control required')
-        evidence = hardware_audit(arguments['operations'], arguments['model'].mesh_device,
+        owners = (arguments['operations'], arguments['model'].mesh_device,
             arguments['predecessor'], arguments['successor'])
+        reused = bool(loaded_audit and all(before is after
+            for before, after in zip(loaded_audit[0], owners)))
+        started = perf_counter()
+        if not reused:
+            loaded_audit[:] = [owners, hardware_audit(*owners)]
+        evidence = loaded_audit[1]
+        setup = dict(event='score_loaded_weight_audit', reused=reused,
+            elapsed_ms=(perf_counter() - started) * 1000, performance_qualified=False)
+        print(json.dumps(setup), flush=True)
         prepare = device_class.prepare_trace
         arms = []
         with ExitStack() as stack:
@@ -56,6 +68,7 @@ def measurement_scope(module, device_class, arm_factory, hardware_audit, records
         if len(arms) != 1:
             raise ValueError('Score-layout candidate was not captured')
         summary = arms[0].summary()
+        summary['loaded_weight_admission'] = setup
         records.append(summary)
         result['score_64k_reintegration'] = summary
         return result
