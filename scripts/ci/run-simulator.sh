@@ -60,11 +60,33 @@ image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 results_gid=$(stat -c %g "$results")
 [[ "$results_gid" =~ ^[0-9]+$ ]]
 chmod g+rwx "$results"
-timeout -k 5 30 docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+preflight_name="qwen-sim-preflight-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+preflight_cleanup() {
+    status=$?
+    trap - EXIT
+    timeout -k 1 5 docker inspect --format '{{json .State}}' "$preflight_name" > "$results/preflight-state.json" 2>&1 || true
+    timeout -k 1 5 docker logs "$preflight_name" > "$results/preflight-container.log" 2>&1 || true
+    if [ "$status" -ne 0 ]; then
+        free -m > "$results/preflight-memory.txt" || true
+        cat /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io > "$results/preflight-pressure.txt" || true
+        timeout -k 1 5 docker ps --format '{{.Names}} {{.Status}}' > "$results/preflight-containers.txt" 2>&1 || true
+    fi
+    timeout -k 1 10 docker rm -f "$preflight_name" >/dev/null 2>&1 || true
+    exit "$status"
+}
+trap preflight_cleanup EXIT
+printf 'preflight_create\n' | tee "$results/preflight-stage.txt"
+timeout -k 5 30 docker create --name "$preflight_name" --network none --cap-drop ALL --security-opt no-new-privileges \
     --group-add "$results_gid" \
     --mount "type=bind,src=$results,dst=/experiment/results" --entrypoint /bin/bash "$image" \
     -c 'printf "container_uid=%s\n" "$(id -u)" > /experiment/results/result-write-preflight.txt'
+printf 'preflight_start\n' | tee "$results/preflight-stage.txt"
+timeout -k 5 30 docker start -a "$preflight_name"
+test "$(timeout -k 1 5 docker inspect --format '{{.State.ExitCode}}' "$preflight_name")" = 0
 test -r "$results/result-write-preflight.txt"
+timeout -k 1 10 docker rm "$preflight_name" >/dev/null
+trap - EXIT
+printf 'preflight_complete\n' | tee "$results/preflight-stage.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
