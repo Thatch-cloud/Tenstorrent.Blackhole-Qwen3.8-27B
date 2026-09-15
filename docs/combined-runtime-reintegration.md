@@ -66,7 +66,11 @@ The combined request entry now installs the split-K adapter **after** the legacy
 the source on success or failure. It retains the bounded 17-token audited request,
 captured publication, folded T16 verifier and target-state checks. This first CI
 job is a correctness screen, not the full-response PP/CTX/TG measurement.
-Host execution is capped at nine minutes; the request process at five minutes.
+Host execution is capped at nine minutes; the request process at seven minutes.
+The first run (34919330098) completed the cold combined build in 297 seconds,
+then hit the host deadline during target loading. No request audit completed.
+The built library is cached; the next run also confines the experimental precision
+flag to draft calls, leaving native target decode untouched.
 
 The request binding is `dspark_native_cached_layer.attend`, installed inside
 `dspark_64k_scope.runtime_scope`. Install the admitted split-K adapter after that

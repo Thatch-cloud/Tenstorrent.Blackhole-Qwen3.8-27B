@@ -1,7 +1,7 @@
 name: Qwen combined T16 split-K audit
 on:
   push:
-    tags: ['experiment/dspark-splitk-combined-v1']
+    tags: ['experiment/dspark-splitk-combined-v1', 'experiment/dspark-splitk-combined-v2']
   workflow_dispatch:
     inputs:
       cards_allocated:
