@@ -16,8 +16,7 @@ class HardwareScopeTests(unittest.TestCase):
             source.write_bytes(original)
             with patch.object(scope, 'SOURCE_SHA256', hashlib.sha256(original).hexdigest()), \
                     patch.object(scope, 'transform', return_value='candidate kernel'), \
-                    patch.object(scope, 'recurrence_transform', side_effect=lambda source: source), \
-                    patch.object(scope, 'numerator_transform', side_effect=lambda source: source):
+                    patch.object(scope, 'recurrence_transform', side_effect=lambda source: source):
                 with self.assertRaisesRegex(RuntimeError, 'probe failed'):
                     with scope.kernel_scope(directory) as evidence:
                         self.assertIn(b'QWEN_SPLITK_NATIVE_EXPERIMENT', source.read_bytes())

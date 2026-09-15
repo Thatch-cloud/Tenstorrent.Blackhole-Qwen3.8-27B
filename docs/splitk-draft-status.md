@@ -23,6 +23,22 @@ does not qualify the mixed-value attention output. No replay qualification was r
 | Simulator run 34913565056 | Dispatched with eight workers and two chunks per worker, testing recurrence plus tree reduction |
 | Combined requests / TG | Blocked on numerical qualification; no new throughput result |
 
+### Subsequent 64K results
+
+| Run | Local recurrence | Failed elements (chip 0, first eager) | Maximum error | Outcome |
+| --- | --- | ---: | ---: | --- |
+| 34913947170 | FP32 denominator, native numerator; eight workers | 1,976 | 0.643814 | Fails; clean close |
+| 34915054290 | FP32 denominator and fused FP32 numerator; eight workers | 22,956 | 1.161568 | Rejected; clean close |
+
+The fused numerator passed the small simulator gate (34914738395), but worsened
+the matched 64K hardware result. It is removed from the active candidate; its
+helper and tests remain as experiment history. Denominator-only is still not
+hardware-qualified. Do not rerun that unchanged baseline merely to reconfirm it.
+
+The last hardware job completed in **52 seconds** with a verified compiled-binary
+cache hit, versus 5m17s for the preceding build-heavy job. Admission reports still
+undergo current source checks; only identical compiled factory inputs are reused.
+
 A CPU ablation on chip-0/head-6/row-2 predicts a last-proposal weighting error
 equivalent to -0.340 output units when denominator reloads are truncated, versus
 -0.000244 without that truncation. This is evidence for a contributor, not an exact
