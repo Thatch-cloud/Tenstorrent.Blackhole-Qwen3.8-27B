@@ -7,7 +7,7 @@ from pathlib import Path
 from dspark_attention_8k_gate import require_matrix
 
 
-REPORT_SHA256 = 'b8001ee5d62ce58381b49fbcaee17ec85eb6cef732155b7b06cbd8a71d79d95c'
+REPORT_SHA256 = '96a5e139b6be99935c30aec2cd521b0203aa469c596f98584bdd41aaefa68fac'
 
 
 def verify_sources(directory, sources):
@@ -30,7 +30,7 @@ def qualify(directory, report_path):
             or report.get('splitk_execution_calls') != 3):
         raise ValueError('Complete retained split-K simulator scope required')
     configuration = report['diagnostic_override']
-    if (configuration.get('key_chunk_size') != 128 or configuration.get('max_cores_per_head') != 8
+    if (configuration.get('key_chunk_size') != 256 or configuration.get('max_cores_per_head') != 8
             or configuration.get('local_denominator_arithmetic') != 'sfpu-fp32-multiply-add-and-copy'
             or configuration.get('tree_denominator_arithmetic') != 'sfpu-fp32-two-products-add-and-transport'
             or configuration.get('local_numerator_add') != 'native-fpu'
