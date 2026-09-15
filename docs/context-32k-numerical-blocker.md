@@ -1,5 +1,19 @@
 # 32K matched-context numerical blocker
 
+## Resolved for this fixture: FP32 local maxima
+
+Hardware run **35034936748** passes all 72 numerical/input/layout/replay checks
+and eight fixture controls with clean shutdown. The isolated factory change
+promotes local maxima buffers c27/c28 to FP32; tolerances and full history are
+unchanged. First-case chip-1 maximum absolute error falls from 0.468784 to
+0.279079, with zero out-of-tolerance values across both cases and both chips.
+Report SHA256: `f9d1bc607a699490c4a4d87a3b0311bd24e7c2d9d54f4730c8cd624e900e3670`.
+
+Simulator admission is run **35034190179**, report SHA256
+`24a5659adba79424b6dee5106257b44469c22a8b8fa7341e2d788b1359b54d2e`.
+Other contexts, full-model correctness and throughput remain unqualified for
+this candidate. It is not enabled in serving or the combined runtime yet.
+
 The 200 committed tok/s objective remains open. This is a draft-attention
 correctness blocker, not a new model-throughput result or a serving change.
 

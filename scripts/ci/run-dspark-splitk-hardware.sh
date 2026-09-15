@@ -5,7 +5,7 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test -z "${TT_METAL_SIMULATOR:-}"
 case "${QWEN_MATCHED_CONTEXT:-0}" in 0|4096|8192|16384|32768|65536|131072|262144) ;; *) exit 2 ;; esac
 case "${QWEN_SPLITK_MAXIMA:-0}" in 0|1) ;; *) exit 2 ;; esac
-if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then test "${QWEN_MATCHED_CONTEXT:-0}" = 32768; fi
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then test "${QWEN_MATCHED_CONTEXT:-0}" != 0; fi
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
 output=$(realpath -e experiment-results)
