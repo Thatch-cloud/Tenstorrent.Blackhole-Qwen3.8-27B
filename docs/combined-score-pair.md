@@ -24,3 +24,26 @@ verify/readback and selection/commit times. Do not pool the two arms into a
 throughput number. One observation per arm in fixed order is diagnostic, not
 repeatability, an order-independent causal result, held-out coding acceptance
 or proof of the 200 committed TG objective.
+# Paired timing outcome: 35018609131
+
+The run fails with **exit 124 during final parameter auditing**, after both
+complete requests return exact output/state checks. Clean device closure and
+final learned-weight checks are incomplete, so this is not performance acceptance.
+
+| Arm | CTX | Committed output | Generation seconds | Diagnostic TG |
+| --- | ---: | ---: | ---: | ---: |
+| Native-score control | 65536 | 135 | 5.2900 | 25.52 |
+| Fused-score candidate | 65536 | 135 | 16.1356 | 8.37 |
+
+Target loading takes 52.92 seconds. The requests finish at process seconds 251.01
+and 400.57; final parameter auditing starts at 401.30 and exceeds the 420-second
+process budget. Do not extend the timeout and rerun this candidate unchanged.
+
+The candidate has severe history-preparation stalls: 2684.88 ms at position
+65558 with only 48.04 ms process CPU, and 1920.69 ms at 65650 with 45.41 ms CPU.
+Recorded GC pauses are zero, and cgroup CPU throttling/OOM counters do not
+increase. Blocking verifier replays remain around 80.6 ms. These facts do not
+prove whether the stalls originate in I/O, runtime compilation, synchronization
+or history-bank assembly; nested attribution is needed before changing kernels.
+Score fusion is not promoted. Its causal effect cannot be isolated from this
+single ordered pair and variable stalls.
