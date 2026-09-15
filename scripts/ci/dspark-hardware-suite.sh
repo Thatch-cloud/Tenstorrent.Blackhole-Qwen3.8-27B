@@ -162,6 +162,7 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     splitk_entry=dspark-splitk-combined-request.py
     if [ "${QWEN_64K_MLP_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-mlp-request.py; fi
     if [ "${QWEN_64K_SHARED_QK_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-qk-request.py; fi
+    if [ "${QWEN_64K_SCORE_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-score-request.py; fi
     if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=dspark-splitk-timed-request.py; fi
     if [ "${QWEN_64K_MLP_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-mlp-timed-request.py; fi
     if [ "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-timed-request.py; fi

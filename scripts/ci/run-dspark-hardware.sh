@@ -7,6 +7,9 @@ splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
 mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
 shared_64k_audit=${QWEN_64K_SHARED_QK_AUDIT:-0}
+score_64k_audit=${QWEN_64K_SCORE_AUDIT:-0}
+[[ "$score_64k_audit" = 0 || "$score_64k_audit" = 1 ]]
+if [ "$score_64k_audit" = 1 ]; then test "$shared_64k_audit" = 1; fi
 shared_64k_timed=${QWEN_64K_SHARED_QK_TIMED:-0}
 [[ "$shared_64k_timed" = 0 || "$shared_64k_timed" = 1 ]]
 if [ "$shared_64k_timed" = 1 ]; then
@@ -454,6 +457,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
+    -e "QWEN_64K_SCORE_AUDIT=$score_64k_audit" \
     -e "QWEN_64K_SHARED_QK_TIMED=$shared_64k_timed" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
