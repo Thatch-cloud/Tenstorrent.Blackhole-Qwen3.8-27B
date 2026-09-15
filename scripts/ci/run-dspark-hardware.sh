@@ -4,6 +4,15 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
+matched_combined=${QWEN_MATCHED_COMBINED:-0}
+[[ "$matched_combined" = 0 || "$matched_combined" = 1 ]]
+if [ "$matched_combined" = 1 ]; then
+    test "$splitk_combined" = 1
+    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+    test "${QWEN_64K_SCORE_AUDIT:-0}" = 1
+    test "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1
+fi
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
 mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
 shared_64k_audit=${QWEN_64K_SHARED_QK_AUDIT:-0}
@@ -59,6 +68,24 @@ if [ "$splitk_combined" = 1 ]; then
     [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 1:0 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 0:1 ]]
     test "${QWEN_DSPARK_CENTER_TILE_FILL:-0}" = 1
     splitk_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-combined-splitk.XXXXXX")
+    if [ "$matched_combined" = 1 ]; then
+        timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10422439077/zip > "$splitk_evidence/maxima.zip"
+        timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10423600155/zip > "$splitk_evidence/draft.zip"
+        timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10422359668/zip > "$splitk_evidence/target.zip"
+        python3 - "$splitk_evidence" <<'PY'
+from pathlib import Path
+import sys
+import zipfile
+root = Path(sys.argv[1])
+for archive, member, destination in (
+    ('maxima.zip', 'dspark-splitk-maxima.json', 'dspark-maxima-simulator.json'),
+    ('draft.zip', 'matched-context-attention-65536.json', 'matched-context-attention-65536.json'),
+    ('target.zip', 'matched-context-target-65536.json', 'matched-context-target-65536.json')):
+    with zipfile.ZipFile(root / archive) as source:
+        (Path('scripts/ci') / destination).write_bytes(source.read(member))
+PY
+        PYTHONPATH=scripts/ci python3 -c 'from matched_combined_build import admission; admission("scripts/ci")'
+    else
     timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376709944/zip > "$splitk_evidence/hardware.zip"
     timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376559640/zip > "$splitk_evidence/simulator.zip"
     python3 - "$splitk_evidence" <<'PY'
@@ -73,6 +100,7 @@ for archive, member, destination in (
         (Path('scripts/ci') / destination).write_bytes(source.read(member))
 PY
     PYTHONPATH=scripts/ci python3 -c 'from dspark_splitk_hardware_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-splitk-hardware.json", "scripts/ci/dspark-splitk-simulator.json")'
+    fi
 fi
 mode=${QWEN_DSPARK_MODE:-backbone}
 trial_64k=${QWEN_DSPARK_64K_TRIAL:-0}
@@ -475,6 +503,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
+    -e "QWEN_MATCHED_COMBINED=$matched_combined" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
@@ -521,7 +550,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
-if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then
+if [[ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 || "$matched_combined" = 1 ]]; then
     history_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-history-append.XXXXXX")
     timeout -k 5 45 gh run download 35024279412 --repo "$GITHUB_REPOSITORY" \
         --name qwen-history-append-hardware-35024279412 --dir "$history_evidence"
@@ -529,7 +558,7 @@ if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then
         "$history_evidence/history-append-hardware.json"
     docker cp "$history_evidence/history-append-hardware.json" "$test_id:/experiment-scripts/ci/history-append-hardware.json"
 fi
-if [[ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 && "$timed_requests" = 1 ]]; then
+if [[ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 && ( "$timed_requests" = 1 || "$matched_combined" = 1 ) ]]; then
     lazy_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-lazy-loader.XXXXXX")
     gh run download 34936162975 --repo "$GITHUB_REPOSITORY" \
         --name qwen-splitk-combined-34936162975 --dir "$lazy_evidence"

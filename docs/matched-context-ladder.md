@@ -53,6 +53,14 @@ exact agreement with the existing 64K padded geometry.
 
 ## Remaining implementation gates
 
+The next 64K run uses `qwen-matched-combined.yml`: one cache-hit model load,
+the new maxima factory, fused T16 MLP, shared Q/K, score-layout fusion and the
+incremental history writer. It retains the existing 17-output correctness
+screen (256-token allocation), including native output/state and trace checks.
+This is not a TG measurement or a full-response qualification. The run has a
+590-second outer deadline; previous timing admission is deliberately rejected.
+After this screen passes, measure complete responses on the exact new build.
+
 1. Completed: repeat the previous combined 64K incremental-history candidate.
 2. Completed through 64K: context-specific draft and folded-target evidence.
    131K draft accuracy remains open; 262K still needs execution. Component
