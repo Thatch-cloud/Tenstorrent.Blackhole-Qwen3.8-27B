@@ -29,5 +29,31 @@ or final parameter audit. A completed diagnostic requires clean shutdown but
 keeps `passed=false`, `full_request_passed=false` and all accepted TG fields null.
 It is not a substitute for those audits on a performance candidate. The process
 budget is 300 seconds, with a 420-second outer limit. Hardware attribution is
-**not yet run**. Select a publication optimization only after
-the cost is attributed; a 44 ms saving alone cannot establish 200 committed TG.
+reported below. A 44 ms saving alone cannot establish 200 committed TG.
+
+## Hardware diagnostic 35020108364
+
+Completed in **4m12s**. One 135-token request passes exact output, final active
+state and inactive-slot checks; device and checkpoint closure pass. This is
+diagnostic completion, not full performance acceptance or a final weight audit.
+
+| Sampled stage, 20 blocks | Mean ms | Maximum ms |
+| --- | ---: | ---: |
+| Captured feature projection | 1.653 | 2.324 |
+| Full history-bank assembly | 46.803 | 63.831 |
+
+The multi-second stalls from the previous run do not recur, so their cause is
+still unresolved. The persistent publication cost is now attributed to bank
+assembly, not projection. Report SHA256:
+`d134bd0b278c23873f19a7fa5d628d0adcf772e03b5d7905e4d467882e9084f1`.
+
+Next candidate: replace full-history slice/concat/pad/copy with a bit-preserving
+dirty-tile writer. Keep the active bank untouched until commit. Repair the spare
+bank's previous accepted/discarded tail, append only accepted rows, and zero
+invalid rows within the touched tiles. A bounded planner covers at most 96 rows
+per append instead of rebuilding 66,560 rows. CPU tests compare entire banks
+through 480 randomized commit/discard transactions and tile boundaries, including
+64K positions. This is a transaction plan, **not an implemented accelerator
+kernel or a measured speedup**. Next gates: BF16 bit-copy kernel, simulator bank
+contents/address lifetime checks, then combined-runtime hardware correctness and
+matched PP/CTX/TG. Serving defaults remain unchanged.
