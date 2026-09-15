@@ -65,4 +65,15 @@ permits only zero-sign changes at that boundary and checks the writer bitwise
 against the actual uploaded input. Nonzero upload changes still fail. This does
 not qualify signed-zero preservation through upload. Run 35022225254 attempt 1
 timed out in the 30-second Docker result-write preflight, before any simulator
-execution; it supplies no kernel evidence. A same-commit retry is requested.
+execution; it supplies no kernel evidence.
+
+Attempt 2 completed in 26 seconds: all 48 checks pass on both simulated chips,
+with clean shutdown. It covers six append/commit/discard actions, whole-bank
+contents, unchanged active banks and input tensors, poisoned padding and stable
+bank addresses. Report SHA256:
+`0a038068c36de2561b9bedeaa4bc1745c043561a48060ce102668a1cba209044`.
+This is a small synthetic fixture, not 64K addressing or hardware acceptance.
+
+The next probe adds changed-input captured replay with 84 checks. Run
+35022680629 attempt 1 failed in Docker preflight before executing the probe;
+attempt 2 is requested. No replay correctness or performance claim is made yet.
