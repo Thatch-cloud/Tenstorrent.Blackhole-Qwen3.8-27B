@@ -10,6 +10,11 @@ if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
     probe=matched-context-maxima-probe.py
 fi
 timeout -k 10 360 python3 "/experiment-scripts/ci/$build"
+if [ "${QWEN_MATCHED_TARGET:-0}" = 1 ]; then
+    timeout -k 10 120 python3 /experiment-scripts/ci/matched-context-target-probe.py --hardware \
+        --output "/experiment/results/matched-context-target-${QWEN_MATCHED_CONTEXT}.json"
+    exit "$?"
+fi
 if [ "${QWEN_MATCHED_CONTEXT:-0}" != 0 ]; then
     timeout -k 10 120 python3 "/experiment-scripts/ci/$probe" \
         --output "/experiment/results/matched-context-attention-${QWEN_MATCHED_CONTEXT}.json"
