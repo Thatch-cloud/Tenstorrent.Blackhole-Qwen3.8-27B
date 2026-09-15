@@ -19,6 +19,10 @@ per block. The prior split-K result was 30.23 TG; this is not a matched A/B
 speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.md).
 Sustained output and held-out coding quality remain unqualified.
 
+Shared-Q/K recurrence also passes at 64K: **PP 2594.11 / CTX 65536 / TG 31.33**
+(run 34926705012). This shows no improvement over MLP alone; it is not promoted
+as a speed win. Both figures are separate-run measurements, not matched A/B.
+
 The 4K/8K results below use a different, optimized T16 runtime. These figures
 are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 
