@@ -8,7 +8,7 @@ class RowDiagnosticTests(unittest.TestCase):
         return '\n'.join(
             'TSLICE(' + buffer + ', 0,\n'
             '    (SliceRange{.h0=0, .h1=4, .hs=1, .w0=0, .w1=1, .ws=1}), true, true);'
-            for buffer in ('cb_prev_sum', 'cb_out_accumulate_im', 'cb_prev_sum',
+            for buffer in ('cb_prev_sum', 'cb_out_accumulate_im', 'cb_precise_reciprocal',
                 'cb_out_accumulate_im', 'cb_out_accumulate_im'))
 
     def test_selects_row_and_value_column_without_changing_compute(self):
