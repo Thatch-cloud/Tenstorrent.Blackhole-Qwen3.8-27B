@@ -1,9 +1,10 @@
 name: Qwen incremental history hardware
 on:
   push:
-    tags: ['experiment/history-append-hardware-v1']
+    tags: ['experiment/history-append-hardware-v1', 'experiment/history-append-hardware-v2']
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: qwen-two-p150a-exclusive
   cancel-in-progress: false
@@ -29,6 +30,7 @@ jobs:
       - name: Simulator-admitted 64K bank and trace audit, no model weights
         env:
           QWEN_CARDS_ALLOCATED: '1'
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p experiment-results
           chmod 2775 experiment-results
