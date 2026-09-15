@@ -2,6 +2,11 @@
 set -euo pipefail
 test "${QWEN_SIM_ONLY:-0}" = 1
 test "${QWEN_LEARNED_STACK:-0}" = 1
+case "${QWEN_SPLITK_MAXIMA:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
+    test "${QWEN_SIM_CASE:-stack}" = dspark-splitk
+    test "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" = 0
+fi
 case "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" in 0|1) ;; *) exit 2 ;; esac
 if [ "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" = 1 ]; then
     test "${QWEN_SIM_CASE:-stack}" = dspark-splitk
@@ -181,6 +186,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_NORMALIZATION_DIRECT_STAGE=$normalization_direct_stage" \
     -e "QWEN_CENTER_TILE_FILL=$center_tile_fill" \
     -e "QWEN_SPLITK_ATTENTION=$splitk_attention" \
+    -e "QWEN_SPLITK_MAXIMA=${QWEN_SPLITK_MAXIMA:-0}" \
     -e "QWEN_SPLITK_ROW_DIAGNOSTIC=${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)

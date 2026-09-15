@@ -61,6 +61,7 @@ PY
                 if [ "${QWEN_SCORE_SFPU:-0}" = 1 ]; then build_script=dspark_score_sfpu_build.py; fi
                 if [ "${QWEN_SUM_SFPU:-0}" = 1 ]; then build_script=dspark_sum_sfpu_build.py; fi
                 if [ "${QWEN_SPLITK_ATTENTION:-0}" = 1 ]; then build_script=dspark_splitk_fp32_build.py; fi
+                if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then build_script=dspark_splitk_maxima_build.py; fi
                 timeout -k 15 330 python3 -u "/experiment-scripts/ci/$build_script"
             else
                 timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_ladder_build.py
@@ -91,6 +92,10 @@ PY
                         export TT_METAL_DPRINT_CORES='(0,0),(0,1),(0,2),(0,3)'
                         export TT_METAL_DPRINT_FILE=/experiment/results/splitk-row-dprint.log
                     fi
+                fi
+                if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
+                    score_name=dspark-splitk-maxima
+                    unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
                 fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
