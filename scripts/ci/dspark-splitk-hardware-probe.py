@@ -7,7 +7,7 @@ import sys
 from unittest.mock import patch
 
 from dspark_hardware_gate import digest
-from dspark_attention_value_diagnostics import KINDS
+from dspark_splitk_linearity import KINDS, diagnostic_scope, summarize
 from dspark_ladder_backend import require_backend, require_packer_mode
 from dspark_ladder_fixtures import fixture_probe
 from dspark_ladder_geometry import geometry
@@ -49,7 +49,7 @@ def main():
             sources.update({name: digest(runtime / name) for name in (*build['binaries'], probe.NATIVE.PACKER)})
             return sources
 
-        with precise_draft_kernel(root), kernel_scope(root) as kernel, \
+        with precise_draft_kernel(root), kernel_scope(root) as kernel, diagnostic_scope(), \
                 patch.dict(os.environ, QWEN_PRECISE_DRAFT_ACTIVE='1', QWEN_SPLITK_FP32_INTERMEDIATES='1'), \
                 patch.object(dspark_splitk_attention, 'execute_folded', execute), \
                 patch.object(probe.NATIVE, 'fingerprints', fingerprints), \
@@ -63,6 +63,7 @@ def main():
                         report['passed'] = False
                         report['error'] = 'Diagnostic calls, two eager calls and one capture required'
                     report.update(scope=__doc__, splitk_factory=build, splitk_kernel=kernel,
+                        linearity_diagnostics=summarize(report.get('value_diagnostics', [])),
                         splitk_execution_calls=execution.call_count,
                         expected_execution_calls=len(KINDS) + 3, key_chunk_size=32,
                         max_cores_per_head=8, native_padded_keys=fixture['native_keys'],
@@ -71,7 +72,7 @@ def main():
                         added_masked_poison_rows=fixture['extra_masked_keys'],
                         performance_qualified=False, full_request_qualified=False,
                         wrapper_sources={name: digest(directory / name) for name in
-                            (Path(__file__).name, 'dspark_splitk_hardware_scope.py')})
+                            (Path(__file__).name, 'dspark_splitk_hardware_scope.py', 'dspark_splitk_linearity.py')})
                     output.write_text(json.dumps(report, indent=2) + '\n')
             if not report['passed']:
                 raise ValueError('Full-history split-K hardware screen failed')
