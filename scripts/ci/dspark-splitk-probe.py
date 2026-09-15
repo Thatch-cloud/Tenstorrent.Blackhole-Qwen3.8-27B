@@ -15,6 +15,7 @@ from dspark_splitk_device_audit import audit_layout
 from dspark_splitk_unfused_correction import unfused_correction_scope
 import dspark_splitk_unfused_correction as correction
 from dspark_splitk_denominator_recurrence import transform as recurrence_transform
+from dspark_splitk_numerator_recurrence import transform as numerator_transform
 from dspark_splitk_fp32_build import validate as validate_factory
 from dspark_splitk_attention import splitk_scope
 from dspark_splitk_layout import scheduling
@@ -58,7 +59,7 @@ def main():
             print(json.dumps(dict(stage='splitk-target-gate', draft_diagnostics_inherited=False)), flush=True)
         return original_run(*args, **kwargs)
 
-    with patch.object(correction, 'transform', lambda source: recurrence_transform(original_transform(source))), \
+    with patch.object(correction, 'transform', lambda source: numerator_transform(recurrence_transform(original_transform(source)))), \
             unfused_correction_scope(), splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint), \
             patch.object(subprocess, 'run', side_effect=run), \
             patch.object(dspark_splitk_attention, 'execute_folded',
@@ -67,7 +68,7 @@ def main():
         if execution.call_count != 3:
             raise ValueError(f'Split-K requires two eager calls and one capture call; got {execution.call_count}')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-fp32-denominator-recurrence', performance_qualified=False,
+    report.update(candidate='native-decode-fp32-numerator-and-denominator-recurrence', performance_qualified=False,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
@@ -81,7 +82,7 @@ def main():
             arithmetic_unpack='tf32-with-explicit-fp32-sum-copy', sum_input_storage='float32', normalization_input_storage='float32',
             reciprocal_storage='float32',
             temporary_per_row_sum_audit=False,
-            local_numerator_add='native-fpu',
+            local_numerator_add='sfpu-fp32-broadcast-multiply-add-single-pack',
             probability_rounding='unchanged-fp32-exponent-storage',
             purpose='exercise local recurrence and tree reduction with two chunks per worker'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
@@ -95,6 +96,7 @@ def main():
             'dspark_splitk_accumulator_add.py',
             'dspark_splitk_denominator.py',
             'dspark_splitk_denominator_recurrence.py',
+            'dspark_splitk_numerator_recurrence.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
