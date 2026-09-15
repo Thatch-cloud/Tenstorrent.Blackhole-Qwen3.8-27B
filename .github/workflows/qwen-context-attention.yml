@@ -1,7 +1,7 @@
 name: Qwen matched context attention gate
 on:
   push:
-    tags: ['experiment/context-attention-4k-v1']
+    tags: ['experiment/context-attention-4k-v1', 'experiment/context-attention-ladder-v1']
 permissions:
   contents: read
   actions: read
@@ -10,6 +10,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   hardware:
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        context: ${{ fromJSON(github.ref == 'refs/tags/experiment/context-attention-4k-v1' && '[4096]' || '[8192,16384,32768,65536,131072,262144]') }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 10
     steps:
@@ -27,11 +32,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Same simulator-qualified kernel, 4K numerical and replay gate
+      - name: Same simulator-qualified kernel, context numerical and replay gate
         env:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
-          QWEN_MATCHED_CONTEXT: '4096'
+          QWEN_MATCHED_CONTEXT: ${{ matrix.context }}
         run: |
           mkdir -p experiment-results
           chmod 2775 experiment-results
@@ -39,5 +44,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: qwen-context-attention-${{ github.run_id }}
+          name: qwen-context-attention-${{ matrix.context }}-${{ github.run_id }}
           path: experiment-results/

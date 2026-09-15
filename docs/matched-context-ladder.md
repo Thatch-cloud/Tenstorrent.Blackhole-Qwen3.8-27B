@@ -53,3 +53,11 @@ reference tolerance, changed-input exact replay, stable addresses and unchanged
 inputs. It starts at 4K with no model weights and a 120-second probe cap.
 This is the draft-attention shape gate, not a full-model context result; folded
 target attention, allocation and request-scope admission remain required.
+
+The 4K draft gate passes in run **35028892841**: 72 eager/replay/input/layout
+checks, eight fixture controls and clean shutdown; the runtime build is a cache
+hit. Report SHA256:
+`250c7bc6e46a44c1eedb94523a48e37a5dc065d71ed2ca5c01702f9fb7cf0d11`.
+The unchanged probe now runs sequentially at 8K/16K/32K/64K/131K/262K, with one
+120-second probe per job and fail-fast scheduling. These are draft-attention
+component checks, not model-memory fit, folded-verifier or PP/TG ladder results.
