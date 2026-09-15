@@ -4,6 +4,31 @@ Use the combined split-K draft, fused T16 MLP, shared Q/K and incremental-histor
 runtime. Do not join the older 4K/8K runtime results to the new 64K measurement
 and call that a scaling curve. Serving defaults remain unchanged.
 
+## Current hardware evidence
+
+| CTX | FP32-maxima draft attention | Folded verifier vs native B1 | Combined PP / TG |
+| ---: | --- | --- | --- |
+| 4096 | Pass | Exact pass | Not measured on this candidate |
+| 8192 | Pass | Exact pass | Not measured on this candidate |
+| 16384 | Pass | Exact pass | Not measured on this candidate |
+| 32768 | Pass | Exact pass | Not measured on this candidate |
+| 65536 | Pass | Exact pass | Not measured on this candidate |
+| 131072 | Numerical failure: 59 elements | Not run | Not qualified |
+| 262144 | Cancelled after 131K failure | Not run | Not qualified |
+
+Draft evidence: runs 35034936748 (32K) and 35035520826 (remaining rows).
+Verifier evidence: run 35035966582; all five contexts close cleanly with eight
+exact output comparisons, 16 mask checks, four source checks, two unpoisoned
+replay checks, two stale controls and eight poison controls. Exact reports and
+current source hashes are checked by `matched_draft_gate.py` and
+`matched_target_gate.py`.
+
+The verifier component reserves CTX+256 positions; the proposed full runtime
+reserves CTX+1024. Integration must account for this explicitly, not pretend
+the component fixture validates every runtime allocation. The previous 64K
+incremental-history runtime reached 37.95/38.32 committed TG, but did not use
+this FP32-maxima factory. Those are not measurements of the new candidate.
+
 ## Proposed allocation contract
 
 Keep one stream, 15 draft proposals, T16 verification, a 256-token output budget,
@@ -28,10 +53,10 @@ exact agreement with the existing 64K padded geometry.
 
 ## Remaining implementation gates
 
-1. Repeat the exact combined 64K candidate before changing context.
-2. Add context-specific numerical/replay evidence for draft attention and folded
-   target attention. The decode factory is dimension-generic, but its existing
-   hardware evidence is not a blanket context admission.
+1. Completed: repeat the previous combined 64K incremental-history candidate.
+2. Completed through 64K: context-specific draft and folded-target evidence.
+   131K draft accuracy remains open; 262K still needs execution. Component
+   evidence is not a blanket full-request admission.
 3. Add a separate request scope for target allocation, prefill capture, history
    banks, attention tickets and context-specific correctness summaries. Current
    `dspark_64k_*` gates intentionally reject other contexts; do not relax those
