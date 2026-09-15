@@ -5,6 +5,13 @@ test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
+mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
+[[ "$mlp_64k_timed" = 0 || "$mlp_64k_timed" = 1 ]]
+if [ "$mlp_64k_timed" = 1 ]; then
+    test "$splitk_combined" = 1
+    test "$mlp_64k_audit" = 0
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1
+fi
 [[ "$mlp_64k_audit" = 0 || "$mlp_64k_audit" = 1 ]]
 if [ "$mlp_64k_audit" = 1 ]; then
     test "$splitk_combined" = 1
@@ -203,6 +210,11 @@ if [ "$timed_requests" = 1 ]; then
         screen_run=34922265472
         screen_artifact="qwen-splitk-combined-$screen_run"
         timing_gate=dspark_splitk_timed
+        if [ "$mlp_64k_timed" = 1 ]; then
+            screen_run=34924260072
+            screen_artifact="qwen-splitk-combined-$screen_run"
+            timing_gate=dspark_64k_mlp_timed
+        fi
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "$screen_artifact" --dir "$screen_evidence"
@@ -418,6 +430,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
+    -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
