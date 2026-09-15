@@ -9,10 +9,10 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest complete 64K candidate: 37.95 committed tok/s**, versus 30.55 control
-in one matched pair (35026222541). Exact output/state and final weight audits
-pass, with clean shutdown. Repeat confirmation is pending; this is not sustained
-serving or held-out coding acceptance.
+**Repeat-confirmed 64K candidate: 37.95 and 38.32 committed tok/s**, versus
+30.55 and 30.69 matched controls (35026222541 / 35027433446). Exact output/state
+and final weight audits pass, with clean shutdown in both runs. These short EOS
+fixtures do not establish sustained serving or held-out coding quality.
 
 **Earlier repeated 64K baseline: 31.40 committed tok/s.**
 Two full-budget requests each commit 135 tokens and reach EOS, with exact output
@@ -50,7 +50,8 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
 | One stream, batch 1, 135 committed tokens to EOS | 65536 | 2584.54 | 31.40 | Two exact requests; split-K draft + folded T16 + fused MLP |
 | Same-request control, 135 committed tokens to EOS | 65536 | 2603.19 | 30.55 | 35026222541; native history publication |
-| Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close; repeat pending |
+| Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close |
+| Incremental-history repeat, same output | 65536 | 2597.34 | 38.32 | 35027433446; matched control 30.69 TG |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 

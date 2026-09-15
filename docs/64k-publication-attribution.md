@@ -154,3 +154,19 @@ outside generation timing but retained in setup-inclusive costs. All hooks resto
 At 6.75 committed tokens/block, 200 TG needs a 33.75 ms cycle versus the measured
 177.79 ms. Drafting and verification now dominate; publication is no longer the
 primary steady-state bottleneck in this run.
+
+## Repeat: 35027433446
+
+The identical runtime repeats successfully in **7m26s**. Control is PP 2511.45 /
+CTX 65536 / TG **30.6937**; candidate is PP 2597.34 / CTX 65536 / TG **38.3215**.
+History preparation averages **49.40 versus 4.28 ms/block**. Both emit the same
+135 committed tokens as the first run. Exact active/inactive state, all 120
+before/after learned-weight checks, source stability and clean closure pass.
+Report SHA256:
+`54ad14089eed8cb9bb1c89d118d5d08872a3aa29917410b5c5808900ff463456`.
+
+Candidate request time including prefill/setup is 51.82 seconds versus 58.06
+control in this repeat; its direction differs from the first pair. Do not infer
+a general prefill or setup win from these two ordered runs. Generation and
+publication gains repeat, but order-independent/sustained and coding-quality
+acceptance remain open. Proceed to the same-runtime context ladder.

@@ -8,7 +8,8 @@ restoring one matched runtime across the context ladder.
 
 **200 committed TG remains unachieved.** The new complete 64K candidate records
 PP **2205.49** / CTX **65536** / TG **37.95** versus matched control TG **30.55**
-(35026222541). One pair passes; repeat confirmation is pending. The earlier
+(35026222541). Repeat 35027433446 passes at PP **2597.34** / TG **38.32** versus
+control **30.69**, with identical output and unchanged executable sources. The earlier
 repeated baseline is PP **2584.54** / CTX **65536** / TG **31.40** (34925118588).
 This is one offline stream, not concurrent serving or held-out coding acceptance.
 
@@ -21,8 +22,9 @@ of rebuilding 66,560, preserving all valid history and commit/discard behaviour.
 | CPU transactions and comparison safeguards | 11 local tests | Pass |
 | Two-chip simulator, changed-input trace replay | 35023307310; 84 checks; 30 seconds | Pass |
 | Physical cards, 64K boundary and trace replay | 35024279412; 84 checks; 42 seconds | Pass |
-| Combined model, exact output/state and PP/CTX/TG | 35026222541; 120 exact weight checks; clean close | Pass, one pair |
-| Repeat timing, context ladder, coding quality, concurrency | Same combined candidate required | Open |
+| Combined model, exact output/state and PP/CTX/TG | 35026222541; 120 exact weight checks; clean close | Pass |
+| Repeat combined timing and exactness | 35027433446; 120 exact weight checks; clean close | Pass |
+| Context ladder, coding quality, concurrency | Same combined candidate required | Open |
 
 The previous combined attempt stopped after a slow control, before the candidate:
 PP 2418.94 / CTX 65536 / TG 11.66. A 5.37-second history-publication stall dominates

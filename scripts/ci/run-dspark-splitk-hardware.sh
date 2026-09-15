@@ -3,6 +3,7 @@ set -euo pipefail
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test -z "${TT_METAL_SIMULATOR:-}"
+case "${QWEN_MATCHED_CONTEXT:-0}" in 0|4096|8192|16384|32768|65536|131072|262144) ;; *) exit 2 ;; esac
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
 output=$(realpath -e experiment-results)
@@ -43,6 +44,7 @@ container=$(docker create --network none --hostname qwen-experiment --add-host q
     --label "thatch.qwen.source-revision=$GITHUB_SHA" --workdir /opt/vllm-tt-plugin \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
     -e QWEN_SPLITK_ATTENTION=1 -e QWEN_LADDER_BACKEND=hardware -e QWEN_LADDER_CONTEXT=65536 \
+    -e "QWEN_MATCHED_CONTEXT=${QWEN_MATCHED_CONTEXT:-0}" \
     -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/experiment-cache/kernels -e MESH_DEVICE=P300 \
     -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
     -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -e OMP_NUM_THREADS=8 \

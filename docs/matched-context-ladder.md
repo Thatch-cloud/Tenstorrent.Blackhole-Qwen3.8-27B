@@ -45,3 +45,11 @@ exact agreement with the existing 64K padded geometry.
 
 `scripts/ci/matched_context_geometry.py` currently supplies planning and CPU
 validation only. It does not enable runtime admission or dispatch ladder jobs.
+
+The 64K repeat now passes (35027433446). The new context-attention probe reuses
+the unchanged, source-pinned simulator-qualified split-K factory/kernel. It tests
+two frontiers, complete history and poisoned padding against the retained FP32
+reference tolerance, changed-input exact replay, stable addresses and unchanged
+inputs. It starts at 4K with no model weights and a 120-second probe cap.
+This is the draft-attention shape gate, not a full-model context result; folded
+target attention, allocation and request-scope admission remain required.
