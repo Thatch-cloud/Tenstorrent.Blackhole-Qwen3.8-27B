@@ -86,10 +86,20 @@ PY
                 if [ "${QWEN_SPLITK_ATTENTION:-0}" = 1 ]; then
                     score_name=dspark-splitk
                     export TT_METAL_DPRINT_CORES='(2,0)'
+                    if [ "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" = 1 ]; then
+                        export TT_METAL_DPRINT_CORES=all
+                        export TT_METAL_DPRINT_FILE=/experiment/results/splitk-row-dprint.log
+                    fi
                 fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \
                     "/experiment-scripts/ci/$score_name-probe.py" \
                     --output "/experiment/results/$score_name.json"
+                if [ "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" = 1 ]; then
+                    grep -q QWEN_SPLITK_NORMALIZE /experiment/results/splitk-row-dprint.log
+                    for stage in reciprocal numerator-fp32 normalized; do
+                        grep -q "QWEN_SPLITK_FINAL $stage" /experiment/results/splitk-row-dprint.log
+                    done
+                fi
                 exit 0
             fi
             smoke_status=0

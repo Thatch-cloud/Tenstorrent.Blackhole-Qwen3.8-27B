@@ -110,6 +110,7 @@ def main():
             'dspark_splitk_denominator_recurrence.py',
             'dspark_splitk_correction_rounding.py',
             'dspark_splitk_tree_denominator.py',
+            'dspark_splitk_row_diagnostic.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 
