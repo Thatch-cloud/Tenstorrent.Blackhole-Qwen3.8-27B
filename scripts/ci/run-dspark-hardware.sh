@@ -4,6 +4,13 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
+mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
+[[ "$mlp_64k_audit" = 0 || "$mlp_64k_audit" = 1 ]]
+if [ "$mlp_64k_audit" = 1 ]; then
+    test "$splitk_combined" = 1
+    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+fi
 [[ "$splitk_combined" = 0 || "$splitk_combined" = 1 ]]
 if [ "$splitk_combined" = 1 ]; then
     [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 1:0 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 0:1 ]]
@@ -410,6 +417,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
+    -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
