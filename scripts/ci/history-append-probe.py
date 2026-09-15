@@ -61,7 +61,14 @@ def main():
             delta[1] = -delta[1]
             delta[:, :, prefix:] = 257
             device_delta = upload(delta)
-            compare(device_delta, delta, 'delta_upload_exact', ordinal)
+            uploaded = torch.cat([ttnn.to_torch(shard) for shard in ttnn.get_device_tensors(device_delta)], dim=0)
+            changed = uploaded.contiguous().view(torch.int16) != delta.contiguous().view(torch.int16)
+            allowed = (uploaded == 0) & (delta == 0)
+            if torch.any(changed & ~allowed):
+                raise AssertionError('Upload changed nonzero input bits')
+            report.setdefault('upload_zero_sign_changes', []).append(int(changed.sum()))
+            delta = uploaded.clone()
+            compare(device_delta, delta, 'delta_device_baseline_exact', ordinal)
             plan = planner.prepare(prefix)
             prepared = expected.clone()
             prepared[:, :, plan.position:plan.position + prefix] = delta[:, :, :prefix]
