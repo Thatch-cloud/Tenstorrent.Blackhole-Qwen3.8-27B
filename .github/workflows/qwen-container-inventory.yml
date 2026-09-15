@@ -1,0 +1,33 @@
+name: Qwen owned container inventory
+on:
+  push:
+    tags: ['experiment/qwen-container-inventory-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 2
+    steps:
+      - name: Inspect experiment containers without accessing cards
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t containers < <(timeout 5 docker ps -q --filter "ancestor=$image")
+          printf 'matching_running_containers=%s\n' "${#containers[@]}"
+          for container in "${containers[@]}"; do
+            hostname=$(timeout 5 docker inspect --format '{{.Config.Hostname}}' "$container")
+            if [ "$hostname" != qwen-experiment ]; then continue; fi
+            timeout 5 docker inspect --format '{{.Id}} {{json .State}} {{.Image}}' "$container"
+            timeout 5 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | awk '/^QWEN_WORKFLOW_RUN=|^QWEN_SOURCE_REVISION=/'
+            timeout 5 docker inspect --format '{{json .HostConfig.Devices}} {{json .Mounts}}' "$container"
+            timeout 8 docker stats --no-stream "$container"
+          done
+          for metric in cpu memory io; do cat "/proc/pressure/$metric"; done
+          grep -E 'MemAvailable|SwapFree|Dirty|Writeback' /proc/meminfo
