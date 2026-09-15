@@ -8,6 +8,13 @@ mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
 mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
 shared_64k_audit=${QWEN_64K_SHARED_QK_AUDIT:-0}
 score_64k_audit=${QWEN_64K_SCORE_AUDIT:-0}
+text_only_load=${QWEN_TEXT_ONLY_LOAD:-0}
+[[ "$text_only_load" = 0 || "$text_only_load" = 1 ]]
+if [ "$text_only_load" = 1 ]; then
+    test "$score_64k_audit" = 1
+    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+fi
 score_64k_timed=${QWEN_64K_SCORE_TIMED:-0}
 [[ "$score_64k_timed" = 0 || "$score_64k_timed" = 1 ]]
 if [ "$score_64k_timed" = 1 ]; then
@@ -469,6 +476,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
     -e "QWEN_64K_SCORE_AUDIT=$score_64k_audit" \
+    -e "QWEN_TEXT_ONLY_LOAD=$text_only_load" \
     -e "QWEN_64K_SHARED_QK_TIMED=$shared_64k_timed" \
     -e "QWEN_64K_SCORE_TIMED=$score_64k_timed" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \

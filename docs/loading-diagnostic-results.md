@@ -24,8 +24,9 @@ fixture. Skip only fresh default vision initialization, leave all text weights
 and model layers unchanged, and restore the original method afterwards. Reject
 explicit visual arguments. No serving default or multimodal capability claim.
 
-The helper has local behavior tests only and is not yet wired into a hardware
-run. It must pass the combined text output/state audit before clean timing.
+The helper has local behavior tests and is wired into the explicit
+`experiment/dspark-64k-score-text-only-v1` correctness run. It must pass the
+combined text output/state audit before clean timing.
 Measure loading and committed TG separately: removing unused vision construction
 may improve setup and residency, but a decode improvement is not established.
 
