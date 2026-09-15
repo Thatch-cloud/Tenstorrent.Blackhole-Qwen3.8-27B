@@ -1,7 +1,7 @@
 name: Qwen matched context attention gate
 on:
   push:
-    tags: ['experiment/context-attention-4k-v1', 'experiment/context-attention-ladder-v1', 'experiment/context-attention-32k-diagnostic-v1', 'experiment/context-attention-32k-diagnostic-v2', 'experiment/context-attention-32k-diagnostic-v3']
+    tags: ['experiment/context-attention-4k-v1', 'experiment/context-attention-ladder-v1', 'experiment/context-attention-32k-diagnostic-v1', 'experiment/context-attention-32k-diagnostic-v2', 'experiment/context-attention-32k-diagnostic-v3', 'experiment/context-attention-32k-diagnostic-maxima-v1']
 permissions:
   contents: read
   actions: read
@@ -37,6 +37,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_MATCHED_CONTEXT: ${{ matrix.context }}
+          QWEN_SPLITK_MAXIMA: ${{ github.ref == 'refs/tags/experiment/context-attention-32k-diagnostic-maxima-v1' && '1' || '0' }}
         run: |
           mkdir -p experiment-results
           chmod 2775 experiment-results

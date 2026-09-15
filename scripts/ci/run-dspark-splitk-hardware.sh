@@ -4,13 +4,23 @@ test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test -z "${TT_METAL_SIMULATOR:-}"
 case "${QWEN_MATCHED_CONTEXT:-0}" in 0|4096|8192|16384|32768|65536|131072|262144) ;; *) exit 2 ;; esac
+case "${QWEN_SPLITK_MAXIMA:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then test "${QWEN_MATCHED_CONTEXT:-0}" = 32768; fi
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
 output=$(realpath -e experiment-results)
 evidence=$(mktemp -d "$RUNNER_TEMP/qwen-splitk-evidence.XXXXXX")
-timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376559640/zip > "$evidence/report.zip"
-python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-splitk-simulator.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read("dspark-splitk.json"))' "$evidence/report.zip"
-PYTHONPATH=scripts/ci python3 -c 'from dspark_splitk_sim_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-splitk-simulator.json")'
+artifact=10376559640
+report_name=dspark-splitk.json
+gate=dspark_splitk_sim_gate
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
+    artifact=10422439077
+    report_name=dspark-splitk-maxima.json
+    gate=dspark_splitk_maxima_gate
+fi
+timeout -k 5 45 gh api "repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/$artifact/zip" > "$evidence/report.zip"
+python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-splitk-simulator.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$evidence/report.zip" "$report_name"
+PYTHONPATH=scripts/ci python3 -c 'import importlib,sys; importlib.import_module(sys.argv[1]).qualify("scripts/ci", "scripts/ci/dspark-splitk-simulator.json")' "$gate"
 volume=qwen-experiments-f1e9b1a64b4f
 if docker volume inspect "$volume" >/dev/null 2>&1; then
     test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$volume")" = true
@@ -45,6 +55,7 @@ container=$(docker create --network none --hostname qwen-experiment --add-host q
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
     -e QWEN_SPLITK_ATTENTION=1 -e QWEN_LADDER_BACKEND=hardware -e QWEN_LADDER_CONTEXT=65536 \
     -e "QWEN_MATCHED_CONTEXT=${QWEN_MATCHED_CONTEXT:-0}" \
+    -e "QWEN_SPLITK_MAXIMA=${QWEN_SPLITK_MAXIMA:-0}" \
     -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/experiment-cache/kernels -e MESH_DEVICE=P300 \
     -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
     -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -e OMP_NUM_THREADS=8 \
