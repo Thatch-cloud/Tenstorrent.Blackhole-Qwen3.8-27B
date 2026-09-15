@@ -7,20 +7,22 @@ from unittest.mock import patch
 
 
 @contextmanager
-def profile_publications(arm_class, records, emit, *, clock=perf_counter):
+def profile_publications(arm_class, records, emit, *, clock=perf_counter, samples_per_request=3, max_requests=2):
+    if type(samples_per_request) is not int or not 1 <= samples_per_request <= 32 or max_requests not in (1, 2):
+        raise ValueError('Bounded publication sampling required')
     original = arm_class.publication
     owners, counts = [], []
 
     @wraps(original)
     def publication(arm, features, prefix, *, position):
         if not any(owner is arm for owner in owners):
-            if len(owners) == 2:
+            if len(owners) == max_requests:
                 return original(arm, features, prefix, position=position)
             owners.append(arm)
             counts.append(0)
         ordinal = next(index for index, owner in enumerate(owners) if owner is arm)
         sample = counts[ordinal]
-        if sample >= 3:
+        if sample >= samples_per_request:
             return original(arm, features, prefix, position=position)
         counts[ordinal] += 1
         stages = []
