@@ -6,6 +6,17 @@ test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
 mlp_64k_timed=${QWEN_64K_MLP_TIMED:-0}
+shared_64k_audit=${QWEN_64K_SHARED_QK_AUDIT:-0}
+[[ "$shared_64k_audit" = 0 || "$shared_64k_audit" = 1 ]]
+if [ "$shared_64k_audit" = 1 ]; then
+    test "$mlp_64k_audit" = 1
+    shared_64k_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-64k-shared.XXXXXX")
+    timeout -k 5 45 gh run download 34701425373 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+        --name qwen-hardware-inventory-34701425373 --dir "$shared_64k_evidence"
+    printf '%s  %s\n' a155b893786f68ac36b4f040454892df683a0da0c3aa0b22b898697b22241ffe "$shared_64k_evidence/gdn-shared-recurrence.json" | sha256sum -c -
+    test "$(cat "$shared_64k_evidence/gdn-shared-recurrence.exit-status")" = 0
+    cp "$shared_64k_evidence/gdn-shared-recurrence.json" scripts/ci/gdn-shared-recurrence.json
+fi
 [[ "$mlp_64k_timed" = 0 || "$mlp_64k_timed" = 1 ]]
 if [ "$mlp_64k_timed" = 1 ]; then
     test "$splitk_combined" = 1
@@ -431,6 +442,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
+    -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
