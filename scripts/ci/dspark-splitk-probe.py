@@ -36,9 +36,9 @@ def main():
 
     def execute(*args, **kwargs):
         nonlocal audited
-        kwargs.update(key_chunk_size=32, max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True)
+        kwargs.update(key_chunk_size=128, max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True)
         if not audited:
-            print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=32,
+            print(json.dumps(dict(stage='splitk-diagnostic-config', key_chunk_size=128,
                 max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True,
                 performance_qualified=False)), flush=True)
             kwargs['audit'] = audit_layout
@@ -69,12 +69,12 @@ def main():
         if execution.call_count != 3:
             raise ValueError(f'Split-K requires two eager calls and one capture call; got {execution.call_count}')
     report = json.loads(output.read_text())
-    report.update(candidate='native-decode-fp32-tree-denominator', performance_qualified=False,
+    report.update(candidate='native-decode-fp32-tree-denominator-chunk128', performance_qualified=False,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
         scheduling_model=scheduling(), splitk_execution_calls=execution.call_count,
-        diagnostic_override=dict(key_chunk_size=32, max_cores_per_head=8, stripe_keys=False,
+        diagnostic_override=dict(key_chunk_size=128, max_cores_per_head=8, stripe_keys=False,
             local_denominator_arithmetic='sfpu-fp32-multiply-add-and-copy',
             tree_denominator_arithmetic='sfpu-fp32-two-products-add-and-transport',
             correction_factor_rounding='explicit-fp32-to-bf16-rne',
@@ -87,7 +87,7 @@ def main():
             temporary_per_row_sum_audit=False,
             local_numerator_add='native-fpu',
             probability_rounding='unchanged-fp32-exponent-storage',
-            purpose='exercise local recurrence and tree reduction with two chunks per worker'))
+            purpose='128-key chunk compile and tree gate; 512-key fixture does not exercise long local recurrence'))
     report['candidate_sources'].update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
         for name in ('dspark_splitk_attention.py', 'dspark_splitk_layout.py',
             'dspark_splitk_device_audit.py', 'dspark_splitk_unfused_correction.py',
