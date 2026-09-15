@@ -1,17 +1,32 @@
-# Split-K draft attention: simulator-qualified, hardware pending
+# Split-K draft attention: 64K accuracy repair
 
-The objective remains 200 committed tokens/s for one coding stream on two P150A cards. These are weight-free simulator experiments, not throughput measurements.
+The objective remains 200 committed tokens/s for one coding stream on two P150A cards. These weight-free kernel experiments are not committed-token throughput measurements.
 
-**Current milestone:** run 34911012256 passes original-order 16-worker-per-KV-lane
+**Retained simulator milestone:** run 34911012256 passes original-order 16-worker-per-KV-lane
 simulation with FP32 local denominators and tree payloads, and round-indexed scratch.
 Four eager numerical checks, four exact replay checks and the native target gate pass;
 both scopes close cleanly. `dspark_splitk_sim_gate.py` pins the report and verifies
-current source dependencies before hardware admission. The pinned report SHA256 is
+matching source dependencies before hardware admission. The pinned report SHA256 is
 `90eb2538f9f97eab84d727b5d4e662fe20d0a2594e7b647dd27bbee385594d96`.
 
-Next: wire a bounded, weight-free 64K hardware numerical test with the same kernel
-and precision, then measure it inside complete combined requests. No split-K hardware
-or TG acceptance exists yet. Keep the original-order and poisoned-history checks.
+**64K hardware result:** run 34912625173 built and imported successfully, then
+failed the first eager numerical check: 2,502 elements outside tolerance, maximum
+absolute error 0.727303 on chip 0. Devices closed cleanly. Constant-value, oldest-key
+and last-proposal diagnostics pass their existing tolerances on both chips; that
+does not qualify the mixed-value attention output. No replay qualification was reached.
+
+| Current work | Status |
+| --- | --- |
+| Hardware build | Cached; initial CI job took 5m7s, mainly compilation |
+| Hardware numerical execution | Diagnostics and first eager check took about five seconds |
+| Local denominator recurrence | FP32 SFPU multiply-add and exact denominator transfer implemented, unqualified |
+| Simulator run 34913565056 | Dispatched with eight workers and two chunks per worker, testing recurrence plus tree reduction |
+| Combined requests / TG | Blocked on numerical qualification; no new throughput result |
+
+A CPU ablation on chip-0/head-6/row-2 predicts a last-proposal weighting error
+equivalent to -0.340 output units when denominator reloads are truncated, versus
+-0.000244 without that truncation. This is evidence for a contributor, not an exact
+device model or proof of the complete cause. Keep tolerances and full-history checks.
 
 ## Early experiment history
 
@@ -31,7 +46,7 @@ The batch-lane representation preserves all 32 padded query rows, all four query
 
 An early simulator report had 65,188 failing elements, maximum absolute error 149.92046, and finite outputs. Sample outputs were around -179 to -190 where the FP32 reference was around -49.76. That failure is superseded by the milestone above; tolerances remain rtol=0.01 and atol=0.01.
 
-## Next diagnostic
+## Historical diagnostic progression
 
 Run 34910369212 (artifact 10374307550) fails before numerical execution: static buffers require 2,175,872 bytes versus 1,572,864 bytes L1. The pinned factory at 9f9cd4 allocates c19 for `num_cores_per_head - 1` payloads; the probe's `QWEN_SDPA_TREE_SCRATCH_ROUNDS` environment variable had no implementation in that factory. Writer offsets are indexed by `round`/`send_at_round`, bounded by `num_tree_reduction_rounds`. Allocate c19 by round count only inside the experimental FP32 branch and remove the ineffective environment flag. For 16 workers this reduces scratch from 15 to four payloads, saving 1,081,344 bytes at this geometry; native allocation remains unchanged. Device allocation and correctness must still be tested.
 
