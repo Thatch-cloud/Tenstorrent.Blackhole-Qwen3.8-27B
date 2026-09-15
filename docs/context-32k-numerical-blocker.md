@@ -1,0 +1,51 @@
+# 32K matched-context numerical blocker
+
+The 200 committed tok/s objective remains open. This is a draft-attention
+correctness blocker, not a new model-throughput result or a serving change.
+
+## Reproduced evidence
+
+| Run | Result |
+| --- | --- |
+| 35029267653 | 8K and 16K jobs green; 32K fails; larger contexts cancelled |
+| 35029765022 | Same 32K failure reproduced with value diagnostics; clean device shutdown |
+
+Both failures occur in the first eager case on chip 1. Four elements in head 15,
+query row 5 (columns 8, 38, 54, 77) return -45.0 instead of FP32 references
+between -45.467598 and -45.468784. The nearest BF16 reference is -45.5.
+Shapes match and outputs are finite. Error is 0.467598–0.468784 against the
+unchanged allowed error of about 0.46468 (`atol=0.01`, `rtol=0.01`).
+
+This is not merely unavoidable final BF16 rounding. It also does not establish
+which intermediate operation causes the discrepancy. The eager record's
+`exact_replay=true` compares the eager checksum to itself; replay was never
+reached and is **not qualified** by this failed report.
+
+## Avoid repeating rejected experiments
+
+`splitk-draft-status.md` records the existing numerical investigation:
+
+- Explicit BF16 correction-factor rounding previously left hardware output
+  unchanged (34916226351); it is already in the active composed transform.
+- Fused FP32 numerator recurrence worsened the 64K result (34915054290).
+- FP32 local/tree denominators improved error but were insufficient alone.
+- Increasing key chunks from 32 to 128 to 256 reduced repeated recurrence
+  error; 256 passed the historical 64K fixture, not every context or input.
+
+Do not loosen tolerances, retry unchanged rounding, or treat passing 64K as
+proof of 32K numerical correctness. The context changes fixture values as well
+as worker partition lengths, so context length alone is not the isolated cause.
+
+## Next discriminating experiment
+
+Use the failing head/query and the same input bits to compare the dominant
+oldest-key and last-proposal contributions, local worker numerator/denominator,
+and final normalization. Existing DPRINT snapshots select only the first four
+rows of tile zero; folded query row 5/head-within-group 3 is row 23, so those
+snapshots do not observe this failure. A targeted diagnostic must select that
+row and its lane before attributing the error to reduction or normalization.
+
+Any changed kernel or chunk configuration needs a bounded simulator gate
+before the same 32K hardware fixture. Only after numerical and changed-input
+replay gates pass should this configuration enter the combined context ladder.
+Full-model weights are unnecessary for isolating this failure.
