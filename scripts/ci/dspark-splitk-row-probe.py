@@ -1,4 +1,4 @@
-"""Simulator-only native split-K candidate with unchanged mixed attention gates."""
+"""Opt-in row diagnostics separated from the source-pinned split-K admission probe."""
 
 import hashlib
 import json
@@ -20,6 +20,7 @@ from dspark_splitk_tree_denominator import transform as tree_denominator
 from dspark_splitk_fp32_build import validate as validate_factory
 from dspark_splitk_attention import splitk_scope
 from dspark_splitk_layout import scheduling
+from dspark_splitk_row_diagnostic import transform as row_diagnostic
 
 
 def main():
@@ -33,6 +34,13 @@ def main():
     original_run = subprocess.run
     original_transform = correction.transform
     audited = False
+    diagnostic_row = os.environ.get('QWEN_SPLITK_ROW_DIAGNOSTIC', '0')
+    if diagnostic_row not in ('0', '1'):
+        raise ValueError('Row diagnostic must be explicitly zero or one')
+
+    def transform(source):
+        candidate = tree_denominator(correction_rounding(recurrence_transform(original_transform(source))))
+        return row_diagnostic(candidate) if diagnostic_row == '1' else candidate
 
     def execute(*args, **kwargs):
         nonlocal audited
@@ -60,7 +68,7 @@ def main():
             print(json.dumps(dict(stage='splitk-target-gate', draft_diagnostics_inherited=False)), flush=True)
         return original_run(*args, **kwargs)
 
-    with patch.object(correction, 'transform', lambda source: tree_denominator(correction_rounding(recurrence_transform(original_transform(source))))), \
+    with patch.object(correction, 'transform', transform), \
             unfused_correction_scope(), splitk_scope(), patch.object(dspark_score_bitwise, 'candidate_entrypoint', entrypoint), \
             patch.object(subprocess, 'run', side_effect=run), \
             patch.object(dspark_splitk_attention, 'execute_folded',
@@ -70,6 +78,7 @@ def main():
             raise ValueError(f'Split-K requires two eager calls and one capture call; got {execution.call_count}')
     report = json.loads(output.read_text())
     report.update(candidate='native-decode-fp32-tree-denominator-chunk256', performance_qualified=False,
+        root_diagnostic_row=23 if diagnostic_row == '1' else None,
         splitk_factory=factory,
         draft_attention_backend='scaled_dot_product_attention_decode',
         draft_math='native decode reduction; prefill scalar selectors do not apply',
@@ -101,6 +110,7 @@ def main():
             'dspark_splitk_denominator_recurrence.py',
             'dspark_splitk_correction_rounding.py',
             'dspark_splitk_tree_denominator.py',
+            'dspark_splitk_row_diagnostic.py',
             'dspark_splitk_fp32_factory.py', 'dspark_splitk_fp32_build.py', Path(__file__).name)})
     output.write_text(json.dumps(report, indent=2) + '\n')
 

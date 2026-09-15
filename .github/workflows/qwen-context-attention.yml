@@ -1,7 +1,7 @@
 name: Qwen matched context attention gate
 on:
   push:
-    tags: ['experiment/context-attention-4k-v1', 'experiment/context-attention-ladder-v1', 'experiment/context-attention-32k-diagnostic-v1', 'experiment/context-attention-32k-diagnostic-v2']
+    tags: ['experiment/context-attention-4k-v1', 'experiment/context-attention-ladder-v1', 'experiment/context-attention-32k-diagnostic-v1', 'experiment/context-attention-32k-diagnostic-v2', 'experiment/context-attention-32k-diagnostic-v3']
 permissions:
   contents: read
   actions: read
