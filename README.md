@@ -9,7 +9,7 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest green combined result: 64K context reaches 31.40 committed tok/s.**
+**Best fully completed 64K timing result: 31.40 committed tok/s.**
 Two full-budget requests each commit 135 tokens and reach EOS, with exact output
 and final-state checks. Hardware run
 [34925118588](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34925118588)
@@ -18,6 +18,15 @@ averages 86 ms drafting, 81 ms verification/readback and 47 ms selection/commit
 per block. The prior split-K result was 30.23 TG; this is not a matched A/B
 speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.md).
 Sustained output and held-out coding quality remain unqualified.
+
+**Latest work:** the cache-first loader passes hardware correctness, with target
+loading measured at 12.2 seconds in that run. It avoids 384 unnecessary host
+weight conversions/packing operations; this is a setup improvement, not a TG claim.
+The subsequent 64K paired run records 25.52 TG control and 8.37 TG candidate,
+then times out in final auditing. Neither is a new accepted benchmark. Score
+fusion remains unpromoted; we are isolating long history-publication stalls.
+[Loader evidence](docs/loading-diagnostic-results.md) ·
+[Failed paired comparison](docs/combined-score-pair.md).
 
 Shared-Q/K recurrence also passes at 64K: **PP 2594.11 / CTX 65536 / TG 31.33**
 (run 34926705012). This shows no improvement over MLP alone; it is not promoted
