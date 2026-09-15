@@ -1,7 +1,7 @@
 name: Qwen split-K row diagnostic simulator
 on:
   push:
-    tags: ['experiment/splitk-row-sim-v1', 'experiment/splitk-row-sim-v2', 'experiment/splitk-row-sim-v3']
+    tags: ['experiment/splitk-row-sim-v1', 'experiment/splitk-row-sim-v2', 'experiment/splitk-row-sim-v3', 'experiment/splitk-row-sim-v4']
 permissions:
   contents: read
 concurrency:
@@ -36,5 +36,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: qwen-splitk-row-sim-${{ github.run_id }}
+          name: qwen-splitk-row-sim-${{ github.run_id }}-${{ github.run_attempt }}
           path: experiment-results/
