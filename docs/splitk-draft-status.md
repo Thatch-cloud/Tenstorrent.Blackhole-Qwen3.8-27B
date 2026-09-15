@@ -17,10 +17,10 @@ does not qualify the mixed-value attention output. No replay qualification was r
 
 | Current work | Status |
 | --- | --- |
-| Hardware build | Cached; initial CI job took 5m7s, mainly compilation |
+| Hardware build | Verified cache reuse; latest hardware job took 34 seconds |
 | Hardware numerical execution | Diagnostics and first eager check took about five seconds |
-| Local denominator recurrence | FP32 SFPU multiply-add and exact denominator transfer implemented, unqualified |
-| Simulator run 34913565056 | Dispatched with eight workers and two chunks per worker, testing recurrence plus tree reduction |
+| Local denominator recurrence | Small simulator passes; full 64K still fails |
+| Next isolated change | Preserve FP32 denominators through tree arithmetic and transport; local checks pass, device checks pending |
 | Combined requests / TG | Blocked on numerical qualification; no new throughput result |
 
 ### Subsequent 64K results
@@ -29,15 +29,23 @@ does not qualify the mixed-value attention output. No replay qualification was r
 | --- | --- | ---: | ---: | --- |
 | 34913947170 | FP32 denominator, native numerator; eight workers | 1,976 | 0.643814 | Fails; clean close |
 | 34915054290 | FP32 denominator and fused FP32 numerator; eight workers | 22,956 | 1.161568 | Rejected; clean close |
+| 34915414445 | Denominator-only control with value-linearity diagnostics | 1,976 | 0.643814 | Sign reversal and power-of-two scaling are exact; mixed output still fails |
+| 34916226351 | Explicit BF16 correction-factor rounding | 1,976 | 0.643814 | Identical output hash to control; ineffective |
 
 The fused numerator passed the small simulator gate (34914738395), but worsened
 the matched 64K hardware result. It is removed from the active candidate; its
 helper and tests remain as experiment history. Denominator-only is still not
 hardware-qualified. Do not rerun that unchanged baseline merely to reconfirm it.
 
-The last hardware job completed in **52 seconds** with a verified compiled-binary
+The latest hardware job completed in **34 seconds** with a verified compiled-binary
 cache hit, versus 5m17s for the preceding build-heavy job. Admission reports still
 undergo current source checks; only identical compiled factory inputs are reused.
+
+The next candidate retains the matched local arithmetic, numerator and rounding,
+changing only tree denominator arithmetic and transport. Default FP32 FPU unpack
+is TF32 in the pinned source: FP32 buffer storage alone does not preserve all bits.
+This is a hypothesis test, not a demonstrated explanation for the full error.
+The small simulator must pass before a fresh, source-matched 64K hardware test.
 
 A CPU ablation on chip-0/head-6/row-2 predicts a last-proposal weighting error
 equivalent to -0.340 output units when denominator reloads are truncated, versus
