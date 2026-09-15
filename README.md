@@ -9,14 +9,15 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest green combined result: 64K context reaches 30.23 committed tok/s.**
+**Latest green combined result: 64K context reaches 31.40 committed tok/s.**
 Two full-budget requests each commit 135 tokens and reach EOS, with exact output
 and final-state checks. Hardware run
-[34923389309](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34923389309)
-finishes in 7m21s with clean device shutdown. The combined split-K draft path
-averages 86 ms drafting, 81 ms verification/readback and 54 ms selection/commit
-per block. This is about 2.1 times the historical 14.30 TG result, not a matched
-A/B speedup claim. Sustained output and held-out coding quality remain unqualified.
+[34925118588](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34925118588)
+finishes in 7m30s with clean device shutdown. Split-K draft plus fused T16 MLP
+averages 86 ms drafting, 81 ms verification/readback and 47 ms selection/commit
+per block. The prior split-K result was 30.23 TG; this is not a matched A/B
+speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.md).
+Sustained output and held-out coding quality remain unqualified.
 
 The 4K/8K results below use a different, optimized T16 runtime. These figures
 are not a like-for-like context-scaling curve or concurrent-serving benchmark.
@@ -27,7 +28,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
-| One stream, batch 1, 135 committed tokens to EOS | 65536 | 2575.67 | 30.23 | Two exact combined requests; split-K draft + folded T16 |
+| One stream, batch 1, 135 committed tokens to EOS | 65536 | 2584.54 | 31.40 | Two exact requests; split-K draft + folded T16 + fused MLP |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 

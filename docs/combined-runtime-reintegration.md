@@ -10,7 +10,7 @@ and coding quality preserved. Serving defaults stay unchanged.
 | Commit-only GDN | Retained | Keep active/inactive state checks |
 | Folded T16 target attention | Integrated in the 64K timed path | Retain exact target outputs and state |
 | Fast draft attention | Combined 64K audit and two clean EOS requests pass; 30.23 TG | Repeat matched control/candidate and retain exact state checks |
-| Fused T16 MLP | Not enabled by the isolated 64K entry | Port admission and dependencies; exact target outputs/state before matched timing |
+| Fused T16 MLP | Explicit 64K audit and clean EOS timing pass; 31.40 TG | Pair control/candidate timing; do not attribute cross-run commit variation to MLP |
 | Shared GDN Q/K preparation | Not enabled by the isolated 64K policy | Integrate after its fused-MLP/target dependencies; exact recurrence and full-request checks |
 | Short-context score layout | Not enabled by the isolated 64K entry | Audit long-history capacity/layout assumptions before integration |
 
