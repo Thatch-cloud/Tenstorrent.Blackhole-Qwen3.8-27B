@@ -1,6 +1,7 @@
 """Audit-only score materialization fusion in a full-history combined request."""
 
 from contextlib import ExitStack, contextmanager
+from functools import wraps
 import inspect
 import os
 from unittest.mock import patch
@@ -15,6 +16,7 @@ def score_scope(request_module, device_class, arm_factory, hardware_audit, recor
     original = request_module.measure_dspark_request
     signature = inspect.signature(original)
 
+    @wraps(original)
     def measure(*args, **kwargs):
         arguments = signature.bind(*args, **kwargs).arguments
         if (len(arguments['prompt']) != 65536 or arguments.get('audit_features') is not True

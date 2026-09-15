@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import os
+import inspect
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -49,6 +50,11 @@ class ScoreScopeTests(unittest.TestCase):
         with patch.dict(os.environ, QWEN_64K_SCORE_AUDIT='1', QWEN_64K_SHARED_QK_AUDIT='1',
                 QWEN_DSPARK_SFPU_REQUEST_SCREEN='1', QWEN_DSPARK_SFPU_TIMED='0'):
             with score_scope(module, Device, Arm, audit, records):
+                signature = inspect.signature(module.measure_dspark_request)
+                self.assertEqual(signature, inspect.signature(measure))
+                bound = signature.bind(None, SimpleNamespace(mesh_device=None), [0] * 65536,
+                    None, None, audit_features=True, proposal_trace=True)
+                self.assertEqual(len(bound.arguments['prompt']), 65536)
                 result = module.measure_dspark_request(None, SimpleNamespace(mesh_device=None),
                     [0] * 65536, None, None, audit_features=True, proposal_trace=True)
         self.assertEqual(order, ['learned_audit', 'install', 'capture', 'restore'])

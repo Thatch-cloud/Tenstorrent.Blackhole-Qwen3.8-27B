@@ -1,7 +1,7 @@
 name: Qwen combined T16 split-K audit
 on:
   push:
-    tags: ['experiment/dspark-splitk-combined-v1', 'experiment/dspark-splitk-combined-v2', 'experiment/dspark-splitk-combined-v3', 'experiment/dspark-splitk-combined-v4', 'experiment/dspark-splitk-combined-v5', 'experiment/dspark-splitk-timed-v1', 'experiment/dspark-splitk-timed-v2', 'experiment/dspark-64k-mlp-v1', 'experiment/dspark-splitk-timed-mlp-v1', 'experiment/dspark-64k-shared-v1', 'experiment/dspark-splitk-timed-shared-v1', 'experiment/dspark-64k-score-v1']
+    tags: ['experiment/dspark-splitk-combined-v1', 'experiment/dspark-splitk-combined-v2', 'experiment/dspark-splitk-combined-v3', 'experiment/dspark-splitk-combined-v4', 'experiment/dspark-splitk-combined-v5', 'experiment/dspark-splitk-timed-v1', 'experiment/dspark-splitk-timed-v2', 'experiment/dspark-64k-mlp-v1', 'experiment/dspark-splitk-timed-mlp-v1', 'experiment/dspark-64k-shared-v1', 'experiment/dspark-splitk-timed-shared-v1', 'experiment/dspark-64k-score-v1', 'experiment/dspark-64k-score-v2']
   workflow_dispatch:
     inputs:
       cards_allocated:
@@ -41,9 +41,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_SPLITK_COMBINED: '1'
-          QWEN_64K_MLP_AUDIT: ${{ (github.ref == 'refs/tags/experiment/dspark-64k-mlp-v1' || github.ref == 'refs/tags/experiment/dspark-64k-shared-v1' || github.ref == 'refs/tags/experiment/dspark-64k-score-v1') && '1' || '0' }}
-          QWEN_64K_SHARED_QK_AUDIT: ${{ (github.ref == 'refs/tags/experiment/dspark-64k-shared-v1' || github.ref == 'refs/tags/experiment/dspark-64k-score-v1') && '1' || '0' }}
-          QWEN_64K_SCORE_AUDIT: ${{ github.ref == 'refs/tags/experiment/dspark-64k-score-v1' && '1' || '0' }}
+          QWEN_64K_MLP_AUDIT: ${{ (github.ref == 'refs/tags/experiment/dspark-64k-mlp-v1' || github.ref == 'refs/tags/experiment/dspark-64k-shared-v1' || startsWith(github.ref, 'refs/tags/experiment/dspark-64k-score-')) && '1' || '0' }}
+          QWEN_64K_SHARED_QK_AUDIT: ${{ (github.ref == 'refs/tags/experiment/dspark-64k-shared-v1' || startsWith(github.ref, 'refs/tags/experiment/dspark-64k-score-')) && '1' || '0' }}
+          QWEN_64K_SCORE_AUDIT: ${{ startsWith(github.ref, 'refs/tags/experiment/dspark-64k-score-') && '1' || '0' }}
           QWEN_64K_MLP_TIMED: ${{ (github.ref == 'refs/tags/experiment/dspark-splitk-timed-mlp-v1' || github.ref == 'refs/tags/experiment/dspark-splitk-timed-shared-v1') && '1' || '0' }}
           QWEN_64K_SHARED_QK_TIMED: ${{ github.ref == 'refs/tags/experiment/dspark-splitk-timed-shared-v1' && '1' || '0' }}
           QWEN_DSPARK_MODE: request-norm-scatter
