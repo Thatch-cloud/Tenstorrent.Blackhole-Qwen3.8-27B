@@ -9,14 +9,14 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest green combined result: 64K context reaches 14.25 committed tok/s.**
+**Latest green combined result: 64K context reaches 30.23 committed tok/s.**
 Two full-budget requests each commit 135 tokens and reach EOS, with exact output
 and final-state checks. Hardware run
-[34839886957](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34839886957)
-finishes in 5m36s. Direct FP32 staging reduces draft overhead; the additional
-normalization-copy removal shows no gain over the recovered 14.31 TG result.
-These are historical comparisons, not matched A/B measurements. Drafting still
-takes about 346 ms per block, versus 81 ms verification and 45 ms commit.
+[34923389309](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34923389309)
+finishes in 7m21s with clean device shutdown. The combined split-K draft path
+averages 86 ms drafting, 81 ms verification/readback and 54 ms selection/commit
+per block. This is about 2.1 times the historical 14.30 TG result, not a matched
+A/B speedup claim. Sustained output and held-out coding quality remain unqualified.
 
 The 4K/8K results below use a different, optimized T16 runtime. These figures
 are not a like-for-like context-scaling curve or concurrent-serving benchmark.
@@ -27,7 +27,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
-| One stream, batch 1, 135-token EOS response | 65536 | 2632.04 | 14.25 | Two exact combined requests; direct FP32 staging + folded T16 |
+| One stream, batch 1, 135 committed tokens to EOS | 65536 | 2575.67 | 30.23 | Two exact combined requests; split-K draft + folded T16 |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 

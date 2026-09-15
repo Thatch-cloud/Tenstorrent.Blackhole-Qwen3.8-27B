@@ -9,7 +9,7 @@ and coding quality preserved. Serving defaults stay unchanged.
 | Captured draft proposal and feature publication | Retained in full requests | Keep exact changed-input replay and publication audits |
 | Commit-only GDN | Retained | Keep active/inactive state checks |
 | Folded T16 target attention | Integrated in the 64K timed path | Retain exact target outputs and state |
-| Fast draft attention | Split-K 256-key component passes full 64K hardware gate | Source-matched combined build and fresh request audit, then PP/CTX/TG |
+| Fast draft attention | Combined 64K audit and two clean EOS requests pass; 30.23 TG | Repeat matched control/candidate and retain exact state checks |
 | Fused T16 MLP | Not enabled by the isolated 64K entry | Port admission and dependencies; exact target outputs/state before matched timing |
 | Shared GDN Q/K preparation | Not enabled by the isolated 64K policy | Integrate after its fused-MLP/target dependencies; exact recurrence and full-request checks |
 | Short-context score layout | Not enabled by the isolated 64K entry | Audit long-history capacity/layout assumptions before integration |
@@ -27,8 +27,10 @@ Each hardware comparison must record enabled optimisations, source hashes,
 precision, topology, prompt/output lengths, acceptance yield and complete draft,
 verification and commit timings. Component results cannot fill TG cells.
 
-The last clean 64K result is 14.3005 TG (run 34842710242): approximately 344 ms
-draft, 81 ms verification and 45 ms selection/commit per T16 block. Even eliminating
+The latest clean 64K result is 30.2348 TG (run 34923389309): approximately 86 ms
+draft, 81 ms verification/readback and 54 ms selection/commit per block, averaging
+6.75 committed tokens. The historical control was 14.3005 TG (34842710242),
+not measured as a paired A/B in this run. Even eliminating
 drafting would not establish 200 TG at the observed yield. Restoring and optimising
 the verifier/commit stack is required, not optional work after a kernel-only win.
 
@@ -41,8 +43,16 @@ Evidence: [64K measurements and attribution](context-ladder-investigation.md),
 Simulator run **34918015135** passes the 256-key chunk gate. Hardware run
 **34918350712** passes the full-history numerical/replay screen in 38 seconds.
 `dspark_splitk_hardware_gate.py` verifies the retained report, source dependencies,
-all numerical/replay checks and input/layout/frontier controls. This does not yet
-qualify a combined model request or provide a throughput result.
+all numerical/replay checks and input/layout/frontier controls. Subsequently,
+combined audit **34922265472** passed and clean timing **34923389309** completed
+two exact EOS requests with 270 committed tokens total. PP is 2575.6711 tok/s,
+CTX is 65536 and committed TG is 30.2348 tok/s. Both requests preserve exact
+outputs, final state and inactive slots; the split-K source is restored and
+devices close cleanly. Per-request decode times are 4.70258 and 4.22752 seconds.
+The report SHA256 is
+`78720d03941214b5cc389757592189a5684767ad6b94a7a618cf93d44f2ffc7b`.
+This is a repeated short-fixture runtime measurement, not sustained/serving or
+held-out coding acceptance. Next implementation work is step 4 above.
 
 | Stage | Bound | Evidence required |
 | --- | --- | --- |
