@@ -67,6 +67,7 @@ def main():
                         expected_execution_calls=len(KINDS) + 3, key_chunk_size=32,
                         max_cores_per_head=8, native_padded_keys=fixture['native_keys'],
                         local_denominator_arithmetic='sfpu-fp32-multiply-add-and-copy',
+                        local_numerator_add='sfpu-fp32-broadcast-multiply-add-single-pack',
                         added_masked_poison_rows=fixture['extra_masked_keys'],
                         performance_qualified=False, full_request_qualified=False,
                         wrapper_sources={name: digest(directory / name) for name in
