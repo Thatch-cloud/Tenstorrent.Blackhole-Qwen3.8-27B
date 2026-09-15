@@ -519,6 +519,13 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-hardware-suite.sh)
 docker cp scripts "$test_id:/experiment-scripts"
+if [[ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 && "$timed_requests" = 1 ]]; then
+    lazy_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-lazy-loader.XXXXXX")
+    gh run download 34936162975 --repo "$GITHUB_REPOSITORY" \
+        --name qwen-splitk-combined-34936162975 --dir "$lazy_evidence"
+    docker cp "$lazy_evidence/dspark-64k-request-hardware.json" \
+        "$test_id:/experiment-scripts/ci/qwen-lazy-weight-audit.json"
+fi
 if [ "$bias_cache" = 1 ]; then
     for name in dspark-cached-markov markov-cache-pipeline markov-cache-pipeline-4992 markov-cache-pipeline-3712; do
         docker cp "$cache_evidence/$name.json" "$test_id:/experiment-scripts/ci/$name.json"

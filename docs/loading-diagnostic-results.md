@@ -99,3 +99,22 @@ unqualified loader changes. Cache-hit tests forbid touching the source tensor;
 cache-miss tests check conversion order and exact small-tensor packing inputs.
 The candidate must complete the existing combined output/state audit before
 clean timing. No TG improvement is claimed from this setup optimization.
+
+### Lazy-loader combined correctness: 34936162975
+
+**Passed**, including exact target output/state checks and clean device closure.
+The target-loading interval is **12.219 seconds**, versus hundreds of seconds
+in the recent failed runs. These are separate runs with uncontrolled cache state,
+not a paired loading-speed ratio. The complete instrumented process takes 326.8
+seconds, mostly the correctness request and its full-history audits.
+
+All **320 shard loads and 64 packed MLP loads** use the existing tensor cache;
+neither preprocessing callback executes. Both function bindings are restored.
+The report SHA256 is
+`739f8e203fcfdeeec552a7d947b5b540f45f99eb2c7490f824a71b27dad4130e`.
+
+Clean timing now retains this immutable combined audit as an additional gate,
+while preserving the prior score/MLP/GDN numerical gates. One loaded model runs
+the native-score control followed by the fused-score candidate. PP, CTX and
+committed TG are reported separately for each arm; there is no pooled speed.
+This correctness pass itself supplies no new clean TG result.

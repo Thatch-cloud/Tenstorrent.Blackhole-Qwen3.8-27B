@@ -10,13 +10,15 @@ from unittest.mock import patch
 
 def summarize(request, label):
     tokens, elapsed = request['committed_decode_tokens'], request['decode_ms']
+    prompt = request['prompt_tokens']
     if (type(tokens) is not int or tokens <= 0 or type(elapsed) not in (int, float)
             or not math.isfinite(elapsed) or elapsed <= 0
+            or not isinstance(prompt, list) or not prompt
             or any(request.get(name) is not True for name in ('exact', 'state_exact', 'inactive_exact'))):
         raise ValueError('Exact complete positive-timing request required')
     return dict(arm=label, committed_tokens=tokens, decode_ms=elapsed,
         committed_tg=tokens * 1000 / elapsed, prefill_ms=request['prefill_ms'],
-        context=request['prompt_tokens'], performance_qualified=False)
+        context=len(prompt), performance_qualified=False)
 
 
 @contextmanager
