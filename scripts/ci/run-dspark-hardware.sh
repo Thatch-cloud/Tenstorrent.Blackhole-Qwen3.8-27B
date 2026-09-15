@@ -484,6 +484,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_64K_SCORE_TIMED=$score_64k_timed" \
     -e "QWEN_SCORE_PAIRED=$score_paired" \
     -e "QWEN_LOAD_SAMPLE=${QWEN_LOAD_SAMPLE:-0}" \
+    -e "QWEN_LAZY_WEIGHT_LOAD=${QWEN_LAZY_WEIGHT_LOAD:-0}" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \

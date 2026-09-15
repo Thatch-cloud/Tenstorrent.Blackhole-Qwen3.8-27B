@@ -76,3 +76,26 @@ stack and process/cgroup I/O every ten seconds, with native stack dumps every
 on timeout. It does not qualify performance; an expected diagnostic timeout
 is not converted into a green model-acceptance result. No kernel, numerical
 gate, serving default, or model-loading behavior changes.
+
+### Actual loader sampling: 34935654817
+
+The job completes in **3m20s**, with the intended 120-second process timeout.
+Samples repeatedly land in `tp_common.shard_w`'s BF16 transpose/copy and in
+`mlp._build_gate_up`'s host packing. Other samples include native tensor loading
+and attention packing. Physical process reads reach **49.35 GB at 110 seconds**.
+Sparse samples identify executed work, not precise phase percentages or proof
+that all read bytes belong to those functions. Loading reaches the vision tower
+before termination; this is not a throughput or model-correctness result.
+
+The pinned TTNN `as_tensor` has a `preprocess` callback invoked only when
+conversion is needed (no cache, cache miss, or failed cache load). Both TP shard
+loading and packed gate/up loading currently perform their host transformations
+*before* calling it, even when the cached device tensor is successfully loaded.
+
+The next opt-in candidate moves those exact transformations into `preprocess`.
+Cache names, tensor dtypes/layouts, shard mapping, native tile packing and device
+placement stay unchanged. Vision loading is unchanged to avoid combining two
+unqualified loader changes. Cache-hit tests forbid touching the source tensor;
+cache-miss tests check conversion order and exact small-tensor packing inputs.
+The candidate must complete the existing combined output/state audit before
+clean timing. No TG improvement is claimed from this setup optimization.
