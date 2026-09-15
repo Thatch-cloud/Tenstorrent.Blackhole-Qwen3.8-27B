@@ -1,7 +1,7 @@
 name: Qwen combined incremental history comparison
 on:
   push:
-    tags: ['experiment/history-pair-v1', 'experiment/history-pair-v2']
+    tags: ['experiment/history-pair-v1', 'experiment/history-pair-v2', 'experiment/history-pair-v3']
 permissions:
   contents: read
   actions: read

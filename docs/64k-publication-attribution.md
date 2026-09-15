@@ -123,3 +123,34 @@ process budget is 480 seconds, outer budget 590 seconds: the observed first
 control alone took about 204 seconds after 66 seconds of shared setup, including
 native reference generation and request setup. No repeated full-model simulator
 run or unbounded retry is introduced.
+
+## Complete combined pair: 35026222541
+
+Completed in **7m35s**, with two identical 135-token EOS outputs, exact active
+and inactive state, 60 before/60 after exact learned-weight checks, unchanged
+recorded sources, and clean device/checkpoint closure. The control is not
+degraded. Report SHA256:
+`5e29489e85e1780650a7837673c636ad4967fe4ef53ed69cbece9e45f789d455`.
+
+| One stream, CTX 65536 | Control | Incremental history |
+| --- | ---: | ---: |
+| PP tok/s | 2603.19 | 2205.49 |
+| Committed TG tok/s | 30.55 | 37.95 |
+| Complete decode seconds | 4.420 | 3.557 |
+| Prefill + setup + decode seconds | 54.02 | 56.92 |
+| Draft ms/block | 83.61 | 87.34 |
+| Verify/readback ms/block | 81.85 | 82.19 |
+| Selection/commit ms/block | 54.16 | 6.84 |
+| Nested history preparation ms/block | 51.91 | 4.48 |
+
+Generation improves **24.25% in this ordered pair**, but slower prefill means
+setup-inclusive latency does not improve. This is not a sustained/endpoint or
+held-out coding-quality result. Repeat confirmation is required before the
+matched context ladder; order effects are not ruled out.
+
+The writer is exercised for every one of 20 committed blocks, touching at most
+64 rows here. One additional discarded warmup takes 385 ms during request setup,
+outside generation timing but retained in setup-inclusive costs. All hooks restore.
+At 6.75 committed tokens/block, 200 TG needs a 33.75 ms cycle versus the measured
+177.79 ms. Drafting and verification now dominate; publication is no longer the
+primary steady-state bottleneck in this run.

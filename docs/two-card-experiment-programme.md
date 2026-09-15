@@ -6,8 +6,10 @@ restoring one matched runtime across the context ladder.
 
 ## Current experiment checkpoint - 2026-09-16
 
-**200 committed TG remains unachieved.** The best fully completed 64K result
-remains PP **2584.54** / CTX **65536** / TG **31.40** (run 34925118588).
+**200 committed TG remains unachieved.** The new complete 64K candidate records
+PP **2205.49** / CTX **65536** / TG **37.95** versus matched control TG **30.55**
+(35026222541). One pair passes; repeat confirmation is pending. The earlier
+repeated baseline is PP **2584.54** / CTX **65536** / TG **31.40** (34925118588).
 This is one offline stream, not concurrent serving or held-out coding acceptance.
 
 The active change removes repeated full-history bank rebuilding, measured at
@@ -19,7 +21,7 @@ of rebuilding 66,560, preserving all valid history and commit/discard behaviour.
 | CPU transactions and comparison safeguards | 11 local tests | Pass |
 | Two-chip simulator, changed-input trace replay | 35023307310; 84 checks; 30 seconds | Pass |
 | Physical cards, 64K boundary and trace replay | 35024279412; 84 checks; 42 seconds | Pass |
-| Combined model, exact output/state and PP/CTX/TG | 35026222541 | Awaiting result |
+| Combined model, exact output/state and PP/CTX/TG | 35026222541; 120 exact weight checks; clean close | Pass, one pair |
 | Repeat timing, context ladder, coding quality, concurrency | Same combined candidate required | Open |
 
 The previous combined attempt stopped after a slow control, before the candidate:
@@ -27,6 +29,12 @@ PP 2418.94 / CTX 65536 / TG 11.66. A 5.37-second history-publication stall domin
 that degradation. The next run may continue diagnostically only with matching
 stage evidence; a degraded baseline cannot support a speedup claim. Serving
 defaults remain unchanged. [Measurements and admission rules](64k-publication-attribution.md).
+
+The successful pair reduces history preparation from 51.91 to 4.48 ms/block.
+Draft and verifier costs remain 87.34 and 82.19 ms/block. At the measured 6.75
+committed tokens per block, 200 TG requires the entire cycle to fit 33.75 ms;
+the current cycle is 177.79 ms. Repeat this runtime, then the matched context
+ladder; further generation gains must chiefly reduce draft/verification costs.
 
 ## Earlier combined-runtime position - 2026-09-14
 

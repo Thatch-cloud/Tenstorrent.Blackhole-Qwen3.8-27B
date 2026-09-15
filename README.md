@@ -9,7 +9,12 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Best fully completed 64K timing result: 31.40 committed tok/s.**
+**Latest complete 64K candidate: 37.95 committed tok/s**, versus 30.55 control
+in one matched pair (35026222541). Exact output/state and final weight audits
+pass, with clean shutdown. Repeat confirmation is pending; this is not sustained
+serving or held-out coding acceptance.
+
+**Earlier repeated 64K baseline: 31.40 committed tok/s.**
 Two full-budget requests each commit 135 tokens and reach EOS, with exact output
 and final-state checks. Hardware run
 [34925118588](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34925118588)
@@ -20,10 +25,10 @@ speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.
 Sustained output and held-out coding quality remain unqualified.
 
 **Latest work:** replacing full history-bank rebuilds with updates to at most
-96 rows per block. All 84 correctness/replay checks pass on both physical cards
-across the 64K boundary, in 42 seconds. Full-model comparison **35026222541**
-is the next gate; no new TG improvement is established. The preceding control
-stalled in history preparation and stopped before testing the candidate.
+96 rows per block. Full-model history preparation falls from **51.91 to 4.48
+ms/block** in the matched run, increasing generation throughput by 24.25%.
+Setup-inclusive request latency is slightly worse (56.92 versus 54.02 seconds),
+with slower prefill; do not present this as an overall response-latency win.
 [Publication measurements and gates](docs/64k-publication-attribution.md).
 
 The cache-first loader also passes hardware correctness and avoids 384 host
@@ -44,6 +49,8 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
 | One stream, batch 1, 135 committed tokens to EOS | 65536 | 2584.54 | 31.40 | Two exact requests; split-K draft + folded T16 + fused MLP |
+| Same-request control, 135 committed tokens to EOS | 65536 | 2603.19 | 30.55 | 35026222541; native history publication |
+| Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close; repeat pending |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 
