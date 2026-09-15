@@ -49,3 +49,30 @@ Any changed kernel or chunk configuration needs a bounded simulator gate
 before the same 32K hardware fixture. Only after numerical and changed-input
 replay gates pass should this configuration enter the combined context ladder.
 Full-model weights are unnecessary for isolating this failure.
+
+## Hardware contribution isolation
+
+Run **35033433891** completed the failure diagnostics in a 14-second hardware
+step and closed cleanly. It retains the original numerical failure; this is not
+an acceptance pass. Q/K/mask and kernel math were unchanged while values were
+replaced with oldest-key-only, last-proposal-only, or constant-one inputs.
+All four failing columns produced the same diagnostic values:
+
+| Value probe | Device BF16 output | CPU FP32 reference |
+| --- | ---: | ---: |
+| Oldest key = 1, others = 0 | 0.103515625 | 0.101952322 |
+| Last proposal = 1, others = 0 | 0.808593750 | 0.812258601 |
+| All values = 1 | 0.996093750 | 0.999999821 |
+
+The constant result shows normalization/output-path error. The oldest-key
+weight moves in the opposite direction to the last-proposal weight, so a
+uniform output rescale cannot repair both. These BF16 outputs do not expose
+unrounded internal probabilities; they cannot uniquely identify the defective
+operation. Next inspect local maximum/correction precision and the final
+normalization path, keeping the already-rejected fused numerator experiment
+out of the candidate. The CPU attribution script reproduces the reference at
+the four failing coordinates to within 0.00004.
+
+Broad and root-only simulator DPRINT attempts repeatedly failed fabric startup
+before attention execution. They do not invalidate hardware numerical evidence,
+but no intermediate values were obtained. Do not repeat those runs unchanged.
