@@ -1,6 +1,5 @@
 """Fresh combined T16 split-K request audit, retaining existing target/state gates."""
 
-import faulthandler
 import json
 from pathlib import Path
 import runpy
@@ -21,7 +20,6 @@ def main():
     sources = {name: digest(directory / name) for name in dependencies}
     records = []
     failure = None
-    faulthandler.dump_traceback_later(60, repeat=True)
     try:
         import dspark_prepared_proposal
         from dflash_request_runtime import DFlashRequestRuntime
@@ -42,7 +40,6 @@ def main():
         failure = f'{type(error).__name__}: {error}'
         raise
     finally:
-        faulthandler.cancel_dump_traceback_later()
         if output.exists():
             report = json.loads(output.read_text())
             report.update(splitk_combined=dict(scopes=records, sources=sources,

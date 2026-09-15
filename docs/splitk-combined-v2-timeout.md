@@ -71,3 +71,13 @@ quickly; V3 did not spend its whole deadline inside that replay. Prioritize
 startup/capture budget attribution and the outer request audit wrappers before
 another kernel change. No new numerical failure or completed acceptance is
 reported. Raw evidence is in `qwen-splitk-combined-34921068711`.
+
+## V4: intrusive stack diagnostic rejected
+
+Run **34921900008**, revision **db42f30**, exited **139**, not 124. It reached
+the fresh-request audit at 110.35 seconds, then crashed during the first
+prefill. The log shows the added periodic traceback dump followed by
+`PyThreadState_Get` reporting a missing GIL/thread state and signal 11.
+This is not evidence of a numerical kernel failure. Remove the asynchronous
+traceback diagnostic before retrying; retain synchronous phase-boundary logs.
+The timing association does not prove the underlying native crash mechanism.
