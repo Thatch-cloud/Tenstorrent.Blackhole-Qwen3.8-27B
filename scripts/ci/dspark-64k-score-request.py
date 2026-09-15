@@ -7,6 +7,7 @@ import sys
 
 from dspark_splitk_combined_build import digest
 from dspark_64k_score_scope import score_scope
+from target_kv_bulk_scope import install_callback
 
 
 def main():
@@ -20,11 +21,16 @@ def main():
     if output.exists():
         raise ValueError('Fresh combined score-layout audit required')
     dependencies = (Path(__file__).name, 'dspark_64k_score_scope.py', 'dspark_score_layout_scope.py',
-        'dspark_score_layout_hardware_audit.py', 'dspark_score_layout_hardware_gate.py')
+        'dspark_score_layout_hardware_audit.py', 'dspark_score_layout_hardware_gate.py',
+        'target_kv_bulk_audit.py', 'target_kv_bulk_scope.py')
     sources = {name: digest(directory / name) for name in dependencies}
     records, failure = [], None
+    bulk_records = []
+    def audit_callback(arguments):
+        install_callback(arguments, bulk_records, lambda record: print(json.dumps(record), flush=True))
     try:
-        with score_scope(full_dspark_request, TracedDSparkDevice, ScoreLayoutArm, audit, records):
+        with score_scope(full_dspark_request, TracedDSparkDevice, ScoreLayoutArm, audit, records,
+                audit_callback=audit_callback):
             runpy.run_path(str(directory / 'dspark-64k-shared-qk-request.py'), run_name='__main__')
         if len(records) != 1 or sources != {name: digest(directory / name) for name in dependencies}:
             raise ValueError('One complete source-stable score-layout request required')
@@ -35,7 +41,7 @@ def main():
         if output.exists():
             report = json.loads(output.read_text())
             report['score_layout_64k'] = dict(records=records, sources=sources,
-                performance_qualified=False, serving_qualified=False)
+                bulk_kv_audit=bulk_records, performance_qualified=False, serving_qualified=False)
             if failure is not None:
                 report.update(passed=False, correctness_screen_passed=False, score_layout_error=failure)
             output.write_text(json.dumps(report, indent=2) + '\n')

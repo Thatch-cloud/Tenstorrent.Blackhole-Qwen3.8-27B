@@ -38,3 +38,19 @@ acceptance, measure clean combined PP / CTX / committed TG separately. The
 
 Evidence: `runner-evidence.local/34927938233/qwen-splitk-combined-34927938233/`
 contains the request log, exit status, partial report and container state.
+
+## V3 candidate
+
+The audit-only callback now reads up to 256 pages at a time, then produces the
+same 64-page, cache-major, page-group-major, shard-major SHA256 stream on the host.
+CPU tests cover partial pages, full 64K, a changed frontier, both-shard mutations,
+invalid input, borrowed allocations and release on readback failure. Fake-device
+read counts fall from 32 to 8 per cache at 64K; this is not hardware speed evidence.
+
+Before selecting the new callback, V3 compares every digest with the original
+on the loaded hardware at both 65,536 and 65,535 tokens. Any mismatch fails closed.
+It keeps the old callback if the candidate is not faster across those checks.
+Every subsequent boundary is still checked. Neither timeout nor request coverage
+changes. Logged host tensor bytes exclude conversion scratch and are not peak RSS.
+No new kernel math is introduced; these local tests run Python/Torch in the
+TT-Sim environment, not a simulator kernel validation.

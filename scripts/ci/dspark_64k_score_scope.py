@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 
 @contextmanager
-def score_scope(request_module, device_class, arm_factory, hardware_audit, records):
+def score_scope(request_module, device_class, arm_factory, hardware_audit, records, *, audit_callback=None):
     required = ('QWEN_64K_SCORE_AUDIT', 'QWEN_64K_SHARED_QK_AUDIT', 'QWEN_DSPARK_SFPU_REQUEST_SCREEN')
     if (any(os.environ.get(name) != '1' for name in required)
             or os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0') != '0'):
@@ -18,11 +18,14 @@ def score_scope(request_module, device_class, arm_factory, hardware_audit, recor
 
     @wraps(original)
     def measure(*args, **kwargs):
-        arguments = signature.bind(*args, **kwargs).arguments
+        bound = signature.bind(*args, **kwargs)
+        arguments = bound.arguments
         if (len(arguments['prompt']) != 65536 or arguments.get('audit_features') is not True
                 or arguments.get('proposal_trace') is not True or arguments.get('score_layout', False)):
             raise ValueError('Full-history audited native-score control route required')
         operations, model = arguments['operations'], arguments['model']
+        if audit_callback is not None:
+            audit_callback(arguments)
         evidence = hardware_audit(operations, model.mesh_device, arguments['predecessor'], arguments['successor'])
         prepare = device_class.prepare_trace
         arms = []
@@ -36,7 +39,7 @@ def score_scope(request_module, device_class, arm_factory, hardware_audit, recor
                 return prepare(device, anchor, audit=audit)
 
             with patch.object(device_class, 'prepare_trace', prepared):
-                result = original(*args, **kwargs)
+                result = original(*bound.args, **bound.kwargs)
         if len(arms) != 1:
             raise ValueError('Score-layout candidate was not installed')
         summary = arms[0].summary()
