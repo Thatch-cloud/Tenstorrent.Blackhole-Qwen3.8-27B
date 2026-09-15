@@ -61,6 +61,13 @@ existing single-library cache build. Its validation rejects a changed decode
 factory even when the prefill manifest passes. Local gate/mutation tests pass;
 the combined library and request integration have not yet run on hardware.
 
+The combined request entry now installs the split-K adapter **after** the legacy
+64K scope, checks the actual kernel hash, rejects zero split-K calls, and restores
+the source on success or failure. It retains the bounded 17-token audited request,
+captured publication, folded T16 verifier and target-state checks. This first CI
+job is a correctness screen, not the full-response PP/CTX/TG measurement.
+Host execution is capped at nine minutes; the request process at five minutes.
+
 The request binding is `dspark_native_cached_layer.attend`, installed inside
 `dspark_64k_scope.runtime_scope`. Install the admitted split-K adapter after that
 scope enters, otherwise the baseline adapter overwrites it. Keep target attention,

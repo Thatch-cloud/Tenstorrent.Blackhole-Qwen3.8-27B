@@ -118,7 +118,9 @@ python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
     --checkpoint /dspark/model.safetensors --config /dspark/config.json \
     --output /experiment/results/dspark-python-preflight.json
 build_started=$SECONDS
-if [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then
+if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
+    timeout -k 10 360 python3 /experiment-scripts/ci/dspark_splitk_combined_build.py
+elif [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then
     python3 /experiment-scripts/ci/dspark_sum_sfpu_hardware.py
 elif [ "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 ]; then
     python3 /experiment-scripts/ci/dspark_score_sfpu_hardware.py
@@ -149,6 +151,11 @@ fi
 runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
     --checkpoint /dspark/model.safetensors --config /dspark/config.json
     --output "/experiment/results/$report_name.json")
+if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
+    runner=(timeout -k 10 300 python3 -u /experiment-scripts/ci/dspark-splitk-combined-request.py "${request_options[@]}"
+        --checkpoint /dspark/model.safetensors --config /dspark/config.json
+        --output "/experiment/results/$report_name.json")
+fi
 if [ "$mode" = request-verifier-profile ]; then
     runner=(bash /experiment-scripts/ci/dspark-request-profile.sh)
 fi
