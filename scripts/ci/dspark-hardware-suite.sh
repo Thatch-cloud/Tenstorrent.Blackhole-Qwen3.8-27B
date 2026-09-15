@@ -183,7 +183,10 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
         splitk_entry=dspark-64k-publication-profile-request.py
         process_limit=300
     fi
-    if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then splitk_entry=dspark-64k-history-paired-request.py; fi
+    if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then
+        splitk_entry=dspark-64k-history-paired-request.py
+        process_limit=480
+    fi
     runner=(timeout -k 10 "$process_limit" python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json
         --output "/experiment/results/$report_name.json")

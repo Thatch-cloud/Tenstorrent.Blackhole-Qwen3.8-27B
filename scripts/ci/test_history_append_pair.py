@@ -2,10 +2,20 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 import unittest
 
-from history_append_pair import paired_history
+from history_append_pair import history_dominated, paired_history
 
 
 class HistoryPairTests(unittest.TestCase):
+    def test_history_stall_classification_requires_matching_stage_evidence(self):
+        request = dict(decode_ms=1000, blocks=[dict(position=65536, draft_ms=80, verify_readback_ms=80)],
+            publication_diagnostics=dict(records=[dict(stage='prepare_history', position=65536, host_ms=700)]))
+        self.assertTrue(history_dominated(request))
+        request['blocks'][0]['draft_ms'] = 500
+        self.assertFalse(history_dominated(request))
+        request['blocks'][0]['draft_ms'] = 80
+        request['publication_diagnostics']['records'][0]['position'] = 65537
+        self.assertFalse(history_dominated(request))
+
     def test_complete_pair_and_metrics(self):
         active, records = [], []
 

@@ -106,3 +106,20 @@ request. It requires identical emitted tokens, exact final active/inactive state
 all candidate publications using the new writer, final audits and clean closure.
 It reports separate PP/CTX/committed TG for control and candidate, never pooled
 throughput. One pair is not sustained performance or held-out coding acceptance.
+
+Run **35025092454** stops after its exact 135-token control: PP **2418.94**,
+CTX **65536**, committed TG **11.6558**. It closes devices and checkpoint cleanly,
+but does not run the candidate or finish the full comparison. Mean draft and
+verification times remain **88.10/82.42 ms**; selection/commit averages **406.72 ms**.
+The first `prepare_history` takes **5374.47 ms** (162.62 ms process CPU, no GC
+pause). This is a recurrence of the publication stall, not a candidate failure.
+
+The next run may continue diagnostically past a slow control only when matched
+per-block history records account for over half of generation time, mean draft
+stays at or below 120 ms and verification at or below 100 ms. Otherwise it still
+stops. A degraded baseline labels the comparison diagnostic-only; it must not
+support a claimed speedup. Exact output/state gates remain unchanged. The model
+process budget is 480 seconds, outer budget 590 seconds: the observed first
+control alone took about 204 seconds after 66 seconds of shared setup, including
+native reference generation and request setup. No repeated full-model simulator
+run or unbounded retry is introduced.

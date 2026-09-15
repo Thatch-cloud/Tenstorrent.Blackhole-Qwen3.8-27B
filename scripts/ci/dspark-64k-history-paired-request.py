@@ -92,7 +92,10 @@ def main():
             report['history_pair'] = dict(records=records, updates=updates, loaders=loaders, warmups=warmups,
                 sources=before, sources_after=sources(), failure=failure,
                 order=['control', 'incremental_history'], repetitions_per_arm=1,
+                baseline_degraded=bool(records and records[0]['summary'].get('degraded')),
                 hardware_admission_run=35024279412, serving_qualified=False, held_out_coding_quality=False)
+            if records and records[0]['summary'].get('degraded'):
+                report['diagnostic_only'] = True
             report.update(pp=None, committed_tg=None, performance_qualified=False)
             for arm in report.get('request_comparison', {}).get('arms', {}).values():
                 arm.update(pp=None, committed_tg=None,

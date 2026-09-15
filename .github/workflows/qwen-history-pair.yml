@@ -1,7 +1,7 @@
 name: Qwen combined incremental history comparison
 on:
   push:
-    tags: ['experiment/history-pair-v1']
+    tags: ['experiment/history-pair-v1', 'experiment/history-pair-v2']
 permissions:
   contents: read
   actions: read
@@ -54,7 +54,7 @@ jobs:
         run: |
           mkdir -p experiment-results
           chmod 2775 experiment-results
-          timeout -k 10 540 bash scripts/ci/run-dspark-hardware.sh
+          timeout -k 10 590 bash scripts/ci/run-dspark-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
