@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import os
 import unittest
 from unittest.mock import patch
 
@@ -19,14 +20,21 @@ class CombinedRuntimeTests(unittest.TestCase):
             self.assertEqual(context, 65536)
             return lambda: candidate.dspark_splitk_attention.execute_folded('device')
 
+        def draft_execute(*args, **kwargs):
+            self.assertEqual(os.environ.get('QWEN_SPLITK_FP32_INTERMEDIATES'), '1')
+            return 'result'
+
         with patch.object(candidate, 'require_screen'), \
                 patch.object(candidate, 'validate_combined', return_value=admission), \
                 patch.object(candidate, 'kernel_scope', kernel_scope), \
                 patch.object(candidate, 'digest', return_value='original'), \
                 patch.object(candidate.dspark_splitk_attention, 'adapter', side_effect=adapter), \
-                patch.object(candidate.dspark_splitk_attention, 'execute_folded', return_value='result') as execute:
+                patch.dict(os.environ, QWEN_SPLITK_FP32_INTERMEDIATES='0'), \
+                patch.object(candidate.dspark_splitk_attention, 'execute_folded', side_effect=draft_execute) as execute:
             with candidate.runtime_scope('.', '.', 'build') as record:
+                self.assertEqual(os.environ.get('QWEN_SPLITK_FP32_INTERMEDIATES'), '0')
                 self.assertEqual(candidate.dspark_native_cached_layer.attend(), 'result')
+                self.assertEqual(os.environ.get('QWEN_SPLITK_FP32_INTERMEDIATES'), '0')
             execute.assert_called_once_with('device', key_chunk_size=256, max_cores_per_head=8,
                 stripe_keys=False, fp32_dest_acc=True)
             self.assertEqual(record['attention_calls'], 1)

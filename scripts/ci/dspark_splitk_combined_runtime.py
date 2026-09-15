@@ -18,7 +18,8 @@ def require_screen():
     required = ('QWEN_DSPARK_SFPU_REQUEST_SCREEN', 'QWEN_TARGET_T16_64K_REQUEST',
         'QWEN_DSPARK_CENTER_TILE_FILL')
     if (any(os.environ.get(name) != '1' for name in required)
-            or os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0') != '0'):
+            or os.environ.get('QWEN_DSPARK_SFPU_TIMED', '0') != '0'
+            or os.environ.get('QWEN_SPLITK_FP32_INTERMEDIATES', '0') != '0'):
         raise ValueError('Fresh audited combined request required before split-K timing')
 
 
@@ -34,7 +35,8 @@ def runtime_scope(directory, root, build_path):
 
     def execute(*args, **kwargs):
         kwargs.update(key_chunk_size=256, max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True)
-        result = original_execute(*args, **kwargs)
+        with patch.dict(os.environ, QWEN_SPLITK_FP32_INTERMEDIATES='1'):
+            result = original_execute(*args, **kwargs)
         state['attention_calls'] += 1
         return result
 
@@ -43,8 +45,7 @@ def runtime_scope(directory, root, build_path):
             if kernel != admission['component']['kernel']:
                 raise ValueError('Combined request must use the exact hardware-qualified decode kernel')
             state['kernel'] = dict(kernel)
-            with patch.dict(os.environ, QWEN_SPLITK_FP32_INTERMEDIATES='1'), \
-                    patch.object(dspark_splitk_attention, 'execute_folded', execute), \
+            with patch.object(dspark_splitk_attention, 'execute_folded', execute), \
                     patch.object(dspark_native_cached_layer, 'attend', dspark_splitk_attention.adapter(65536)):
                 yield state
                 if state['attention_calls'] == 0:
