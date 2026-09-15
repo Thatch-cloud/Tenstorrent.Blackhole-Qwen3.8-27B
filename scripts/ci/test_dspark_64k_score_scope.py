@@ -41,15 +41,21 @@ class ScoreScopeTests(unittest.TestCase):
             order.append('learned_audit')
             return {'passed': True}
 
-        def measure(operations, model, prompt, predecessor, successor, *, audit_features, proposal_trace):
+        def measure(operations, model, prompt, predecessor, successor, *, audit_features, proposal_trace,
+                kv_digest=None):
+            self.assertEqual(kv_digest(65536), ['replacement', 65536])
             Device().prepare_trace(1, audit=audit_features)
             return {'exact': True}
+
+        def audit_callback(arguments):
+            order.append('callback')
+            arguments['kv_digest'] = lambda valid: ['replacement', valid]
 
         module = SimpleNamespace(measure_dspark_request=measure)
         original = Device.prepare_trace
         with patch.dict(os.environ, QWEN_64K_SCORE_AUDIT='1', QWEN_64K_SHARED_QK_AUDIT='1',
                 QWEN_DSPARK_SFPU_REQUEST_SCREEN='1', QWEN_DSPARK_SFPU_TIMED='0'):
-            with score_scope(module, Device, Arm, audit, records):
+            with score_scope(module, Device, Arm, audit, records, audit_callback=audit_callback):
                 signature = inspect.signature(module.measure_dspark_request)
                 self.assertEqual(signature, inspect.signature(measure))
                 bound = signature.bind(None, SimpleNamespace(mesh_device=None), [0] * 65536,
@@ -57,7 +63,7 @@ class ScoreScopeTests(unittest.TestCase):
                 self.assertEqual(len(bound.arguments['prompt']), 65536)
                 result = module.measure_dspark_request(None, SimpleNamespace(mesh_device=None),
                     [0] * 65536, None, None, audit_features=True, proposal_trace=True)
-        self.assertEqual(order, ['learned_audit', 'install', 'capture', 'restore'])
+        self.assertEqual(order, ['callback', 'learned_audit', 'install', 'capture', 'restore'])
         self.assertIs(Device.prepare_trace, original)
         self.assertIs(module.measure_dspark_request, measure)
         self.assertEqual(len(records), 1)
