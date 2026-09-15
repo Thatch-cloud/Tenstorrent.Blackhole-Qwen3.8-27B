@@ -117,6 +117,21 @@ def main():
                     report['checks'].append(dict(mode=mode, case=case, chip=chip, name='attention', passed=passed,
                         failed_elements=int((~close).sum()), max_abs=float((actual.float() - expected[case][chip]).abs().max())))
                     if not passed:
+                        mismatches = []
+                        for coordinates in (~close).nonzero()[:32].tolist():
+                            index = tuple(coordinates)
+                            reference_value = float(expected[case][chip][index])
+                            actual_value = float(actual[index])
+                            mismatches.append(dict(index=coordinates, actual=actual_value,
+                                reference=reference_value,
+                                reference_bf16=float(expected[case][chip][index].bfloat16()),
+                                absolute_error=abs(actual_value - reference_value),
+                                allowed_error=.01 + .01 * abs(reference_value)))
+                        report['checks'][-1]['mismatches'] = mismatches
+                        report['checks'][-1]['actual_shape'] = list(actual.shape)
+                        report['checks'][-1]['reference_shape'] = list(expected[case][chip].shape)
+                        report['checks'][-1]['finite'] = bool(torch.isfinite(actual).all())
+                        report['checks'][-1]['exact_replay'] = checksum == eager[case, chip]
                         raise AssertionError('Full-history numerical or exact replay gate failed')
                     for name in (*fixture.NAMES, 'key', 'value'):
                         tensor = inputs[name] if name in inputs else output[name]
