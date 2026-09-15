@@ -87,7 +87,7 @@ PY
                     score_name=dspark-splitk
                     export TT_METAL_DPRINT_CORES='(2,0)'
                     if [ "${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" = 1 ]; then
-                        export TT_METAL_DPRINT_CORES='(0,0)-(7,7)'
+                        export TT_METAL_DPRINT_CORES='(0,0),(0,1),(0,2),(0,3)'
                         export TT_METAL_DPRINT_FILE=/experiment/results/splitk-row-dprint.log
                     fi
                 fi

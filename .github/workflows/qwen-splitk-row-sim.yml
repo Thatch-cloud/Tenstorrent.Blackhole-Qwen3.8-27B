@@ -1,7 +1,7 @@
 name: Qwen split-K row diagnostic simulator
 on:
   push:
-    tags: ['experiment/splitk-row-sim-v1', 'experiment/splitk-row-sim-v2', 'experiment/splitk-row-sim-v3', 'experiment/splitk-row-sim-v4']
+    tags: ['experiment/splitk-row-sim-v1', 'experiment/splitk-row-sim-v2', 'experiment/splitk-row-sim-v3', 'experiment/splitk-row-sim-v4', 'experiment/splitk-row-sim-v5']
 permissions:
   contents: read
 concurrency:
