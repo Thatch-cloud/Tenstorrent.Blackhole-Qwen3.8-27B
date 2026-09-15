@@ -16,6 +16,9 @@ if [ "$text_only_load" = 1 ]; then
     test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
 fi
 score_64k_timed=${QWEN_64K_SCORE_TIMED:-0}
+score_paired=${QWEN_SCORE_PAIRED:-0}
+[[ "$score_paired" = 0 || "$score_paired" = 1 ]]
+if [ "$score_paired" = 1 ]; then test "$score_64k_timed" = 1; fi
 [[ "$score_64k_timed" = 0 || "$score_64k_timed" = 1 ]]
 if [ "$score_64k_timed" = 1 ]; then
     test "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1
@@ -479,6 +482,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_TEXT_ONLY_LOAD=$text_only_load" \
     -e "QWEN_64K_SHARED_QK_TIMED=$shared_64k_timed" \
     -e "QWEN_64K_SCORE_TIMED=$score_64k_timed" \
+    -e "QWEN_SCORE_PAIRED=$score_paired" \
     -e "QWEN_DSPARK_64K_TRIAL=$trial_64k" \
     -e "QWEN_DSPARK_PHASE_PROBE=$phase_probe" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
