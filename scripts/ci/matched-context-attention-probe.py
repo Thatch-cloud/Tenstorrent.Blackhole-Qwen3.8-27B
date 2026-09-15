@@ -132,6 +132,30 @@ def main():
                         report['checks'][-1]['reference_shape'] = list(expected[case][chip].shape)
                         report['checks'][-1]['finite'] = bool(torch.isfinite(actual).all())
                         report['checks'][-1]['exact_replay'] = checksum == eager[case, chip]
+                        report['failure_weight_diagnostics'] = []
+                        for diagnostic in ('oldest', 'last_proposal', 'constant'):
+                            changed = dict(patterns[case])
+                            for name in ('history_value', 'query_value'):
+                                changed[name] = torch.zeros_like(patterns[case][name])
+                            if diagnostic == 'oldest':
+                                changed['history_value'][:, :, 0] = 1
+                            elif diagnostic == 'last_proposal':
+                                changed['query_value'][:, :, 14] = 1
+                            else:
+                                changed['history_value'].fill_(1)
+                                changed['query_value'].fill_(1)
+                            for name in ('history_value', 'query_value'):
+                                payload = upload(changed[name], name, False)
+                                ttnn.copy_host_to_device_tensor(payload, inputs[name])
+                            ttnn.synchronize_device(mesh)
+                            diagnostic_output = operation()
+                            ttnn.synchronize_device(mesh)
+                            observed = ttnn.to_torch(ttnn.get_device_tensors(diagnostic_output['attention'])[chip])
+                            golden = fixture.reference(changed, chip)
+                            report['failure_weight_diagnostics'].append(dict(name=diagnostic,
+                                samples=[dict(index=entry['index'],
+                                    actual=float(observed[tuple(entry['index'])]),
+                                    reference=float(golden[tuple(entry['index'])])) for entry in mismatches]))
                         raise AssertionError('Full-history numerical or exact replay gate failed')
                     for name in (*fixture.NAMES, 'key', 'value'):
                         tensor = inputs[name] if name in inputs else output[name]
