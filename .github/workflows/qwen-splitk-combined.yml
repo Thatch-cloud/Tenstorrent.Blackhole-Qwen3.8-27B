@@ -1,7 +1,7 @@
 name: Qwen combined T16 split-K audit
 on:
   push:
-    tags: ['experiment/dspark-splitk-combined-v1', 'experiment/dspark-splitk-combined-v2', 'experiment/dspark-splitk-combined-v3', 'experiment/dspark-splitk-combined-v4', 'experiment/dspark-splitk-combined-v5']
+    tags: ['experiment/dspark-splitk-combined-v1', 'experiment/dspark-splitk-combined-v2', 'experiment/dspark-splitk-combined-v3', 'experiment/dspark-splitk-combined-v4', 'experiment/dspark-splitk-combined-v5', 'experiment/dspark-splitk-timed-v1']
   workflow_dispatch:
     inputs:
       cards_allocated:
@@ -52,8 +52,8 @@ jobs:
           QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE: '1'
           QWEN_DSPARK_CENTER_TILE_FILL: '1'
           QWEN_TARGET_T16_64K_REQUEST: '1'
-          QWEN_DSPARK_SFPU_REQUEST_SCREEN: '1'
-          QWEN_DSPARK_SFPU_TIMED: '0'
+          QWEN_DSPARK_SFPU_REQUEST_SCREEN: ${{ github.ref == 'refs/tags/experiment/dspark-splitk-timed-v1' && '0' || '1' }}
+          QWEN_DSPARK_SFPU_TIMED: ${{ github.ref == 'refs/tags/experiment/dspark-splitk-timed-v1' && '1' || '0' }}
         shell: bash
         run: |
           mkdir -p experiment-results

@@ -6,8 +6,7 @@ test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 [[ "$splitk_combined" = 0 || "$splitk_combined" = 1 ]]
 if [ "$splitk_combined" = 1 ]; then
-    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
-    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+    [[ "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 1:0 || "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}:${QWEN_DSPARK_SFPU_TIMED:-0}" = 0:1 ]]
     test "${QWEN_DSPARK_CENTER_TILE_FILL:-0}" = 1
     splitk_evidence=$(mktemp -d "$RUNNER_TEMP/qwen-combined-splitk.XXXXXX")
     timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376709944/zip > "$splitk_evidence/hardware.zip"
@@ -192,8 +191,14 @@ if [ "$timed_requests" = 1 ]; then
         screen_run=34841889707
         timing_gate=dspark_center_fill_timed
     fi
+    screen_artifact="qwen-hardware-inventory-$screen_run"
+    if [ "$splitk_combined" = 1 ]; then
+        screen_run=34922265472
+        screen_artifact="qwen-splitk-combined-$screen_run"
+        timing_gate=dspark_splitk_timed
+    fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
-        --name "qwen-hardware-inventory-$screen_run" --dir "$screen_evidence"
+        --name "$screen_artifact" --dir "$screen_evidence"
     cp "$screen_evidence/dspark-64k-request-hardware.json" "$request_evidence/dspark-sfpu-request-screen.json"
     PYTHONPATH=scripts/ci python3 -c 'import importlib, sys; importlib.import_module(sys.argv[2]).qualify("scripts/ci", sys.argv[1])' "$request_evidence" "$timing_gate"
 fi

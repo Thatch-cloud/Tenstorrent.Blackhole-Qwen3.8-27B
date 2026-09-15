@@ -152,7 +152,9 @@ runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${requ
     --checkpoint /dspark/model.safetensors --config /dspark/config.json
     --output "/experiment/results/$report_name.json")
 if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
-    runner=(timeout -k 10 420 python3 -u /experiment-scripts/ci/dspark-splitk-combined-request.py "${request_options[@]}"
+    splitk_entry=dspark-splitk-combined-request.py
+    if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=dspark-splitk-timed-request.py; fi
+    runner=(timeout -k 10 420 python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json
         --output "/experiment/results/$report_name.json")
 fi
