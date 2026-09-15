@@ -174,6 +174,12 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     runner=(timeout -k 10 420 python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json
         --output "/experiment/results/$report_name.json")
+    if [ "${QWEN_LOAD_SAMPLE:-0}" = 1 ]; then
+        runner=(timeout -k 10 120 python3 -u /experiment-scripts/ci/qwen_load_sample.py
+            "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
+            --checkpoint /dspark/model.safetensors --config /dspark/config.json
+            --output "/experiment/results/$report_name.json")
+    fi
 fi
 if [ "$mode" = request-verifier-profile ]; then
     runner=(bash /experiment-scripts/ci/dspark-request-profile.sh)

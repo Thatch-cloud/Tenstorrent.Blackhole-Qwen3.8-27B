@@ -54,8 +54,25 @@ host conversion, device upload, or a model-throughput result. No cache flush was
 performed. It rules out a uniformly slow read of these sampled cached bytes at
 the observation time, not intermittent contention during the failed model run.
 
-The next probe must separate native `ttnn.load_tensor` host deserialization from
-the subsequent device transfer, using these same bounded files and the pinned
-loader implementation. The first extra source collected (`ttnn/core.py`) is not
-the Python `as_tensor` implementation; inspect `ttnn/operations/core.py` before
-choosing that probe's exact API path. Keep full-model retries paused meanwhile.
+The attempted no-device flatbuffer probe **34933749978** failed: passing
+`device=None` still triggers chip discovery in this pinned runtime. It supplies
+no deserialization timing. Do not repeat that probe without devices.
+
+## Loading regression, not another throughput result
+
+Paired run **34934197491** exhausts its outer 540-second budget before the first
+control generates. Setup reaches the first request at 365 seconds. There is no
+completed control/candidate comparison and no new TG result.
+
+Read-only inventory **34935346770** completes in eight seconds and finds **zero
+running containers using the pinned experiment image**. Leaked experiment
+containers are not present at this observation. Host I/O pressure is still
+visible (10-second `full` 10.49%), but this alone does not establish causation.
+
+The next explicitly selected diagnostic samples the actual hardware Python
+stack and process/cgroup I/O every ten seconds, with native stack dumps every
+30 seconds. It runs the unchanged combined-runtime loading path with a
+**120-second process limit and 240-second outer limit**, retaining logs even
+on timeout. It does not qualify performance; an expected diagnostic timeout
+is not converted into a green model-acceptance result. No kernel, numerical
+gate, serving default, or model-loading behavior changes.
