@@ -1,7 +1,7 @@
 name: Qwen incremental history simulator
 on:
   push:
-    tags: ['experiment/history-append-sim-v1', 'experiment/history-append-sim-v2', 'experiment/history-append-sim-v3']
+    tags: ['experiment/history-append-sim-v1', 'experiment/history-append-sim-v2', 'experiment/history-append-sim-v3', 'experiment/history-append-sim-v4']
 permissions:
   contents: read
 concurrency:
