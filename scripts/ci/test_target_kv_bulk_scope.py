@@ -25,6 +25,16 @@ class BulkScopeTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             callback(65536)
 
+    def test_first_check_after_gold_decode_retains_requested_frontier(self):
+        calls = []
+        def operation(valid):
+            calls.append(valid)
+            return ['digest', valid]
+        callback = qualified_callback(operation, operation, [], lambda record: None)
+        self.assertEqual(callback(65552), ['digest', 65552])
+        self.assertEqual(calls, [65536, 65536, 65535, 65535, 65552, 65552])
+        self.assertEqual(callback(65536), ['digest', 65536])
+
     def test_slower_candidate_keeps_reference(self):
         records = []
         ticks = iter((0, 1, 1, 5, 5, 6, 6, 10, 10, 11))

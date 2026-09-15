@@ -54,3 +54,10 @@ Every subsequent boundary is still checked. Neither timeout nor request coverage
 changes. Logged host tensor bytes exclude conversion scratch and are not peak RSS.
 No new kernel math is introduced; these local tests run Python/Torch in the
 TT-Sim environment, not a simulator kernel validation.
+
+V3 run `34928953853` failed before admission with a Python frontier guard, not a
+timeout or digest mismatch. `full_request.py:112` first hashes KV after the gold
+decode (65,552 here), before the experimental prefill/capture. V4 admits this
+ordering, compares 65,536, 65,535 and the actual first frontier against the oracle,
+and returns the digest for the requested frontier. A regression covers the gold
+check followed by the experimental request's return to the 65,536 frontier.

@@ -16,10 +16,10 @@ def qualified_callback(original, candidate, records, emit, *, clock=perf_counter
     def invoke(valid):
         nonlocal selected
         if selected is None:
-            if type(valid) is not int or valid != 65536:
-                raise ValueError('First bulk KV admission must cover the full 64K frontier')
+            if type(valid) is not int or valid < 65536:
+                raise ValueError('First bulk KV admission must cover at least the full 64K frontier')
             comparisons = []
-            for prefix in (valid, valid - 1):
+            for prefix in dict.fromkeys((65536, 65535, valid)):
                 expected, reference_ms = timed(original, prefix)
                 actual, candidate_ms = timed(candidate, prefix)
                 exact = actual == expected
