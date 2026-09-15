@@ -1,7 +1,7 @@
 name: Qwen bounded split-K hardware
 on:
   push:
-    tags: ['experiment/dspark-splitk-hardware-v1', 'experiment/dspark-splitk-hardware-v2', 'experiment/dspark-splitk-hardware-v3', 'experiment/dspark-splitk-hardware-v4', 'experiment/dspark-splitk-hardware-v5', 'experiment/dspark-splitk-hardware-v6']
+    tags: ['experiment/dspark-splitk-hardware-v1', 'experiment/dspark-splitk-hardware-v2', 'experiment/dspark-splitk-hardware-v3', 'experiment/dspark-splitk-hardware-v4', 'experiment/dspark-splitk-hardware-v5', 'experiment/dspark-splitk-hardware-v6', 'experiment/dspark-splitk-hardware-v7']
   workflow_dispatch:
     inputs:
       cards_allocated:

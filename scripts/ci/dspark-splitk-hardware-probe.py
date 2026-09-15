@@ -33,7 +33,7 @@ def main():
     original_execute = dspark_splitk_attention.execute_folded
 
     def execute(*args, **kwargs):
-        kwargs.update(key_chunk_size=32, max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True)
+        kwargs.update(key_chunk_size=128, max_cores_per_head=8, stripe_keys=False, fp32_dest_acc=True)
         return original_execute(*args, **kwargs)
 
     with fixture_probe(65536) as probe:
@@ -65,7 +65,7 @@ def main():
                     report.update(scope=__doc__, splitk_factory=build, splitk_kernel=kernel,
                         linearity_diagnostics=summarize(report.get('value_diagnostics', [])),
                         splitk_execution_calls=execution.call_count,
-                        expected_execution_calls=len(KINDS) + 3, key_chunk_size=32,
+                        expected_execution_calls=len(KINDS) + 3, key_chunk_size=128,
                         max_cores_per_head=8, native_padded_keys=fixture['native_keys'],
                         local_denominator_arithmetic='sfpu-fp32-multiply-add-and-copy',
                         tree_denominator_arithmetic='sfpu-fp32-two-products-add-and-transport',
