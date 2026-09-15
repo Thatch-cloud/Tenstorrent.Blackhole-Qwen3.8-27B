@@ -40,12 +40,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--cache', type=Path, action='append', default=[])
+    parser.add_argument('--extra-source', type=Path, action='append', default=[])
     options = parser.parse_args()
     source = inspect_tree(options.source_root)
     if not source['files']:
         raise ValueError('Pinned model source directory is empty or missing')
+    extra = []
+    if len(options.extra_source) > 4:
+        raise ValueError('At most four explicit extra source files')
+    for path in options.extra_source:
+        if path.stat().st_size > 262144:
+            raise ValueError('Extra source exceeds diagnostic byte bound')
+        payload = path.read_bytes()
+        extra.append(dict(path=str(path), sha256=hashlib.sha256(payload).hexdigest(),
+            source=payload.decode('utf-8')))
     print(json.dumps(dict(scope=__doc__, source=source,
-        filesystems=[filesystem(path) for path in options.cache]), indent=2))
+        extra_sources=extra, filesystems=[filesystem(path) for path in options.cache]), indent=2))
 
 
 if __name__ == '__main__':

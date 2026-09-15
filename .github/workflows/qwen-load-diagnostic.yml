@@ -1,7 +1,7 @@
 name: Qwen read-only loading diagnostic
 on:
   push:
-    tags: ['experiment/qwen-load-diagnostic-v1']
+    tags: ['experiment/qwen-load-diagnostic-v1', 'experiment/qwen-load-diagnostic-v2']
 permissions:
   contents: read
 concurrency:
@@ -56,8 +56,18 @@ jobs:
             --mount type=bind,src=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B,dst=/target,readonly \
             --entrypoint python3 "$image" -B /source/scripts/ci/qwen_load_diagnostic.py \
             --source-root /opt/tt-metal/models/demos/blackhole/qwen36/tt \
+            --extra-source /opt/tt-metal/ttnn/ttnn/core.py \
             --cache /experiment-cache --cache /experiment-cache/weights --cache /target \
             > load-diagnostic/image.json
+          timeout -k 5 45 docker run --rm --name "$name" --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --cpus 1 --memory 256m \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --mount "type=volume,src=$volume,dst=/experiment-cache,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/qwen_cache_read_probe.py \
+            --root /experiment-cache/weights/P300/tensor_cache_bfp8_mesh1x2 \
+            --file layers.0.input_layernorm.weight_dtype_BFLOAT16_layout_ROW_MAJOR.tensorbin \
+            --file layers.0/tp/qkvzab.il_dtype_BFLOAT8_B_layout_TILE.tensorbin \
+            > load-diagnostic/cache-read.jsonl
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
