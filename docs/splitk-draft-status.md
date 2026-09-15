@@ -20,7 +20,7 @@ does not qualify the mixed-value attention output. No replay qualification was r
 | Hardware build | Verified cache reuse; latest hardware job took 34 seconds |
 | Hardware numerical execution | Diagnostics and first eager check took about five seconds |
 | Local denominator recurrence | Small simulator passes; full 64K still fails |
-| Next isolated change | 128-key chunks instead of 32; unchanged FP32 tree candidate, tolerances and full history |
+| Next isolated change | 256-key chunks after 128-key partial improvement; unchanged arithmetic, tolerances and full history |
 | Combined requests / TG | Blocked on numerical qualification; no new throughput result |
 
 ### Subsequent 64K results
@@ -32,13 +32,14 @@ does not qualify the mixed-value attention output. No replay qualification was r
 | 34915414445 | Denominator-only control with value-linearity diagnostics | 1,976 | 0.643814 | Sign reversal and power-of-two scaling are exact; mixed output still fails |
 | 34916226351 | Explicit BF16 correction-factor rounding | 1,976 | 0.643814 | Identical output hash to control; ineffective |
 | 34917227924 | FP32 tree denominator arithmetic and transport | 1,624 | 0.636242 | Partial improvement, still fails; clean close, 36-second job |
+| 34917809100 | Same arithmetic, 128-key chunks | 63 | 0.472881 | Still fails; clean close, 35-second job |
 
 The fused numerator passed the small simulator gate (34914738395), but worsened
 the matched 64K hardware result. It is removed from the active candidate; its
 helper and tests remain as experiment history. Denominator-only is still not
 hardware-qualified. Do not rerun that unchanged baseline merely to reconfirm it.
 
-The latest hardware job completed in **34 seconds** with a verified compiled-binary
+The latest hardware job completed in **35 seconds** with a verified compiled-binary
 cache hit, versus 5m17s for the preceding build-heavy job. Admission reports still
 undergo current source checks; only identical compiled factory inputs are reused.
 
@@ -48,6 +49,11 @@ the full 64K hardware screen. The next candidate changes only the key chunk from
 repeated arithmetic/packing overhead and accumulation error, not a shorter context.
 Its small simulator gate exercises the larger chunk and tree; it cannot establish
 long-recurrence accuracy or performance. A fresh 64K hardware check remains required.
+
+The 128-key simulator gate (34917475625) passes in 2m12s. Its matched hardware
+result reduces failing elements from 1,624 to 63, without passing the full numerical
+gate. Next test 256-key chunks with the same arithmetic and worker limit. Do not
+interpret the reduced error count as a correctness pass or a throughput measurement.
 
 Default FP32 FPU unpack
 is TF32 in the pinned source: FP32 buffer storage alone does not preserve all bits.
