@@ -33,3 +33,29 @@ may improve setup and residency, but a decode improvement is not established.
 Source evidence: `runner-evidence.local/34932153411/qwen-load-diagnostic-34932153411/image.json`.
 Host snapshot: the adjacent `host.txt`. Complete native source SHA256 values are
 retained in the image report; no native source was modified by the diagnostic.
+
+## Text-only attempt and bounded cache reads
+
+Text-only audit `34932542190` times out before completing the request. Its
+`load_target_once` to `upload_fc.weight` interval is 313.84 seconds. Removing
+vision construction is not sufficient to cure the loading slowdown; the candidate
+is not hardware-qualified and there is no new TG result.
+
+Read-only diagnostic **34933388567** (`cb8deec`) completes in **14 seconds**:
+
+| Cached input | Bytes sampled | Initial read + SHA256 | Repeat read + SHA256 |
+|---|---:|---:|---:|
+| Layer 0 input norm | 10,584 (whole file) | 0.189 ms | 0.028 ms |
+| Layer 0 packed QKV projection | 67,108,864 of 89,825,728 | 33.246 ms | 29.707 ms |
+
+The two hashes agree for each file. This is buffered read-plus-hash time, not
+cold storage bandwidth, whole-checkpoint bandwidth, TT tensor deserialization,
+host conversion, device upload, or a model-throughput result. No cache flush was
+performed. It rules out a uniformly slow read of these sampled cached bytes at
+the observation time, not intermittent contention during the failed model run.
+
+The next probe must separate native `ttnn.load_tensor` host deserialization from
+the subsequent device transfer, using these same bounded files and the pinned
+loader implementation. The first extra source collected (`ttnn/core.py`) is not
+the Python `as_tensor` implementation; inspect `ttnn/operations/core.py` before
+choosing that probe's exact API path. Keep full-model retries paused meanwhile.
