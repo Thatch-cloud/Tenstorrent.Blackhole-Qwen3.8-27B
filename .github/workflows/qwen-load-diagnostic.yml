@@ -1,7 +1,7 @@
 name: Qwen read-only loading diagnostic
 on:
   push:
-    tags: ['experiment/qwen-load-diagnostic-v1', 'experiment/qwen-load-diagnostic-v2', 'experiment/qwen-load-diagnostic-v3']
+    tags: ['experiment/qwen-load-diagnostic-v1', 'experiment/qwen-load-diagnostic-v2', 'experiment/qwen-load-diagnostic-v3', 'experiment/qwen-load-diagnostic-v4']
 permissions:
   contents: read
 concurrency:
@@ -61,10 +61,12 @@ jobs:
             --cache /experiment-cache --cache /experiment-cache/weights --cache /target \
             > load-diagnostic/image.json
           timeout -k 5 45 docker run --rm --name "$name" --network none --read-only \
-            --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --cpus 1 --memory 256m \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --cpus 2 --memory 2g \
+            -e OMP_NUM_THREADS=2 -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=64m \
             --mount "type=bind,src=$PWD,dst=/source,readonly" \
             --mount "type=volume,src=$volume,dst=/experiment-cache,readonly" \
             --entrypoint python3 "$image" -B /source/scripts/ci/qwen_cache_read_probe.py \
+            --deserialize \
             --root /experiment-cache/weights/P300/tensor_cache_bfp8_mesh1x2 \
             --file layers.0.input_layernorm.weight_dtype_BFLOAT16_layout_ROW_MAJOR.tensorbin \
             --file layers.0/tp/qkvzab.il_dtype_BFLOAT8_B_layout_TILE.tensorbin \
