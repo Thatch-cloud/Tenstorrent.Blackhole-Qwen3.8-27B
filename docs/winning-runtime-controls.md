@@ -444,7 +444,7 @@ Serving defaults remain unchanged; the 200 committed tok/s target remains unmet.
 | 35071369480 | Coding prompt admitted only 4K/8K | Extend recorded-source prompt to 32K; retain task and template |
 | 35071865764 | Full-history constructor retained 8K bound | Admit exact 32K frontier with 256-token headroom; retain projection math |
 | 35072920817 | Prefill completed; target kernel could not compile draft-only macro | Guard scalar reciprocal by macro presence in shared header |
-| 35074425940 | Retry submitted at `4b301e9` | Await combined correctness and measured PP/CTX/TG |
+| 35074425940 | Passed at `4b301e9`, 15m11s whole job | 32K combined exactness and warm timing measured; see below |
 
 The reciprocal guard passes host C++ preprocessing checks for all three TRISC
 roles: defined-macro draft output is identical; undefined-macro target code
@@ -458,6 +458,31 @@ waiting for device execution. `verify_readback_ms` includes that trace, replay
 checks/synchronization, and output readback; do not add these nested measurements
 together. Use the separate readback and synchronization fields before choosing
 a host-conversion optimization. Keep cold load/capture separate from warm TG.
+
+### 32K combined hardware result
+
+Run **35074425940** completes with exact output, state and inactive-slot checks
+for all six requests. Two requests per arm are timed; one per arm is instrumented
+for correctness and excluded from throughput. Single coding prompt, one stream;
+this is not held-out coding-quality or serving acceptance.
+
+| Arm | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Control | 2935.98 | 32768 | 71.60 |
+| Captured publication | 2964.43 | 32768 | 72.27 |
+
+Publication timed requests individually reach **72.49** and **72.06** tok/s.
+Mean timed block: draft **50.19 ms**, verifier/readback **73.97 ms**,
+select/commit **21.96 ms**, total **147.11 ms**, **10.64 committed tokens**.
+At this acceptance, 200 tok/s requires about **53.18 ms per complete cycle**.
+The verifier alone exceeds that budget: optimizing only draft or host readback
+cannot reach the target. Next optimization must reduce target verification cost
+and/or increase committed tokens per verification, retaining exactness checks.
+
+Pre-load I/O stall was **0.045%**, below the 1% gate; this does not establish
+isolation throughout the run. Mean publication feature setup was **7.68 s** and
+verifier setup **3.03 s**, separately from warm TG. Serving remains unqualified.
+Report SHA256: `a2df6c374647500891dcd2566b2537f7fd1ed3aa9ebab0f64ffd59e4c1e612b4`.
 
 ### 32K target verifier: compact scratch replay qualified
 
