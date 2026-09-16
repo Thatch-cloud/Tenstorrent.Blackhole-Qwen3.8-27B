@@ -123,6 +123,29 @@ The final validator requires all numerical checks plus ten matched scopes per
 execution, across four fused replays on both chips. Sources are checked before
 and after the probe. A green numerical report alone cannot qualify the markers.
 
+### Hardware marker check: passed in 34 seconds
+
+Run **35150494386**, revision `a894c75`, passed all numerical gates and retained
+**160 endpoints / 80 matched scope pairs** across four actual fused replays on
+each chip. Independent downloaded-artifact validation reproduces the samples
+exactly. Container exit is 0 with no OOM. No full model was loaded.
+
+Hardware marker report SHA256:
+`08b18726cb651df3536c9143767d52432dca7fe585bfd23cb069d97f7677920e`.
+Hardware numerical report SHA256:
+`c648ce5795a3a7df682d3f85b1d8651eb123f73f7df41e0085df806627a317f0`.
+Raw marker CSV SHA256:
+`2f8146e381f9f2ba0f6b7bf42ee593f594a2aaaed03202286d1a44055b3415af`.
+
+This admits the diagnostic scopes, not a performance change. Fixture waits are
+not representative evidence for the complete model's bottleneck. The combined
+runtime gate pins both reports, retains the original multi-width fusion gate,
+and permits only the qualified reader-source differences. Its reversible scope
+requires an audited 32K profiling request and rejects throughput claims. The
+post-request route requires norm prefetch and incremental publication to remain
+enabled. Combined staging/capture wiring and actual full-request marker coverage
+are still pending; no combined profiling run is launched by this result alone.
+
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or
