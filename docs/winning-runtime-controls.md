@@ -389,3 +389,21 @@ correctly records `eager_complete=true`, `passed=false` and
 `complete_probe_coverage=false`: replay and stale-input checks were not run.
 Diagnostics, replay, full-model correctness and PP/CTX/TG remain unqualified.
 The candidate has not been enabled in hardware or serving.
+
+### Reciprocal candidate: 32K replay passes
+
+Run **35060395395**, revision `f080c1c`, passes all four eager and four changed-input
+replay comparisons, with zero numerical failures and exact replay hashes. It also
+retains 48 immutable-input, 16 layout, eight fixture-control and two stale-input
+checks. Probe time is **681.70 seconds**, cached preparation **2.41 seconds**;
+device and container cleanup pass. All 48 source and 18 deployment hashes were
+independently reconstructed and verified.
+
+Report SHA256:
+`091cbdd2ad2b01a9c529083ef1ac11bbc78784fae59f471b4daf075420fbccef`.
+
+The report has `passed=true` for the numerical/replay shard but
+`complete_probe_coverage=false`: the three value-diagnostic fixtures remain
+outstanding. The next isolated diagnostics run uses the same reciprocal candidate,
+factory, chunk size and tolerances, with the original 510-second probe limit.
+Neither this report nor its elapsed simulator time establishes model TG.
