@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2']
 permissions:
   contents: read
   actions: read
