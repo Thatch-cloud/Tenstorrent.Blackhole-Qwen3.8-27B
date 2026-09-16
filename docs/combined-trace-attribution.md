@@ -1,5 +1,40 @@
 # Combined-runtime trace attribution
 
+## Current 32K shared-Q/K profile
+
+Run **35076649250**, revision `b93f337`, passes in **9m42s**. This profiles
+the admitted 32K combined candidate from run 35074425940, retaining shared-Q/K,
+scalar draft reciprocal and compact target scratch. It is not a TG benchmark.
+One audited request supplies eleven T16 replays, ten steady, on each chip.
+
+| Per-chip median | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Kernel envelope | 73.688 ms | 73.682 ms |
+| Kernel interval union | 72.372 ms | 72.357 ms |
+| Uncovered intervals | 1.314 ms | 1.327 ms |
+
+| Chip 0 operation/core group | Calls/replay | Summed kernel ms |
+| --- | ---: | ---: |
+| Generic, 99 cores (fused MLP mapping) | 64 | 11.389 |
+| Matmul, 32 cores (down/output mapping) | 128 | 10.788 |
+| Decode SDPA, 110 cores | 32 | 9.882 |
+| Generic, 96 cores (recurrence mapping) | 48 | 9.488 |
+| Matmul, 43 cores (GDN input mapping) | 48 | 5.738 |
+| Generic, 48 cores | 112 | 4.607 |
+| Generic, 24 cores (GDN norm mapping) | 48 | 4.487 |
+
+Mappings in parentheses remain source-geometry inferences, not kernel identity
+labels. Group sums can overlap. Do not sum across chips or convert profile time
+to committed TG. The two chips are balanced at this resolution; uncovered
+dispatch intervals cannot explain the required speedup. Investigate internal
+matmul/MLP and recurrence work, plus the now larger long-context SDPA cost;
+do not restart rejected outer-add scheduling or chase host readback alone.
+
+Request SHA256: `3429a57f7bff88eaa6951cfaddc6fba84080cb09ed5fc9805b2cde342d7fade4`.
+Device report SHA256: `6cb93cf904fe36876db72310652579a232b27d6547a2c147a521670c327112fe`.
+
+## Historical 4K profile
+
 Status: completed attribution run 34698584939, revision `6f83b7c`. This is not a TG benchmark.
 
 The most recent GDN changes preserve exactness but do not reduce blocking trace
