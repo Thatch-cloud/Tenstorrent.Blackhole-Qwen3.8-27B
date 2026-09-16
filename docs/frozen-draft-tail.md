@@ -74,3 +74,35 @@ incremental publication and the original MLP readers in **both** arms. Only
 proposal K/V assembly changes. It preserves the 33,024-row capacity, exact request
 audits and A/B/B/A timed requests. Profiling is disabled; no additional fences are
 inserted. The candidate must execute all ten K/V assemblies per five-layer draft.
+
+## Combined run: incomplete, not a performance result
+
+Run **35158707469** hit the 900-second command timeout (exit 124).
+Both feature-audited requests completed: each committed 117 tokens over 11
+blocks, with exact output, target state and inactive state. Norm prefetch was
+enabled in both arms; only the candidate used the tail hook (140 construction
+calls, including setup). No timed request completed.
+
+| Phase | Previous successful run 35087582465 | This run |
+| --- | ---: | ---: |
+| Target load, stage-to-stage | 50.41 s | 292.30 s |
+| Control feature audit | 230.17 s | 249.04 s |
+| Candidate feature audit | 231.31 s | 277.67 s |
+| First timed request starts, from harness start | 531.79 s | 849.35 s |
+
+Harness elapsed time excludes launcher setup. The outer command therefore
+expired shortly after the first timed request began. Audit-mode draft timings
+include verification overhead and must not be compared with ordinary decode TG.
+The pre-load I/O admission passed (0.859% full stall); this does not establish
+the cause of the later slow load or prove isolation throughout the run.
+
+The partial report has `passed=false`, `closed_cleanly=false`, and no final
+source-immutability checks. Its two completed audits are useful diagnostic
+evidence, **not a reusable full-run qualification**. Do not silently substitute
+them for fresh audits or promote this candidate. The accepted 32K result stays
+at 89.01 TG. Before retrying, the test cycle needs a phase budget that accounts
+for load, both audits, all four timed requests and cleanup, rather than another
+unchanged 900-second attempt.
+
+Partial report SHA256:
+`00658e8b2f9f04090b7c34aa3dbc707ae29d702debeead2699927a733e7efbbd`.

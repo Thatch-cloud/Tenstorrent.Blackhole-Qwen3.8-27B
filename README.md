@@ -32,7 +32,7 @@ matched control and is rejected. Keep the original streaming MLP reader.
 | Work | Evidence / status |
 | --- | --- |
 | Faster draft K/V assembly | Simulator and full-size hardware checks pass; **1.412 to 0.212 ms** per assembly, not TG |
-| Matched 32K combined test | [Queued comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35158707469); winning recipe in both arms, only assembly changes |
+| Matched 32K combined test | [Timed out](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35158707469) after both correctness audits; no completed timed requests or new TG result |
 | Full-runtime profiler | Capture overflow/timeouts remain unresolved; expensive per-token-drain configuration withdrawn |
 | Gap to 200 TG | Current mean block **131.38 ms**; needs **58.50 ms** at unchanged acceptance |
 
