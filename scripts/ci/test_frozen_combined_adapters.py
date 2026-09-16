@@ -3,12 +3,28 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from frozen_combined_adapters import adapt_admission
+from frozen_combined_adapters import adapt_admission, adapt_combined_sources, FILES
+from frozen_runtime_context import FILES as RUNTIME_FILES, adapt_runtime_sources
 from frozen_combined_runtime import qualify
 from frozen_recipe_context import REVISION
 
 
 class CombinedAdmissionTests(unittest.TestCase):
+    def test_candidate_scope_retains_guards_and_enters_reciprocal(self):
+        sources = {name: subprocess.check_output(['git', 'show',
+            f'{REVISION}:scripts/ci/{name}'], text=True) for name in FILES + RUNTIME_FILES}
+        adapted = adapt_combined_sources(adapt_runtime_sources(sources))
+        for name, source in adapted.items():
+            if name.endswith('.py'):
+                compile(source, name, 'exec')
+        entry = adapted['dspark_8k_entry.py']
+        self.assertIn('request_context() != 32768', entry)
+        for guard in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED', 'TT_METAL_SIMULATOR',
+                '--captured-publication', 'QWEN_FROZEN_COMBINED_RUNTIME', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS'):
+            self.assertIn(guard, entry)
+        self.assertIn('stack.enter_context(scalar_reciprocal())', adapted['dspark_8k_scope.py'])
+        self.assertIn('if history_limit() == 33024:', adapted['dspark_context_selection.py'])
+
     def test_selected_admission_preserves_binary_and_factory_checks(self):
         source = subprocess.check_output(['git', 'show',
             f'{REVISION}:scripts/ci/dspark_8k_admission.py'], text=True)

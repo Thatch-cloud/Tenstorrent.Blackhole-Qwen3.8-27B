@@ -163,7 +163,12 @@ def main():
         help='Stop after both eager fixtures; never qualifies replay or full probe coverage')
     parser.add_argument('--target-replay', action='store_true',
         help='Prepare context-selected target replay with runtime BF16 KV; does not grant admission')
+    parser.add_argument('--combined-runtime', action='store_true',
+        help='Prepare guarded 32K offline candidate entry; requires retained component evidence')
     options = parser.parse_args()
+    if options.combined_runtime and (options.context != 32768 or not options.scalar_reciprocal
+            or not options.target_replay or options.eager_only):
+        parser.error('Combined candidate requires 32768, scalar reciprocal and target replay, not eager-only')
     checkout = options.checkout.resolve(strict=True)
 
     def git(*arguments):
@@ -178,6 +183,9 @@ def main():
         'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
     if options.target_replay:
         names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py')
+    if options.combined_runtime:
+        from frozen_combined_adapters import FILES as COMBINED_FILES
+        names += COMBINED_FILES
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -197,6 +205,11 @@ def main():
             'dspark_ladder_scalar_reciprocal.py').read_text()
     if options.eager_only:
         adapted = adapt_eager_only(adapted)
+    if options.combined_runtime:
+        from frozen_combined_adapters import adapt_combined_sources
+        adapted = adapt_combined_sources(adapted)
+        for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py'):
+            adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -213,6 +226,7 @@ def main():
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',
         eager_only=options.eager_only,
         target_replay=options.target_replay,
+        combined_runtime=options.combined_runtime,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 

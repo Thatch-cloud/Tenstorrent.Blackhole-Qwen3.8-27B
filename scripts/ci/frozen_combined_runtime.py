@@ -8,6 +8,9 @@ from frozen_combined_gate import qualify as qualify_components, REPORTS
 from frozen_context_geometry import selected_geometry
 
 
+REPORT_SHA256 = REPORTS['draft-numerical.json']
+
+
 def qualify(directory):
     if (os.environ.get('QWEN_FROZEN_COMBINED_RUNTIME') != '1'
             or selected_geometry()['context'] != 32768

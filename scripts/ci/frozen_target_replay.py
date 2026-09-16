@@ -4,7 +4,6 @@ import hashlib
 from pathlib import Path
 
 from frozen_context_geometry import geometry
-from frozen_recipe_context import replace_once
 from target_t16_attention_8k_gate import SOURCES
 
 
@@ -67,6 +66,7 @@ def validate_target_report(report, directory, context, *, compact_scratch=False)
 
 
 def adapt_target_probe(source):
+    from frozen_recipe_context import replace_once
     source = replace_once(source, '    mesh = None\n',
         "    scratch = os.environ.get('QWEN_FROZEN_TARGET_SCRATCH', '0')\n"
         "    if scratch not in ('0', '1'):\n"
@@ -133,6 +133,7 @@ def adapt_target_probe(source):
 
 
 def adapt_target_mask(source):
+    from frozen_recipe_context import replace_once
     source = replace_once(source, 'import hashlib',
         'import hashlib\nfrom frozen_context_geometry import selected_geometry')
     return replace_once(source,
