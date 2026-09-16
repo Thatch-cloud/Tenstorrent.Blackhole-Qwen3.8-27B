@@ -56,10 +56,18 @@ speed. At 11 committed tokens/block, 200 TG requires a whole block cycle of
 55 ms, already less than this verifier trace alone, before drafting/publication.
 That acceptance is workload-dependent, not a general guarantee.
 
-Next: reduce arithmetic/projection work in the large groups. The first outer-add
-fusion reinitializes multiply/add modes for every tile; a multi-tile register
-version can test whether mode-switch cost erased the saved buffer pass. Any
-candidate still needs exact simulator admission and complete-request timing.
+Historical follow-up, now completed: the two-tile outer-add candidate passed
+simulator correctness but hardware run 34699539483 regressed from 106.47 to
+106.16 committed TG, with blocking trace time rising from 68.017 to 68.329 ms.
+Do not restart that scheduling family from this older recommendation. See
+[the retained comparison](gdn-outer-add-experiment.md#two-tile-arithmetic-setup-candidate).
+
+This profile also predates the shared-Q/K path used by the later winning recipe.
+Its operation groups identify historical costs, not measured costs of that newer
+kernel composition. Before selecting another recurrence/projection change,
+attribute the exact winning runtime rather than treating these group totals as
+its current bottleneck breakdown. The winning 8K request's overall verifier
+cost is separately established in [the runtime budget](winning-runtime-controls.md#winning-8k-recipe-where-the-200-tg-gap-actually-is).
 
 Evidence validation checks 786 script hashes, exact request/state/feature audits,
 trace markers, and request/device-report hashes. PP and TG remain null.
