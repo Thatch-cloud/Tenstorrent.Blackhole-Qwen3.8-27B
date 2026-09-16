@@ -3,11 +3,21 @@ import unittest
 import os
 from unittest.mock import patch
 
-from frozen_recipe_context import REVISION, adapt_probe_sources, geometry
+from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, geometry
 from frozen_context_geometry import CONTEXTS, selected_geometry
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
+    def test_cache_launcher_preserves_bounded_original_probe(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        result = adapt_cache_launcher(sources)
+        self.assertIn('frozen_sim_build_cache.py', result['simulator-suite.sh'])
+        self.assertIn('dst=/frozen-simulator-cache', result['run-simulator.sh'])
+        self.assertIn('"/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"', result['simulator-suite.sh'])
+        self.assertNotIn('--device', result['run-simulator.sh'])
+
     def test_single_environment_flag_selects_all_sizes_without_fallback(self):
         for context in CONTEXTS:
             with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': str(context)}):

@@ -46,6 +46,22 @@ def adapt_probe_sources(sources, context):
     return result
 
 
+def adapt_cache_launcher(sources):
+    result = dict(sources)
+    result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
+        'python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
+        'python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py')
+    result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
+        'container=$(docker create',
+        'volume=qwen-frozen-simulator-f1e9b1a64b4f\n'
+        'if ! docker volume inspect "$volume" >/dev/null 2>&1; then\n'
+        '    docker volume create --label thatch.qwen.frozen-simulator-cache=true "$volume" >/dev/null\n'
+        'fi\n'
+        'test "$(docker volume inspect --format \'{{index .Labels "thatch.qwen.frozen-simulator-cache"}}\' "$volume")" = true\n'
+        'container=$(docker create --mount "type=volume,src=$volume,dst=/frozen-simulator-cache"')
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
@@ -62,7 +78,7 @@ def main():
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
     names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'run-simulator.sh')
+        'dspark_stats_pack.py', 'run-simulator.sh', 'simulator-suite.sh')
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -70,8 +86,9 @@ def main():
         if original.replace('\r\n', '\n') != actual:
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
-    adapted = adapt_probe_sources(sources, options.context)
-    adapted['frozen_context_geometry.py'] = Path(__file__).with_name('frozen_context_geometry.py').read_text()
+    adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
+    for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'dspark_runtime_cache.py'):
+        adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
