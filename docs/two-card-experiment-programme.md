@@ -6,6 +6,17 @@ restoring one matched runtime across the context ladder.
 
 ## Current experiment checkpoint - 2026-09-16
 
+**Latest complete matched runtime:** PP **2309.96** / CTX **65536** / TG **37.94**,
+run **35039344557**, with two exact 135-token EOS responses and clean shutdown.
+FP32 maxima retains the prior speed; it is not a throughput improvement. Drafting
+and verification average 85.51 and 82.32 ms/block. The job takes 5m49s; builds
+must hit the exact cache rather than compile during request testing.
+
+Next worker-limit candidate (8 to 16 per KV lane) passes simulator **35040143195**
+and all 72 full-64K hardware checks in **35040886460** (1m21s). The combined
+model audit is next; candidate TG is not yet measured. Both request exactness
+and complete-loop speed remain mandatory. [Current ladder](matched-context-ladder.md).
+
 **200 committed TG remains unachieved.** The new complete 64K candidate records
 PP **2205.49** / CTX **65536** / TG **37.95** versus matched control TG **30.55**
 (35026222541). Repeat 35027433446 passes at PP **2597.34** / TG **38.32** versus

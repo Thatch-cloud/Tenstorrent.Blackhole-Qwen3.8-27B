@@ -57,6 +57,11 @@ exact replay checks, 48 input checks, 16 layout checks, poison/frontier controls
 and the unchanged native target gate. The factory is identical to the baseline;
 only the worker limit changes. The 64K hardware screen requires that cached
 binary and has a four-minute outer deadline. Model speed remains unmeasured.
+Hardware run **35040886460 passes in 1m21s**, with a binary-cache hit, all 72
+checks, eight negative controls and clean close. The recorded base allocation
+still describes the eight-worker control; `worker_experiment.calls` proves all
+three eager/capture executions selected 16. The next combined audit retains
+every target output/state check and incremental-history publication.
 Combined timing report SHA: `aa5604cb21ccad7d8d920e91e5c065ab1829ce2ca8cad039d7fdcecddd6ad79e`.
 
 ## Proposed allocation contract

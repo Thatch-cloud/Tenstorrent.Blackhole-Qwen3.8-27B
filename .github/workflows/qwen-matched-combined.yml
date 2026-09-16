@@ -1,7 +1,7 @@
 name: Qwen matched maxima combined correctness
 on:
   push:
-    tags: ['experiment/matched-combined-audit-v1', 'experiment/matched-combined-audit-v2']
+    tags: ['experiment/matched-combined-audit-v1', 'experiment/matched-combined-audit-v2', 'experiment/workers16-combined-audit-v1']
 permissions:
   contents: read
   actions: read
@@ -33,6 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_MATCHED_COMBINED: '1'
+          QWEN_SPLITK_WORKERS: ${{ github.ref == 'refs/tags/experiment/workers16-combined-audit-v1' && '16' || '8' }}
           QWEN_SPLITK_COMBINED: '1'
           QWEN_64K_MLP_AUDIT: '1'
           QWEN_64K_SHARED_QK_AUDIT: '1'

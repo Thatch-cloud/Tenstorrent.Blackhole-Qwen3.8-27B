@@ -5,6 +5,13 @@ test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 matched_combined=${QWEN_MATCHED_COMBINED:-0}
+splitk_workers=${QWEN_SPLITK_WORKERS:-8}
+case "$splitk_workers" in 8|16) ;; *) exit 2 ;; esac
+if [ "$splitk_workers" = 16 ]; then
+    test "$matched_combined" = 1
+    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+fi
 [[ "$matched_combined" = 0 || "$matched_combined" = 1 ]]
 if [ "$matched_combined" = 1 ]; then
     test "$splitk_combined" = 1
@@ -89,6 +96,11 @@ for archive, member, destination in (
         (Path('scripts/ci') / destination).write_bytes(source.read(member))
 PY
         PYTHONPATH=scripts/ci python3 -c 'from matched_combined_build import admission; admission("scripts/ci")'
+        if [ "$splitk_workers" = 16 ]; then
+            timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10424783045/zip > "$splitk_evidence/workers-hardware.zip"
+            python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-workers-64k-hardware.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read("matched-context-attention-65536.json"))' "$splitk_evidence/workers-hardware.zip"
+            PYTHONPATH=scripts/ci python3 -c 'from splitk_workers_hardware_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-workers-64k-hardware.json")'
+        fi
     else
     timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376709944/zip > "$splitk_evidence/hardware.zip"
     timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10376559640/zip > "$splitk_evidence/simulator.zip"
@@ -513,6 +525,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_MATCHED_COMBINED=$matched_combined" \
+    -e "QWEN_SPLITK_WORKERS=$splitk_workers" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \

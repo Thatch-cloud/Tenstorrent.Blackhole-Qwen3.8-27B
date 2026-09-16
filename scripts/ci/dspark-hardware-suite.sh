@@ -193,6 +193,7 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then
         splitk_entry=matched_combined_request.py
         if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=matched_combined_timed_request.py; fi
+        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then splitk_entry=workers_combined_request.py; fi
     fi
     runner=(timeout -k 10 "$process_limit" python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json

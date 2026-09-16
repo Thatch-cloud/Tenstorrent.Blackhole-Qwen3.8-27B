@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from splitk_worker_scope import worker_scope
 
@@ -28,6 +29,22 @@ class WorkerScopeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.execute_folded(key_chunk_size=128, max_cores_per_head=8,
                     stripe_keys=False, fp32_dest_acc=True)
+
+    def test_combined_runtime_captures_worker_override_before_its_own_binding(self):
+        module = SimpleNamespace(execute_folded=lambda **kwargs: kwargs)
+        records = []
+        with worker_scope(module, records):
+            captured = module.execute_folded
+
+            def runtime_execute(**kwargs):
+                kwargs.update(key_chunk_size=256, max_cores_per_head=8,
+                    stripe_keys=False, fp32_dest_acc=True)
+                return captured(**kwargs)
+
+            with patch.object(module, 'execute_folded', runtime_execute):
+                result = module.execute_folded()
+        self.assertEqual(result['max_cores_per_head'], 16)
+        self.assertEqual(len(records), 1)
 
 
 if __name__ == '__main__':
