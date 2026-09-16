@@ -72,6 +72,11 @@ def adapt_cache_launcher(sources, probe_seconds=510):
     if type(probe_seconds) is not int or probe_seconds not in (510, 1020):
         raise ValueError('Explicit supported probe budget required')
     result = dict(sources)
+    result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
+        '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
+        '    -e "QWEN_FROZEN_TARGET_SCRATCH=${QWEN_FROZEN_TARGET_SCRATCH:-0}" \\\n'
+        '    -e "QWEN_SDPA_TREE_SCRATCH_ROUNDS=${QWEN_FROZEN_TARGET_SCRATCH:-0}" \\\n'
+        '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"')
     from frozen_sim_assets import ASSETS
     downloads = '\n'.join(f'curl --fail --location --max-time 180 {url} -o "$assets/{name}"'
         for name, url, checksum in ASSETS)

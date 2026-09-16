@@ -1,7 +1,7 @@
 name: Qwen winning recipe larger-context simulator
 on:
   push:
-    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1']
+    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1']
 permissions:
   contents: read
 concurrency:
@@ -38,6 +38,7 @@ jobs:
           QWEN_SIM_CASE: dspark-native-8k-attention
           QWEN_DSPARK_REQUEST_CONTEXT: '8192'
           QWEN_FROZEN_BUILD_ONLY: '1'
+          QWEN_FROZEN_TARGET_SCRATCH: ${{ endsWith(github.ref, 'target-scratch-build-v1') && '1' || '0' }}
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p frozen-build/experiment-results
@@ -52,7 +53,7 @@ jobs:
           name: qwen-frozen-factory-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-build/experiment-results/
   geometry:
-    if: github.ref != 'refs/tags/experiment/frozen-context-build-v1'
+    if: ${{ !contains(github.ref, '-build-') }}
     needs: prepare
     strategy:
       max-parallel: 1
