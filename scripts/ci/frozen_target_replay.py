@@ -8,7 +8,27 @@ from frozen_recipe_context import replace_once
 from target_t16_attention_8k_gate import SOURCES
 
 
-def validate_target_report(report, directory, context):
+def validate_target_report(report, directory, context, *, compact_scratch=False):
+    if type(compact_scratch) is not bool:
+        raise ValueError('Explicit target scratch qualification selection required')
+    if report.get('compact_tree_scratch', False) is not compact_scratch:
+        raise ValueError('Target scratch variant differs from requested qualification')
+    if compact_scratch:
+        from sdpa_tree_scratch import HASHES, PATCHED_FACTORY_SHA256
+        expected_native = dict(HASHES)
+        expected_native['sdpa_decode_program_factory.cpp'] = PATCHED_FACTORY_SHA256
+        if (report.get('native_sources') != expected_native
+                or report.get('native_sources_after') != expected_native):
+            raise ValueError('Pinned compact scratch native sources required')
+        build = report.get('factory_build', {})
+        binaries = build.get('binaries_after', {})
+        if (build.get('passed') is not True or build.get('import_passed') is not True
+                or set(binaries) != {'build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'}
+                or len(set(binaries.values())) != 1
+                or any(not isinstance(value, str) or len(value) != 64
+                    or any(character not in '0123456789abcdef' for character in value)
+                    for value in binaries.values())):
+            raise ValueError('Audited matching compact scratch binary identities required')
     capacity = geometry(context)['capacity']
     if (report.get('passed') is not True or report.get('closed') is not True
             or report.get('backend') != 'simulator' or report.get('context') != context
@@ -42,6 +62,7 @@ def validate_target_report(report, directory, context):
             or report.get('stale_controls') != 2 or report.get('mask_poison_controls') != 8):
         raise ValueError('Target replay negative controls incomplete')
     return dict(context=context, capacity=capacity, kv_dtype='bfloat16',
+        compact_tree_scratch=compact_scratch,
         component_qualified=True, full_request_qualified=False, performance_qualified=False)
 
 

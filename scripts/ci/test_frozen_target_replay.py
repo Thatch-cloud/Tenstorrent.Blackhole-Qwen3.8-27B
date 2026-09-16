@@ -67,6 +67,20 @@ class TargetReplayTests(unittest.TestCase):
             result = validate_target_report(report, directory, 32768)
             self.assertTrue(result['component_qualified'])
             self.assertFalse(result['performance_qualified'])
+            with self.assertRaisesRegex(ValueError, 'variant differs'):
+                validate_target_report(report, directory, 32768, compact_scratch=True)
+            from sdpa_tree_scratch import HASHES, PATCHED_FACTORY_SHA256
+            compact = deepcopy(report)
+            native = dict(HASHES, **{'sdpa_decode_program_factory.cpp': PATCHED_FACTORY_SHA256})
+            compact.update(compact_tree_scratch=True, native_sources=native,
+                native_sources_after=dict(native), factory_build=dict(passed=True, import_passed=True,
+                    binaries_after={name: 'a' * 64 for name in
+                        ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')}))
+            self.assertTrue(validate_target_report(compact, directory, 32768,
+                compact_scratch=True)['compact_tree_scratch'])
+            compact['native_sources_after'].clear()
+            with self.assertRaisesRegex(ValueError, 'native sources'):
+                validate_target_report(compact, directory, 32768, compact_scratch=True)
             for mutate in (
                     lambda value: value.update(context=8192),
                     lambda value: value.update(kv_dtype='bfloat8_b'),
