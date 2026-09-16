@@ -48,7 +48,7 @@ class FrozenRecipeContextTests(unittest.TestCase):
             self.assertFalse(report['performance_qualified'])
             self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
                 {'frozen_binary_cache.py', 'frozen_context_geometry.py',
-                 'frozen_sim_build_cache.py', 'frozen_sim_phase.py'})
+                 'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')
@@ -59,6 +59,8 @@ class FrozenRecipeContextTests(unittest.TestCase):
         self.assertIn('dst=/frozen-simulator-cache', result['run-simulator.sh'])
         self.assertIn('"/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"', result['simulator-suite.sh'])
         self.assertNotIn('--device', result['run-simulator.sh'])
+        self.assertNotIn('--max-time 180', result['run-simulator.sh'])
+        self.assertIn('timeout -k 5 60 python3', result['run-simulator.sh'])
 
     def test_single_environment_flag_selects_all_sizes_without_fallback(self):
         for context in CONTEXTS:

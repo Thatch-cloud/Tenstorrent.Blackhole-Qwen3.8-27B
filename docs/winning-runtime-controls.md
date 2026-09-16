@@ -242,9 +242,13 @@ The current branch has the following **planned**, not hardware-validated budgets
 | In-container preparation | 510 s, build allowed | 120 s, cache hit required |
 | In-container probe | Not run | 510 s |
 
-These are nested limits, not independent allowances. The launcher downloads two
-assets with up to 180 seconds allowed **each**, before container preparation.
-Those downloads consume the outer launcher and step budgets. Cleanup also runs
+These are nested limits, not independent allowances. The historical launcher
+allowed up to 180 seconds **each** for two asset downloads before container
+preparation. The adapter now reuses SHA256-verified cached copies; misses have
+20-second curl deadlines and a 60-second total asset-stage limit (five-second
+kill grace). Asset hashes and staged copies are checked on every run. Local
+tests cover reuse, corruption, wrong downloads and timeout failures; no runner
+speedup is measured yet. These operations still consume outer budgets. Cleanup also runs
 inside the outer limit; its Docker log/copy/removal commands have no individual
 deadline. A 510-second probe allowance therefore does not guarantee 510 seconds
 are available to the probe. The current design does **not** yet meet the requested

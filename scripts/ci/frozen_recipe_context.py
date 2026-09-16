@@ -65,6 +65,12 @@ def adapt_probe_sources(sources, context):
 
 def adapt_cache_launcher(sources):
     result = dict(sources)
+    from frozen_sim_assets import ASSETS
+    downloads = '\n'.join(f'curl --fail --location --max-time 180 {url} -o "$assets/{name}"'
+        for name, url, checksum in ASSETS)
+    result['run-simulator.sh'] = replace_once(result['run-simulator.sh'], downloads,
+        'timeout -k 5 60 python3 -B scripts/ci/frozen_sim_assets.py '
+        '--cache "$cache/frozen-simulator-assets" --destination "$assets"')
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
         'prepare_seconds=120\n'
@@ -115,7 +121,7 @@ def main():
         sources[name] = actual
     adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
-            'frozen_sim_phase.py'):
+            'frozen_sim_phase.py', 'frozen_sim_assets.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():
         if name.endswith('.py'):
