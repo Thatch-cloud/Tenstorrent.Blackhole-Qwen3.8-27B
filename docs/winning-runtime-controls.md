@@ -52,3 +52,18 @@ original-report self-comparisons test this offline checker, not the hardware rep
 The separate 64K history diagnostic is not the new baseline. Its second pass
 (35044914165) passed but did not reproduce the hundreds-of-milliseconds spikes;
 it does not establish a root cause or justify another chain of profiling jobs.
+
+## Replay outcome: 35045581089
+
+The unchanged 4K revision reached the ten-minute cap; 8K was cancelled by matrix
+fail-fast before starting. Runtime build was a **three-second cache hit**, not a
+cold compilation. The partial report retains two audited requests and one timed
+control, but stops during the first timed candidate. It has no clean shutdown or
+complete comparison and must not supply an accepted PP/TG row.
+
+Late candidate block logs retain approximately 27–33 ms drafting and 66.8 ms
+blocking verifier time, consistent with the original recipe. One selection/
+publication call spikes to 452 ms. Thus the intermittent wait also occurs on
+the unchanged winning runtime; it cannot be attributed solely to the later
+sixteen-worker experiment. Keep the frozen recipe while investigating execution
+conditions. Do not extend deadlines blindly or restart kernel exploration.
