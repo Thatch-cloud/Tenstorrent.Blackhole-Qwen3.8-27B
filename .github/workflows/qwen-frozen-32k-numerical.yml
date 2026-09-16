@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2']
 permissions:
   contents: read
 concurrency:
@@ -63,7 +63,7 @@ jobs:
           QWEN_DSPARK_REQUEST_CONTEXT: '32768'
           QWEN_FROZEN_PROBE_PART: ${{ endsWith(github.ref, 'reciprocal-diagnostics-v1') && 'diagnostics' || 'numerical' }}
           QWEN_FROZEN_BUILD_ONLY: '0'
-          QWEN_FROZEN_TARGET_SCRATCH: ${{ endsWith(github.ref, 'target-replay-scratch-v1') && '1' || '0' }}
+          QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-replay-scratch-') && '1' || '0' }}
         run: |
           limit=1090
           if [ "$QWEN_SIM_CASE" = target-t16-attention-8k ]; then limit=620; fi
