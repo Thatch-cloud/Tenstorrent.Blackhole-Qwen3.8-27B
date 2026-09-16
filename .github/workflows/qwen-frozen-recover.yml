@@ -1,0 +1,48 @@
+name: Recover completed Qwen 32K diagnostics artifacts
+on:
+  push:
+    tags: ['experiment/frozen-32k-recover-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 5
+    steps:
+      - name: Validate retained diagnostics without checkout or simulator execution
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          python3 -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve(strict=True)
+          directory = workspace / 'frozen-recipe/experiment-results'
+          assert directory.resolve(strict=True) == directory
+          path = directory / 'dspark-native-8k-attention.json'
+          report = json.loads(path.read_bytes())
+          assert report['stage'] == 'diagnostics_complete' and report['closed_cleanly'] is True
+          assert report['diagnostics_complete'] is True and report['reciprocal_variant'] == 'scalar-fp32'
+          assert report['capacity'] == 33024 and report['probe_part'] == 'diagnostics'
+          assert report['sources']['dspark-native-8k-attention-probe.py'] == 'e99f178fff12d745f0140cdf55517c3dff3479615c5f547f80fa8511c98ab9e0'
+          assert report['sources'] == report['sources_after']
+          assert report['native_sources'] == report['native_sources_after']
+          timing = json.loads((directory / 'probe-timing.json').read_text())
+          assert timing['exit_code'] == 0 and timing['timed_out'] is False
+          records = report['value_diagnostics']
+          assert len(records) == 6
+          assert {(record['kind'], record['chip']) for record in records} == {
+              (kind, chip) for kind in ('constant', 'oldest', 'last_proposal') for chip in range(2)}
+          assert all(record['finite'] is True and record['failed_elements'] == 0 for record in records)
+          print(json.dumps(dict(recovered_from_run=35061391709,
+              report_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), timing=timing)))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qwen-frozen-recovered-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-recipe/experiment-results/
+          if-no-files-found: error
