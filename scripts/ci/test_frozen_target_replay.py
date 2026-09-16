@@ -23,9 +23,10 @@ class TargetReplayTests(unittest.TestCase):
         self.assertIn("kv_dtype='bfloat16'", changed)
         self.assertNotIn('ttnn.bfloat8_b', changed)
         self.assertIn("'frozen_context_geometry.py'", changed)
-        start = '                original_cache = '
+        start = '                trace, output = capture_operation'
         self.assertEqual(self.original.split(start, 1)[1], changed.split(start, 1)[1])
         self.assertIn('starts = [first, first + 17, capacity - rows, first]', changed)
+        self.assertLess(changed.index('allocation_check = reader('), changed.index('for start, ticket_query in zip('))
 
     def test_source_drift_and_reapplication_rejected(self):
         with self.assertRaises(ValueError):
