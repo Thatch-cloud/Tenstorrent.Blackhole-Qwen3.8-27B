@@ -158,6 +158,7 @@ if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then
         if [ "${QWEN_PUBLICATION_PROFILE:-0}" = 1 ]; then source_entry=dspark-64k-publication-profile-request.py; fi
         if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then source_entry=dspark-64k-history-paired-request.py; fi
         if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then source_entry=matched_combined_timed_request.py; fi
+        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then source_entry=workers_combined_timed_request.py; fi
         timeout -k 5 30 python3 -u "/experiment-scripts/ci/$source_entry" --source-preflight || exit "$?"
     else
         timeout -k 5 30 python3 -u /experiment-scripts/ci/dspark_direct_fp32_preflight.py || exit "$?"
@@ -193,7 +194,10 @@ if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then
         splitk_entry=matched_combined_request.py
         if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=matched_combined_timed_request.py; fi
-        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then splitk_entry=workers_combined_request.py; fi
+        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then
+            splitk_entry=workers_combined_request.py
+            if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=workers_combined_timed_request.py; fi
+        fi
     fi
     runner=(timeout -k 10 "$process_limit" python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
         --checkpoint /dspark/model.safetensors --config /dspark/config.json

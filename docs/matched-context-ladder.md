@@ -6,6 +6,13 @@ and call that a scaling curve. Serving defaults remain unchanged.
 
 ## Current hardware evidence
 
+Sixteen-worker combined audit **35041737747 passed** at CTX 65536 in 6m47s.
+All 25 draft-attention calls used the qualified worker setting; all 120 learned
+parameter checks were exact, with clean shutdown and unchanged sources. This
+was a bounded correctness screen, not a throughput measurement. The next test
+times two complete responses using this exact audit and the existing build cache.
+The table below still records the eight-worker full-response baseline.
+
 | CTX | FP32-maxima draft attention | Folded verifier vs native B1 | Combined PP / TG |
 | ---: | --- | --- | --- |
 | 4096 | Pass | Exact pass | Not measured on this candidate |

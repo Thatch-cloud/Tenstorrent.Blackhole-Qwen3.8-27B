@@ -9,8 +9,11 @@ splitk_workers=${QWEN_SPLITK_WORKERS:-8}
 case "$splitk_workers" in 8|16) ;; *) exit 2 ;; esac
 if [ "$splitk_workers" = 16 ]; then
     test "$matched_combined" = 1
-    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
-    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
+    if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 0
+    else
+        test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+    fi
 fi
 [[ "$matched_combined" = 0 || "$matched_combined" = 1 ]]
 if [ "$matched_combined" = 1 ]; then
@@ -310,6 +313,11 @@ if [ "$timed_requests" = 1 ]; then
         screen_run=35038298030
         screen_artifact=qwen-matched-combined-35038298030-1
         timing_gate=matched_combined_timed
+        if [ "$splitk_workers" = 16 ]; then
+            screen_run=35041737747
+            screen_artifact=qwen-matched-combined-35041737747-1
+            timing_gate=workers_combined_timed
+        fi
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "$screen_artifact" --dir "$screen_evidence"
