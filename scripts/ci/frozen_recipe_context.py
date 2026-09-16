@@ -169,7 +169,11 @@ def main():
         help='Instrument exact 32K shared-Q/K verifier; never a throughput benchmark')
     parser.add_argument('--mlp-buffer', action='store_true',
         help='Matched four-block MLP comparison; retained simulator report required')
+    parser.add_argument('--gdn-input-cache', action='store_true',
+        help='Matched simulator-qualified GDN V/beta/gate input-cache comparison')
     options = parser.parse_args()
+    if options.gdn_input_cache and (not options.combined_runtime or options.verifier_profile or options.mlp_buffer):
+        parser.error('GDN cache requires isolated uninstrumented combined runtime')
     if options.mlp_buffer and (not options.combined_runtime or options.verifier_profile):
         parser.error('Buffer comparison requires uninstrumented combined runtime')
     if options.verifier_profile and not options.combined_runtime:
@@ -200,6 +204,8 @@ def main():
     sources = {}
     if options.mlp_buffer:
         names += ('fused_1d.py', 'dspark_request_experiment.py')
+    if options.gdn_input_cache:
+        names += ('dspark_request_experiment.py',)
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
         actual = (checkout / 'scripts/ci' / name).read_text()
@@ -240,6 +246,17 @@ def main():
             '        yield evidence')
         for name in ('frozen_mlp_buffer_gate.py', 'frozen_mlp_buffer_scope.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
+    if options.gdn_input_cache:
+        adapted['dspark_request_experiment.py'] = replace_once(adapted['dspark_request_experiment.py'],
+            'Native versus shared Q/K preparation and recurrence; complete combined runtime',
+            'Uncached versus cached V/beta/gate; shared Q/K enabled in both complete runtime arms')
+        adapted['dspark_8k_scope.py'] = replace_once(adapted['dspark_8k_scope.py'],
+            '        yield evidence',
+            '        from frozen_gdn_cache_scope import runtime_scope as cache_scope\n'
+            '        stack.enter_context(cache_scope(directory))\n'
+            '        yield evidence')
+        for name in ('frozen_gdn_input_cache.py', 'frozen_gdn_cache_gate.py', 'frozen_gdn_cache_scope.py'):
+            adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -259,6 +276,7 @@ def main():
         combined_runtime=options.combined_runtime,
         verifier_profile=options.verifier_profile,
         mlp_buffer=options.mlp_buffer,
+        gdn_input_cache=options.gdn_input_cache,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 

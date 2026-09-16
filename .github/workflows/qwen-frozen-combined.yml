@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1']
 permissions:
   contents: read
   actions: read
@@ -44,6 +44,12 @@ jobs:
           gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
           mkdir -p frozen-hardware/experiment-results
           profile=()
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-gdn-cache-v1 ]]; then
+            profile=(--gdn-input-cache)
+            gh run download 35081361623 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35081361623-1 --dir "$evidence/gdn-cache"
+            test "$(cat "$evidence/gdn-cache/gdn-shared-recurrence.exit-status")" = 0
+            cp "$evidence/gdn-cache/gdn-shared-recurrence.json" frozen-hardware/scripts/ci/frozen-gdn-cache.json
+          fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-verifier-profile-v1 ]]; then profile=(--verifier-profile); fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-buffer-v1 ]]; then
             profile=(--mlp-buffer)
