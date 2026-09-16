@@ -2,7 +2,6 @@ import subprocess
 import unittest
 
 from frozen_recipe_context import REVISION, replace_once
-from frozen_verifier_profile import FILES
 from frozen_wait_combined_stage import adapt, SOURCE_FILES, drain_setup
 
 
@@ -25,8 +24,20 @@ class CombinedWaitStageTests(unittest.TestCase):
         self.assertIn('frozen_wait_combined_report.py', result['dspark-combined-profile.sh'])
         self.assertIn("schedule = (('publication', True),)", result['dspark_request_experiment.py'])
         self.assertIn('timeout -k 30 720', result['dspark-combined-profile.sh'])
-        self.assertIn('--max-new-tokens 64', result['dspark-combined-profile.sh'])
+        self.assertIn('--max-new-tokens 256', result['dspark-combined-profile.sh'])
         self.assertIn('cp -u "$output/.logs/$name"', result['dspark-combined-profile.sh'])
+
+    def test_history_capacity_matches_existing_transaction_gate(self):
+        from frozen_incremental_scope import validate_records
+        result = adapt(self.sources)
+        self.assertIn('history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32',
+            result['full_dspark_request.py'])
+        capacity = ((32768 + 256 + 31) // 32) * 32
+        validate_records([dict(initial_position=32768, capacity=capacity, failed=False,
+            restored=True, committed=1, prepared=1, discarded=0, max_touched_rows=32)], True)
+        with self.assertRaises(ValueError):
+            validate_records([dict(initial_position=32768, capacity=((32768 + 64 + 31) // 32) * 32,
+                failed=False, restored=True, committed=1, prepared=1, discarded=0, max_touched_rows=32)], True)
 
     def test_missing_base_scope_rejected(self):
         changed = dict(self.sources)

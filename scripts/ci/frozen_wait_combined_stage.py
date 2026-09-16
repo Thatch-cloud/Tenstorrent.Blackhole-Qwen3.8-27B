@@ -13,7 +13,8 @@ from frozen_wait_zone_gate import qualify
 
 
 HELPERS = ('frozen_wait_zone_gate.py', 'frozen_wait_zone_scope.py', 'frozen_wait_zone_report.py',
-    'frozen_mlp_wait_zones.py', 'frozen_recipe_context.py', 'frozen_wait_combined_report.py')
+    'frozen_mlp_wait_zones.py', 'frozen_recipe_context.py', 'frozen_wait_combined_report.py',
+    'frozen_wait_raw_export.py')
 SOURCE_FILES = (*FILES, 'dspark_8k_scope.py', 'verifier_engine.py')
 
 
@@ -71,10 +72,16 @@ def adapt(sources):
         'from frozen_wait_zone_scope import validate_route as publication_route')
     result['dspark-combined-profile.sh'] = adapt_capture(result['dspark-combined-profile.sh'])
     result['dspark-combined-profile.sh'] = replace_once(result['dspark-combined-profile.sh'],
-        '--max-new-tokens 256', '--max-new-tokens 64')
-    result['dspark-combined-profile.sh'] = replace_once(result['dspark-combined-profile.sh'],
-        'cp "$output/.logs/$name" "$output/metadata/$name"',
-        'cp -u "$output/.logs/$name" "$output/metadata/$name"')
+        'if [ -f "$output/.logs/$name" ]; then cp "$output/.logs/$name" "$output/metadata/$name"; fi',
+        'if [ -f "$output/.logs/$name" ]; then\n'
+        '            if [ "$name" = profile_log_device.csv ]; then\n'
+        '                if [ ! -f "$output/metadata/$name" ] || [ "$output/.logs/$name" -nt "$output/metadata/$name" ]; then\n'
+        '                    python3 /experiment-scripts/ci/frozen_wait_raw_export.py "$output/.logs/$name" "$output/metadata/$name"\n'
+        '                fi\n'
+        '            else\n'
+        '                cp -u "$output/.logs/$name" "$output/metadata/$name"\n'
+        '            fi\n'
+        '        fi')
     result['dspark-combined-profile.sh'] += ('\npython3 /experiment-scripts/ci/frozen_wait_combined_report.py '
         '"$output"\n')
     for name, source in result.items():

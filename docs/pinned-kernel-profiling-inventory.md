@@ -169,10 +169,20 @@ markers; the outer launcher later returned 124. This is not a new TG result.
 The v2 diagnostic adds drains after completed prefill, audited reference decode,
 proposal preparation, verifier warm-up, verifier capture and publication capture.
 No drain is inserted inside a captured operation. It retains the same qualified
-kernel sources and full correctness checks. The output limit is 64 tokens rather
-than 256; the gate still requires at least three full-width verifier observations.
+kernel sources and full correctness checks. The proposed 64-token cap was withdrawn:
+it changes the history capacity and conflicts with the qualified incremental-history
+transaction gate. Run **35154364454** was cancelled rather than relaxing that gate.
+The next diagnostic retains the existing 256-token limit and 33,024-row history;
+it still requires at least three full-width verifier observations.
 Repeated metadata preservation skips unchanged files, and overflow is rejected
 before parsing the multi-gigabyte raw CSV. Hardware validation remains pending.
+
+The v3 export retains every `QWEN_MLP_` raw row (including duplicates and unmatched
+endpoints), with hashes of both the full source and selected CSV. It does not
+filter by replay success or relax completeness checks. This avoids copying and
+uploading gigabytes of unrelated raw events. Against the existing hardware
+fixture, export preserved all 160 trace endpoints exactly; 200 total MLP rows
+include the eager markers. The original source remains in the profiler log directory.
 
 ## Keep the 200 TG objective in view
 
