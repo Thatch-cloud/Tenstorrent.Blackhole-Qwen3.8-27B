@@ -79,6 +79,8 @@ def adapt_combined_sources(sources):
             ('        stack.enter_context(scoped_stats_pack())',
                 '        from dspark_ladder_scalar_reciprocal import scalar_reciprocal\n'
                 '        stack.enter_context(scalar_reciprocal())\n'
+                '        from frozen_reciprocal_isolation import isolated_reciprocal\n'
+                '        stack.enter_context(isolated_reciprocal())\n'
                 '        stack.enter_context(scoped_stats_pack())')),
         'dspark_context_selection.py': (
             ('if history_limit() == 8448:', 'if history_limit() == 33024:'),),
