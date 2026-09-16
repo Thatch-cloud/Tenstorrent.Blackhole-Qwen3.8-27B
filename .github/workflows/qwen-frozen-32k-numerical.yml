@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 16
+    timeout-minutes: 20
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -38,6 +38,9 @@ jobs:
           if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 ]; then
             candidate=(--scalar-reciprocal --eager-only)
           fi
+          if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-replay-v1 ]; then
+            candidate=(--scalar-reciprocal --probe-seconds 1020)
+          fi
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
             --checkout frozen-recipe --context 32768 \
             "${candidate[@]}" \
@@ -45,7 +48,7 @@ jobs:
           git -C frozen-recipe diff --check
           git -C frozen-recipe diff > frozen-recipe/experiment-results/geometry.patch
       - name: Cache-required 32K numerical probe without model weights
-        timeout-minutes: 14
+        timeout-minutes: 19
         working-directory: frozen-recipe
         env:
           QWEN_SIM_ONLY: '1'
@@ -54,7 +57,7 @@ jobs:
           QWEN_DSPARK_REQUEST_CONTEXT: '32768'
           QWEN_FROZEN_PROBE_PART: numerical
           QWEN_FROZEN_BUILD_ONLY: '0'
-        run: timeout -k 45 780 bash scripts/ci/run-simulator.sh
+        run: timeout -k 45 1090 bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

@@ -68,7 +68,9 @@ def adapt_probe_sources(sources, context):
     return result
 
 
-def adapt_cache_launcher(sources):
+def adapt_cache_launcher(sources, probe_seconds=510):
+    if type(probe_seconds) is not int or probe_seconds not in (510, 1020):
+        raise ValueError('Explicit supported probe budget required')
     result = dict(sources)
     from frozen_sim_assets import ASSETS
     downloads = '\n'.join(f'curl --fail --location --max-time 180 {url} -o "$assets/{name}"'
@@ -100,7 +102,7 @@ def adapt_cache_launcher(sources):
         '            if [ "${QWEN_FROZEN_BUILD_ONLY:-0}" = 1 ]; then exit 0; fi')
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"',
-        'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase probe --seconds 510 '
+        f'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase probe --seconds {probe_seconds} '
         '--output /experiment/results/probe-timing.json -- '
         'python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"')
     result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
@@ -146,6 +148,7 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--context', type=int, choices=CONTEXTS, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--probe-seconds', type=int, choices=(510, 1020), default=510)
     parser.add_argument('--scalar-reciprocal', action='store_true',
         help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
     parser.add_argument('--eager-only', action='store_true',
@@ -170,7 +173,7 @@ def main():
         if original.replace('\r\n', '\n') != actual:
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
-    adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context)))
+    adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context), options.probe_seconds))
     if options.scalar_reciprocal:
         adapted = adapt_scalar_reciprocal(adapted)
         adapted['dspark_ladder_scalar_reciprocal.py'] = Path(__file__).with_name(
@@ -192,6 +195,7 @@ def main():
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',
         eager_only=options.eager_only,
+        probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 
 
