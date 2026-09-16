@@ -1,7 +1,7 @@
 name: Qwen matched combined full-response timing
 on:
   push:
-    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2', 'experiment/matched-score-pair-v1']
+    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2', 'experiment/matched-score-pair-v1', 'experiment/matched-score-pair-v2']
 permissions:
   contents: read
   actions: read
@@ -40,8 +40,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_MATCHED_COMBINED: '1'
-          QWEN_MATCHED_SCORE_LAYOUT: ${{ github.ref_name == 'experiment/matched-score-pair-v1' && '1' || '0' }}
-          QWEN_MATCHED_SCORE_PAIR: ${{ github.ref_name == 'experiment/matched-score-pair-v1' && '1' || '0' }}
+          QWEN_MATCHED_SCORE_LAYOUT: ${{ startsWith(github.ref_name, 'experiment/matched-score-pair-') && '1' || '0' }}
+          QWEN_MATCHED_SCORE_PAIR: ${{ startsWith(github.ref_name, 'experiment/matched-score-pair-') && '1' || '0' }}
           QWEN_SPLITK_WORKERS: ${{ startsWith(github.ref_name, 'experiment/workers16-') && '16' || '8' }}
           QWEN_HISTORY_WAIT_PROFILE: ${{ startsWith(github.ref_name, 'experiment/workers16-history-profile-') && '1' || '0' }}
           QWEN_SPLITK_COMBINED: '1'
