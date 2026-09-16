@@ -1,6 +1,35 @@
 # GDN norm bridge prefetch candidate
 
-Simulator-qualified; not hardware-qualified or selected by the combined runtime.
+Simulator and matched combined hardware checks pass; serving remains unchanged.
+
+## Matched hardware result
+
+Run **35087582465**, revision `b126116`, passes in **13m45s**. Both arms retain
+incremental publication. One audited request per arm precedes four A/B/B/A timed
+requests; every response commits 117 tokens with identical output hashes and
+exact target output/state/inactive-state checks.
+
+| One stream | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Original norm reader | 2940.84 | 32768 | 87.41 |
+| Prefetched norm reader | 2962.66 | 32768 | **89.01** |
+
+The within-run gain is **1.83%**, not broad performance acceptance. Candidate
+repeats are 89.45/88.58 TG; controls are 87.50/87.33. Verification/readback drops
+74.26 -> 72.86 ms/block; drafting is 52.11 -> 51.47 ms and whole cycle
+133.78 -> 131.38 ms. The observed 11.7 committed tokens/block still requires
+58.5 ms for 200 TG. This small gain does not solve the dominant budget gap.
+
+Every candidate request records 96 three-stage builds; controls record zero.
+All six requests use bounded incremental publication. All 850 reported source
+entries and 1,520 native entries match before/after; container exit is zero,
+with no OOM. Pre-load full I/O stall is 0.0438%, not a throughout-run guarantee.
+Held-out coding quality and sustained serving remain unqualified.
+
+Hardware report SHA256:
+`b8be862d143160de6f030d182dc2f2552b861cf5dee72fd54de91f79cc1a5132`.
+
+## Simulator qualification
 
 Run **35086789628**, revision `2d1b59e`, passes in **3m03s** with clean close
 and exit zero. The full matrix contains 24 exact eager/changed-input replay

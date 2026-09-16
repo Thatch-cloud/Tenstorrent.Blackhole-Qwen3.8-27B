@@ -24,8 +24,10 @@ shared-Q/K, fused T16 verifier and draft attention. Publication/commit falls fro
 21.56 to 6.17 ms/block; verification remains about 74 ms. The complete job takes
 14m10s. [Results and source hashes](docs/frozen-incremental-history.md).
 
-**Now testing:** simulator-qualified batched GDN norm reads in complete 32K
-requests, with incremental publication in both arms. No speedup is claimed yet.
+**Latest follow-up:** batched GDN norm reads reach **PP 2962.66 / CTX 32768 /
+TG 89.01**, versus 87.41 TG matched control (+1.83%), with incremental publication
+in both arms. Exact checks pass; verification drops about 1.40 ms/block. This
+single matched run is not broad performance or quality acceptance.
 [Candidate and qualification](docs/frozen-gdn-norm-prefetch.md).
 
 The 4K/8K historical winners and the separate 64K split-K runtime below are
@@ -92,6 +94,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
 | One stream, batch 1, 117 committed tokens to EOS | 32768 | 2961.67 | 87.53 | Matched incremental-publication result; 35084843498 |
+| Same 32K workload, incremental publication + norm prefetch | 32768 | 2962.66 | 89.01 | Matched control 87.41; 35087582465 |
 | One stream, batch 1, 135 committed tokens to EOS | 65536 | 2584.54 | 31.40 | Two exact requests; split-K draft + folded T16 + fused MLP |
 | Same-request control, 135 committed tokens to EOS | 65536 | 2603.19 | 30.55 | 35026222541; native history publication |
 | Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close |
