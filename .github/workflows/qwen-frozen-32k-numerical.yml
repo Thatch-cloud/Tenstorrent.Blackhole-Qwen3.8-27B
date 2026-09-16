@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3', 'experiment/frozen-32k-target-replay-scratch-v4']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && 12 || 20 }}
+    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && !endsWith(github.ref, 'scratch-v4') && 12 || 20 }}
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -37,6 +37,9 @@ jobs:
           candidate=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-* ]]; then
             candidate=(--target-replay)
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 ]]; then
+              candidate+=(--probe-seconds 1020)
+            fi
           fi
           if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 ]; then
             candidate=(--scalar-reciprocal --eager-only)
@@ -66,7 +69,7 @@ jobs:
           QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-replay-scratch-') && '1' || '0' }}
         run: |
           limit=1090
-          if [ "$QWEN_SIM_CASE" = target-t16-attention-8k ]; then limit=620; fi
+          if [[ "$QWEN_SIM_CASE" = target-t16-attention-8k && "$GITHUB_REF" != refs/tags/experiment/frozen-32k-target-replay-scratch-v4 ]]; then limit=620; fi
           timeout -k 45 "$limit" bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
