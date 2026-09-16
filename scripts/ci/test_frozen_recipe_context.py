@@ -17,7 +17,8 @@ class FrozenRecipeContextTests(unittest.TestCase):
             geometry(131072)
 
     def test_historical_source_changes_geometry_not_math_or_poison(self):
-        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py')
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py')
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
         self.assertEqual(adapt_probe_sources(sources, 8192), sources)
@@ -31,6 +32,9 @@ class FrozenRecipeContextTests(unittest.TestCase):
                 candidate[candidate.index('    kernel ='):])
             self.assertIn('key_padding, 8192.', candidate)
             self.assertIn('key_padding, -8192.', candidate)
+            self.assertIn(f"get_compile_time_arg_val(3) == {(context + 512) // 32}",
+                adapted['dspark_stats_pack.py'])
+            self.assertIn('get_compile_time_arg_val(8) == 8', adapted['dspark_stats_pack.py'])
         broken = dict(sources)
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):

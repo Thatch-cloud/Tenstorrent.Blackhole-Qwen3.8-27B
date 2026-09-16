@@ -33,6 +33,9 @@ def adapt_probe_sources(sources, context):
             ('CAPACITY, PROPOSALS = 8448, 15', f"CAPACITY, PROPOSALS = {shape['capacity']}, 15"),
             ('POSITIONS = (8192, 8433)', f"POSITIONS = {shape['positions']}"),
             ('native_padded_keys=8704', f"native_padded_keys={shape['padded_keys']}")),
+        'dspark_stats_pack.py': (
+            ('get_compile_time_arg_val(3) == 272',
+                f"get_compile_time_arg_val(3) == {shape['padded_keys'] // 32}"),),
     }
     for name, replacements in changes.items():
         for before, after in replacements:
