@@ -89,9 +89,25 @@ def adapt_target_probe(source):
     source = replace_once(source, '                for start, ticket_query in zip(starts, queries, strict=True):',
         reader +
         '                allocation_check = reader(query, keys, values, scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)\n'
+        '                allocation_host = host(allocation_check)\n'
         '                ttnn.deallocate(allocation_check)\n'
         "                print(json.dumps(dict(stage='target-allocation-ready', capacity=capacity)), flush=True)\n"
         '                for start, ticket_query in zip(starts, queries, strict=True):')
+    source = replace_once(source, '                    outputs = []\n',
+        '                    if gold and start == starts[0] and torch.equal(ticket_query, queries[0]):\n'
+        '                        gold.append([value.clone() for value in gold[0]])\n'
+        "                        print(json.dumps(dict(stage='native-reference-reused', capacity=capacity, start=start)), flush=True)\n"
+        '                        continue\n'
+        '                    outputs = []\n')
+    source = replace_once(source,
+        '                warm = reader(query, keys, values, scale=0.0625, memory_config=ttnn.L1_MEMORY_CONFIG)\n'
+        '                try:\n'
+        '                    if any(not torch.equal(actual, expected) for actual, expected in zip(host(warm), gold[0], strict=True)):\n'
+        "                        raise AssertionError('T16 long-context warm output differs from native B1')\n"
+        '                finally:\n'
+        '                    ttnn.deallocate(warm)\n',
+        '                if any(not torch.equal(actual, expected) for actual, expected in zip(allocation_host, gold[0], strict=True)):\n'
+        "                    raise AssertionError('T16 long-context warm output differs from native B1')\n")
     source = replace_once(source, '    import torch\n',
         '    from attention_mask_replay import validate_ticket\n'
         "    capacity = selected_geometry()['capacity']\n"

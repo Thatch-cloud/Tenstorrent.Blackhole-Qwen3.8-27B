@@ -28,6 +28,9 @@ class TargetReplayTests(unittest.TestCase):
             changed.split(start, 1)[1].split('    except BaseException', 1)[0])
         self.assertIn('starts = [first, first + 17, capacity - rows, first]', changed)
         self.assertLess(changed.index('allocation_check = reader('), changed.index('for start, ticket_query in zip('))
+        self.assertIn('start == starts[0] and torch.equal(ticket_query, queries[0])', changed)
+        self.assertIn('zip(allocation_host, gold[0], strict=True)', changed)
+        self.assertNotIn('warm = reader(', changed)
 
     def test_source_drift_and_reapplication_rejected(self):
         with self.assertRaises(ValueError):
