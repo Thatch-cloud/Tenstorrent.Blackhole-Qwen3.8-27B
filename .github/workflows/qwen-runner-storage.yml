@@ -1,0 +1,27 @@
+name: Qwen read-only runner storage observation
+on:
+  push:
+    tags: ['experiment/runner-storage-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  observe:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          path: storage-observer
+      - name: Read storage layout and bounded pressure samples
+        timeout-minutes: 2
+        shell: bash
+        run: timeout -k 5 90 bash storage-observer/scripts/ci/runner-storage-observe.sh "$RUNNER_TEMP/qwen-storage-${{ github.run_id }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-runner-storage-${{ github.run_id }}
+          path: ${{ runner.temp }}/qwen-storage-${{ github.run_id }}/

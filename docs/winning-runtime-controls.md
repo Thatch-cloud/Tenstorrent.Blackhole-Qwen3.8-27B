@@ -67,3 +67,12 @@ publication call spikes to 452 ms. Thus the intermittent wait also occurs on
 the unchanged winning runtime; it cannot be attributed solely to the later
 sixteen-worker experiment. Keep the frozen recipe while investigating execution
 conditions. Do not extend deadlines blindly or restart kernel exploration.
+
+The replay's existing cgroup telemetry shows a substantial storage-pressure
+change: the two audited requests accumulate **17.33 s and 6.93 s of full I/O
+stall**, versus **0.0015 s and 0.0018 s** originally. The completed timed control
+records 1.26 s versus 0.0008 s. These span setup and auditing as well as decode;
+they do not prove which storage call caused an individual token-latency spike.
+CPU quota throttling and OOM counters remain zero. A bounded read-only runner
+storage observation checks backing mounts, capacity and device pressure before
+changing the frozen model recipe. It does not load weights or touch the cards.
