@@ -1,6 +1,7 @@
 """Unqualified full-K activation staging for the fused T16 MLP."""
 
 from frozen_recipe_context import replace_once
+from frozen_recipe_context import REVISION
 
 
 def reader(source):
@@ -41,3 +42,51 @@ def memory_budget(pairs_per_worker=3):
         extra_input_bytes_per_core=(160 - 16) * 2048,
         worker_cb_bytes=160 * 2048 + 32 * 3 * 576 + 3 * 2048 + 6 * 4096 + 6 * 2048,
         scope='Declared CB bytes only; not device L1 admission or a performance prediction')
+
+
+def main():
+    import argparse
+    import hashlib
+    import json
+    from pathlib import Path
+    import subprocess
+    from frozen_mlp_buffer_trial import adapt_probe
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--checkout', type=Path, required=True)
+    parser.add_argument('--manifest', type=Path, required=True)
+    options = parser.parse_args()
+    if options.manifest.exists():
+        raise ValueError('Fresh candidate manifest required')
+    scripts = options.checkout / 'scripts/ci'
+    sources = {}
+    for name in ('fused_1d.py', 'fused_1d_input.cpp', 'fused-batch-probe.py'):
+        source = subprocess.check_output(['git', '-C', str(options.checkout), 'show',
+            f'{REVISION}:scripts/ci/{name}']).decode().replace('\r\n', '\n')
+        if (scripts / name).read_text() != source:
+            raise ValueError('Historical source required: ' + name)
+        sources[name] = source
+    adapted = {'fused_1d.py': projection(sources['fused_1d.py']),
+        'fused_1d_input.cpp': reader(sources['fused_1d_input.cpp']),
+        'fused-batch-probe.py': adapt_probe(sources['fused-batch-probe.py'])}
+    adapted['fused-batch-probe.py'] = replace_once(adapted['fused-batch-probe.py'],
+        "    report['qualification_scope'] = 'T16 buffering only; other row widths and performance unqualified'",
+        "    report['input_reader_candidate_sha256'] = hashlib.sha256(\n"
+        "        Path(__file__).with_name('fused_1d_input.cpp').read_bytes()).hexdigest()\n"
+        "    report['qualification_scope'] = 'T16 full-K input prefetch; other widths and performance unqualified'")
+    adapted['simulator-suite.sh'] = replace_once((scripts / 'simulator-suite.sh').read_text(),
+        'timeout -k 15 9000 python3 -u /experiment-scripts/ci/fused-batch-probe.py',
+        'timeout -k 15 510 python3 -u /experiment-scripts/ci/fused-batch-probe.py')
+    for name, source in adapted.items():
+        if name.endswith('.py'):
+            compile(source, name, 'exec')
+    for name, source in adapted.items():
+        (scripts / name).write_bytes(source.encode())
+    options.manifest.write_text(json.dumps(dict(before={name: hashlib.sha256(source.encode()).hexdigest()
+        for name, source in sources.items()}, after={name: hashlib.sha256(source.encode()).hexdigest()
+        for name, source in adapted.items()}, memory=memory_budget(),
+        simulator_qualified=False, hardware_qualified=False), indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()
