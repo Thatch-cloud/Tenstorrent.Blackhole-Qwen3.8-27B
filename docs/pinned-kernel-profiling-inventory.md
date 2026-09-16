@@ -83,3 +83,23 @@ The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or
 critical-path time. It is not yet wired to a hardware capture.
+
+## Keep the 200 TG objective in view
+
+The accepted 32K combined report from **35087582465**, re-analyzed with
+`frozen_cycle_budget.py`, averages **11.7 committed tokens per 131.38 ms block**.
+At unchanged acceptance, 200 TG requires **58.50 ms**, removing **72.88 ms**.
+
+| Component | Observed mean | Hypothetical TG if this cost alone vanished |
+| --- | ---: | ---: |
+| Draft | 51.47 ms | 146.43 |
+| Verification plus readback | 72.86 ms | 199.95 |
+| Selection and commit | 5.76 ms | 93.14 |
+
+These are block-only bounds with every other cost and acceptance fixed, not
+achievable forecasts; request overhead makes end-to-end results lower. Do not
+add nested replay/readback timers. The MLP scopes answer a narrow attribution
+question: they cannot by themselves deliver 200 TG. Subsequent combined work
+must reduce both draft and verifier cost, or demonstrate a higher accepted-token
+yield without weakening target verification or coding quality. Avoid more buffer
+sweeps without evidence of the specific wait being addressed.

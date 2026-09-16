@@ -21,6 +21,15 @@ class CycleBudgetTests(unittest.TestCase):
         self.assertEqual(result['mean']['cycle_ms'], 147)
         self.assertEqual(result['target_cycle_ms'], 55)
         self.assertEqual(result['request_tg'], 74)
+        self.assertEqual(result['required_cycle_reduction_ms'], 92)
+        self.assertAlmostEqual(result['hypothetical_zero_component_block_tg']['draft_ms'], 11000 / 97)
+        self.assertAlmostEqual(result['hypothetical_zero_component_block_tg']['verify_readback_ms'], 11000 / 73)
+
+    def test_invalid_component_budget_rejected(self):
+        report = self.fixture()
+        report['request_checks'][1]['blocks'][0]['draft_ms'] = 147
+        with self.assertRaises(ValueError):
+            summarize(report)
 
     def test_failed_audit_rejected(self):
         report = self.fixture()
