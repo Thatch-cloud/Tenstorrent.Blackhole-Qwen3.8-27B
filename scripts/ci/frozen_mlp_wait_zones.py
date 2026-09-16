@@ -72,6 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--unmodified-control', action='store_true')
     options = parser.parse_args()
     if options.manifest.exists():
         raise ValueError('Fresh diagnostic manifest required')
@@ -85,9 +86,13 @@ def main():
         sources[name] = source
     adapted = {f'fused_1d_{role}.cpp': instrument(sources[f'fused_1d_{role}.cpp'], role)
         for role in ZONES}
+    if options.unmodified_control:
+        adapted = {name: sources[name] for name in adapted}
     adapted['fused-batch-probe.py'] = replace_once(adapt_probe(sources['fused-batch-probe.py']),
         "T16 buffering only; other row widths and performance unqualified",
-        "T16 sampled diagnostic scopes only; profiler export and performance unqualified")
+        ("T16 unmodified profiler control; no diagnostic kernel qualification"
+            if options.unmodified_control else
+            "T16 sampled diagnostic scopes only; profiler export and performance unqualified"))
     adapted['simulator-suite.sh'] = replace_once((scripts / 'simulator-suite.sh').read_text(),
         'timeout -k 15 9000 python3 -u /experiment-scripts/ci/fused-batch-probe.py',
         PROFILER_ENV + ' timeout -k 15 510 python3 -u /experiment-scripts/ci/fused-batch-probe.py')
@@ -99,7 +104,8 @@ def main():
     options.manifest.write_text(json.dumps(dict(
         before={name: hashlib.sha256(source.encode()).hexdigest() for name, source in sources.items()},
         after={name: hashlib.sha256(source.encode()).hexdigest() for name, source in adapted.items()},
-        diagnostic_only=True, profiler_requested=True, simulator_qualified=False,
+        diagnostic_only=True, unmodified_control=options.unmodified_control,
+        profiler_requested=True, simulator_qualified=False,
         hardware_qualified=False, performance_qualified=False), indent=2) + '\n')
 
 

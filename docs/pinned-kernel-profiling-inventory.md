@@ -70,3 +70,16 @@ without trace tracking. The retry adds `TT_METAL_PROFILER_TRACE_TRACKING=1`, as
 used by the existing combined capture; kernel sources and correctness checks
 remain unchanged. This is a diagnosis to test, not a proven fix. No hardware
 admission follows from the partial replay result.
+
+Retry **35147195915** also failed with exit 134 after **4m24s**. The two eager,
+twelve replay and four weight-check entries were retained, but the overall report
+stayed false and native TRISC kernel/FW marker pairing still aborted at close.
+Trace tracking alone is therefore not a fix. The next diagnostic is an exact
+unmodified-reader control with the same profiler settings, not another buffer or
+kernel variant. It distinguishes a general profiler/replay failure from an
+instrumentation-specific failure. Neither failed run admits hardware use.
+
+The prepared raw-scope validator rejects missing or duplicate endpoints,
+substituted replay identities, missing chip coverage and reported marker drops.
+It keeps per-core cycle samples separate and never converts their sum to TG or
+critical-path time. It is not yet wired to a hardware capture.

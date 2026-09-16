@@ -1,7 +1,7 @@
 name: Qwen frozen T16 MLP buffer simulation
 on:
   push:
-    tags: ['experiment/frozen-mlp-buffer-sim-v1', 'experiment/frozen-mlp-input-prefetch-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v2']
+    tags: ['experiment/frozen-mlp-buffer-sim-v1', 'experiment/frozen-mlp-input-prefetch-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v2', 'experiment/frozen-mlp-wait-zones-sim-control-v1']
 permissions:
   contents: read
 concurrency:
@@ -29,10 +29,12 @@ jobs:
             --checkout buffer-candidate --context 8192 \
             --manifest buffer-candidate/experiment-results/frozen-geometry.json
           staging=frozen_mlp_buffer_trial.py
+          staging_args=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-input-prefetch-sim-v1 ]]; then staging=frozen_mlp_input_prefetch.py; fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-wait-zones-sim-* ]]; then staging=frozen_mlp_wait_zones.py; fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-wait-zones-sim-control-v1 ]]; then staging_args=(--unmodified-control); fi
           python3 -B "buffer-orchestrator/scripts/ci/$staging" \
-            --checkout buffer-candidate --manifest buffer-candidate/experiment-results/buffer-candidate.json
+            --checkout buffer-candidate --manifest buffer-candidate/experiment-results/buffer-candidate.json "${staging_args[@]}"
           git -C buffer-candidate diff --check
           git -C buffer-candidate diff > buffer-candidate/experiment-results/buffer.patch
       - name: T16 eager and changed-input replay with byte-exact weight checks
