@@ -3,6 +3,7 @@
 from gdn_multitoken import replace_once
 from gdn_shared_qk_recurrence import INPUTS
 from gdn_vsplit_prefetch import CACHE_AND_GATHER
+from unittest.mock import patch
 
 
 LOOP = '    for (uint32_t token = 0; token < n_inst; ++token) {'
@@ -38,3 +39,21 @@ def buffers(io, fp32):
     if 31 in io or 31 in fp32:
         raise ValueError('Recurrence cache CB31 must be unused')
     return dict(io) | {31: 3}, dict(fp32)
+
+
+def build(operations, mesh, tensors, *, root):
+    import gdn_shared_qk_pipeline as pipeline
+    original_kernels, original_buffers = pipeline.load_kernels, pipeline.cb_plan
+
+    def kernels(requested_root):
+        result = {stage: dict(parts) for stage, parts in original_kernels(requested_root).items()}
+        result['recurrence']['reader'] = reader(result['recurrence']['reader'])
+        return result
+
+    def plan(stage, *, prefetch_inputs=False):
+        if stage != 'recurrence' or prefetch_inputs:
+            raise ValueError('Only the shared-Q/K recurrence cache is supported')
+        return buffers(*original_buffers(stage, prefetch_inputs=False))
+
+    with patch.object(pipeline, 'load_kernels', kernels), patch.object(pipeline, 'cb_plan', plan):
+        return pipeline.build(operations, mesh, tensors, root=root)
