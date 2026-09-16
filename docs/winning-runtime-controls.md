@@ -131,7 +131,7 @@ retains native output/state, source, loader and incremental-writer checks. It
 cannot be combined with the sixteen-worker or history-profiling experiment.
 Default paths and frozen 4K/8K controls are unchanged. Local scope and mutation
 tests pass; the newly composed entry is **not yet hardware validated**, and no
-performance gain is claimed. No hardware job has been launched for it.
+performance gain is qualified. Hardware attempts are recorded below.
 
 The prepared comparison also supports `QWEN_MATCHED_SCORE_PAIR=1`: one model load,
 one complete native-score control and one complete fused-score candidate. It
@@ -139,7 +139,31 @@ reuses the existing paired-request scope and its degraded-control stop, and
 retains two full requests with exact output/state checks. Per-arm timings are
 reported separately; pooled PP/TG fields are cleared. One fixed-order pair is a
 diagnostic, not repeatability or causal acceptance. The workflow has a separate
-15-second pre-load I/O gate and is ready but not dispatched while the competing
-builds are active. No new kernel implementation or simulator replay is needed
+15-second pre-load I/O gate. No new kernel implementation or simulator replay is needed
 for this source-identical score kernel; composed hardware correctness remains
 mandatory before any performance promotion.
+
+### Score comparison attempts (16 September)
+
+Run **35048450847** passed pre-load admission and completed both 64K requests,
+then failed the outer report validator. These are diagnostic observations only:
+
+| Path | CTX | Committed tokens | Decode ms | TG (tokens/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Native score | 65,536 | 135 | 3,643.03 | 37.06 |
+| Fused score | 65,536 | 135 | 3,324.23 | 40.61 |
+
+Both requests report exact output, active state and inactive state. The fused
+scope reports two calls and restored hooks; device closure completed. The
+serialized pair requests match the serialized main request records, but the
+validator compared live Python objects against JSON-decoded objects. Commit
+`73d9855` normalizes the comparison representation without dropping fields;
+local tests cover tuple/list equivalence and rejection of changed values.
+The failed artifact remains failed; it has not been retroactively qualified.
+The observed 9.6% difference is one fixed-order pair, not a repeatable gain.
+
+Retry **35049234170**, revision `2458f52`, stopped at the 15-second admission
+check: **45.997% full I/O stall**, versus the 1% limit. No model load or hardware
+measurement ran. The fix still needs an uncontended hardware rerun; do not
+weaken the admission threshold or stop unrelated jobs to obtain a green run.
+The 200 committed tokens/s objective remains unachieved.
