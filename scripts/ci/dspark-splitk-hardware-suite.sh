@@ -9,7 +9,12 @@ if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
     build=dspark_splitk_maxima_hardware.py
     probe=matched-context-maxima-probe.py
 fi
-timeout -k 10 360 python3 "/experiment-scripts/ci/$build"
+if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then
+    timeout -k 5 30 python3 /experiment-scripts/ci/matched-context-workers-probe.py --build
+    probe=matched-context-workers-probe.py
+else
+    timeout -k 10 360 python3 "/experiment-scripts/ci/$build"
+fi
 if [ "${QWEN_MATCHED_TARGET:-0}" = 1 ]; then
     timeout -k 10 120 python3 /experiment-scripts/ci/matched-context-target-probe.py --hardware \
         --output "/experiment/results/matched-context-target-${QWEN_MATCHED_CONTEXT}.json"

@@ -52,7 +52,12 @@ Next controlled experiment: raise the split-K worker limit from 8 to 16 per
 KV lane, keeping maxima precision, 256-key chunks and all history unchanged.
 Run a weight-free simulator check, then full-context numerical validation and
 combined-request measurement; do not claim a speedup from configured core count.
-Report SHA: `aa5604cb21ccad7d8d920e91e5c065ab1829ce2ca8cad039d7fdcecddd6ad79e`.
+Simulator run 35040143195 passes in 2m53s: four numerical eager checks, four
+exact replay checks, 48 input checks, 16 layout checks, poison/frontier controls
+and the unchanged native target gate. The factory is identical to the baseline;
+only the worker limit changes. The 64K hardware screen requires that cached
+binary and has a four-minute outer deadline. Model speed remains unmeasured.
+Combined timing report SHA: `aa5604cb21ccad7d8d920e91e5c065ab1829ce2ca8cad039d7fdcecddd6ad79e`.
 
 ## Proposed allocation contract
 
