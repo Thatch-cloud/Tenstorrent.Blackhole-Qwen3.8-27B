@@ -6,7 +6,7 @@ mkdir -p "$output"
 
 snapshot() {
     date -u +%FT%TZ
-    for name in /proc/pressure/io /proc/pressure/memory /proc/pressure/cpu /proc/diskstats /proc/meminfo; do
+    for name in /proc/pressure/io /proc/pressure/memory /proc/pressure/cpu /proc/diskstats /proc/meminfo /proc/mdstat; do
         printf '\n%s\n' "$name"
         cat "$name"
     done
@@ -35,7 +35,16 @@ if command -v iostat >/dev/null; then
 fi
 if command -v pidstat >/dev/null; then
     timeout 20 pidstat -d 1 10 > "$output/process-io.txt" 2>&1
+    timeout 20 sudo -n pidstat -d 1 10 > "$output/system-process-io.txt" 2>&1 || true
 fi
+ps -eo pid,ppid,uid,stat,comm > "$output/process-names.txt"
+for array in /sys/block/md*/md; do
+    test -d "$array" || continue
+    for field in array_state degraded sync_action sync_completed; do
+        printf '%s: ' "$array/$field"
+        cat "$array/$field" || true
+    done
+done > "$output/raid-state.txt" 2>&1
 snapshot > "$output/storage-after.txt"
 printf '%s\n' 'Read-only idle-host observation; no model load, device access, writes benchmarked, cleanup or process termination.' \
     > "$output/scope.txt"

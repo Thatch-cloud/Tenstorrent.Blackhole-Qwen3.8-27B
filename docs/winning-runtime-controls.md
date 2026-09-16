@@ -76,3 +76,12 @@ they do not prove which storage call caused an individual token-latency spike.
 CPU quota throttling and OOM counters remain zero. A bounded read-only runner
 storage observation checks backing mounts, capacity and device pressure before
 changing the frozen model recipe. It does not load weights or touch the cards.
+
+Read-only run **35046558059** confirms heavy storage activity with Qwen stopped:
+the root filesystem, Docker backing store and checkpoints share RAID1 `md1`.
+Sampled `nvme0n1` writes have 237–271 ms average latency and 94–97% utilization;
+host full I/O pressure reaches 54% over the last ten seconds. The unprivileged
+process sample cannot identify the system-wide writer. Follow-up only reads
+RAID synchronization state and process I/O counters; it does not stop workloads
+or change storage configuration. This is evidence of contention, not yet proof
+of the writer or attribution of every publication spike.

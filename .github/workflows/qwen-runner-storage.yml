@@ -1,7 +1,7 @@
 name: Qwen read-only runner storage observation
 on:
   push:
-    tags: ['experiment/runner-storage-v1']
+    tags: ['experiment/runner-storage-v1', 'experiment/runner-storage-v2']
 permissions:
   contents: read
 concurrency:
