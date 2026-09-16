@@ -5,11 +5,17 @@ from unittest.mock import patch
 
 from frozen_combined_adapters import adapt_admission, adapt_combined_sources, FILES
 from frozen_runtime_context import FILES as RUNTIME_FILES, adapt_runtime_sources
-from frozen_combined_runtime import qualify, validate_target_option
+from frozen_combined_runtime import qualify, validate_target_option, prepare_scratch
 from frozen_recipe_context import REVISION
 
 
 class CombinedAdmissionTests(unittest.TestCase):
+    def test_hardware_scratch_cannot_apply_without_allocation(self):
+        with patch.dict(os.environ, {}, clear=True), patch('frozen_combined_runtime.subprocess.run') as execute:
+            with self.assertRaisesRegex(ValueError, 'Explicit offline hardware'):
+                prepare_scratch('.')
+            execute.assert_not_called()
+
     def test_target_request_geometry_remains_strict(self):
         options = dict(rows=16, position=32768, remaining=256, replay=True,
             norm_batch=True, native_sampling=True, group_rows=4, short_context=False)
@@ -36,6 +42,9 @@ class CombinedAdmissionTests(unittest.TestCase):
         self.assertIn('if history_limit() == 33024:', adapted['dspark_context_selection.py'])
         self.assertIn('from frozen_combined_runtime import qualify_target', adapted['target_t16_attention_gate.py'])
         self.assertIn('from frozen_combined_runtime import validate_target_option', adapted['target_t16_attention_gate.py'])
+        self.assertIn('scratch = prepare_scratch(root)', adapted['dspark_8k_build.py'])
+        self.assertIn("verify_scratch(root, inputs.get('target_tree_scratch'))", adapted['dspark_8k_build.py'])
+        self.assertIn('enabled=request_context() == 32768', adapted['dspark_runtime_cache.py'])
 
     def test_selected_admission_preserves_binary_and_factory_checks(self):
         source = subprocess.check_output(['git', 'show',

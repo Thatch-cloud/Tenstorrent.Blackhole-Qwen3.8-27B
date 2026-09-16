@@ -3,13 +3,30 @@
 from frozen_recipe_context import replace_once
 
 
-FILES = ('dspark_8k_admission.py', 'dspark_8k_entry.py', 'target_t16_attention_gate.py')
+FILES = ('dspark_8k_admission.py', 'dspark_8k_entry.py', 'target_t16_attention_gate.py',
+    'dspark_8k_build.py', 'dspark_runtime_cache.py')
 
 
 def adapt_combined_sources(sources):
     result = dict(sources)
     result['dspark_8k_admission.py'] = adapt_admission(result['dspark_8k_admission.py'])
     replacements = {
+        'dspark_runtime_cache.py': (
+            ('enabled=request_context() == 8192', 'enabled=request_context() == 32768'),),
+        'dspark_8k_build.py': (
+            ('from dspark_attention_8k_gate import qualify',
+                'from frozen_combined_runtime import qualify, prepare_scratch, verify_scratch'),
+            ('    admission = qualify(scripts)',
+                '    admission = qualify(scripts)\n    scratch = prepare_scratch(root)'),
+            ('key_chunk_size=256, capacity=8448)',
+                'key_chunk_size=256, capacity=33024, target_tree_scratch=scratch)'),
+            ('    root = Path(root)\n',
+                "    root = Path(root)\n    verify_scratch(root, inputs.get('target_tree_scratch'))\n")),
+        'run-dspark-hardware.sh': (
+            ('    -e "QWEN_DSPARK_MODE=$mode"',
+                '    -e "QWEN_FROZEN_COMBINED_RUNTIME=${QWEN_FROZEN_COMBINED_RUNTIME:-0}" \\\n'
+                '    -e "QWEN_SDPA_TREE_SCRATCH_ROUNDS=${QWEN_FROZEN_COMBINED_RUNTIME:-0}" \\\n'
+                '    -e "QWEN_DSPARK_MODE=$mode"'),),
         'target_t16_attention_gate.py': (
             ('if request_context() == 8192:\n        from target_t16_attention_8k_gate import validate_request_option as validate_8k',
                 'if request_context() == 32768:\n        from frozen_combined_runtime import validate_target_option as validate_8k'),
@@ -40,7 +57,10 @@ def adapt_combined_sources(sources):
 
 def adapt_admission(source):
     changes = (
-        ('from dspark_attention_8k_gate import qualify', 'from frozen_combined_runtime import qualify'),
+        ('from dspark_attention_8k_gate import qualify', 'from frozen_combined_runtime import qualify, verify_scratch'),
+        ('    factory_sha256 = verify_factory(factory_root)',
+            "    verify_scratch(factory_root, build_evidence.get('factory_inputs', {}).get('target_tree_scratch'))\n"
+            '    factory_sha256 = verify_factory(factory_root)'),
         ('return 8448 if _ADMISSION.get() is not None else 8192',
             "return _ADMISSION.get()['capacity'] if _ADMISSION.get() is not None else 8192"),
         ('context != 8192 or output_tokens != 256', 'context != 32768 or output_tokens != 256'),
