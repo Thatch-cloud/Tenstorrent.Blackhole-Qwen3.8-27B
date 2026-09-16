@@ -61,3 +61,12 @@ weight loading. This is not yet simulator or hardware qualified. Raw marker
 retention must still be verified before attributing hardware stalls. A barrier
 scope measures remaining completion wait, not the whole transfer or bandwidth.
 No serving default or performance claim changes.
+
+First simulator attempt **35146501486** failed after **3m59s** (exit 134),
+not a timeout. Its T16 changed-input replay matrix passed, but the overall report
+remained false: native profiler processing aborted on mismatched TRISC kernel/FW
+markers with sentinel trace identities. This attempt enabled device profiling
+without trace tracking. The retry adds `TT_METAL_PROFILER_TRACE_TRACKING=1`, as
+used by the existing combined capture; kernel sources and correctness checks
+remain unchanged. This is a diagnosis to test, not a proven fix. No hardware
+admission follows from the partial replay result.

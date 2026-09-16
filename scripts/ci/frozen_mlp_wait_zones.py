@@ -4,6 +4,7 @@ from frozen_recipe_context import replace_once
 
 
 HEADER = '#include "tools/profiler/kernel_profiler.hpp"\n'
+PROFILER_ENV = 'TT_METAL_DEVICE_PROFILER=1 TT_METAL_PROFILER_TRACE_TRACKING=1'
 ZONES = {
     'input': (
         ('cb_reserve_back(0, 8);', 'QWEN_MLP_INPUT_FREE',
@@ -89,7 +90,7 @@ def main():
         "T16 sampled diagnostic scopes only; profiler export and performance unqualified")
     adapted['simulator-suite.sh'] = replace_once((scripts / 'simulator-suite.sh').read_text(),
         'timeout -k 15 9000 python3 -u /experiment-scripts/ci/fused-batch-probe.py',
-        'TT_METAL_DEVICE_PROFILER=1 timeout -k 15 510 python3 -u /experiment-scripts/ci/fused-batch-probe.py')
+        PROFILER_ENV + ' timeout -k 15 510 python3 -u /experiment-scripts/ci/fused-batch-probe.py')
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')

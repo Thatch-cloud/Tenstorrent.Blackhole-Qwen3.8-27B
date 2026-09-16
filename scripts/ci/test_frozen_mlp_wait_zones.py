@@ -1,10 +1,14 @@
 from pathlib import Path
 import unittest
 
-from frozen_mlp_wait_zones import instrument, remove_scopes, scoped_statement, ZONES
+from frozen_mlp_wait_zones import instrument, remove_scopes, scoped_statement, ZONES, PROFILER_ENV
 
 
 class WaitZoneTests(unittest.TestCase):
+    def test_trace_identity_tracking_required(self):
+        self.assertEqual(dict(entry.split('=') for entry in PROFILER_ENV.split()),
+            dict(TT_METAL_DEVICE_PROFILER='1', TT_METAL_PROFILER_TRACE_TRACKING='1'))
+
     def test_original_sources_round_trip(self):
         for role in ZONES:
             with self.subTest(role=role):
