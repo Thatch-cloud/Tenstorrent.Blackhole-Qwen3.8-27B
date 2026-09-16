@@ -8,6 +8,20 @@ from pathlib import Path
 SOURCES = ('draft-tail-probe.py', 'frozen_draft_tail.py', 'dspark_native_cached_layer.py',
     'dspark_full_attention.py', 'dspark_projection.py', 'attention_batch.py')
 RUNTIME = '9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9'
+HARDWARE_SHA256 = 'cb31fac3a1767be5d6c278d4cbf758745c1b0382091a3615449d5ef75e208bb0'
+
+
+def qualify_hardware(directory, report_path):
+    from frozen_draft_tail_hardware import validate_hardware
+    raw = Path(report_path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != HARDWARE_SHA256:
+        raise ValueError('Pinned full-size hardware report required')
+    report = json.loads(raw)
+    validate_hardware(report)
+    for name in SOURCES:
+        if hashlib.sha256((Path(directory) / name).read_bytes()).hexdigest() != report['sources'][name]:
+            raise ValueError('Hardware-qualified source changed: ' + name)
+    return dict(report_sha256=HARDWARE_SHA256, passed=True, serving_qualified=False)
 
 
 def validate(report):

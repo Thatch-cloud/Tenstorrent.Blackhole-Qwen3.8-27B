@@ -1,6 +1,7 @@
 # Draft KV assembly: pad the tail, not the history
 
-Status: simulator correctness passed. No model integration, hardware timing or serving changes.
+Status: simulator and full-size hardware component passed; combined comparison prepared.
+No serving changes or new committed-TG result.
 
 ## Why test this
 
@@ -25,8 +26,8 @@ path savings or a throughput prediction. The clean combined capture is separate.
 | --- | --- | --- |
 | Host tests | Original versus reordered row assembly; both tail sizes; poisoned padding; alignment and layout rejection | Three tests pass |
 | Weight-free two-chip simulator | BF16 bitwise eager output and changed-input traces; 64/96 history rows, 7/15 proposals, both chips | 35157432497 passes all 112 checks |
-| Hardware component | Exact full-size output and replay; measure original versus candidate | Prepared for 33,024/33,056 rows |
-| Combined 32K runtime | Same qualified recipe, candidate changes assembly only; exact proposals/output/state; PP/CTX/TG | Not started |
+| Hardware component | Exact full-size output and replay; measure original versus candidate | 35158163367 passes in 37 seconds |
+| Combined 32K runtime | Same qualified recipe, candidate changes assembly only; exact proposals/output/state; PP/CTX/TG | Prepared; not yet qualified |
 
 The simulator has a six-minute whole-job cap, uses no model weights and has no
 physical device access. Its 112 checks cover original and candidate eager output,
@@ -50,3 +51,26 @@ history to 33,024/33,056 rows. It adds eight blocking trace measurements per arm
 per shape in ABBA order and checks the final outputs again. The gate requires
 128 exact checks and 64 timing samples. These component milliseconds are not TG.
 The job remains weight-free, rejects occupied cards, and has a seven-minute cap.
+
+## Full-size component result
+
+Run **35158163367** passes all 128 bitwise checks and 64 ABBA timing samples.
+Independent validation confirms the report, every source, generated harness hash,
+clean exit and no OOM. These are blocking assembly-trace medians on the two-card
+mesh, **not token-generation throughput**.
+
+| History capacity | Proposals | Original ms | Tail-first ms |
+| --- | --- | --- | --- |
+| 33,024 | 7 | 1.411 | 0.208 |
+| 33,024 | 15 | 1.412 | 0.212 |
+| 33,056 | 7 | 1.236 | 0.205 |
+| 33,056 | 15 | 1.241 | 0.209 |
+
+Hardware report SHA256:
+`cb31fac3a1767be5d6c278d4cbf758745c1b0382091a3615449d5ef75e208bb0`.
+
+The combined comparison keeps shared Q/K, fused T16 verification, norm prefetch,
+incremental publication and the original MLP readers in **both** arms. Only
+proposal K/V assembly changes. It preserves the 33,024-row capacity, exact request
+audits and A/B/B/A timed requests. Profiling is disabled; no additional fences are
+inserted. The candidate must execute all ten K/V assemblies per five-layer draft.
