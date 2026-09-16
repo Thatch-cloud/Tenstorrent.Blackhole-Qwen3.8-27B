@@ -31,12 +31,14 @@ matched control and is rejected. Keep the original streaming MLP reader.
 
 | Work | Evidence / status |
 | --- | --- |
-| Sampled MLP timing probes | Simulator numerical gate passed; hardware marker gate passed in **34 seconds** |
-| Full 32K runtime attribution | [Combined capture launched](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35151664646); no new TG claim |
+| Faster draft K/V assembly | Simulator and full-size hardware checks pass; **1.412 to 0.212 ms** per assembly, not TG |
+| Matched 32K combined test | [Queued comparison](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35158707469); winning recipe in both arms, only assembly changes |
+| Full-runtime profiler | Capture overflow/timeouts remain unresolved; expensive per-token-drain configuration withdrawn |
 | Gap to 200 TG | Current mean block **131.38 ms**; needs **58.50 ms** at unchanged acceptance |
 
 Both draft and verification costs need attention; MLP buffer tweaks alone cannot
-close that gap. [Profiling evidence and limits](docs/pinned-kernel-profiling-inventory.md).
+close that gap. [Draft-tail experiment](docs/frozen-draft-tail.md) and
+[profiling evidence and limits](docs/pinned-kernel-profiling-inventory.md).
 
 The 4K/8K historical winners and the separate 64K split-K runtime below are
 **not one matched context-scaling curve**. The 32K extension explicitly adds
