@@ -37,7 +37,11 @@ def adapt_runtime_sources(sources):
         'dspark-target-hardware.py': (
             ('import os', 'import os\nfrom frozen_context_geometry import selected_geometry'),
             ('max_batch_size=8, max_seq_len=65536',
-                "max_batch_size=8, max_seq_len=selected_geometry()['target_sequence_capacity']")),
+                "max_batch_size=8, max_seq_len=selected_geometry()['target_sequence_capacity']"),
+            ('generator.allocate_kv_cache((1032, model.args.n_local_kv_heads, 64, model.args.head_dim), ttnn.bfloat16, 64)',
+                "generator.allocate_kv_cache((selected_geometry()['target_cache_blocks'], model.args.n_local_kv_heads, 64, model.args.head_dim), ttnn.bfloat16, 64)"),
+            ('torch.arange(1024, dtype=torch.int32).reshape(1, 1024)',
+                "torch.arange(selected_geometry()['target_page_count'], dtype=torch.int32).reshape(1, selected_geometry()['target_page_count'])")),
     }
     for name, replacements in changes.items():
         for before, after in replacements:

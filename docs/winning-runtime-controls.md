@@ -286,6 +286,16 @@ dependencies are included in the probe's source hashes. Local mutation tests
 cover these failure paths. No corrected simulator result is claimed.
 The 200 committed-TG objective remains unachieved.
 
+The target allocation adapter now scales **both** model sequence capacity and
+physical KV pages. Previously it increased only `max_seq_len` while retaining
+1,024 addressable 64-row pages, which cannot hold a 65,536-token prompt plus
+generation. Below 64K the original 1,024 pages / 1,032 cache blocks are unchanged.
+At 64K, 131K and 262K, addressable pages are respectively 1,028, 2,052 and 4,100,
+with the same eight spare cache blocks. Each covers the prompt plus 256 rows;
+model sequence capacity remains separately rounded up. Local geometry tests
+verify coverage, not available device memory, model positional limits or hardware
+correctness. No KV precision or attention algorithm changes are introduced.
+
 ### Winning 8K recipe: where the 200-TG gap actually is
 
 Recomputed from retained run 34730226400, report SHA256

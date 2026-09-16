@@ -47,6 +47,10 @@ class RuntimeContextTests(unittest.TestCase):
         self.assertEqual(sources['dspark_context_selection.py'].split('def validate_history_capacity', 1)[1],
             adapted['dspark_context_selection.py'].split('def validate_history_capacity', 1)[1])
         self.assertIn('max_batch_size=8, max_seq_len=selected_geometry()', adapted['dspark-target-hardware.py'])
+        self.assertNotIn('allocate_kv_cache((1032,', adapted['dspark-target-hardware.py'])
+        self.assertNotIn('torch.arange(1024,', adapted['dspark-target-hardware.py'])
+        self.assertIn("selected_geometry()['target_cache_blocks']", adapted['dspark-target-hardware.py'])
+        self.assertIn("selected_geometry()['target_page_count']", adapted['dspark-target-hardware.py'])
         for name, source in adapted.items():
             if name.endswith('.py'):
                 compile(source, name, 'exec')
