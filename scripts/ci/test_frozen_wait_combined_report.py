@@ -1,10 +1,27 @@
 import copy
 import unittest
+import json
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 
-from frozen_wait_combined_report import expected_executions
+from frozen_wait_combined_report import expected_executions, main
 
 
 class CombinedWaitReportTests(unittest.TestCase):
+    def test_overflow_fails_before_reading_large_raw_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'console.log').write_text('Profiler DRAM buffers were full, markers were dropped!')
+            with patch('frozen_wait_combined_report.read_raw_trace_events') as reader:
+                with self.assertRaisesRegex(ValueError, 'Dropped markers'):
+                    main(root)
+                reader.assert_not_called()
+            report = json.loads((root / 'wait-attribution.json').read_text())
+            self.assertFalse(report['passed'])
+            self.assertIsNone(report['committed_tg'])
+            self.assertIn('Dropped markers', report['error'])
+
     def fixture(self):
         attribution = dict(passed=True, context=32768, streams=1, devices=[dict(
             trace_id=7, device=str(chip), steady_replays=2,

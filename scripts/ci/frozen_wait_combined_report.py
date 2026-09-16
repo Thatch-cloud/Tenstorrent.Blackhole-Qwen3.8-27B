@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from frozen_wait_zone_report import read_raw_trace_events, summarize
+from frozen_wait_zone_report import read_raw_trace_events, summarize, validate_console
 
 
 def expected_executions(events, attribution):
@@ -46,6 +46,8 @@ def main(root):
     root = Path(root)
     result = dict(passed=False, diagnostic_only=True, committed_tg=None)
     try:
+        console = (root / 'console.log').read_text(errors='replace')
+        validate_console(console)
         attribution = json.loads((root / 'attribution.json').read_text())
         request = root / 'request.json'
         if hashlib.sha256(request.read_bytes()).hexdigest() != attribution.get('request_sha256'):
@@ -53,7 +55,7 @@ def main(root):
         raw = root / 'metadata/profile_log_device.csv'
         events = list(read_raw_trace_events(raw))
         expected = expected_executions(events, attribution)
-        result = summarize(events, expected, (root / 'console.log').read_text(errors='replace'))
+        result = summarize(events, expected, console)
         result.update(context=32768, streams=1, executions=len(expected),
             request_sha256=attribution['request_sha256'], raw_sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),
             performance_qualified=False, serving_qualified=False)

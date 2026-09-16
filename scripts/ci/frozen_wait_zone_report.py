@@ -32,9 +32,13 @@ def read_raw_trace_events(path):
             yield event
 
 
-def summarize(events, expected_executions, console):
+def validate_console(console):
     if 'markers were dropped' in console.lower():
         raise ValueError('Dropped markers invalidate wait attribution')
+
+
+def summarize(events, expected_executions, console):
+    validate_console(console)
     expected = set(expected_executions)
     if not expected or {key[0] for key in expected} != {0, 1}:
         raise ValueError('Explicit executions on both chips required')
