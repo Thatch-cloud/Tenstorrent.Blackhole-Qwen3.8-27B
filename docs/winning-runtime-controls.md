@@ -98,6 +98,13 @@ experiment-start policy, not a performance qualification or guarantee that the
 host stays quiet. Existing per-request telemetry remains necessary. No full-model
 rerun is launched while arranging a quiet window.
 
+After the user reported reclaimed disk space, guarded replay **35047650211**
+sampled 15 seconds and measured **12.48% full I/O stall** (1.872344 seconds),
+above the 1% start limit. It correctly exited before loading weights; 8K was
+cancelled without starting. This is an environment-admission rejection, not a
+model correctness or throughput failure. A quiet execution window is still
+needed; do not lower the threshold merely to obtain a green run.
+
 ## Offline recipe comparison
 
 Comparison uses the original 8K report (34730226400) and completed eight-worker
