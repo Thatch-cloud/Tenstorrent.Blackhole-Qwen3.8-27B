@@ -1,6 +1,37 @@
 # Fused MLP activation prefetch
 
-Simulator-qualified candidate; not selected by hardware or serving yet.
+Correctness passes, but matched hardware performance regresses. **Not promoted.**
+
+## Hardware decision
+
+Run **35090533393**, revision `775fba4`, finishes in **13m56s**. Both arms retain
+incremental publication and norm prefetch. The full-K activation candidate is
+slower in both timed repetitions; keep the original streaming input reader.
+
+| One coding stream | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Existing incremental/norm runtime | 2944.77 | 32768 | **88.95** |
+| Full-K activation staging | 2964.77 | 32768 | 86.50 |
+
+Candidate TG regresses **2.75%**. Its repeats are 87.06/85.95 versus control
+88.89/89.01. Verification/readback grows 72.87 -> 73.66 ms/block; drafting
+51.37 -> 53.01 ms, selection/commit 6.32 -> 6.95 ms, total 131.48 -> 135.19 ms.
+These timings do not establish which internal wait or allocation causes the loss.
+Do not increase buffers again without evidence of the limiting stage.
+
+All six requests preserve exact output, target state and inactive state, with
+identical output hashes. Both arms commit 234 timed tokens and accept 216/300
+proposals. Candidate admission and all 64 MLP layer hit counters are verified.
+All 852 reported source entries and 1,520 native entries match before/after;
+candidate subdirectory files are separately checked by the admission gate and
+per-layer kernel manifests, not covered by that top-level source count.
+The container exits zero without OOM. Pre-load full I/O stall is 0.204%.
+Serving is unchanged; no wider coding-quality claim is made.
+
+Hardware report SHA256:
+`ed334963ed57edc6b0d1ef21131fdca820995829b611d3c5b46498d83178a999`.
+
+## Simulator qualification
 
 Run **35089468990**, revision `7e13b88`, passes in **3m59s**, with wrapper exit
 zero. Independent report checks confirm both-chip eager equality, all twelve
@@ -38,6 +69,6 @@ runtime allocations and other L1 reservations; only the device can admit it.
 Host tests cover exact input-page and multicast-byte coverage, preserved packet
 size/order, and the projection source's capacity-only change. The simulator
 matrix above retains eager equality, changed-input replays, stale-input controls
-and complete packed-weight integrity without changing tolerances. Next prepare a matched
-complete-runtime comparison retain incremental publication and norm prefetch
+and complete packed-weight integrity without changing tolerances. The matched
+complete-runtime comparison above retains incremental publication and norm prefetch
 in both arms. A local source test is not a device qualification or speed claim.

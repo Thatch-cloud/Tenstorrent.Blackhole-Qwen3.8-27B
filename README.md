@@ -30,6 +30,10 @@ in both arms. Exact checks pass; verification drops about 1.40 ms/block. This
 single matched run is not broad performance or quality acceptance.
 [Candidate and qualification](docs/frozen-gdn-norm-prefetch.md).
 
+The next MLP activation-prefetch trial regresses to **86.50 TG** versus **88.95**
+matched control and is rejected. Keep the original streaming MLP reader.
+[Rejected trial](docs/frozen-mlp-input-prefetch.md).
+
 The 4K/8K historical winners and the separate 64K split-K runtime below are
 **not one matched context-scaling curve**. The 32K extension explicitly adds
 qualified scalar-reciprocal and target-scratch changes; it is not a flag-only
