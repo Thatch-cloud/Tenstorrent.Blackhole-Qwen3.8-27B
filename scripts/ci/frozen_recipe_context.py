@@ -27,7 +27,7 @@ def adapt_probe_sources(sources, context):
             ('Skt == 272', '{factory_selector()}')),
         'run-simulator.sh': ((
             '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
-            '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_FROZEN_PROBE_PART=${QWEN_FROZEN_PROBE_PART:-full}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
+            '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_FROZEN_BUILD_ONLY=${QWEN_FROZEN_BUILD_ONLY:-0}" \\\n    -e "QWEN_FROZEN_PROBE_PART=${QWEN_FROZEN_PROBE_PART:-full}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
         'dspark_attention_chunk_trial.py': (
             ('PADDED_KEYS = 8704', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nPADDED_KEYS = SHAPE['padded_keys']"),
             ('context_rows != 8448', "context_rows != SHAPE['capacity']"),
@@ -67,9 +67,12 @@ def adapt_cache_launcher(sources):
     result = dict(sources)
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
-        'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase prepare --seconds 120 '
+        'prepare_seconds=120\n'
+        '            if [ "${QWEN_FROZEN_BUILD_ONLY:-0}" = 1 ]; then prepare_seconds=510; fi\n'
+        '            python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase prepare --seconds "$prepare_seconds" '
         '--output /experiment/results/prepare-timing.json -- '
-        'python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py')
+        'python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py\n'
+        '            if [ "${QWEN_FROZEN_BUILD_ONLY:-0}" = 1 ]; then exit 0; fi')
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"',
         'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase probe --seconds 510 '

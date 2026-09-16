@@ -1,6 +1,7 @@
 """Reuse only identical historical simulator builds; never substitute a newer factory."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,6 +39,8 @@ def main():
         state.update(inputs=inputs, cache_hit=manifest is not None)
         print(json.dumps(dict(stage='frozen_factory_cache', hit=manifest is not None)), flush=True)
         if manifest is None:
+            if os.environ.get('QWEN_FROZEN_BUILD_ONLY') != '1':
+                raise ValueError('Build cache missing; prepare it separately before numerical testing')
             return original(command, *arguments, **keywords)
         for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'):
             shutil.copy2(cache / cache_key(inputs) / '_ttnncpp.so', root / name)
