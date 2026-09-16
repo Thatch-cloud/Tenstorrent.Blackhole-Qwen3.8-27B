@@ -205,3 +205,23 @@ tokens per verification, while retaining exact recurrence/KV rollback and coding
 quality. Repeating host-I/O admission tuning or isolated score tweaks is not a
 credible route to the target. Use this composed fused path as the next diagnostic
 control; do not restart its component kernel search.
+
+### Same-recipe ladder correction
+
+The requested ladder is 4,096 / 8,192 / 16,384 / 32,768 / 65,536 / 131,072 /
+262,144 prompt tokens, with 256 additional generation rows. Selection alone is
+not admission. The full historical runtime still needs its context routing,
+history checks and target-attention admission parameterized together.
+
+Simulator attempts 35051035331 and 35051933391 **cannot qualify the intended
+larger-context recipe**, independently of their timeouts: the first adapter
+updated operand shapes and the kernel assertion but missed the factory's
+`Skt == 272` condition. Consequently it did not select the original FP32
+statistics format at larger shapes. The split retry 35053293462 was cancelled
+when this was discovered. Do not use any of these as numerical or speed evidence
+for the winning recipe at 32K/64K.
+
+The adapter now derives both selectors from the same context geometry. Local
+tests evaluate the generated factory for all seven sizes and verify the 8K
+replacement is byte-identical to the historical replacement. This invalidates
+the old build-cache key intentionally. No corrected numerical run is claimed.

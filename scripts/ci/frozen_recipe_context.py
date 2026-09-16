@@ -22,6 +22,9 @@ def adapt_probe_sources(sources, context):
     geometry(context)
     result = dict(sources)
     changes = {
+        'dspark_fp32_intermediates.py': (
+            ("REPLACEMENT = '''", "from frozen_context_geometry import selected_geometry\nREPLACEMENT = f'''"),
+            ('Skt == 272', "Skt == {selected_geometry()['padded_keys'] // 32}")),
         'run-simulator.sh': ((
             '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
             '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_FROZEN_PROBE_PART=${QWEN_FROZEN_PROBE_PART:-full}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
@@ -99,7 +102,7 @@ def main():
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
     names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'run-simulator.sh', 'simulator-suite.sh')
+        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh')
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()

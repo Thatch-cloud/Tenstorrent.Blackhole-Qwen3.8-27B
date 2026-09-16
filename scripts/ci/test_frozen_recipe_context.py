@@ -40,7 +40,7 @@ class FrozenRecipeContextTests(unittest.TestCase):
 
     def test_historical_source_changes_geometry_not_math_or_poison(self):
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-            'dspark_stats_pack.py', 'run-simulator.sh')
+            'dspark_stats_pack.py', 'run-simulator.sh', 'dspark_fp32_intermediates.py')
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
         baseline = adapt_probe_sources(sources, 8192)
@@ -59,6 +59,17 @@ class FrozenRecipeContextTests(unittest.TestCase):
             self.assertIn("get_compile_time_arg_val(3) == {selected_geometry()['padded_keys'] // 32}",
                 adapted['dspark_stats_pack.py'])
             self.assertIn('get_compile_time_arg_val(8) == 8', adapted['dspark_stats_pack.py'])
+            with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': str(context)}):
+                namespace = {}
+                exec(adapted['dspark_fp32_intermediates.py'], namespace)
+                expected_tiles = geometry(context)['padded_keys'] // 32
+                self.assertIn(f'Skt == {expected_tiles}', namespace['REPLACEMENT'])
+                self.assertIn('stats_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32',
+                    namespace['REPLACEMENT'])
+                if context == 8192:
+                    historical = {}
+                    exec(sources['dspark_fp32_intermediates.py'], historical)
+                    self.assertEqual(namespace['REPLACEMENT'], historical['REPLACEMENT'])
         broken = dict(sources)
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):
