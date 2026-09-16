@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 20
+    timeout-minutes: ${{ endsWith(github.ref, 'target-replay-v1') && 12 || 20 }}
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -35,6 +35,9 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p frozen-recipe/experiment-results
           candidate=()
+          if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-v1 ]; then
+            candidate=(--target-replay)
+          fi
           if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 ]; then
             candidate=(--scalar-reciprocal --eager-only)
           fi
@@ -56,11 +59,14 @@ jobs:
         env:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
-          QWEN_SIM_CASE: dspark-native-8k-attention
+          QWEN_SIM_CASE: ${{ endsWith(github.ref, 'target-replay-v1') && 'target-t16-attention-8k' || 'dspark-native-8k-attention' }}
           QWEN_DSPARK_REQUEST_CONTEXT: '32768'
           QWEN_FROZEN_PROBE_PART: ${{ endsWith(github.ref, 'reciprocal-diagnostics-v1') && 'diagnostics' || 'numerical' }}
           QWEN_FROZEN_BUILD_ONLY: '0'
-        run: timeout -k 45 1090 bash scripts/ci/run-simulator.sh
+        run: |
+          limit=1090
+          if [ "$QWEN_SIM_CASE" = target-t16-attention-8k ]; then limit=620; fi
+          timeout -k 45 "$limit" bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
