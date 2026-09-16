@@ -232,6 +232,9 @@ the old build-cache key intentionally. No corrected numerical run is claimed.
 ### Cancelled-run audit: timeout scope and remaining work
 
 Run 35053293462 is terminal (`cancelled`). No replacement run has been launched.
+The proposed `experiment/frozen-context-build-v1` tag runs preparation only;
+the entire numerical/diagnostic matrix is explicitly skipped for that tag.
+The tag has not been published and no runner permission has been added for it.
 The current branch has the following **planned**, not hardware-validated budgets:
 
 | Boundary | Factory preparation job | Each numerical/diagnostic job |
