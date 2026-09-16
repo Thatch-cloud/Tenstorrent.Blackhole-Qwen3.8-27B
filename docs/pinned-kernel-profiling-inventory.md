@@ -184,6 +184,11 @@ uploading gigabytes of unrelated raw events. Against the existing hardware
 fixture, export preserved all 160 trace endpoints exactly; 200 total MLP rows
 include the eager markers. The original source remains in the profiler log directory.
 
+Run **35154804723** failed during host preflight, before model execution: the new
+drains accessed device APIs in non-profiled mock tests. The v4 adapter guards all
+new drains by explicit combined profiling. Regression tests execute each guard
+with profiling disabled and enabled, retaining the original non-profiled behavior.
+
 ## Keep the 200 TG objective in view
 
 The accepted 32K combined report from **35087582465**, re-analyzed with

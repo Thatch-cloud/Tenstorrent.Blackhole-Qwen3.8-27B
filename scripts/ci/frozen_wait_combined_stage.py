@@ -28,31 +28,37 @@ def drain_setup(sources):
             '        drafter.propose(seed, 15)\n\n    def factory():'):
         if anchor.endswith('def factory():'):
             replacement = ('        drafter.propose(seed, 15)\n'
-                '        operations.synchronize_device(model.mesh_device)\n'
-                '        operations.ReadDeviceProfiler(model.mesh_device)\n\n    def factory():')
+                '        if combined_profile:\n'
+                '            operations.synchronize_device(model.mesh_device)\n'
+                '            operations.ReadDeviceProfiler(model.mesh_device)\n\n    def factory():')
         else:
             indent = anchor[:len(anchor) - len(anchor.lstrip())]
-            replacement = (anchor + indent + 'operations.synchronize_device(model.mesh_device)\n'
-                + indent + 'operations.ReadDeviceProfiler(model.mesh_device)\n')
+            replacement = (anchor + indent + 'if combined_profile:\n'
+                + indent + '    operations.synchronize_device(model.mesh_device)\n'
+                + indent + '    operations.ReadDeviceProfiler(model.mesh_device)\n')
         source = replace_once(source, anchor, replacement)
     result['full_dspark_request.py'] = source
     source = result['verifier_engine.py']
     changes = (
         ('                    ttnn.synchronize_device(self.mesh)\n                finally:',
          '                    ttnn.synchronize_device(self.mesh)\n'
-         '                    ttnn.ReadDeviceProfiler(self.mesh)\n                finally:'),
+         "                    if os.environ.get('QWEN_COMBINED_TRACE_PROFILE') == '1':\n"
+         '                        ttnn.ReadDeviceProfiler(self.mesh)\n                finally:'),
         ("                        feature_capture=bucket.get('feature_capture')))\n                if rows > 1:",
          "                        feature_capture=bucket.get('feature_capture')))\n"
-         '                ttnn.synchronize_device(self.mesh)\n'
-         '                ttnn.ReadDeviceProfiler(self.mesh)\n                if rows > 1:'),
+         "                if os.environ.get('QWEN_COMBINED_TRACE_PROFILE') == '1':\n"
+         '                    ttnn.synchronize_device(self.mesh)\n'
+         '                    ttnn.ReadDeviceProfiler(self.mesh)\n                if rows > 1:'),
         ('                    for publication in publications.values():\n                        publication()\n',
          '                    for publication in publications.values():\n                        publication()\n'
-         '                        ttnn.synchronize_device(self.mesh)\n'
-         '                        ttnn.ReadDeviceProfiler(self.mesh)\n'),
+         "                        if os.environ.get('QWEN_COMBINED_TRACE_PROFILE') == '1':\n"
+         '                            ttnn.synchronize_device(self.mesh)\n'
+         '                            ttnn.ReadDeviceProfiler(self.mesh)\n'),
         ("                        bucket['commits'][prefix], unused = capture_operation(ttnn, self.mesh, publication)\n",
          "                        bucket['commits'][prefix], unused = capture_operation(ttnn, self.mesh, publication)\n"
-         '                        ttnn.synchronize_device(self.mesh)\n'
-         '                        ttnn.ReadDeviceProfiler(self.mesh)\n'),
+         "                        if os.environ.get('QWEN_COMBINED_TRACE_PROFILE') == '1':\n"
+         '                            ttnn.synchronize_device(self.mesh)\n'
+         '                            ttnn.ReadDeviceProfiler(self.mesh)\n'),
     )
     for before, after in changes:
         source = replace_once(source, before, after)

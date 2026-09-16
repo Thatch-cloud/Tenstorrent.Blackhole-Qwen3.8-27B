@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3', 'experiment/frozen-32k-wait-profile-v4']
 permissions:
   contents: read
   actions: read
@@ -44,12 +44,12 @@ jobs:
           gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
           mkdir -p frozen-hardware/experiment-results
           profile=()
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-incremental-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-incremental-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 ]]; then
             profile=(--incremental-history)
             gh run download 35024279412 --repo "$GITHUB_REPOSITORY" --name qwen-history-append-hardware-35024279412 --dir "$evidence/history"
             cp "$evidence/history/history-append-hardware.json" frozen-hardware/scripts/ci/history-append-hardware.json
           fi
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 ]]; then
             profile=(--norm-prefetch)
             gh run download 35086789628 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35086789628-1 --dir "$evidence/norm"
             test "$(cat "$evidence/norm/gdn-shared-recurrence.exit-status")" = 0
@@ -78,7 +78,7 @@ jobs:
             --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
             "${profile[@]}" \
             --manifest frozen-hardware/experiment-results/frozen-geometry.json
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 ]]; then
             gh run download 35150494386 --repo "$GITHUB_REPOSITORY" --name qwen-wait-zone-hardware-35150494386 --dir "$evidence/markers"
             cp "$evidence/markers/simulator/fused-batch.json" frozen-hardware/scripts/ci/frozen-wait-zones-simulator.json
             cp "$evidence/markers/marker-qualification.json" frozen-hardware/scripts/ci/frozen-wait-zones-hardware.json

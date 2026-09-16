@@ -61,6 +61,32 @@ class CombinedWaitStageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             drain_setup(result)
 
+    def test_drain_guards_leave_nonprofiled_host_tests_untouched(self):
+        import ast
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        result = drain_setup(self.sources)
+        for filename, guard in (('full_dspark_request.py', 'combined_profile'),
+                ('verifier_engine.py', "os.environ.get('QWEN_COMBINED_TRACE_PROFILE') == '1'")):
+            tree = ast.parse(result[filename])
+            guards = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == guard
+                and any(isinstance(child, ast.Attribute) and child.attr == 'ReadDeviceProfiler'
+                    for child in ast.walk(node))]
+            self.assertEqual(len(guards), 4)
+            for node in guards:
+                code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), filename, 'exec')
+                disabled = dict(combined_profile=False, os=SimpleNamespace(environ={}))
+                exec(code, disabled)
+                operations = SimpleNamespace(synchronize_device=Mock(), ReadDeviceProfiler=Mock())
+                mesh = object()
+                enabled = dict(combined_profile=True,
+                    os=SimpleNamespace(environ={'QWEN_COMBINED_TRACE_PROFILE': '1'}),
+                    operations=operations, model=SimpleNamespace(mesh_device=mesh),
+                    ttnn=operations, self=SimpleNamespace(mesh=mesh))
+                exec(code, enabled)
+                operations.ReadDeviceProfiler.assert_called_once_with(mesh)
+
 
 if __name__ == '__main__':
     unittest.main()
