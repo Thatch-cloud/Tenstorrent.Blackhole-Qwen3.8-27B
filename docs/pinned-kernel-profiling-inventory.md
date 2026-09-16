@@ -146,6 +146,14 @@ post-request route requires norm prefetch and incremental publication to remain
 enabled. Combined staging/capture wiring and actual full-request marker coverage
 are still pending; no combined profiling run is launched by this result alone.
 
+Combined capture wiring now stages on top of the accepted norm/incremental
+recipe, not either rejected MLP buffer variant. It runs one audited request at
+32K, preserves raw device logs, and validates both the existing verifier profile
+and the sampled waits. Every full-row replay must contain all 64 MLP program
+identities on each chip, with stable coverage and complete endpoint pairs. Missing
+layers, sessions or endpoints fail the run; diagnostics never report committed TG.
+The normal whole-job cap remains 20 minutes, including staging and model loading.
+
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or

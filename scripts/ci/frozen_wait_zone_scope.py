@@ -60,7 +60,11 @@ def runtime_scope(directory):
 
     with patch.object(full_dspark_request, 'measure_dspark_request', measured), \
             patch.object(gdn_shared_qk_variants, 'validate_route', route):
-        yield evidence
+        try:
+            yield evidence
+        finally:
+            if qualify(directory) != evidence:
+                raise ValueError('Diagnostic sources changed during the combined request')
 
 
 def validate_route(value, arm):
