@@ -35,6 +35,10 @@ class FrozenRecipeContextTests(unittest.TestCase):
             self.assertEqual(shape['padded_keys'], context + 512)
             self.assertEqual(shape['key_chunk'], 256)
             self.assertEqual(shape['positions'][1] + 15, shape['capacity'])
+            self.assertGreaterEqual(shape['target_sequence_capacity'], context + 256)
+            self.assertEqual(shape['target_sequence_capacity'] & (shape['target_sequence_capacity'] - 1), 0)
+            if context < 65536:
+                self.assertEqual(shape['target_sequence_capacity'], 65536)
         with self.assertRaises(ValueError):
             geometry(524288)
 

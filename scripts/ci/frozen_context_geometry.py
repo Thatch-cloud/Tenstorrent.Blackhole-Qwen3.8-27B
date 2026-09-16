@@ -12,7 +12,8 @@ def geometry(context):
     capacity = context + 256
     return dict(context=context, capacity=capacity, proposals=15,
         positions=(context, capacity - 15), storage_keys=capacity + 64,
-        padded_keys=((capacity + 64 + 255) // 256) * 256, key_chunk=256)
+        padded_keys=((capacity + 64 + 255) // 256) * 256, key_chunk=256,
+        target_sequence_capacity=max(65536, 1 << (capacity - 1).bit_length()))
 
 
 def selected_geometry():
