@@ -169,7 +169,7 @@ def main():
     names = tuple(dict.fromkeys(('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
         'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
     if options.target_replay:
-        names += ('target-t16-attention-8k-probe.py',)
+        names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py')
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -179,9 +179,10 @@ def main():
         sources[name] = actual
     adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context), options.probe_seconds))
     if options.target_replay:
-        from frozen_target_replay import adapt_target_probe
+        from frozen_target_replay import adapt_target_probe, adapt_target_mask
         name = 'target-t16-attention-8k-probe.py'
         adapted[name] = adapt_target_probe(adapted[name])
+        adapted['attention_mask_replay.py'] = adapt_target_mask(adapted['attention_mask_replay.py'])
     if options.scalar_reciprocal:
         adapted = adapt_scalar_reciprocal(adapted)
         adapted['dspark_ladder_scalar_reciprocal.py'] = Path(__file__).with_name(

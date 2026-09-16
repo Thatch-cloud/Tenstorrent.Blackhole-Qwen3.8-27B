@@ -46,6 +46,12 @@ def validate_target_report(report, directory, context):
 
 
 def adapt_target_probe(source):
+    source = replace_once(source, '    import torch\n',
+        '    from attention_mask_replay import validate_ticket\n'
+        "    capacity = selected_geometry()['capacity']\n"
+        '    for start in (capacity - 256, capacity - 239, capacity - 16):\n'
+        '        validate_ticket(start, 16, capacity, short_context=False)\n'
+        '    import torch\n')
     source = replace_once(source, 'from pathlib import Path',
         'from pathlib import Path\nfrom frozen_context_geometry import selected_geometry')
     source = replace_once(source,
@@ -62,3 +68,13 @@ def adapt_target_probe(source):
             f'{name} = upload(torch.randn(capacity // 64, 2, 64, 256).bfloat16() * 0.1, ttnn.bfloat16)')
     compile(source, 'target-t16-attention-8k-probe.py', 'exec')
     return source
+
+
+def adapt_target_mask(source):
+    source = replace_once(source, 'import hashlib',
+        'import hashlib\nfrom frozen_context_geometry import selected_geometry')
+    return replace_once(source,
+        '    minimum, maximum = (256, 768) if short_context else (4096, 16640)',
+        '    minimum, maximum = (256, 768) if short_context else (4096, 16640)\n'
+        "    if not short_context and capacity == selected_geometry()['capacity']:\n"
+        '        maximum = max(maximum, capacity)')

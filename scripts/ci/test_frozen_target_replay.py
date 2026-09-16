@@ -1,12 +1,14 @@
 import subprocess
 import unittest
 import hashlib
+import os
+from unittest.mock import patch
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from frozen_recipe_context import REVISION
-from frozen_target_replay import SOURCES, adapt_target_probe, validate_target_report
+from frozen_target_replay import SOURCES, adapt_target_probe, adapt_target_mask, validate_target_report
 
 
 class TargetReplayTests(unittest.TestCase):
@@ -30,6 +32,20 @@ class TargetReplayTests(unittest.TestCase):
             adapt_target_probe(self.original.replace('for capacity in (8448,):', 'for capacity in (4352,):'))
         with self.assertRaises(ValueError):
             adapt_target_probe(adapt_target_probe(self.original))
+
+    def test_selected_capacity_is_checked_before_reference_work(self):
+        original = subprocess.check_output(['git', 'show',
+            f'{REVISION}:scripts/ci/attention_mask_replay.py'], text=True)
+        namespace = {}
+        exec(adapt_target_mask(original), namespace)
+        with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': '32768'}):
+            for start in (32768, 32785, 33008):
+                namespace['validate_ticket'](start, 16, 33024)
+            for start, capacity in ((32767, 33024), (33009, 33024), (65536, 65792)):
+                with self.assertRaises(ValueError):
+                    namespace['validate_ticket'](start, 16, capacity)
+        changed = adapt_target_probe(self.original)
+        self.assertLess(changed.index('validate_ticket(start, 16'), changed.index('    import torch'))
 
     def test_context_dtype_identity_and_complete_replay_required(self):
         with TemporaryDirectory() as directory:
