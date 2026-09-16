@@ -217,7 +217,7 @@ def main():
         if name.endswith('.py'):
             compile(source, name, 'exec')
     for name, source in adapted.items():
-        (checkout / 'scripts/ci' / name).write_text(source)
+        (checkout / 'scripts/ci' / name).write_bytes(source.encode('utf-8'))
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
         geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},

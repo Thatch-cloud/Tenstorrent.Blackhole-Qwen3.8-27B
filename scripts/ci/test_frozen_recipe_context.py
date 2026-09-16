@@ -2,6 +2,7 @@ import subprocess
 import unittest
 import os
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import sys
@@ -75,6 +76,8 @@ timeout() {
             self.assertEqual((scripts / 'dspark_runtime_cache.py').read_bytes(),
                 originals['dspark_runtime_cache.py'])
             report = json.loads(manifest.read_text())
+            for name, checksum in report['after'].items():
+                self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), checksum, name)
             self.assertNotIn('dspark_runtime_cache.py', report['after'])
             self.assertIn('frozen_binary_cache.py', report['after'])
             self.assertFalse(report['performance_qualified'])
