@@ -85,3 +85,15 @@ process sample cannot identify the system-wide writer. Follow-up only reads
 RAID synchronization state and process I/O counters; it does not stop workloads
 or change storage configuration. This is evidence of contention, not yet proof
 of the writer or attribution of every publication spike.
+
+Follow-up **35046860907** reports both RAID arrays non-degraded with synchronization
+idle. A different UID 1001 `Runner.Worker` reports about 141,385 KiB/s writes;
+`cargo` and `tar` also write heavily. The Qwen observer runs under UID 1000.
+These counters identify competing build activity, not its repository/job owner;
+no process was stopped. The user confirms another workload is highly likely.
+
+Future winning-control launches sample host full I/O pressure for 15 seconds and
+exit before weight loading if the interval exceeds 1%. This is a conservative
+experiment-start policy, not a performance qualification or guarantee that the
+host stays quiet. Existing per-request telemetry remains necessary. No full-model
+rerun is launched while arranging a quiet window.
