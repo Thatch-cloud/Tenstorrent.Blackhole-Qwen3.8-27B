@@ -63,8 +63,15 @@ def adapt_probe_sources(sources, context):
 def adapt_cache_launcher(sources):
     result = dict(sources)
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
-        'python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
+        'timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
+        'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase prepare --seconds 120 '
+        '--output /experiment/results/prepare-timing.json -- '
         'python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py')
+    result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
+        'timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"',
+        'python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase probe --seconds 510 '
+        '--output /experiment/results/probe-timing.json -- '
+        'python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"')
     result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
         'container=$(docker create',
         'volume=qwen-frozen-simulator-f1e9b1a64b4f\n'
@@ -101,7 +108,8 @@ def main():
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
     adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
-    for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'dspark_runtime_cache.py'):
+    for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'dspark_runtime_cache.py',
+            'frozen_sim_phase.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():
         if name.endswith('.py'):
