@@ -71,6 +71,20 @@ def adapt_cache_launcher(sources):
     result['run-simulator.sh'] = replace_once(result['run-simulator.sh'], downloads,
         'timeout -k 5 60 python3 -B scripts/ci/frozen_sim_assets.py '
         '--cache "$cache/frozen-simulator-assets" --destination "$assets"')
+    result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
+        '''        docker logs "$container" > experiment-results/simulator-container.log 2>&1 || true
+        docker cp "$container:/experiment/results/." experiment-results/ || true
+        docker rm -f "$container" >/dev/null || true''',
+        '''        stop_status=0; logs_status=0; copy_status=0; remove_status=0
+        timeout -k 1 5 docker stop -t 2 "$container" >/dev/null 2>&1 || stop_status=$?
+        timeout -k 1 5 docker logs "$container" > experiment-results/simulator-container.log 2>&1 || logs_status=$?
+        timeout -k 1 15 docker cp "$container:/experiment/results/." experiment-results/ || copy_status=$?
+        timeout -k 1 5 docker rm -f "$container" >/dev/null || remove_status=$?
+        printf '{"stop_exit":%s,"logs_exit":%s,"copy_exit":%s,"remove_exit":%s}\\n' \\
+            "$stop_status" "$logs_status" "$copy_status" "$remove_status" > experiment-results/container-cleanup.json
+        if [ "$status" = 0 ] && [ "$stop_status:$logs_status:$copy_status:$remove_status" != 0:0:0:0 ]; then
+            status=70
+        fi''')
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py',
         'prepare_seconds=120\n'

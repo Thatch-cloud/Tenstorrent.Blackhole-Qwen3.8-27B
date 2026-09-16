@@ -238,7 +238,7 @@ The current branch has the following **planned**, not hardware-validated budgets
 | --- | ---: | ---: |
 | GitHub job, including checkout and artifact upload | 13 min | 16 min |
 | Execution step | 11 min | 14 min |
-| Host launcher, including downloads and container setup | 630 s | 810 s |
+| Host launcher, including downloads and container setup | 600 s + 45 s kill grace | 780 s + 45 s kill grace |
 | In-container preparation | 510 s, build allowed | 120 s, cache hit required |
 | In-container probe | Not run | 510 s |
 
@@ -248,9 +248,14 @@ preparation. The adapter now reuses SHA256-verified cached copies; misses have
 20-second curl deadlines and a 60-second total asset-stage limit (five-second
 kill grace). Asset hashes and staged copies are checked on every run. Local
 tests cover reuse, corruption, wrong downloads and timeout failures; no runner
-speedup is measured yet. These operations still consume outer budgets. Cleanup also runs
-inside the outer limit; its Docker log/copy/removal commands have no individual
-deadline. A 510-second probe allowance therefore does not guarantee 510 seconds
+speedup is measured yet. These operations still consume outer budgets. Cleanup
+now stops the owned simulator container before collecting logs/results, then
+removes it. Stop/log/copy/removal deadlines are 5/5/15/5 seconds, each with a
+one-second kill grace; their exit codes are retained in `container-cleanup.json`.
+A cleanup error cannot turn a failed test into success, and makes an otherwise
+successful launcher fail. No unrelated containers are addressed. This is covered
+by local shell tests, not a live Docker timeout test. A 510-second probe allowance
+still does not guarantee 510 seconds
 are available to the probe. The current design does **not** yet meet the requested
 single-digit-minute end-to-end cycle. Four serialized probe jobs plus preparation
 can still make the whole workflow lengthy; there is no single workflow-wide timer
@@ -263,7 +268,7 @@ historical hardware module remains byte-for-byte unchanged. This is source-level
 protection, not a performance result.
 
 Before another ladder run:
-- Bound and measure asset/setup/cleanup time, not only numerical execution.
+- Verify the asset/cleanup bounds on the runner and measure remaining setup time.
 - Connect the context adapter to the full historical runtime: currently its
   deployment is simulator-only and the runtime plumbing helper is not invoked.
 - Replace the hard-coded 8K admission with matching per-context evidence, without

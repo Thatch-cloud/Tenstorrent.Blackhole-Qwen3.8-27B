@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import tempfile
+import sys
 from unittest.mock import patch
 
 import frozen_recipe_context
@@ -12,6 +13,36 @@ from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selecto
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
+    def test_cleanup_is_bounded_and_preserves_failure(self):
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True)
+            for name in ('run-simulator.sh', 'simulator-suite.sh')}
+        launcher = adapt_cache_launcher(sources)['run-simulator.sh']
+        cleanup = 'cleanup() {' + launcher.split('cleanup() {', 1)[1].split('trap cleanup EXIT', 1)[0]
+        bash = 'C:/Program Files/Git/bin/bash.exe' if sys.platform == 'win32' else 'bash'
+        for initial, failed, expected in ((0, '', 0), (0, 'cp', 70), (17, 'cp', 17), (0, 'rm', 70)):
+            with self.subTest(initial=initial, failed=failed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'experiment-results').mkdir()
+                script = '''set -euo pipefail
+container=owned-test-container
+timeout() {
+    printf '%s\\n' "$*" >> commands.txt
+    if [ "$5" = "$FAIL_ACTION" ]; then return 124; fi
+    return 0
+}
+''' + cleanup + '\ntrap cleanup EXIT\nexit ' + str(initial) + '\n'
+                process = subprocess.run([bash], input=script, text=True, cwd=root,
+                    env=dict(os.environ, FAIL_ACTION=failed), capture_output=True, timeout=10)
+                self.assertEqual(process.returncode, expected, process.stderr)
+                commands = (root / 'commands.txt').read_text().splitlines()
+                self.assertEqual(commands[0], '-k 1 5 docker stop -t 2 owned-test-container')
+                self.assertEqual(commands[-1], '-k 1 5 docker rm -f owned-test-container')
+                self.assertEqual(len(commands), 4)
+                result = json.loads((root / 'experiment-results/container-cleanup.json').read_text())
+                self.assertEqual(result['copy_exit'], 124 if failed == 'cp' else 0)
+                self.assertEqual(result['remove_exit'], 124 if failed == 'rm' else 0)
+
     def test_deployment_preserves_historical_hardware_runtime(self):
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
             'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
