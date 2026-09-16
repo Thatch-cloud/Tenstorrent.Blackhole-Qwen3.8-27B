@@ -33,7 +33,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then
     printf '%s\n' "$status" > /experiment/results/markov-cache-control.exit-status
     exit "$status"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path
@@ -45,6 +45,13 @@ patch = Path('/simulator-support/blackhole-packer-zero-flags.patch').read_bytes(
 packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
+    if [ "${QWEN_SIM_CASE:-stack}" = draft-tail ]; then
+        status=0
+        timeout -k 10 180 python3 -u /experiment-scripts/ci/draft-tail-probe.py \
+            --output /experiment/results/draft-tail.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/draft-tail.exit-status
+        exit "$status"
+    fi
     if [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "$QWEN_SIM_CASE" = gdn-output-* || "$QWEN_SIM_CASE" = gdn-copy-pairs || "$QWEN_SIM_CASE" = gdn-outer-add || "$QWEN_SIM_CASE" = dspark-ladder-attention || "$QWEN_SIM_CASE" = dspark-native-8k-attention || "$QWEN_SIM_CASE" = target-t16-attention-8k || "$QWEN_SIM_CASE" = gdn-shared-recurrence || "$QWEN_SIM_CASE" = gdn-shared-qk ]]; then
         [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "$QWEN_SIM_CASE" = gdn-output-l1 || "$QWEN_SIM_CASE" = gdn-output-grid || "$QWEN_SIM_CASE" = gdn-copy-pairs || "$QWEN_SIM_CASE" = gdn-outer-add || "$QWEN_SIM_CASE" = dspark-ladder-attention || "$QWEN_SIM_CASE" = dspark-native-8k-attention || "$QWEN_SIM_CASE" = target-t16-attention-8k || "$QWEN_SIM_CASE" = gdn-shared-recurrence || "$QWEN_SIM_CASE" = gdn-shared-qk ]]
         status=0

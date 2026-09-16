@@ -1,0 +1,39 @@
+name: Qwen draft tail simulator
+on:
+  push:
+    tags: ['experiment/draft-tail-sim-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  simulator:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 6
+    steps:
+      - name: Verify host and restore result ownership
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Weight-free CPU simulator, no physical card access
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: draft-tail
+        run: timeout -k 15 270 bash scripts/ci/run-simulator.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-draft-tail-sim-${{ github.run_id }}
+          path: experiment-results/
