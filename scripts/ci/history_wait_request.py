@@ -9,6 +9,7 @@ import sys
 from captured_publication_profile import profile_publications
 from dspark_hardware_gate import digest
 from history_writer_profile import profile_writers
+from history_input_profile import profile_inputs
 
 
 def main():
@@ -26,27 +27,30 @@ def main():
         runpy.run_path(str(entry), run_name='__main__')
         return
     import incremental_history_scope
+    import torch
     from dspark_publication_scope import CapturedPublicationArm
 
     output = Path(sys.argv[sys.argv.index('--output') + 1])
     if output.exists():
         raise ValueError('Fresh diagnostic report required')
-    names = (Path(__file__).name, 'history_writer_profile.py', 'captured_publication_profile.py')
+    names = (Path(__file__).name, 'history_writer_profile.py', 'captured_publication_profile.py',
+        'history_input_profile.py')
 
     def sources():
         return {name: digest(directory / name) for name in names}
 
     before = sources()
-    publications, writers, failure = [], [], None
+    publications, writers, inputs, failure = [], [], [], None
     try:
         with profile_publications(CapturedPublicationArm, publications, lambda record: None,
-                samples_per_request=32, max_requests=2), profile_writers(incremental_history_scope, writers):
+                samples_per_request=32, max_requests=2), profile_writers(incremental_history_scope, writers), \
+                profile_inputs(CapturedPublicationArm, torch, inputs):
             runpy.run_path(str(entry), run_name='__main__')
         report = json.loads(output.read_text())
         requests = report['request_checks']
         blocks = sum(len(request['blocks']) for request in requests)
         if (len(requests) != 2 or len(publications) != blocks or len(writers) != blocks + 2
-                or any(not record['passed'] for record in publications + writers)
+                or len(inputs) != blocks or any(not record['passed'] for record in publications + writers + inputs)
                 or report.get('full_request_passed') is not True or before != sources()):
             raise ValueError('Every complete request publication and both warmups must be observed')
     except BaseException as error:
@@ -54,7 +58,7 @@ def main():
         raise
     finally:
         report = json.loads(output.read_text()) if output.exists() else {}
-        report['history_wait_profile'] = dict(publications=publications, writers=writers,
+        report['history_wait_profile'] = dict(publications=publications, writers=writers, inputs=inputs,
             failure=failure, sources=before, sources_after=sources(), added_device_fences=False,
             instrumented_pp=report.get('pp'), instrumented_tg=report.get('committed_tg'))
         report.update(pp=None, committed_tg=None, diagnostic_only=True, performance_qualified=False)

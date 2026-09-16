@@ -27,6 +27,15 @@ not its cause: separate projection, writer construction/enqueue, and final devic
 synchronization before blaming host contention or the extra workers. Keep the
 unchanged eight-worker baseline as a control. The context table below records it.
 
+Diagnostic **35044128425** passed both complete requests and clean shutdown.
+Across 40 publications, projection averaged 1.72 ms and bank assembly 2.00 ms;
+the existing writer synchronization averaged 0.06 ms. Publication time outside
+those two phases averaged 24.78 ms, including two spikes of 288 and 642 ms.
+This run does not reproduce the earlier severity and does not establish its
+cause. Instrumented TG (34.68) is not a benchmark result. Next diagnostic splits
+padding, rotary tables, host allocation, uploads, address inspection and cleanup,
+without adding fences or changing tensor operations.
+
 | CTX | FP32-maxima draft attention | Folded verifier vs native B1 | Combined PP / TG |
 | ---: | --- | --- | --- |
 | 4096 | Pass | Exact pass | Not measured on this candidate |
