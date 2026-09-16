@@ -97,3 +97,31 @@ exit before weight loading if the interval exceeds 1%. This is a conservative
 experiment-start policy, not a performance qualification or guarantee that the
 host stays quiet. Existing per-request telemetry remains necessary. No full-model
 rerun is launched while arranging a quiet window.
+
+## Offline recipe comparison
+
+Comparison uses the original 8K report (34730226400) and completed eight-worker
+64K report (35039344557), not the contended sixteen-worker timing.
+
+| Winning element | Current 64K path | Required action |
+| --- | --- | --- |
+| Folded T16 target and commit-only GDN | Enabled in both complete requests | Retain |
+| Fused T16 MLP | Reintegration wrapper; same `fused_t16_scope.py` hash | Retain, do not rebuild the kernel |
+| Shared Q/K recurrence | Same scope and pipeline source hashes | Retain |
+| Captured publication | Same publication adapter; incremental writer added | Retain full-history state/commit checks |
+| Fused Markov score layout | Disabled in the latest clean 64K timing | Restore behind one explicit experimental flag |
+| Draft attention | Long-history split-K replaces the short-context path | Reuse its completed admission, not its exploration |
+
+The score-layout kernel source itself is unchanged. Its scope adds only an
+overridable feedback method around the same candidate call. The old 64K score
+comparison timed out and suffered variable publication stalls; it did not
+establish a causal reason to permanently omit the winning fusion.
+
+`QWEN_MATCHED_SCORE_LAYOUT=1` now selects `matched_score_request.py` around the
+existing admitted eight-worker combined runtime. It reuses the learned-weight
+score audit, requires actual fused execution in both complete requests, and
+retains native output/state, source, loader and incremental-writer checks. It
+cannot be combined with the sixteen-worker or history-profiling experiment.
+Default paths and frozen 4K/8K controls are unchanged. Local scope and mutation
+tests pass; the newly composed entry is **not yet hardware validated**, and no
+performance gain is claimed. No hardware job has been launched for it.

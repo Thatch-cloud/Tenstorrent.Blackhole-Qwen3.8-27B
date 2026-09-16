@@ -5,6 +5,14 @@ test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
 test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 matched_combined=${QWEN_MATCHED_COMBINED:-0}
+matched_score=${QWEN_MATCHED_SCORE_LAYOUT:-0}
+[[ "$matched_score" = 0 || "$matched_score" = 1 ]]
+if [ "$matched_score" = 1 ]; then
+    test "$matched_combined" = 1
+    test "${QWEN_SPLITK_WORKERS:-8}" = 8
+    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1
+    test "${QWEN_HISTORY_WAIT_PROFILE:-0}" = 0
+fi
 splitk_workers=${QWEN_SPLITK_WORKERS:-8}
 case "$splitk_workers" in 8|16) ;; *) exit 2 ;; esac
 if [ "$splitk_workers" = 16 ]; then
@@ -533,6 +541,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_DSPARK_MODE=$mode" \
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_MATCHED_COMBINED=$matched_combined" \
+    -e "QWEN_MATCHED_SCORE_LAYOUT=$matched_score" \
     -e "QWEN_SPLITK_WORKERS=$splitk_workers" \
     -e "QWEN_HISTORY_WAIT_PROFILE=${QWEN_HISTORY_WAIT_PROFILE:-0}" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
