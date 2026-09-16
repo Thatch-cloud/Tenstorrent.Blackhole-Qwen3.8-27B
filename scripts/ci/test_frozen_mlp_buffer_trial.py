@@ -1,7 +1,7 @@
 import subprocess
 import unittest
 
-from frozen_mlp_buffer_trial import manifest, transform
+from frozen_mlp_buffer_trial import manifest, transform, adapt_probe
 from frozen_recipe_context import REVISION
 
 
@@ -27,6 +27,16 @@ class MlpBufferTrialTests(unittest.TestCase):
         for source in ('', transform(self.source)):
             with self.assertRaises(ValueError):
                 transform(source)
+
+    def test_t16_only_probe_retains_weight_and_changed_input_checks(self):
+        source = subprocess.check_output(['git', 'show',
+            f'{REVISION}:scripts/ci/fused-batch-probe.py'], text=True)
+        candidate = adapt_probe(source)
+        self.assertIn('trace_rows = (16,)', candidate)
+        self.assertIn('for rows in (16,):', candidate)
+        self.assertIn('compare_packed_weights(mesh, device_packed, separate, offset, owned)', candidate)
+        self.assertIn('validate_replays(', candidate)
+        self.assertIn('options.hardware or options.timing', candidate)
 
 
 if __name__ == '__main__':
