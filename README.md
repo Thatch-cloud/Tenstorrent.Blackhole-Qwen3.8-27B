@@ -9,12 +9,26 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest combined result: PP 2,309.96 / CTX 65,536 / TG 37.94 tok/s**
+**Next comparison: replay the original 4K/8K winners unchanged**, then extend
+that combined recipe with only necessary context changes.
+[Pinned revisions and settings](docs/winning-runtime-controls.md).
+
+**Current combined baseline: PP 2,309.96 / CTX 65,536 / TG 37.94 tok/s**
 ([35039344557](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35039344557)).
 Two exact EOS responses each commit 135 tokens with FP32-maxima split-K,
 fused T16 MLP, shared Q/K and incremental history. This maintains the previous
 64K performance; it is not a new speedup. The complete job took 5m49s.
 Drafting and verification still cost about 85.5 and 82.3 ms/block, respectively.
+
+| Latest experiment | Streams | CTX | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Eight-worker baseline | 1 | 65,536 | 2,309.96 | 37.94 |
+| Sixteen-worker candidate | 1 | 65,536 | 2,090.29 | 17.65 |
+
+The sixteen-worker candidate passes output/state checks but **is not promoted**.
+Drafting improves slightly; intermittent publication waits outweigh that gain.
+The follow-up diagnostic places the spikes outside projection and history writes.
+[Evidence and next diagnostic](docs/matched-context-ladder.md).
 
 **Repeat-confirmed 64K candidate: 37.95 and 38.32 committed tok/s**, versus
 30.55 and 30.69 matched controls (35026222541 / 35027433446). Exact output/state
