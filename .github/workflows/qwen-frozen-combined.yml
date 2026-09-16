@@ -1,0 +1,88 @@
+name: Qwen frozen 32K combined candidate
+on:
+  push:
+    tags: ['experiment/frozen-32k-combined-v1']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  combined:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 20
+    steps:
+      - name: Verify host and restore artifact ownership
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/frozen-hardware/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: frozen-orchestrator
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: frozen-hardware
+          persist-credentials: false
+      - name: Stage retained qualifications and explicit candidate
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          evidence=$(mktemp -d "$RUNNER_TEMP/qwen-combined-evidence.XXXXXX")
+          gh run download 35060395395 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35060395395-1 --dir "$evidence/numerical"
+          gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
+          gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
+          mkdir -p frozen-hardware/experiment-results
+          python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
+            --manifest frozen-hardware/experiment-results/frozen-geometry.json
+          python3 -B frozen-orchestrator/scripts/ci/frozen_stage_evidence.py \
+            --repository frozen-orchestrator --numerical "$evidence/numerical" \
+            --diagnostics "$evidence/diagnostics" --target "$evidence/target" \
+            --output frozen-hardware/scripts/ci/frozen-evidence \
+            > frozen-hardware/experiment-results/component-qualification.json
+          git -C frozen-hardware diff --check
+          git -C frozen-hardware diff > frozen-hardware/experiment-results/geometry.patch
+      - name: Record host pressure
+        timeout-minutes: 1
+        run: |
+          status=0
+          timeout -k 5 25 python3 -B frozen-orchestrator/scripts/ci/runner_io_gate.py \
+            --output frozen-hardware/experiment-results/runner-io-admission.json || status=$?
+          test "$status" = 0 -o "$status" = 75
+          if [ "$status" = 75 ]; then echo '::warning::Host contention: results are diagnostic, not performance acceptance.'; fi
+      - name: Run combined 32K candidate on allocated cards
+        timeout-minutes: 16
+        working-directory: frozen-hardware
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QWEN_CARDS_ALLOCATED: '1'
+          QWEN_FROZEN_COMBINED_RUNTIME: '1'
+          QWEN_DSPARK_REQUEST_CONTEXT: '32768'
+          QWEN_DSPARK_MODE: request-target-attention
+          QWEN_DSPARK_CODING_TASK: merge_intervals
+          QWEN_DSPARK_MLP_DOWN: '0'
+          QWEN_DSPARK_SCORE_LAYOUT: '1'
+          QWEN_DSPARK_BANKED_PROPOSAL: '0'
+          QWEN_DSPARK_NATIVE_SLOT: '0'
+          QWEN_DSPARK_FUSION_T16: '1'
+          QWEN_DSPARK_CAPTURED_PUBLICATION: '1'
+          QWEN_DSPARK_MLP_FOOTPRINT: '0'
+          QWEN_DSPARK_DRAFT_PROFILE: '0'
+          QWEN_DSPARK_HISTORY_PROFILE: '0'
+        run: timeout -k 45 900 bash scripts/ci/run-dspark-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-combined-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-hardware/experiment-results/
