@@ -165,7 +165,11 @@ def main():
         help='Prepare context-selected target replay with runtime BF16 KV; does not grant admission')
     parser.add_argument('--combined-runtime', action='store_true',
         help='Prepare guarded 32K offline candidate entry; requires retained component evidence')
+    parser.add_argument('--verifier-profile', action='store_true',
+        help='Instrument exact 32K shared-Q/K verifier; never a throughput benchmark')
     options = parser.parse_args()
+    if options.verifier_profile and not options.combined_runtime:
+        parser.error('Verifier profiling requires the admitted combined runtime')
     if options.combined_runtime and (options.context != 32768 or not options.scalar_reciprocal
             or not options.target_replay or options.eager_only):
         parser.error('Combined candidate requires 32768, scalar reciprocal and target replay, not eager-only')
@@ -186,6 +190,9 @@ def main():
     if options.combined_runtime:
         from frozen_combined_adapters import FILES as COMBINED_FILES
         names += COMBINED_FILES
+    if options.verifier_profile:
+        from frozen_verifier_profile import FILES as PROFILE_FILES
+        names += PROFILE_FILES
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -211,6 +218,9 @@ def main():
         for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py',
                 'frozen_combined_history.py', 'frozen_reciprocal_isolation.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
+    if options.verifier_profile:
+        from frozen_verifier_profile import adapt_sources
+        adapted = adapt_sources(adapted)
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -228,6 +238,7 @@ def main():
         eager_only=options.eager_only,
         target_replay=options.target_replay,
         combined_runtime=options.combined_runtime,
+        verifier_profile=options.verifier_profile,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 

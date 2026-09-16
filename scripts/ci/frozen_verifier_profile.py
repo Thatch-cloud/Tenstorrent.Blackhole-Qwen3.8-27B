@@ -4,12 +4,18 @@ from frozen_recipe_context import replace_once
 
 
 FILES = ('dspark_request_experiment.py', 'full_dspark_request.py',
-    'request_verifier_profile_report.py', 'dspark-combined-profile.sh')
+    'request_verifier_profile_report.py', 'dspark-combined-profile.sh',
+    'run-dspark-hardware.sh', 'dspark-hardware-suite.sh')
 
 
 def adapt_sources(sources):
     result = dict(sources)
     changes = {
+        'run-dspark-hardware.sh': (
+            ('    -e "QWEN_DSPARK_MODE=$mode"',
+                '    -e QWEN_COMBINED_TRACE_PROFILE=1 \\\n    -e "QWEN_DSPARK_MODE=$mode"'),),
+        'dspark-hardware-suite.sh': (
+            ('export QWEN_COMBINED_TRACE_PROFILE=0', 'export QWEN_COMBINED_TRACE_PROFILE=1'),),
         'dspark_request_experiment.py': (
             ("'QWEN_GDN_OUTPUT_L1_EXPERIMENT', 'QWEN_GDN_OUTPUT_GRID_EXPERIMENT',\n"
                 "                    'QWEN_COMBINED_TRACE_PROFILE'",
@@ -23,6 +29,8 @@ def adapt_sources(sources):
             ('gdn_outer_add or gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or combined_profile or not (',
                 'gdn_outer_add or gdn_copy_pairs or gdn_output_l1 or gdn_output_grid or not ('),),
         'request_verifier_profile_report.py': (
+            ('result.update(passed=True, context=4096, streams=1,',
+                "result.update(passed=True, context=request['length'], streams=1,"),
             ('from dspark_publication_variants import validate_route as publication_route',
                 'from gdn_shared_qk_variants import validate_route as publication_route'),
             ("request.get('length') != 4096 or request.get('lookup_max_rows') != 16",

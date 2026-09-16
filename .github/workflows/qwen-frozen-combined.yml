@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1']
 permissions:
   contents: read
   actions: read
@@ -43,8 +43,11 @@ jobs:
           gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
           gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
           mkdir -p frozen-hardware/experiment-results
+          profile=()
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-verifier-profile-v1 ]]; then profile=(--verifier-profile); fi
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
             --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
+            "${profile[@]}" \
             --manifest frozen-hardware/experiment-results/frozen-geometry.json
           python3 -B frozen-orchestrator/scripts/ci/frozen_stage_evidence.py \
             --repository frozen-orchestrator --numerical "$evidence/numerical" \

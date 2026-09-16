@@ -29,6 +29,21 @@ class FrozenVerifierProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapt_sources(changed)
 
+    def test_composes_with_runtime_admission_and_shells_parse(self):
+        import sys
+        from frozen_runtime_context import FILES as RUNTIME_FILES, adapt_runtime_sources
+        from frozen_combined_adapters import FILES as COMBINED_FILES, adapt_combined_sources
+        names = set(FILES + RUNTIME_FILES + COMBINED_FILES)
+        sources = {name: subprocess.check_output(['git', 'show',
+            f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        result = adapt_sources(adapt_combined_sources(adapt_runtime_sources(sources)))
+        bash = 'C:/Program Files/Git/bin/bash.exe' if sys.platform == 'win32' else 'bash'
+        for name in ('run-dspark-hardware.sh', 'dspark-hardware-suite.sh', 'dspark-combined-profile.sh'):
+            subprocess.run([bash, '-n'], input=result[name], text=True, check=True, timeout=10)
+        self.assertIn('export QWEN_GDN_SHARED_QK_EXPERIMENT=1', result['dspark-hardware-suite.sh'])
+        self.assertIn('export QWEN_COMBINED_TRACE_PROFILE=1', result['dspark-hardware-suite.sh'])
+        self.assertIn('context=request[\'length\']', result['request_verifier_profile_report.py'])
+
 
 if __name__ == '__main__':
     unittest.main()
