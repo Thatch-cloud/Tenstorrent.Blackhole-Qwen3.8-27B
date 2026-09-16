@@ -9,11 +9,33 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Next comparison: replay the original 4K/8K winners unchanged**, then extend
-that combined recipe with only necessary context changes.
-[Pinned revisions and settings](docs/winning-runtime-controls.md).
+**Latest validated improvement: 87.53 committed tokens/s at 32K context**, one
+coding stream on both cards. Incremental history publication improves the matched
+control by **10.15%**. Exact output, target state and inactive-state checks pass.
+This is an offline coding fixture, not sustained serving or held-out quality certification.
 
-**Current combined baseline: PP 2,309.96 / CTX 65,536 / TG 37.94 tok/s**
+| Matched 32K runtime | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Full-bank publication | 2935.22 | 32768 | 79.46 |
+| Incremental publication | 2961.67 | 32768 | **87.53** |
+
+Two timed responses per arm, 117 committed tokens each. Both arms use the same
+shared-Q/K, fused T16 verifier and draft attention. Publication/commit falls from
+21.56 to 6.17 ms/block; verification remains about 74 ms. The complete job takes
+14m10s. [Results and source hashes](docs/frozen-incremental-history.md).
+
+**Now testing:** simulator-qualified batched GDN norm reads in complete 32K
+requests, with incremental publication in both arms. No speedup is claimed yet.
+[Candidate and qualification](docs/frozen-gdn-norm-prefetch.md).
+
+The 4K/8K historical winners and the separate 64K split-K runtime below are
+**not one matched context-scaling curve**. The 32K extension explicitly adds
+qualified scalar-reciprocal and target-scratch changes; it is not a flag-only
+replay of the original winners. [Pinned recipe](docs/winning-runtime-controls.md).
+
+### Earlier 64K experiments
+
+**Earlier combined baseline: PP 2,309.96 / CTX 65,536 / TG 37.94 tok/s**
 ([35039344557](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35039344557)).
 Two exact EOS responses each commit 135 tokens with FP32-maxima split-K,
 fused T16 MLP, shared Q/K and incremental history. This maintains the previous
@@ -45,7 +67,7 @@ per block. The prior split-K result was 30.23 TG; this is not a matched A/B
 speedup claim. [MLP results and attribution](docs/64k-mlp-reintegration-results.md).
 Sustained output and held-out coding quality remain unqualified.
 
-**Latest work:** replacing full history-bank rebuilds with updates to at most
+**Earlier 64K publication work:** replacing full history-bank rebuilds with updates to at most
 96 rows per block. Full-model history preparation falls from **51.91 to 4.48
 ms/block** in the matched run, increasing generation throughput by 24.25%.
 Setup-inclusive request latency is slightly worse (56.92 versus 54.02 seconds),
@@ -69,12 +91,13 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | --- | ---: | ---: | ---: | --- |
 | One stream, batch 1, 121-token EOS response | 4096 | 3279.29 | 106.58 | Repeated combined hardware result |
 | One stream, batch 1, 121-token EOS response | 8192 | 3304.32 | 101.59 | Repeat-confirmed combined result |
+| One stream, batch 1, 117 committed tokens to EOS | 32768 | 2961.67 | 87.53 | Matched incremental-publication result; 35084843498 |
 | One stream, batch 1, 135 committed tokens to EOS | 65536 | 2584.54 | 31.40 | Two exact requests; split-K draft + folded T16 + fused MLP |
 | Same-request control, 135 committed tokens to EOS | 65536 | 2603.19 | 30.55 | 35026222541; native history publication |
 | Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close |
 | Incremental-history repeat, same output | 65536 | 2597.34 | 38.32 | 35027433446; matched control 30.69 TG |
 | FP32-maxima combined runtime, two repeated EOS responses | 65536 | 2309.96 | 37.94 | 35039344557; exact outputs/state, clean close |
-| Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
+| Remaining ladder: 16K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 
 **8K numerical milestone:** 256-key draft attention passes the full synthetic
@@ -89,7 +112,7 @@ all six requests pass again. The cached runtime build takes three seconds.
 The run exits successfully but logs a shutdown warning also seen in older 4K runs.
 [8K evidence and remaining gates](docs/draft-8k-numerical-investigation.md).
 
-### Latest complete-response comparison
+### Historical 4K complete-response comparison
 
 One stream / batch 1, CTX 4096. Each timed response commits 121 tokens and ends
 at EOS. TG includes drafting, verification, transfers and publication; setup is
@@ -109,7 +132,7 @@ token/state checks. Serving defaults remain unchanged. Context-ladder and
 held-out coding-quality acceptance are still pending.
 [Shared Q/K evidence](docs/shared-qk-recurrence-results.md).
 
-**Latest kernel check:** paired GDN copies reach **106.26 TG** versus **105.49 TG**
+**Earlier kernel check:** paired GDN copies reach **106.26 TG** versus **105.49 TG**
 matched control at CTX 4096 in run **34696377960**. Exactness passes, but blocking
 trace time worsens slightly, so this is not a demonstrated kernel speedup and
 the candidate remains disabled. Serving defaults are unchanged.
@@ -120,7 +143,7 @@ The subsequent **FPU outer-add fusion** also passes full-request exactness:
 **34697917056**. Blocking trace time does not improve, so it remains disabled.
 [Fusion results](docs/gdn-outer-add-experiment.md).
 
-**Where time goes:** the current combined T16 verifier takes about **68.7 ms**
+**Historical 4K profile:** the combined T16 verifier takes about **68.7 ms**
 on each chip, with only **1.3 ms outside kernel intervals**. Major kernels use
 96–110 cores; the old 36-core figure does not describe the whole runtime.
 Recurrence and MLP/projection work dominate. This profile is not a TG benchmark.
