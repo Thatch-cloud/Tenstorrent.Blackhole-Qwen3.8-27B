@@ -4,12 +4,24 @@ from frozen_recipe_context import replace_once
 
 
 FILES = ('run-dspark-hardware.sh', 'dspark-hardware-suite.sh',
-    'dspark_context_selection.py', 'dspark-target-hardware.py')
+    'dspark_context_selection.py', 'dspark-target-hardware.py', 'dspark_8k_scope.py')
 
 
 def adapt_runtime_sources(sources):
     result = dict(sources)
     changes = {
+        'dspark_8k_scope.py': (
+            ('from pathlib import Path',
+                'from pathlib import Path\nfrom frozen_context_geometry import selected_geometry, geometry'),
+            ('history_limit() != 8448 or type(position) is not int or position != 8192 or type(capacity) is not int or capacity != 8448',
+                "history_limit() != selected_geometry()['capacity'] or type(position) is not int or position != selected_geometry()['context'] or type(capacity) is not int or capacity != selected_geometry()['capacity']"),
+            ('Admitted exact 8192/8448 fixed history required',
+                'Admitted exact selected-context fixed history required'),
+            ("patch.object(dspark_full_attention, 'MAX_CONTEXT', 8448)",
+                "patch.object(dspark_full_attention, 'MAX_CONTEXT', geometry(context)['capacity'])"),
+            ("            assertion = '''static_assert", "            assertion = f'''static_assert"),
+            ('get_compile_time_arg_val(3) == 272 && get_compile_time_arg_val(8) == 8',
+                "get_compile_time_arg_val(3) == {geometry(context)['padded_keys'] // 32} && get_compile_time_arg_val(8) == 8")),
         'run-dspark-hardware.sh': ((
             '    -e "QWEN_DSPARK_MODE=$mode"',
             '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_DSPARK_MODE=$mode"'),),

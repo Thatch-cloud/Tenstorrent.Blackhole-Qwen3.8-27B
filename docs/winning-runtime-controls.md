@@ -269,3 +269,37 @@ Before another ladder run:
 The current simulator matrix covers only 32K and 64K, not the complete requested
 ladder. Its split-report coverage checker is not yet a runtime admission gate.
 The 200 committed-TG objective remains unachieved.
+
+### Winning 8K recipe: where the 200-TG gap actually is
+
+Recomputed from retained run 34730226400, report SHA256
+`c4ab877ca9db65a5491b04afa5456ceedff5f4451154f96d16d39ebd4a0b804c`.
+Only the two uninstrumented publication requests are included: 22 blocks,
+242 committed tokens. Audited requests are excluded.
+
+| Mean per block | Observed |
+| --- | ---: |
+| Committed tokens | 11 |
+| Draft | 29.78 ms |
+| Verify including readback | 68.45 ms |
+| Select and commit | 9.17 ms |
+| Complete cycle | 108.23 ms |
+| Required complete cycle at this acceptance for 200 TG | 55.00 ms |
+
+The verify/readback timer includes the blocking trace; do not add those nested
+measurements together. The recorded full-request result remains **101.59 TG**,
+not a new measurement.
+
+Two optimistic bounds clarify the next performance work:
+- Removing every cost except verification, at the observed acceptance, gives
+  only **160.69 TG**. Host-overhead removal alone cannot reach 200.
+- Accepting all 16 rows at the observed complete-cycle cost gives **147.84 TG**.
+  Better draft acceptance alone cannot reach 200 at that cost either.
+
+These are arithmetic bounds with fixed measured costs, not predicted benchmark
+results. The same-recipe context ladder remains necessary, but extending its
+context flag is not itself a route to 200 TG. The optimization must reduce target
+verification work alongside draft/commit costs, or increase useful verified rows
+without proportional cost. The existing combined trace attribution identifies
+recurrence, fused MLP and down/output projections as substantial kernel groups;
+it does not support treating spare cores or host dispatch as the dominant cause.

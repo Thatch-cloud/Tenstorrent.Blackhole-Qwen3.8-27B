@@ -9,6 +9,30 @@ from frozen_runtime_context import FILES, adapt_runtime_sources
 
 
 class RuntimeContextTests(unittest.TestCase):
+    def test_history_geometry_preserves_publication_and_admission(self):
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in FILES}
+        adapted = adapt_runtime_sources(sources)
+        original = sources['dspark_8k_scope.py']
+        changed = adapted['dspark_8k_scope.py']
+        start = '            FullHistoryKV.__init__'
+        end = '    return EightKHistory'
+        self.assertEqual(original.split(start)[1].split(end)[0],
+            changed.split(start)[1].split(end)[0])
+        start = '        evidence = stack.enter_context(admitted_request'
+        end = '        stack.enter_context(patch.object(dspark_full_attention'
+        self.assertEqual(original.split(start)[1].split(end)[0],
+            changed.split(start)[1].split(end)[0])
+        namespace = {}
+        admission = subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/dspark_8k_admission.py'], text=True)
+        exec(admission, namespace)
+        namespace['validate_request'](8192, 256)
+        for context in CONTEXTS:
+            if context != 8192:
+                with self.assertRaises(ValueError):
+                    namespace['validate_request'](context, 256)
+
     def test_context_transport_does_not_overwrite_or_bypass_admission(self):
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in FILES}
