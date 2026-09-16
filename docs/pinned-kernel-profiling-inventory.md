@@ -189,6 +189,14 @@ drains accessed device APIs in non-profiled mock tests. The v4 adapter guards al
 new drains by explicit combined profiling. Regression tests execute each guard
 with profiling disabled and enabled, retaining the original non-profiled behavior.
 
+Run **35155716351** passed host preflight but exhausted its cap with exit 137.
+The first prefill ended at 22:10:24 UTC; the next began at 22:18:29. Per-token
+reference-decode drains made this diagnostic impractically expensive, and marker
+overflow still appeared after the second prefill. No completed request or wait
+attribution qualified. Do not repeat this drain configuration or extend its cap.
+Continue the independently testable draft-tail candidate while redesigning capture
+to exclude reference-generation profiling rather than draining every token.
+
 ## Keep the 200 TG objective in view
 
 The accepted 32K combined report from **35087582465**, re-analyzed with

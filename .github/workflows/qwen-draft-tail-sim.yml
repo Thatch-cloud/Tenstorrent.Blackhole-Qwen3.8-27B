@@ -1,7 +1,7 @@
 name: Qwen draft tail simulator
 on:
   push:
-    tags: ['experiment/draft-tail-sim-v1']
+    tags: ['experiment/draft-tail-sim-v1', 'experiment/draft-tail-sim-v2']
 permissions:
   contents: read
 concurrency:
@@ -17,7 +17,7 @@ jobs:
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           workspace=$(realpath -e "$GITHUB_WORKSPACE")
-          results="$workspace/experiment-results"
+          results="$workspace/draft-tail-source/experiment-results"
           if [ -e "$results" ]; then
             test ! -L "$results"
             test "$(realpath -e "$results")" = "$results"
@@ -25,8 +25,10 @@ jobs:
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          path: draft-tail-source
           persist-credentials: false
       - name: Weight-free CPU simulator, no physical card access
+        working-directory: draft-tail-source
         env:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
@@ -36,4 +38,4 @@ jobs:
         if: always()
         with:
           name: qwen-draft-tail-sim-${{ github.run_id }}
-          path: experiment-results/
+          path: draft-tail-source/experiment-results/

@@ -33,3 +33,8 @@ physical device access. Its 112 checks cover original and candidate eager output
 three changed-input replays and unchanged inputs on both chips. Simulator time
 is never reported as hardware throughput. Neither the prototype nor its test
 adds a runtime hook or modifies serving defaults.
+
+Simulator run **35155862154** did not execute the probe: root checkout encountered
+root-owned artifacts from an older marker workflow and failed cleaning the shared
+workspace. The retry uses `draft-tail-source/` as an isolated checkout and results
+directory, leaving unrelated artifacts untouched. This is not a numerical failure.
