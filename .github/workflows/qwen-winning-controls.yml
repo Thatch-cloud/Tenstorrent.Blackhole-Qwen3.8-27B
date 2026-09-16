@@ -1,7 +1,7 @@
 name: Qwen original winning runtime controls
 on:
   push:
-    tags: ['experiment/winning-controls-v1', 'experiment/winning-controls-v2']
+    tags: ['experiment/winning-controls-v1', 'experiment/winning-controls-v2', 'experiment/winning-controls-v3']
 permissions:
   contents: read
   actions: read
@@ -44,13 +44,22 @@ jobs:
           ref: ${{ github.sha }}
           path: control-orchestrator
           persist-credentials: false
-      - name: Reject contended host before loading weights
+      - name: Record pressure for frozen diagnostic replay
         timeout-minutes: 1
         shell: bash
         run: |
           mkdir -p experiment-results
+          status=0
           timeout -k 5 25 python3 -B control-orchestrator/scripts/ci/runner_io_gate.py \
-            --output experiment-results/runner-io-admission.json
+            --output experiment-results/runner-io-admission.json || status=$?
+          if [ "$status" != 0 ]; then
+            test "$GITHUB_REF_NAME" = experiment/winning-controls-v3
+            test "$status" = 75
+            python3 -c 'import json; report=json.load(open("experiment-results/runner-io-admission.json")); assert isinstance(report.get("full_io_stall_fraction"), (int, float)); assert report["elapsed_seconds"] > 0'
+            echo '::warning::Contended host: frozen replay is diagnostic, not performance qualification.'
+          fi
+          printf '{"diagnostic_only":true,"performance_qualified":false,"reason":"Frozen historical replay; host pressure and repeatability require separate assessment"}\n' \
+            > experiment-results/replay-qualification.json
       - name: Replay original complete combined experiment
         timeout-minutes: 10
         shell: bash
