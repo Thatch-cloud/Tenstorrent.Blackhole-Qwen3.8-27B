@@ -106,7 +106,7 @@ def adapt_cache_launcher(sources, probe_seconds=510):
         '            if [ "${QWEN_FROZEN_BUILD_ONLY:-0}" = 1 ]; then prepare_seconds=510; fi\n'
         '            python3 -u /experiment-scripts/ci/frozen_sim_phase.py --phase prepare --seconds "$prepare_seconds" '
         '--output /experiment/results/prepare-timing.json -- '
-        'python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py\n'
+        'env QWEN_SIM_CASE=dspark-native-8k-attention python3 -u /experiment-scripts/ci/frozen_sim_build_cache.py\n'
         '            if [ "${QWEN_FROZEN_BUILD_ONLY:-0}" = 1 ]; then exit 0; fi')
     result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
         'timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"',
