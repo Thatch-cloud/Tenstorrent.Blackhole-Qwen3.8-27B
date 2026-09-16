@@ -24,7 +24,7 @@ def adapt_probe_sources(sources, context):
     changes = {
         'run-simulator.sh': ((
             '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
-            '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
+            '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_FROZEN_PROBE_PART=${QWEN_FROZEN_PROBE_PART:-full}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
         'dspark_attention_chunk_trial.py': (
             ('PADDED_KEYS = 8704', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nPADDED_KEYS = SHAPE['padded_keys']"),
             ('context_rows != 8448', "context_rows != SHAPE['capacity']"),
@@ -32,6 +32,20 @@ def adapt_probe_sources(sources, context):
             ('PADDED_KEYS - 8512), (0, 0)', "PADDED_KEYS - SHAPE['storage_keys']), (0, 0)"),
             ('PADDED_KEYS - 8512)]', "PADDED_KEYS - SHAPE['storage_keys'])]")),
         'dspark-native-8k-attention-probe.py': (
+            ("        for kind in KINDS:",
+                "        part = os.environ.get('QWEN_FROZEN_PROBE_PART', 'full')\n"
+                "        if part not in ('full', 'diagnostics', 'numerical'):\n"
+                "            raise ValueError('Explicit frozen probe part required')\n"
+                "        report['probe_part'] = part\n"
+                "        report['complete_probe_coverage'] = part == 'full'\n"
+                "        for kind in (() if part == 'numerical' else KINDS):"),
+            ('        for case in range(2):\n            progress',
+                "        if part == 'diagnostics':\n"
+                "            if len(report['value_diagnostics']) != len(KINDS) * 2:\n"
+                "                raise AssertionError('Incomplete value diagnostics')\n"
+                "            report['diagnostics_complete'] = True\n"
+                "            return\n\n"
+                '        for case in range(2):\n            progress'),
             ('CAPACITY, PROPOSALS = 8448, 15', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nCAPACITY, PROPOSALS = SHAPE['capacity'], 15\nSOURCES = tuple(sorted(set(SOURCES + ('frozen_context_geometry.py',))))"),
             ('POSITIONS = (8192, 8433)', "POSITIONS = SHAPE['positions']"),
             ('native_padded_keys=8704', "native_padded_keys=SHAPE['padded_keys']")),
