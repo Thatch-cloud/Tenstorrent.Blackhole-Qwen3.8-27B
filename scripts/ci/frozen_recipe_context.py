@@ -153,6 +153,8 @@ def main():
         help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
     parser.add_argument('--eager-only', action='store_true',
         help='Stop after both eager fixtures; never qualifies replay or full probe coverage')
+    parser.add_argument('--target-replay', action='store_true',
+        help='Prepare context-selected target replay with runtime BF16 KV; does not grant admission')
     options = parser.parse_args()
     checkout = options.checkout.resolve(strict=True)
 
@@ -166,6 +168,8 @@ def main():
     from frozen_runtime_context import FILES, adapt_runtime_sources
     names = tuple(dict.fromkeys(('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
         'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
+    if options.target_replay:
+        names += ('target-t16-attention-8k-probe.py',)
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -174,6 +178,10 @@ def main():
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
     adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context), options.probe_seconds))
+    if options.target_replay:
+        from frozen_target_replay import adapt_target_probe
+        name = 'target-t16-attention-8k-probe.py'
+        adapted[name] = adapt_target_probe(adapted[name])
     if options.scalar_reciprocal:
         adapted = adapt_scalar_reciprocal(adapted)
         adapted['dspark_ladder_scalar_reciprocal.py'] = Path(__file__).with_name(
@@ -195,6 +203,7 @@ def main():
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',
         eager_only=options.eager_only,
+        target_replay=options.target_replay,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 
