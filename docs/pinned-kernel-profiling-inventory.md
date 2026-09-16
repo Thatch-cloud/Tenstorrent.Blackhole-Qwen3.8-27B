@@ -79,6 +79,17 @@ unmodified-reader control with the same profiler settings, not another buffer or
 kernel variant. It distinguishes a general profiler/replay failure from an
 instrumentation-specific failure. Neither failed run admits hardware use.
 
+Control **35147997366** failed in **4m04s** with the same native TRISC marker
+pairing abort. Its retained manifest proves both input and weight reader hashes
+are identical before and after staging; `unmodified_control=true`. The overall
+report is false, despite two eager checks, four weight-check entries and a passed
+T16 replay matrix. The new timing scopes are therefore not necessary to reproduce
+this failure. Stop changing kernel operations to address this profiler failure.
+The remaining diagnostic boundary is native profiler collection/finalization:
+the existing combined profile uses mid-run dumping, whereas these fixtures do
+not. Inspect that path before another retry; do not disable marker validation or
+promote partial reports as successful qualification.
+
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or
