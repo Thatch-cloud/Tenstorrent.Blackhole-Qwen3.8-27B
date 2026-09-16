@@ -436,3 +436,33 @@ the draft-attention report does not qualify the target verifier. Keep matching
 source/binary verification and the existing request correctness audit. Reuse the
 recovered component evidence rather than repeating this simulator qualification.
 Serving defaults remain unchanged; the 200 committed tok/s target remains unmet.
+
+### 32K target verifier: compact scratch replay qualified
+
+Run **35068517785** (`09802df`) passes the BF16-KV target replay component:
+eight exact comparisons, 16 mask checks, four unchanged-KV checks, both stale
+controls and eight mask-poison controls. Cached preparation took **2.56 seconds**;
+the complete probe took **785.23 seconds**. Device/container cleanup passed.
+All eight reported source hashes and 19 deployment hashes were independently
+reconstructed; the recorded binary matches the compact-scratch cache entry.
+
+| Evidence | Result |
+| --- | --- |
+| Initial 32K target replay | Historical 16K guard rejected geometry |
+| Geometry-corrected replay | L1 allocation 1,598,400 bytes exceeded 1,572,864 |
+| Compact scratch build, run 35064960972 | Passed in 263.85 seconds |
+| Compact scratch with 510-second probe | Allocation succeeded; full replay exceeded budget |
+| Complete compact scratch replay | Exact, closed, simulator component qualified |
+
+Report SHA256:
+`92c5187536e53739d00536216d0d00d9c901b4963648bb6bfda5195b593007e0`.
+Simulator binary SHA256:
+`e41370bd0cfb2e27431cf40741439b1e138debf69f4d222f3c2b2b9e075e1aa4`.
+
+Compact scratch reuses the existing opt-in tree-round allocation patch; it is an
+explicit addition to the historical recipe, not a claim that the original binary
+passed. KV stays BF16. The probe reuses one identical native reference and its
+initial warm output, while retaining all four replay tickets. No model weights
+were loaded. This evidence now permits work on combined runtime admission and
+hardware integration; it does not establish coding quality, model TG, or other
+context sizes. Draft reciprocal and target scratch still need combined validation.
