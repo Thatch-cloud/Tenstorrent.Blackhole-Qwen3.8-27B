@@ -4,13 +4,22 @@ from frozen_recipe_context import replace_once
 
 
 FILES = ('dspark_8k_admission.py', 'dspark_8k_entry.py', 'target_t16_attention_gate.py',
-    'dspark_8k_build.py', 'dspark_runtime_cache.py')
+    'dspark_8k_build.py', 'dspark_runtime_cache.py', 'coding_context_request.py')
 
 
 def adapt_combined_sources(sources):
     result = dict(sources)
     result['dspark_8k_admission.py'] = adapt_admission(result['dspark_8k_admission.py'])
     replacements = {
+        'coding_context_request.py': (
+            ('context_tokens not in (4096, 8192)', 'context_tokens not in (4096, 8192, 32768)'),
+            ('Only the explicit 4K and 8K context qualification pilots are enabled',
+                'Only explicit 4K, 8K and candidate 32K context pilots are enabled'),
+            ('    sources = {name: Path(__file__).with_name(name).read_bytes() for name in filenames}',
+                "    if context_tokens == 32768:\n"
+                "        filenames = (*EXTENDED_CONTEXT_FILES, 'full-prefix.py', 'full_dflash_request.py',\n"
+                "            'full_dspark_request.py', 'dspark_request_experiment.py', 'gdn-prefix.py', 'learned-attention-probe.py')\n"
+                '    sources = {name: Path(__file__).with_name(name).read_bytes() for name in filenames}')),
         'dspark-target-hardware.py': (
             ('if options.request and not options.preflight and request_context() == 8192:',
                 'if options.request and not options.preflight and request_context() == 32768:'),

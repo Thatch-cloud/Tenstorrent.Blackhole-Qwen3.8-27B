@@ -1,6 +1,8 @@
 import os
 import subprocess
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from frozen_combined_adapters import adapt_admission, adapt_combined_sources, FILES
@@ -59,6 +61,18 @@ class CombinedAdmissionTests(unittest.TestCase):
         self.assertIn('enabled=request_context() == 32768', adapted['dspark_runtime_cache.py'])
         self.assertIn('if options.preflight and request_context() == 32768:', adapted['dspark-target-hardware.py'])
         self.assertIn('require_compatible_native(native,', adapted['dspark-target-hardware.py'])
+        namespace = {'__file__': str(Path(__file__).with_name('coding_context_request.py'))}
+        exec(adapted['coding_context_request.py'], namespace)
+        from coding_request import TASK
+        def encode(messages, **options):
+            self.assertTrue(messages[1]['content'].endswith(TASK))
+            self.assertIs(options['enable_thinking'], False)
+            return [ord(character) for character in messages[1]['content']]
+        tokenizer = SimpleNamespace(apply_chat_template=encode)
+        tokens, report = namespace['make_context_prompt'](tokenizer, context_tokens=32768)
+        self.assertEqual(len(tokens), 32768)
+        self.assertEqual(report['actual_context'], 32768)
+        self.assertEqual(len(report['sources']), 12)
 
     def test_selected_admission_preserves_binary_and_factory_checks(self):
         source = subprocess.check_output(['git', 'show',
