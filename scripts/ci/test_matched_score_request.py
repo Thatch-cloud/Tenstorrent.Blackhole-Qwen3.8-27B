@@ -1,6 +1,7 @@
 from copy import deepcopy
 from contextlib import contextmanager
 import os
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -100,6 +101,18 @@ class MatchedScoreTests(unittest.TestCase):
         report = dict(passed=True, full_request_passed=True, closed_cleanly=True, request_checks=requests)
         validate_pair_execution(report, [record], pairs)
         requests[0]['score_64k_reintegration'] = record
+        with self.assertRaises(ValueError):
+            validate_pair_execution(report, [record], pairs)
+
+    def test_pair_compares_json_representation_without_dropping_evidence(self):
+        record = dict(restored=True, calls=2, shape=(1, 16, 128))
+        requests = [dict(shape=(1, 16)), dict(score_64k_reintegration=record)]
+        pairs = [dict(summary=dict(arm=arm), request=request)
+            for arm, request in zip(('control', 'score_layout'), requests)]
+        report = json.loads(json.dumps(dict(passed=True, full_request_passed=True,
+            closed_cleanly=True, request_checks=requests)))
+        validate_pair_execution(report, [record], pairs)
+        report['request_checks'][0]['shape'][1] = 32
         with self.assertRaises(ValueError):
             validate_pair_execution(report, [record], pairs)
 

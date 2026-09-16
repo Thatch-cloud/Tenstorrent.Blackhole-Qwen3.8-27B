@@ -24,6 +24,8 @@ def validate_score_execution(report, records):
 
 
 def validate_pair_execution(report, records, pairs):
+    records = json.loads(json.dumps(records))
+    pairs = json.loads(json.dumps(pairs))
     requests = report.get('request_checks', [])
     if (len(records) != 1 or len(pairs) != 2 or len(requests) != 2
             or [pair['summary']['arm'] for pair in pairs] != ['control', 'score_layout']
