@@ -17,7 +17,7 @@ def adapt_probe(source, *, norm_prefetch=False):
         f'from {module} import build as build_pipeline')
     source = replace_once(source,
         'rows=16, norm_unchanged=True, state_math_unchanged=True, shared_qk_preparation=True)',
-        'rows=16, norm_unchanged=True, state_math_unchanged=True, shared_qk_preparation=True,\n'
+        'rows=16, norm_unchanged=True, state_math_unchanged=True, shared_qk_preparation=True,\n' +
         ('        norm_bridge_prefetch=True, norm_staging_bytes=8192)' if norm_prefetch else
          '        v_beta_gate_cache=True, cache_pages_per_worker=3)'))
     compile(source, 'gdn-shared-recurrence-probe.py', 'exec')
