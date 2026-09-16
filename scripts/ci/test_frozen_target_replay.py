@@ -24,7 +24,8 @@ class TargetReplayTests(unittest.TestCase):
         self.assertNotIn('ttnn.bfloat8_b', changed)
         self.assertIn("'frozen_context_geometry.py'", changed)
         start = '                trace, output = capture_operation'
-        self.assertEqual(self.original.split(start, 1)[1], changed.split(start, 1)[1])
+        self.assertEqual(self.original.split(start, 1)[1].split('    except BaseException', 1)[0],
+            changed.split(start, 1)[1].split('    except BaseException', 1)[0])
         self.assertIn('starts = [first, first + 17, capacity - rows, first]', changed)
         self.assertLess(changed.index('allocation_check = reader('), changed.index('for start, ticket_query in zip('))
 

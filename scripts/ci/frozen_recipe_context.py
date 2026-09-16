@@ -77,6 +77,9 @@ def adapt_cache_launcher(sources, probe_seconds=510):
         '    -e "QWEN_FROZEN_TARGET_SCRATCH=${QWEN_FROZEN_TARGET_SCRATCH:-0}" \\\n'
         '    -e "QWEN_SDPA_TREE_SCRATCH_ROUNDS=${QWEN_FROZEN_TARGET_SCRATCH:-0}" \\\n'
         '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"')
+    result['simulator-suite.sh'] = replace_once(result['simulator-suite.sh'],
+        'if [[ "$QWEN_SIM_CASE" = dspark-native-8k-attention ]]; then',
+        'if [[ "$QWEN_SIM_CASE" = dspark-native-8k-attention || "${QWEN_FROZEN_TARGET_SCRATCH:-0}" = 1 ]]; then')
     from frozen_sim_assets import ASSETS
     downloads = '\n'.join(f'curl --fail --location --max-time 180 {url} -o "$assets/{name}"'
         for name, url, checksum in ASSETS)

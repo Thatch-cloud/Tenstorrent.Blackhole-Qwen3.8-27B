@@ -46,6 +46,23 @@ def validate_target_report(report, directory, context):
 
 
 def adapt_target_probe(source):
+    source = replace_once(source, '    mesh = None\n',
+        "    scratch = os.environ.get('QWEN_FROZEN_TARGET_SCRATCH', '0')\n"
+        "    if scratch not in ('0', '1'):\n"
+        "        raise ValueError('Explicit scratch variant required')\n"
+        "    report['compact_tree_scratch'] = scratch == '1'\n"
+        "    if scratch == '1':\n"
+        '        from sdpa_tree_scratch import audit\n'
+        '        from dspark_fp32_build import validate_manifest\n'
+        "        if os.environ.get('QWEN_SDPA_TREE_SCRATCH_ROUNDS') != '1':\n"
+        "            raise ValueError('Compiled scratch candidate must be explicitly enabled')\n"
+        "        report['native_sources'] = audit('/opt/tt-metal', patched=True)\n"
+        "        report['factory_build'] = validate_manifest('/opt/tt-metal', '/experiment/results/dspark-fp32-build.json')\n"
+        '    mesh = None\n')
+    source = replace_once(source, "        report['closed'] = mesh is not None",
+        "        if scratch == '1':\n"
+        "            report['native_sources_after'] = audit('/opt/tt-metal', patched=True)\n"
+        "        report['closed'] = mesh is not None")
     reader = '                reader = ReplayAttentionReader(ttnn, mesh, rows, capacity, pages_host, upload, short_context=False)\n'
     source = replace_once(source, reader, '')
     source = replace_once(source, '                for start, ticket_query in zip(starts, queries, strict=True):',
