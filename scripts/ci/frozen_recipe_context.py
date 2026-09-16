@@ -23,8 +23,8 @@ def adapt_probe_sources(sources, context):
     result = dict(sources)
     changes = {
         'dspark_fp32_intermediates.py': (
-            ("REPLACEMENT = '''", "from frozen_context_geometry import selected_geometry\nREPLACEMENT = f'''"),
-            ('Skt == 272', "Skt == {selected_geometry()['padded_keys'] // 32}")),
+            ("REPLACEMENT = '''", "from frozen_context_geometry import factory_selector\nREPLACEMENT = f'''"),
+            ('Skt == 272', '{factory_selector()}')),
         'run-simulator.sh': ((
             '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
             '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_FROZEN_PROBE_PART=${QWEN_FROZEN_PROBE_PART:-full}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),

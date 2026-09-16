@@ -20,3 +20,8 @@ def selected_geometry():
     if value not in tuple(map(str, CONTEXTS)):
         raise ValueError('Unsupported QWEN_DSPARK_REQUEST_CONTEXT')
     return geometry(int(value))
+
+
+def factory_selector():
+    return '(' + ' || '.join(f"Skt == {geometry(context)['padded_keys'] // 32}"
+        for context in CONTEXTS) + ')'

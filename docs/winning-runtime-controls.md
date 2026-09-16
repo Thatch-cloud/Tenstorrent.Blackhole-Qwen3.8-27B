@@ -222,6 +222,9 @@ when this was discovered. Do not use any of these as numerical or speed evidence
 for the winning recipe at 32K/64K.
 
 The adapter now derives both selectors from the same context geometry. Local
-tests evaluate the generated factory for all seven sizes and verify the 8K
-replacement is byte-identical to the historical replacement. This invalidates
+tests evaluate the generated factory for all seven sizes and verify that only
+the allowed context selector differs from the historical replacement. The
+factory admits the explicit seven shapes in one compiled library, rather than
+rebuilding that library for each environment value. Per-shape device kernel
+compilation is still possible. This invalidates
 the old build-cache key intentionally. No corrected numerical run is claimed.

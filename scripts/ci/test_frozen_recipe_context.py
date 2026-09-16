@@ -4,7 +4,7 @@ import os
 from unittest.mock import patch
 
 from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, geometry
-from frozen_context_geometry import CONTEXTS, selected_geometry
+from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
@@ -44,6 +44,7 @@ class FrozenRecipeContextTests(unittest.TestCase):
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
         baseline = adapt_probe_sources(sources, 8192)
+        factories = []
         for context in CONTEXTS:
             adapted = adapt_probe_sources(sources, context)
             self.assertEqual(adapted, baseline)
@@ -62,6 +63,7 @@ class FrozenRecipeContextTests(unittest.TestCase):
             with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': str(context)}):
                 namespace = {}
                 exec(adapted['dspark_fp32_intermediates.py'], namespace)
+                factories.append(namespace['REPLACEMENT'])
                 expected_tiles = geometry(context)['padded_keys'] // 32
                 self.assertIn(f'Skt == {expected_tiles}', namespace['REPLACEMENT'])
                 self.assertIn('stats_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32',
@@ -69,7 +71,9 @@ class FrozenRecipeContextTests(unittest.TestCase):
                 if context == 8192:
                     historical = {}
                     exec(sources['dspark_fp32_intermediates.py'], historical)
-                    self.assertEqual(namespace['REPLACEMENT'], historical['REPLACEMENT'])
+                    self.assertEqual(namespace['REPLACEMENT'].replace(factory_selector(), 'Skt == 272'),
+                        historical['REPLACEMENT'])
+        self.assertEqual(len(set(factories)), 1)
         broken = dict(sources)
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):
