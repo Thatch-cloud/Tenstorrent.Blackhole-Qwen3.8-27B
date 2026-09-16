@@ -1,7 +1,7 @@
 name: Qwen frozen T16 MLP buffer simulation
 on:
   push:
-    tags: ['experiment/frozen-mlp-buffer-sim-v1', 'experiment/frozen-mlp-input-prefetch-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v2', 'experiment/frozen-mlp-wait-zones-sim-control-v1']
+    tags: ['experiment/frozen-mlp-buffer-sim-v1', 'experiment/frozen-mlp-input-prefetch-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v1', 'experiment/frozen-mlp-wait-zones-sim-v2', 'experiment/frozen-mlp-wait-zones-sim-control-v1', 'experiment/frozen-mlp-wait-zones-sim-drain-v1']
 permissions:
   contents: read
 concurrency:
@@ -33,6 +33,7 @@ jobs:
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-input-prefetch-sim-v1 ]]; then staging=frozen_mlp_input_prefetch.py; fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-wait-zones-sim-* ]]; then staging=frozen_mlp_wait_zones.py; fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-wait-zones-sim-control-v1 ]]; then staging_args=(--unmodified-control); fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-mlp-wait-zones-sim-drain-v1 ]]; then staging_args=(--mid-run-dump); fi
           python3 -B "buffer-orchestrator/scripts/ci/$staging" \
             --checkout buffer-candidate --manifest buffer-candidate/experiment-results/buffer-candidate.json "${staging_args[@]}"
           git -C buffer-candidate diff --check

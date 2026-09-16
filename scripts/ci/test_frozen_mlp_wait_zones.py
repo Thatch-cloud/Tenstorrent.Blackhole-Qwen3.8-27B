@@ -1,10 +1,19 @@
 from pathlib import Path
 import unittest
 
-from frozen_mlp_wait_zones import instrument, remove_scopes, scoped_statement, ZONES, PROFILER_ENV
+from frozen_mlp_wait_zones import instrument, remove_scopes, scoped_statement, ZONES, PROFILER_ENV, profile_trace_source
 
 
 class WaitZoneTests(unittest.TestCase):
+    def test_drain_does_not_replace_replays_or_checks(self):
+        source = Path(__file__).with_name('fusion_trace.py').read_text()
+        candidate = profile_trace_source(source)
+        compile(candidate, 'fusion_trace.py', 'exec')
+        self.assertEqual(candidate.count('operations.ReadDeviceProfiler(mesh)'), 4)
+        self.assertEqual(candidate.count('operations.execute_trace('), source.count('operations.execute_trace('))
+        self.assertIn('operations.ReadDeviceProfiler(mesh)\n        for trace in traces.values():', candidate)
+        self.assertEqual(candidate.count('raise AssertionError'), source.count('raise AssertionError'))
+
     def test_trace_identity_tracking_required(self):
         self.assertEqual(dict(entry.split('=') for entry in PROFILER_ENV.split()),
             dict(TT_METAL_DEVICE_PROFILER='1', TT_METAL_PROFILER_TRACE_TRACKING='1'))
