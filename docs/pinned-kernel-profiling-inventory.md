@@ -157,7 +157,22 @@ The normal whole-job cap remains 20 minutes, including staging and model loading
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or
-critical-path time. It is not yet wired to a hardware capture.
+critical-path time. The hardware marker fixture passed; the combined capture
+is wired but has not qualified its wait attribution.
+
+### Combined capture overflow and bounded retry
+
+Run **35151664646** failed: native profiler DRAM buffers filled during setup,
+before the first committed block. The wait validator correctly rejected dropped
+markers; the outer launcher later returned 124. This is not a new TG result.
+
+The v2 diagnostic adds drains after completed prefill, audited reference decode,
+proposal preparation, verifier warm-up, verifier capture and publication capture.
+No drain is inserted inside a captured operation. It retains the same qualified
+kernel sources and full correctness checks. The output limit is 64 tokens rather
+than 256; the gate still requires at least three full-width verifier observations.
+Repeated metadata preservation skips unchanged files, and overflow is rejected
+before parsing the multi-gigabyte raw CSV. Hardware validation remains pending.
 
 ## Keep the 200 TG objective in view
 

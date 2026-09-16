@@ -14,10 +14,53 @@ from frozen_wait_zone_gate import qualify
 
 HELPERS = ('frozen_wait_zone_gate.py', 'frozen_wait_zone_scope.py', 'frozen_wait_zone_report.py',
     'frozen_mlp_wait_zones.py', 'frozen_recipe_context.py', 'frozen_wait_combined_report.py')
+SOURCE_FILES = (*FILES, 'dspark_8k_scope.py', 'verifier_engine.py')
+
+
+def drain_setup(sources):
+    result = dict(sources)
+    source = result['full_dspark_request.py']
+    for anchor in (
+            '            seed = prefill(tokens)\n',
+            '                output = decode(token, position, False)\n',
+            '        drafter.prepare_trace(seed, audit=audit_features)\n',
+            '        drafter.propose(seed, 15)\n\n    def factory():'):
+        if anchor.endswith('def factory():'):
+            replacement = ('        drafter.propose(seed, 15)\n'
+                '        operations.synchronize_device(model.mesh_device)\n'
+                '        operations.ReadDeviceProfiler(model.mesh_device)\n\n    def factory():')
+        else:
+            indent = anchor[:len(anchor) - len(anchor.lstrip())]
+            replacement = (anchor + indent + 'operations.synchronize_device(model.mesh_device)\n'
+                + indent + 'operations.ReadDeviceProfiler(model.mesh_device)\n')
+        source = replace_once(source, anchor, replacement)
+    result['full_dspark_request.py'] = source
+    source = result['verifier_engine.py']
+    changes = (
+        ('                    ttnn.synchronize_device(self.mesh)\n                finally:',
+         '                    ttnn.synchronize_device(self.mesh)\n'
+         '                    ttnn.ReadDeviceProfiler(self.mesh)\n                finally:'),
+        ("                        feature_capture=bucket.get('feature_capture')))\n                if rows > 1:",
+         "                        feature_capture=bucket.get('feature_capture')))\n"
+         '                ttnn.synchronize_device(self.mesh)\n'
+         '                ttnn.ReadDeviceProfiler(self.mesh)\n                if rows > 1:'),
+        ('                    for publication in publications.values():\n                        publication()\n',
+         '                    for publication in publications.values():\n                        publication()\n'
+         '                        ttnn.synchronize_device(self.mesh)\n'
+         '                        ttnn.ReadDeviceProfiler(self.mesh)\n'),
+        ("                        bucket['commits'][prefix], unused = capture_operation(ttnn, self.mesh, publication)\n",
+         "                        bucket['commits'][prefix], unused = capture_operation(ttnn, self.mesh, publication)\n"
+         '                        ttnn.synchronize_device(self.mesh)\n'
+         '                        ttnn.ReadDeviceProfiler(self.mesh)\n'),
+    )
+    for before, after in changes:
+        source = replace_once(source, before, after)
+    result['verifier_engine.py'] = source
+    return result
 
 
 def adapt(sources):
-    result = adapt_sources(sources)
+    result = drain_setup(adapt_sources(sources))
     result['dspark_8k_scope.py'] = replace_once(result['dspark_8k_scope.py'],
         '        stack.enter_context(incremental_scope(directory))\n        yield evidence',
         '        stack.enter_context(incremental_scope(directory))\n'
@@ -27,6 +70,11 @@ def adapt(sources):
         'from gdn_shared_qk_variants import validate_route as publication_route',
         'from frozen_wait_zone_scope import validate_route as publication_route')
     result['dspark-combined-profile.sh'] = adapt_capture(result['dspark-combined-profile.sh'])
+    result['dspark-combined-profile.sh'] = replace_once(result['dspark-combined-profile.sh'],
+        '--max-new-tokens 256', '--max-new-tokens 64')
+    result['dspark-combined-profile.sh'] = replace_once(result['dspark-combined-profile.sh'],
+        'cp "$output/.logs/$name" "$output/metadata/$name"',
+        'cp -u "$output/.logs/$name" "$output/metadata/$name"')
     result['dspark-combined-profile.sh'] += ('\npython3 /experiment-scripts/ci/frozen_wait_combined_report.py '
         '"$output"\n')
     for name, source in result.items():
@@ -50,7 +98,7 @@ def main():
     for name, checksum in geometry['after'].items():
         if hashlib.sha256((scripts / name).read_bytes()).hexdigest() != checksum:
             raise ValueError('Prepared runtime source changed: ' + name)
-    sources = {name: (scripts / name).read_text() for name in (*FILES, 'dspark_8k_scope.py')}
+    sources = {name: (scripts / name).read_text() for name in SOURCE_FILES}
     result = adapt(sources)
     for name in HELPERS:
         result[name] = Path(__file__).with_name(name).read_text()
