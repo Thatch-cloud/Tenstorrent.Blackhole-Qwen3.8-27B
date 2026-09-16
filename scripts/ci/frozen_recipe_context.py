@@ -208,7 +208,8 @@ def main():
     if options.combined_runtime:
         from frozen_combined_adapters import adapt_combined_sources
         adapted = adapt_combined_sources(adapted)
-        for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py'):
+        for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py',
+                'frozen_combined_history.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):

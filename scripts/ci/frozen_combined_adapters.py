@@ -63,6 +63,17 @@ def adapt_combined_sources(sources):
                 '    from dspark_8k_scope import runtime_scope'),
             ('context=8192, output_tokens=256', 'context=32768, output_tokens=256')),
         'dspark_8k_scope.py': (
+            ('            FullHistoryKV.__init__(self, operations, mesh, collectives, parameters,',
+                '            from frozen_combined_history import initialise_history\n'
+                '            initialise_history(self, operations, mesh, collectives, parameters,'),
+            ("        stack.enter_context(patch.object(dspark_full_attention, 'MAX_CONTEXT', geometry(context)['capacity']))",
+                '        import dspark_prefill\n'
+                '        import full_dspark_request\n'
+                '        from frozen_combined_history import prefill_capture_class\n'
+                '        capture = prefill_capture_class(dspark_prefill.FullHistoryCapture)\n'
+                "        stack.enter_context(patch.object(dspark_prefill, 'FullHistoryCapture', capture))\n"
+                "        stack.enter_context(patch.object(full_dspark_request, 'FullHistoryCapture', capture))\n"
+                "        stack.enter_context(patch.object(dspark_full_attention, 'MAX_CONTEXT', geometry(context)['capacity']))"),
             ('from dspark_attention_8k_gate import REPORT_SHA256',
                 'from frozen_combined_runtime import REPORT_SHA256'),
             ('        stack.enter_context(scoped_stats_pack())',
