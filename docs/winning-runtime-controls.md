@@ -437,6 +437,28 @@ source/binary verification and the existing request correctness audit. Reuse the
 recovered component evidence rather than repeating this simulator qualification.
 Serving defaults remain unchanged; the 200 committed tok/s target remains unmet.
 
+### Combined 32K integration: failure ledger
+
+| Hardware run | Observed blocker | Scoped correction |
+| --- | --- | --- |
+| 35071369480 | Coding prompt admitted only 4K/8K | Extend recorded-source prompt to 32K; retain task and template |
+| 35071865764 | Full-history constructor retained 8K bound | Admit exact 32K frontier with 256-token headroom; retain projection math |
+| 35072920817 | Prefill completed; target kernel could not compile draft-only macro | Guard scalar reciprocal by macro presence in shared header |
+| 35074425940 | Retry submitted at `4b301e9` | Await combined correctness and measured PP/CTX/TG |
+
+The reciprocal guard passes host C++ preprocessing checks for all three TRISC
+roles: defined-macro draft output is identical; undefined-macro target code
+compiles without the scalar body. This is not a native Blackhole compile result.
+The existing reciprocal stub execution test also passes; the local native-source
+cross-compiler test is skipped because its pinned source is unavailable.
+
+For the next timing analysis, `blocking_trace_host_ms` is wall time around
+`execute_trace(..., blocking=True)`, **not isolated host overhead**. It includes
+waiting for device execution. `verify_readback_ms` includes that trace, replay
+checks/synchronization, and output readback; do not add these nested measurements
+together. Use the separate readback and synchronization fields before choosing
+a host-conversion optimization. Keep cold load/capture separate from warm TG.
+
 ### 32K target verifier: compact scratch replay qualified
 
 Run **35068517785** (`09802df`) passes the BF16-KV target replay component:
