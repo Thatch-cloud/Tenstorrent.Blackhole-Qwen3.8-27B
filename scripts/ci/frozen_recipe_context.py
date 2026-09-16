@@ -6,17 +6,10 @@ import json
 from pathlib import Path
 import subprocess
 
+from frozen_context_geometry import CONTEXTS, geometry
+
 
 REVISION = '8c102b20df22329106955b4006bf4d650bb94e40'
-
-
-def geometry(context):
-    if type(context) is not int or context not in (8192, 32768, 65536):
-        raise ValueError('Explicit frozen-recipe 8K, 32K or 64K context required')
-    capacity = context + 256
-    return dict(context=context, capacity=capacity, proposals=15,
-        positions=(context, capacity - 15), storage_keys=capacity + 64,
-        padded_keys=((capacity + 64 + 255) // 256) * 256, key_chunk=256)
 
 
 def replace_once(source, before, after):
@@ -26,22 +19,26 @@ def replace_once(source, before, after):
 
 
 def adapt_probe_sources(sources, context):
-    shape = geometry(context)
+    geometry(context)
     result = dict(sources)
     changes = {
+        'run-simulator.sh': ((
+            '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
+            '    -e "QWEN_DSPARK_REQUEST_CONTEXT=${QWEN_DSPARK_REQUEST_CONTEXT:-8192}" \\\n    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"'),),
         'dspark_attention_chunk_trial.py': (
-            ('PADDED_KEYS = 8704', f"PADDED_KEYS = {shape['padded_keys']}"),
-            ('context_rows != 8448', f"context_rows != {shape['capacity']}"),
-            ('key.shape[2] != 8512', f"key.shape[2] != {shape['storage_keys']}"),
-            ('PADDED_KEYS - 8512), (0, 0)', f"PADDED_KEYS - {shape['storage_keys']}), (0, 0)"),
-            ('PADDED_KEYS - 8512)]', f"PADDED_KEYS - {shape['storage_keys']})]")),
+            ('PADDED_KEYS = 8704', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nPADDED_KEYS = SHAPE['padded_keys']"),
+            ('context_rows != 8448', "context_rows != SHAPE['capacity']"),
+            ('key.shape[2] != 8512', "key.shape[2] != SHAPE['storage_keys']"),
+            ('PADDED_KEYS - 8512), (0, 0)', "PADDED_KEYS - SHAPE['storage_keys']), (0, 0)"),
+            ('PADDED_KEYS - 8512)]', "PADDED_KEYS - SHAPE['storage_keys'])]")),
         'dspark-native-8k-attention-probe.py': (
-            ('CAPACITY, PROPOSALS = 8448, 15', f"CAPACITY, PROPOSALS = {shape['capacity']}, 15"),
-            ('POSITIONS = (8192, 8433)', f"POSITIONS = {shape['positions']}"),
-            ('native_padded_keys=8704', f"native_padded_keys={shape['padded_keys']}")),
+            ('CAPACITY, PROPOSALS = 8448, 15', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nCAPACITY, PROPOSALS = SHAPE['capacity'], 15\nSOURCES = tuple(sorted(set(SOURCES + ('frozen_context_geometry.py',))))"),
+            ('POSITIONS = (8192, 8433)', "POSITIONS = SHAPE['positions']"),
+            ('native_padded_keys=8704', "native_padded_keys=SHAPE['padded_keys']")),
         'dspark_stats_pack.py': (
+            ("SELECTOR_ASSERT = '''", "from frozen_context_geometry import selected_geometry\nSELECTOR_ASSERT = f'''"),
             ('get_compile_time_arg_val(3) == 272',
-                f"get_compile_time_arg_val(3) == {shape['padded_keys'] // 32}"),),
+                "get_compile_time_arg_val(3) == {selected_geometry()['padded_keys'] // 32}")),
     }
     for name, replacements in changes.items():
         for before, after in replacements:
@@ -52,7 +49,7 @@ def adapt_probe_sources(sources, context):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
-    parser.add_argument('--context', type=int, choices=(32768, 65536), required=True)
+    parser.add_argument('--context', type=int, choices=CONTEXTS, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
     options = parser.parse_args()
     checkout = options.checkout.resolve(strict=True)
@@ -65,7 +62,7 @@ def main():
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
     names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py')
+        'dspark_stats_pack.py', 'run-simulator.sh')
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -74,8 +71,10 @@ def main():
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
     adapted = adapt_probe_sources(sources, options.context)
+    adapted['frozen_context_geometry.py'] = Path(__file__).with_name('frozen_context_geometry.py').read_text()
     for name, source in adapted.items():
-        compile(source, name, 'exec')
+        if name.endswith('.py'):
+            compile(source, name, 'exec')
     for name, source in adapted.items():
         (checkout / 'scripts/ci' / name).write_text(source)
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
