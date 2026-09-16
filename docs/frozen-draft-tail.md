@@ -1,6 +1,6 @@
 # Draft KV assembly: pad the tail, not the history
 
-Status: host prototype only. No model integration, hardware timing or serving changes.
+Status: simulator correctness passed. No model integration, hardware timing or serving changes.
 
 ## Why test this
 
@@ -24,8 +24,8 @@ path savings or a throughput prediction. The clean combined capture is separate.
 | Gate | Scope | State |
 | --- | --- | --- |
 | Host tests | Original versus reordered row assembly; both tail sizes; poisoned padding; alignment and layout rejection | Three tests pass |
-| Weight-free two-chip simulator | BF16 bitwise eager output and changed-input traces; 64/96 history rows, 7/15 proposals, both chips | Prepared; not yet qualified |
-| Hardware component | Exact full-size output and replay; measure original versus candidate | Not started |
+| Weight-free two-chip simulator | BF16 bitwise eager output and changed-input traces; 64/96 history rows, 7/15 proposals, both chips | 35157432497 passes all 112 checks |
+| Hardware component | Exact full-size output and replay; measure original versus candidate | Prepared for 33,024/33,056 rows |
 | Combined 32K runtime | Same qualified recipe, candidate changes assembly only; exact proposals/output/state; PP/CTX/TG | Not started |
 
 The simulator has a six-minute whole-job cap, uses no model weights and has no
@@ -38,3 +38,15 @@ Simulator run **35155862154** did not execute the probe: root checkout encounter
 root-owned artifacts from an older marker workflow and failed cleaning the shared
 workspace. The retry uses `draft-tail-source/` as an isolated checkout and results
 directory, leaving unrelated artifacts untouched. This is not a numerical failure.
+
+The isolated retry **35157432497** passed; its simulator step took 2m15s. Independent
+validation checked all 112 unique check identities, exact results, clean close,
+zero exit status, the pinned TT-Metal revision and all six reported source hashes.
+Simulator report SHA256:
+`57ef37a3f2fbc44943e33c0e636e96afedd453bf992c60b9e5b3c030535af279`.
+
+The hardware harness preserves these operations and replay patterns, extending
+history to 33,024/33,056 rows. It adds eight blocking trace measurements per arm
+per shape in ABBA order and checks the final outputs again. The gate requires
+128 exact checks and 64 timing samples. These component milliseconds are not TG.
+The job remains weight-free, rejects occupied cards, and has a seven-minute cap.

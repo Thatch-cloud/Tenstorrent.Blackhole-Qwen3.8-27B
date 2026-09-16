@@ -1,0 +1,52 @@
+name: Qwen full-size draft tail hardware qualification
+on:
+  push:
+    tags: ['experiment/draft-tail-hardware-v1']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  hardware:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 7
+    steps:
+      - name: Restore ownership of this experiment's results only
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/draft-tail-hardware-source/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: draft-tail-hardware-source
+          persist-credentials: false
+      - name: Stage exact simulator-qualified sources
+        working-directory: draft-tail-hardware-source
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          gh run download 35157432497 -R Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            -n qwen-draft-tail-sim-35157432497 -D experiment-results/simulator
+          python3 -B scripts/ci/frozen_draft_tail_hardware.py --directory scripts/ci --evidence experiment-results/simulator
+          cp scripts/ci/draft-tail-hardware-sources.json experiment-results/
+      - name: Full-size exact replay and matched component timings
+        working-directory: draft-tail-hardware-source
+        timeout-minutes: 5
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+        run: timeout -k 15 280 bash scripts/ci/run-draft-tail-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-draft-tail-hardware-${{ github.run_id }}
+          path: draft-tail-hardware-source/experiment-results/
