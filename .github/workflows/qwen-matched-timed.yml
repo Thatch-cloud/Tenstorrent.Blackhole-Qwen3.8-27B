@@ -1,7 +1,7 @@
 name: Qwen matched combined full-response timing
 on:
   push:
-    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2']
+    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2', 'experiment/matched-score-pair-v1']
 permissions:
   contents: read
   actions: read
@@ -27,12 +27,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Cached build and two complete repeated 64K requests
+      - name: Reject contended host before loading weights
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          timeout -k 5 25 python3 -B scripts/ci/runner_io_gate.py --output experiment-results/runner-io-admission.json
+      - name: Cached build and two complete 64K requests
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_MATCHED_COMBINED: '1'
+          QWEN_MATCHED_SCORE_LAYOUT: ${{ github.ref_name == 'experiment/matched-score-pair-v1' && '1' || '0' }}
+          QWEN_MATCHED_SCORE_PAIR: ${{ github.ref_name == 'experiment/matched-score-pair-v1' && '1' || '0' }}
           QWEN_SPLITK_WORKERS: ${{ startsWith(github.ref_name, 'experiment/workers16-') && '16' || '8' }}
           QWEN_HISTORY_WAIT_PROFILE: ${{ startsWith(github.ref_name, 'experiment/workers16-history-profile-') && '1' || '0' }}
           QWEN_SPLITK_COMBINED: '1'

@@ -6,6 +6,9 @@ test -z "${TT_METAL_SIMULATOR:-}"
 splitk_combined=${QWEN_SPLITK_COMBINED:-0}
 matched_combined=${QWEN_MATCHED_COMBINED:-0}
 matched_score=${QWEN_MATCHED_SCORE_LAYOUT:-0}
+matched_score_pair=${QWEN_MATCHED_SCORE_PAIR:-0}
+[[ "$matched_score_pair" = 0 || "$matched_score_pair" = 1 ]]
+if [ "$matched_score_pair" = 1 ]; then test "$matched_score" = 1; fi
 [[ "$matched_score" = 0 || "$matched_score" = 1 ]]
 if [ "$matched_score" = 1 ]; then
     test "$matched_combined" = 1
@@ -542,6 +545,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_MATCHED_COMBINED=$matched_combined" \
     -e "QWEN_MATCHED_SCORE_LAYOUT=$matched_score" \
+    -e "QWEN_MATCHED_SCORE_PAIR=$matched_score_pair" \
     -e "QWEN_SPLITK_WORKERS=$splitk_workers" \
     -e "QWEN_HISTORY_WAIT_PROFILE=${QWEN_HISTORY_WAIT_PROFILE:-0}" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \

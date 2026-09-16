@@ -125,3 +125,14 @@ cannot be combined with the sixteen-worker or history-profiling experiment.
 Default paths and frozen 4K/8K controls are unchanged. Local scope and mutation
 tests pass; the newly composed entry is **not yet hardware validated**, and no
 performance gain is claimed. No hardware job has been launched for it.
+
+The prepared comparison also supports `QWEN_MATCHED_SCORE_PAIR=1`: one model load,
+one complete native-score control and one complete fused-score candidate. It
+reuses the existing paired-request scope and its degraded-control stop, and
+retains two full requests with exact output/state checks. Per-arm timings are
+reported separately; pooled PP/TG fields are cleared. One fixed-order pair is a
+diagnostic, not repeatability or causal acceptance. The workflow has a separate
+15-second pre-load I/O gate and is ready but not dispatched while the competing
+builds are active. No new kernel implementation or simulator replay is needed
+for this source-identical score kernel; composed hardware correctness remains
+mandatory before any performance promotion.
