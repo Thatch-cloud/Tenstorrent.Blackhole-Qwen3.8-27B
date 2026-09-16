@@ -5,11 +5,21 @@ from unittest.mock import patch
 
 from frozen_combined_adapters import adapt_admission, adapt_combined_sources, FILES
 from frozen_runtime_context import FILES as RUNTIME_FILES, adapt_runtime_sources
-from frozen_combined_runtime import qualify
+from frozen_combined_runtime import qualify, validate_target_option
 from frozen_recipe_context import REVISION
 
 
 class CombinedAdmissionTests(unittest.TestCase):
+    def test_target_request_geometry_remains_strict(self):
+        options = dict(rows=16, position=32768, remaining=256, replay=True,
+            norm_batch=True, native_sampling=True, group_rows=4, short_context=False)
+        validate_target_option(True, **options)
+        for name, value in (('rows', 8), ('position', 8192), ('remaining', 257), ('remaining', 0),
+                ('replay', False), ('norm_batch', False), ('native_sampling', False),
+                ('group_rows', 8), ('short_context', True)):
+            with self.assertRaises(ValueError):
+                validate_target_option(True, **dict(options, **{name: value}))
+
     def test_candidate_scope_retains_guards_and_enters_reciprocal(self):
         sources = {name: subprocess.check_output(['git', 'show',
             f'{REVISION}:scripts/ci/{name}'], text=True) for name in FILES + RUNTIME_FILES}
@@ -24,6 +34,8 @@ class CombinedAdmissionTests(unittest.TestCase):
             self.assertIn(guard, entry)
         self.assertIn('stack.enter_context(scalar_reciprocal())', adapted['dspark_8k_scope.py'])
         self.assertIn('if history_limit() == 33024:', adapted['dspark_context_selection.py'])
+        self.assertIn('from frozen_combined_runtime import qualify_target', adapted['target_t16_attention_gate.py'])
+        self.assertIn('from frozen_combined_runtime import validate_target_option', adapted['target_t16_attention_gate.py'])
 
     def test_selected_admission_preserves_binary_and_factory_checks(self):
         source = subprocess.check_output(['git', 'show',

@@ -11,6 +11,24 @@ from frozen_context_geometry import selected_geometry
 REPORT_SHA256 = REPORTS['draft-numerical.json']
 
 
+def validate_target_option(enabled, *, rows, position, remaining, replay, norm_batch,
+                           native_sampling, group_rows, short_context):
+    if type(enabled) is not bool:
+        raise ValueError('Explicit T16 attention selection required')
+    if not enabled:
+        return
+    if (any(type(value) is not int for value in (rows, position, remaining, group_rows))
+            or rows != 16 or position != 32768 or not 1 <= remaining <= 256
+            or replay is not True or norm_batch is not True or native_sampling is not True
+            or group_rows != 4 or short_context is not False):
+        raise ValueError('Qualified 32K T16 replay with four-row groups and native sampling required')
+
+
+def qualify_target(directory):
+    evidence = qualify(directory)
+    return dict(evidence['target'], report_sha256=REPORTS['target-replay.json'])
+
+
 def qualify(directory):
     if (os.environ.get('QWEN_FROZEN_COMBINED_RUNTIME') != '1'
             or selected_geometry()['context'] != 32768

@@ -3,13 +3,18 @@
 from frozen_recipe_context import replace_once
 
 
-FILES = ('dspark_8k_admission.py', 'dspark_8k_entry.py')
+FILES = ('dspark_8k_admission.py', 'dspark_8k_entry.py', 'target_t16_attention_gate.py')
 
 
 def adapt_combined_sources(sources):
     result = dict(sources)
     result['dspark_8k_admission.py'] = adapt_admission(result['dspark_8k_admission.py'])
     replacements = {
+        'target_t16_attention_gate.py': (
+            ('if request_context() == 8192:\n        from target_t16_attention_8k_gate import validate_request_option as validate_8k',
+                'if request_context() == 32768:\n        from frozen_combined_runtime import validate_target_option as validate_8k'),
+            ('if request_context() == 8192:\n        from target_t16_attention_8k_gate import qualify as qualify_8k',
+                'if request_context() == 32768:\n        from frozen_combined_runtime import qualify_target as qualify_8k')),
         'dspark_8k_entry.py': (
             ('request_context() != 8192', 'request_context() != 32768'),
             ("    from dspark_8k_scope import runtime_scope",
