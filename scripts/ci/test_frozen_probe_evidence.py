@@ -2,7 +2,7 @@ from copy import deepcopy
 import unittest
 
 from frozen_context_geometry import geometry
-from frozen_probe_evidence import validate_pair
+from frozen_probe_evidence import validate_pair, validate_diagnostics
 
 
 def fixture(context):
@@ -36,6 +36,17 @@ def fixture(context):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_diagnostics_reject_mismatch_nonfinite_or_incomplete_output(self):
+        records = fixture(32768)[1]['value_diagnostics']
+        validate_diagnostics(records)
+        for field, value in (('failed_elements', 1), ('finite', False), ('chip', 3)):
+            changed = deepcopy(records)
+            changed[0][field] = value
+            with self.assertRaises(ValueError):
+                validate_diagnostics(changed)
+        with self.assertRaises(ValueError):
+            validate_diagnostics(records[:-1])
+
     def test_complete_pair_is_not_model_or_provenance_qualification(self):
         result = validate_pair(*fixture(32768), 32768)
         self.assertTrue(result['complete_probe_coverage'])

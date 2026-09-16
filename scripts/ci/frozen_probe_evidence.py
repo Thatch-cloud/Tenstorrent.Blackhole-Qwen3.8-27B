@@ -4,6 +4,13 @@ from frozen_context_geometry import geometry
 from dspark_attention_8k_gate import require_matrix
 
 
+def validate_diagnostics(records):
+    require_matrix(records, ('kind', 'chip'),
+        {(kind, chip) for kind in ('constant', 'oldest', 'last_proposal') for chip in range(2)}, 'finite')
+    if any(record.get('failed_elements') != 0 for record in records):
+        raise ValueError('Value diagnostic numerical discrepancies remain')
+
+
 def validate_pair(numerical, diagnostics, context):
     shape = geometry(context)
     if numerical.get('passed') is not True or diagnostics.get('diagnostics_complete') is not True:
@@ -48,11 +55,7 @@ def validate_pair(numerical, diagnostics, context):
         {(name, 1 if name == 'frontier_update' else 0, chip)
             for name in ('oldest', 'last_proposal', 'gap_poison', 'frontier_update') for chip in range(2)}, 'detected')
     require_matrix(numerical.get('stale_controls', []), ('chip',), {(0,), (1,)}, 'detected')
-    records = diagnostics.get('value_diagnostics', [])
-    require_matrix(records, ('kind', 'chip'),
-        {(kind, chip) for kind in ('constant', 'oldest', 'last_proposal') for chip in range(2)}, 'finite')
-    if any(record.get('failed_elements') != 0 for record in records):
-        raise ValueError('Value diagnostic numerical discrepancies remain')
+    validate_diagnostics(diagnostics.get('value_diagnostics', []))
     return dict(context=context, capacity=shape['capacity'], complete_probe_coverage=True,
         source_files_verified=False, artifact_provenance_verified=False,
         full_request_qualified=False, performance_qualified=False)

@@ -79,7 +79,8 @@ timeout() {
             self.assertFalse(report['performance_qualified'])
             self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
                 {'frozen_binary_cache.py', 'frozen_context_geometry.py',
-                 'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py'})
+                 'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py',
+                 'frozen_probe_evidence.py'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')

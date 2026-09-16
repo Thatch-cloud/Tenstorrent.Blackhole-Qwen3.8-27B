@@ -277,6 +277,11 @@ Before another ladder run:
 
 The current simulator matrix covers only 32K and 64K, not the complete requested
 ladder. Its split-report coverage checker is not yet a runtime admission gate.
+The diagnostics shard now rejects missing, non-finite or numerically mismatched
+results before returning success; a successful shard is labeled
+`diagnostics_complete`, not full numerical qualification. Its validator and
+dependencies are included in the probe's source hashes. Local mutation tests
+cover these failure paths. No corrected simulator result is claimed.
 The 200 committed-TG objective remains unachieved.
 
 ### Winning 8K recipe: where the 200-TG gap actually is

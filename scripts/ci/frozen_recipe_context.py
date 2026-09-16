@@ -44,12 +44,17 @@ def adapt_probe_sources(sources, context):
                 "        for kind in (() if part == 'numerical' else KINDS):"),
             ('        for case in range(2):\n            progress',
                 "        if part == 'diagnostics':\n"
+                "            from frozen_probe_evidence import validate_diagnostics\n"
+                "            validate_diagnostics(report['value_diagnostics'])\n"
                 "            if len(report['value_diagnostics']) != len(KINDS) * 2:\n"
                 "                raise AssertionError('Incomplete value diagnostics')\n"
                 "            report['diagnostics_complete'] = True\n"
                 "            return\n\n"
                 '        for case in range(2):\n            progress'),
-            ('CAPACITY, PROPOSALS = 8448, 15', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nCAPACITY, PROPOSALS = SHAPE['capacity'], 15\nSOURCES = tuple(sorted(set(SOURCES + ('frozen_context_geometry.py',))))"),
+            ("progress('complete' if report['passed'] and report['closed_cleanly'] else 'failed')",
+                "progress('complete' if report['passed'] and report['closed_cleanly'] else "
+                "'diagnostics_complete' if report.get('diagnostics_complete') and report['closed_cleanly'] else 'failed')"),
+            ('CAPACITY, PROPOSALS = 8448, 15', "from frozen_context_geometry import selected_geometry\nSHAPE = selected_geometry()\nCAPACITY, PROPOSALS = SHAPE['capacity'], 15\nSOURCES = tuple(sorted(set(SOURCES + ('frozen_context_geometry.py', 'frozen_probe_evidence.py', 'dspark_attention_8k_gate.py'))))"),
             ('POSITIONS = (8192, 8433)', "POSITIONS = SHAPE['positions']"),
             ('native_padded_keys=8704', "native_padded_keys=SHAPE['padded_keys']")),
         'dspark_stats_pack.py': (
@@ -135,7 +140,7 @@ def main():
         sources[name] = actual
     adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
-            'frozen_sim_phase.py', 'frozen_sim_assets.py'):
+            'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():
         if name.endswith('.py'):
