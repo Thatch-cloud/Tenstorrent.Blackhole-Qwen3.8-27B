@@ -5,11 +5,23 @@ from unittest.mock import patch
 
 from frozen_combined_adapters import adapt_admission, adapt_combined_sources, FILES
 from frozen_runtime_context import FILES as RUNTIME_FILES, adapt_runtime_sources
-from frozen_combined_runtime import qualify, validate_target_option, prepare_scratch
+from frozen_combined_runtime import qualify, validate_target_option, prepare_scratch, qualified_native_reference
 from frozen_recipe_context import REVISION
 
 
 class CombinedAdmissionTests(unittest.TestCase):
+    def test_native_reference_only_replaces_audited_tree_sources(self):
+        from sdpa_tree_scratch import HASHES, ROOT, PATCHED_FACTORY_SHA256
+        original = {(ROOT / name).as_posix(): checksum for name, checksum in HASHES.items()}
+        changed = dict(HASHES, **{'sdpa_decode_program_factory.cpp': PATCHED_FACTORY_SHA256})
+        with patch('sdpa_tree_scratch.audit', return_value=changed):
+            result = qualified_native_reference('.', dict(original, unrelated='retained'))
+            self.assertEqual(result['unrelated'], 'retained')
+            self.assertEqual(result[(ROOT / 'sdpa_decode_program_factory.cpp').as_posix()], PATCHED_FACTORY_SHA256)
+            original[(ROOT / 'sdpa_decode_program_factory.cpp').as_posix()] = 'unknown'
+            with self.assertRaisesRegex(ValueError, 'Unexpected original'):
+                qualified_native_reference('.', original)
+
     def test_hardware_scratch_cannot_apply_without_allocation(self):
         with patch.dict(os.environ, {}, clear=True), patch('frozen_combined_runtime.subprocess.run') as execute:
             with self.assertRaisesRegex(ValueError, 'Explicit offline hardware'):
@@ -45,6 +57,8 @@ class CombinedAdmissionTests(unittest.TestCase):
         self.assertIn('scratch = prepare_scratch(root)', adapted['dspark_8k_build.py'])
         self.assertIn("verify_scratch(root, inputs.get('target_tree_scratch'))", adapted['dspark_8k_build.py'])
         self.assertIn('enabled=request_context() == 32768', adapted['dspark_runtime_cache.py'])
+        self.assertIn('if options.preflight and request_context() == 32768:', adapted['dspark-target-hardware.py'])
+        self.assertIn('require_compatible_native(native,', adapted['dspark-target-hardware.py'])
 
     def test_selected_admission_preserves_binary_and_factory_checks(self):
         source = subprocess.check_output(['git', 'show',

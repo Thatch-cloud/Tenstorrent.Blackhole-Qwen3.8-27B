@@ -43,6 +43,18 @@ def verify_scratch(root, evidence):
         raise ValueError('Matching built hardware scratch source and adapter required')
 
 
+def qualified_native_reference(root, reference):
+    from sdpa_tree_scratch import audit, HASHES, ROOT
+    sources = audit(root, patched=True)
+    result = dict(reference)
+    for name, checksum in sources.items():
+        path = (ROOT / name).as_posix()
+        if path in reference and reference[path] != HASHES[name]:
+            raise ValueError('Unexpected original native fingerprint: ' + path)
+        result[path] = checksum
+    return result
+
+
 def validate_target_option(enabled, *, rows, position, remaining, replay, norm_batch,
                            native_sampling, group_rows, short_context):
     if type(enabled) is not bool:

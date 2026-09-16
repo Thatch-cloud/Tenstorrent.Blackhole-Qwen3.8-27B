@@ -11,6 +11,20 @@ def adapt_combined_sources(sources):
     result = dict(sources)
     result['dspark_8k_admission.py'] = adapt_admission(result['dspark_8k_admission.py'])
     replacements = {
+        'dspark-target-hardware.py': (
+            ('if options.request and not options.preflight and request_context() == 8192:',
+                'if options.request and not options.preflight and request_context() == 32768:'),
+            ("if history_limit() != 8448 or gate['native_reference'].get(SOURCE) != SOURCE_SHA256:",
+                "if history_limit() != 33024 or gate['native_reference'].get(SOURCE) != SOURCE_SHA256:"),
+            ("        gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})",
+                "        gate['native_reference'] = dict(gate['native_reference'], **{SOURCE: qualified_factory})\n"
+                '        from frozen_combined_runtime import qualified_native_reference\n'
+                "        gate['native_reference'] = qualified_native_reference(root, gate['native_reference'])\n"
+                "        native = native_fingerprints(root, dict(native_sources=gate['native_reference']))"),
+            ('if options.preflight and request_context() == 8192:',
+                'if options.preflight and request_context() == 32768:'),
+            ('from dspark_attention_8k_gate import qualify as qualify_8k',
+                'from frozen_combined_runtime import qualify as qualify_8k')),
         'dspark_runtime_cache.py': (
             ('enabled=request_context() == 8192', 'enabled=request_context() == 32768'),),
         'dspark_8k_build.py': (
