@@ -11,7 +11,21 @@ All 25 draft-attention calls used the qualified worker setting; all 120 learned
 parameter checks were exact, with clean shutdown and unchanged sources. This
 was a bounded correctness screen, not a throughput measurement. The next test
 times two complete responses using this exact audit and the existing build cache.
-The table below still records the eight-worker full-response baseline.
+Full-response timing **35043128421 passed correctness but regressed throughput**.
+Both responses emitted the same 135 committed tokens as the eight-worker baseline,
+with exact target state and inactive state. Do not promote this candidate.
+
+| Worker limit | PP | CTX | Committed TG | Draft ms/block | Verify ms/block | Select/commit ms/block |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 2309.96 | 65536 | 37.94 | 85.51 | 82.32 | 8.07 |
+| 16 | 2090.29 | 65536 | 17.65 | 80.76 | 82.44 | 217.43 |
+
+Sixteen-worker repeats measured 13.67 and 24.90 TG. History preparation averaged
+325.18 and 104.69 ms wall time, versus only 6.64 and 5.30 ms process CPU time.
+No cgroup CPU throttling or OOM was recorded. This identifies the waiting phase,
+not its cause: separate projection, writer construction/enqueue, and final device
+synchronization before blaming host contention or the extra workers. Keep the
+unchanged eight-worker baseline as a control. The context table below records it.
 
 | CTX | FP32-maxima draft attention | Folded verifier vs native B1 | Combined PP / TG |
 | ---: | --- | --- | --- |
