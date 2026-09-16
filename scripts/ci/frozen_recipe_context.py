@@ -171,7 +171,12 @@ def main():
         help='Matched four-block MLP comparison; retained simulator report required')
     parser.add_argument('--gdn-input-cache', action='store_true',
         help='Matched simulator-qualified GDN V/beta/gate input-cache comparison')
+    parser.add_argument('--incremental-history', action='store_true',
+        help='Matched qualified incremental history publication comparison')
     options = parser.parse_args()
+    if options.incremental_history and (not options.combined_runtime or options.verifier_profile
+            or options.mlp_buffer or options.gdn_input_cache):
+        parser.error('Incremental history requires isolated uninstrumented combined runtime')
     if options.gdn_input_cache and (not options.combined_runtime or options.verifier_profile or options.mlp_buffer):
         parser.error('GDN cache requires isolated uninstrumented combined runtime')
     if options.mlp_buffer and (not options.combined_runtime or options.verifier_profile):
@@ -204,7 +209,7 @@ def main():
     sources = {}
     if options.mlp_buffer:
         names += ('fused_1d.py', 'dspark_request_experiment.py')
-    if options.gdn_input_cache:
+    if options.gdn_input_cache or options.incremental_history:
         names += ('dspark_request_experiment.py',)
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -257,6 +262,19 @@ def main():
             '        yield evidence')
         for name in ('frozen_gdn_input_cache.py', 'frozen_gdn_cache_gate.py', 'frozen_gdn_cache_scope.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
+    if options.incremental_history:
+        adapted['dspark_request_experiment.py'] = replace_once(adapted['dspark_request_experiment.py'],
+            'Native versus shared Q/K preparation and recurrence; complete combined runtime',
+            'Full-bank versus incremental publication; shared Q/K enabled in both complete runtime arms')
+        adapted['dspark_8k_scope.py'] = replace_once(adapted['dspark_8k_scope.py'],
+            '        yield evidence',
+            '        from frozen_incremental_scope import runtime_scope as incremental_scope\n'
+            '        stack.enter_context(incremental_scope(directory))\n'
+            '        yield evidence')
+        for name in ('frozen_incremental_scope.py', 'incremental_history_scope.py',
+                'history_append_hardware_gate.py', 'history_append_plan.py',
+                'history_append_dma.py', 'history_append_dma.cpp', 'history-append-probe.py'):
+            adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -277,6 +295,7 @@ def main():
         verifier_profile=options.verifier_profile,
         mlp_buffer=options.mlp_buffer,
         gdn_input_cache=options.gdn_input_cache,
+        incremental_history=options.incremental_history,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 

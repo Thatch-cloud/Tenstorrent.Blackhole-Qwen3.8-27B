@@ -24,3 +24,12 @@ comparison with shared-Q/K, original MLP buffering and original draft attention
 in both arms. Candidate changes only captured publication to the retained writer;
 verify exact full history, target output/state, proposal acceptance and source
 identities. Do not mix in the small GDN-cache candidate. No serving changes.
+
+The deployment adapter now provides `--incremental-history`, isolated from
+profiling, MLP-buffer and GDN-cache experiments. Both arms retain shared Q/K;
+only the candidate enters the incremental publication scope. Host tests verify
+arm identity, transaction accounting and restoration, including exceptional exit.
+The adapted historical checkout passes the retained hardware source-hash gate.
+Local validation: 61 frozen tests, three optional checks skipped; all five
+incremental tests pass when the retained hardware report is supplied.
+The integrated 32K hardware comparison is still pending; no speedup is claimed.
