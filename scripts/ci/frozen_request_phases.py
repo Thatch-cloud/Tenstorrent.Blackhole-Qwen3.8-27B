@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import math
 from pathlib import Path
 
 from dspark_request_variants import proposal_signature
@@ -68,9 +67,6 @@ def prepare(directory, report, schedule):
     configuration = json.loads(path.read_text())
     mode = configuration.get('mode')
     if mode == 'audit' and set(configuration) == {'mode'}:
-        elapsed = (report.get('stages') or [{}])[-1].get('elapsed_seconds')
-        if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 100:
-            raise ValueError('Audit phase needs setup within 100 seconds to preserve request and cleanup budget')
         result = dict(mode=mode, schedule=SCHEDULE[:2])
     elif mode == 'timed' and set(configuration) == {'mode', 'qualification_sha256'}:
         payload = (Path(directory) / 'frozen-request-qualification.json').read_bytes()

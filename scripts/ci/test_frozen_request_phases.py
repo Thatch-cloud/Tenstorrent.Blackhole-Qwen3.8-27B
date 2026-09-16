@@ -71,8 +71,7 @@ class RequestPhaseTests(unittest.TestCase):
             self.assertTrue(report['correctness_only'])
             self.assertIsNone(report['committed_tg'])
             report['stages'] = [dict(elapsed_seconds=101)]
-            with self.assertRaisesRegex(ValueError, '100 seconds'):
-                prepare(directory, report, SCHEDULE)
+            self.assertEqual(prepare(directory, report, SCHEDULE)['schedule'], SCHEDULE[:2])
 
     def test_timed_phase_requires_pinned_clean_audits_and_four_fresh_requests(self):
         with tempfile.TemporaryDirectory() as directory:

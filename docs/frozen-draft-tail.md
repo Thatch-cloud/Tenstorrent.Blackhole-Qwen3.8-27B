@@ -154,3 +154,40 @@ sources. It executes only the four fresh A/B/B/A timed requests, retaining their
 output/state and audited-proposal agreement checks. Hardware command cap is
 420 seconds, step cap 8 minutes, whole-job cap 13 minutes including staging and
 upload. Host contention still rejects admission before loading weights.
+
+## Combined performance result
+
+Timed run **35162640023** passed in **6m30s**, with clean shutdown, exit 0 and no
+OOM. Its four fresh A/B/B/A requests reproduce the retained audits exactly.
+All runtime/model identity checks pass; independently recalculated request
+summaries match the report.
+
+| Full combined runtime | PP tok/s | CTX | Committed TG tok/s | Draft ms/block | Verify/readback ms/block | Select/commit ms/block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original assembly | 2966.31 | 32768 | 80.29 | 51.54 | 72.92 | 6.92 |
+| Tail-first assembly | 2955.07 | 32768 | 89.47 | 39.27 | 72.80 | 5.88 |
+
+The matched gain is **11.43%**. Each arm commits 234 tokens across two requests,
+with 214 accepted proposals out of 330 and 22 total blocks. The candidate needs
+53.18 ms/block to reach 200 TG at this acceptance, versus 118.83 ms observed.
+These are complete generation loops, not standalone kernel timings. Held-out
+coding quality and sustained serving remain unqualified.
+
+The previous 89.01 result used two different prompt tokens: the fixture embeds
+live repository text, including the edited request harness. Model parameters,
+native sources and emitted tokens match, but the earlier proposal schedule
+required 20 blocks rather than 22. Do not combine these into a cross-run gain.
+Pin the workload before further ladder/runtime changes.
+
+Timed report SHA256:
+`c9822575931a59f96c91f7b455914e84b986fc0d4042c4d4385873279261943d`.
+
+## Timeout policy for the requested ladder
+
+At the user's request, subsequent combined benchmark jobs remove the explicit
+whole-job and hardware-step timeouts, outer shell timer, inner 3000-second
+full-request timer, and setup-elapsed admission cutoff. GitHub's own platform
+limit still applies. Setup/download and cleanup bounds, host-pressure admission,
+source validation and all numerical checks remain. No serving default changes.
+This changes harness fingerprints, so the new ladder must qualify its own
+audits rather than pretending the older report covers changed sources.

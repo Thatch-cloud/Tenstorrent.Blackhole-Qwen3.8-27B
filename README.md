@@ -9,19 +9,23 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest validated fixture result: 89.01 committed tokens/s at 32K context**,
+**Latest validated fixture result: 89.47 committed tokens/s at 32K context**,
 one coding stream on both cards. Exact output, target state and inactive-state
 checks pass. Sustained serving and held-out coding quality remain unqualified.
 
 | Matched 32K runtime | PP tok/s | CTX | Committed TG tok/s |
 | --- | ---: | ---: | ---: |
-| Incremental publication, original norm reader | 2940.84 | 32768 | 87.41 |
-| Incremental publication, prefetched norm reader | 2962.66 | 32768 | **89.01** |
+| Winning combined runtime, original K/V assembly | 2966.31 | 32768 | 80.29 |
+| Same runtime, tail-first K/V assembly | 2955.07 | 32768 | **89.47** |
 
-Two timed responses per arm, 117 committed tokens each; a **1.83% matched gain**.
-This follows the earlier **10.15%** incremental-publication gain. These are
-separate comparisons, not cumulative percentages.
-[Norm result](docs/frozen-gdn-norm-prefetch.md) · [Publication result](docs/frozen-incremental-history.md).
+Four full-model A/B/B/A requests, 117 committed tokens each: **11.43% matched gain**.
+The timing job took **6m30s**, reusing two clean, source-identical correctness
+audits. Drafting, verification, selection, state updates and readback are all
+included. [Combined result](docs/frozen-draft-tail.md).
+
+This is not an 11% gain over the earlier 89.01 result: two prompt tokens changed
+between runs because the fixture incorporates live source text. Comparisons
+within each run remain matched; future workload fixtures must be pinned.
 
 The next MLP activation-prefetch trial regresses to **86.50 TG** versus **88.95**
 matched control and is rejected. Keep the original streaming MLP reader.
@@ -31,10 +35,10 @@ matched control and is rejected. Keep the original streaming MLP reader.
 
 | Work | Evidence / status |
 | --- | --- |
-| Faster draft K/V assembly | Simulator and full-size hardware checks pass; **1.412 to 0.212 ms** per assembly, not TG |
-| Matched 32K combined test | [Timed out](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35158707469) after both correctness audits; no completed timed requests or new TG result |
+| Faster draft K/V assembly | Combined drafting **51.54 to 39.27 ms/block**, with unchanged proposals and acceptance within the matched run |
+| Matched 32K combined test | [Passed](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35162640023); exact output/state checks, clean shutdown, no OOM |
 | Full-runtime profiler | Capture overflow/timeouts remain unresolved; expensive per-token-drain configuration withdrawn |
-| Gap to 200 TG | Current mean block **131.38 ms**; needs **58.50 ms** at unchanged acceptance |
+| Gap to 200 TG | Current mean block **118.83 ms**; needs **53.18 ms** at unchanged acceptance; verification alone costs **72.80 ms** |
 
 Both draft and verification costs need attention; MLP buffer tweaks alone cannot
 close that gap. [Draft-tail experiment](docs/frozen-draft-tail.md) and

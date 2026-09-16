@@ -11,7 +11,6 @@ concurrency:
 jobs:
   combined:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-timed-v1' && 13 || (github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' || github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v2') && 18 || 20 }}
     steps:
       - name: Verify host and restore artifact ownership
         run: |
@@ -110,6 +109,8 @@ jobs:
             --diagnostics "$evidence/diagnostics" --target "$evidence/target" \
             --output frozen-hardware/scripts/ci/frozen-evidence \
             > frozen-hardware/experiment-results/component-qualification.json
+          python3 -B frozen-orchestrator/scripts/ci/frozen_benchmark_timeout.py --checkout frozen-hardware \
+            > frozen-hardware/experiment-results/benchmark-timeout-policy.json
           git -C frozen-hardware diff --check
           git -C frozen-hardware diff > frozen-hardware/experiment-results/geometry.patch
       - name: Record host pressure
@@ -125,7 +126,6 @@ jobs:
           fi
           if [ "$status" = 75 ]; then echo '::warning::Host contention: results are diagnostic, not performance acceptance.'; fi
       - name: Run combined 32K candidate on allocated cards
-        timeout-minutes: ${{ github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-timed-v1' && 8 || (github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' || github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v2') && 13 || 16 }}
         working-directory: frozen-hardware
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,11 +143,7 @@ jobs:
           QWEN_DSPARK_MLP_FOOTPRINT: '0'
           QWEN_DSPARK_DRAFT_PROFILE: '0'
           QWEN_DSPARK_HISTORY_PROFILE: '0'
-        run: |
-          budget=900
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-timed-v1 ]]; then budget=420; fi
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then budget=720; fi
-          timeout -k 45 "$budget" bash scripts/ci/run-dspark-hardware.sh
+        run: bash scripts/ci/run-dspark-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
