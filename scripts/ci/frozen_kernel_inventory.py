@@ -42,7 +42,7 @@ def inventory(root, output):
             retain(path)
         else:
             report['missing'].append(relative)
-    for relative in ('tt_metal/tools/profiler', 'tt_metal/hw/inc', 'tt_metal/tools/tracy'):
+    for relative in ('tt_metal/tools/profiler', 'tt_metal/hw/inc', 'tools/tracy'):
         directory = root / relative
         if not directory.is_dir():
             report['missing'].append(relative)

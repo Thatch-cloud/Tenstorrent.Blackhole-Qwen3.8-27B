@@ -34,3 +34,30 @@ The pinned `DeviceZoneScopedN` macro declares fixed local names; each injected
 zone needs its own lexical block, and its lifetime must cover the intended wait
 or work rather than merely recording an instantaneous marker. These source
 changes must preserve buffer ownership and synchronization order.
+
+## Sampled MLP diagnostic qualification
+
+Export inventory run **35093041332** passed in **14 seconds**, but its guessed
+`tt_metal/tools/tracy` directory was absent. The pinned upstream tree locates
+the exporter under `tools/tracy`; the inventory now uses that path.
+At revision `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9`,
+`tools/tracy/__main__.py` maps `--disable-device-data-dump-to-files` to
+`TT_METAL_PROFILER_DISABLE_DUMP_TO_FILES=1`. `process_device_log.py` consumes
+zone name, phase, source location and trace identity fields from raw device CSV.
+Our current combined capture disables that raw export; aggregate RISC timings
+alone cannot establish internal waits.
+
+`frozen_mlp_wait_zones.py` prepares nine diagnostic scopes around existing waits
+and barriers, sampled at K-block 10 on input workers 0/1 and weight worker 0.
+Output readiness/write completion use only the first output pair on worker 0.
+Each branch executes the original statement once; removing the generated scopes
+must recover the complete original source byte-for-byte after newline normalization.
+Buffer sizes, transfers, math and semaphore order are unchanged. Four host tests
+cover that transformation, duplicate instrumentation and source drift rejection.
+
+The simulator lane requests device profiling and retains eager, changed-input
+replay and byte-exact weight checks, with a 12-minute whole-job cap and no model
+weight loading. This is not yet simulator or hardware qualified. Raw marker
+retention must still be verified before attributing hardware stalls. A barrier
+scope measures remaining completion wait, not the whole transfer or bandwidth.
+No serving default or performance claim changes.

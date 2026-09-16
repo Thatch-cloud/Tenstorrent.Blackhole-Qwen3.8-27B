@@ -10,7 +10,7 @@ class InventoryTests(unittest.TestCase):
     def test_exporter_retained_without_kernel_marker(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / 'runtime'
-            exporter = root / 'tt_metal/tools/tracy/export.py'
+            exporter = root / 'tools/tracy/export.py'
             exporter.parent.mkdir(parents=True)
             exporter.write_text('def export_zones(): pass\n')
             output = Path(temporary) / 'output'
