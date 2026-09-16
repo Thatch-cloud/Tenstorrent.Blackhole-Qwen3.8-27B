@@ -1,7 +1,7 @@
 name: Qwen matched maxima combined correctness
 on:
   push:
-    tags: ['experiment/matched-combined-audit-v1']
+    tags: ['experiment/matched-combined-audit-v1', 'experiment/matched-combined-audit-v2']
 permissions:
   contents: read
   actions: read

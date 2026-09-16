@@ -120,7 +120,7 @@ python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
 build_started=$SECONDS
 if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
     combined_builder=dspark_splitk_combined_build.py
-    if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then combined_builder=matched_combined_build.py; fi
+    if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then combined_builder=matched_cached_build.py; fi
     timeout -k 10 360 python3 "/experiment-scripts/ci/$combined_builder"
 elif [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then
     python3 /experiment-scripts/ci/dspark_sum_sfpu_hardware.py

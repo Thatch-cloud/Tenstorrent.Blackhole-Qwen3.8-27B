@@ -5,10 +5,41 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import matched_combined_request as candidate
+from matched_cached_build import cached_only
 from matched_combined_request import validate_result
 
 
 class MatchedCombinedRequestTests(unittest.TestCase):
+    def test_original_full_kv_callback_is_not_replaced(self):
+        callback = lambda valid: valid
+        arguments = dict(audit_features=True, kv_digest=callback)
+        records = []
+        candidate.retain_legacy_kv(arguments, records, lambda record: None)
+        self.assertIs(arguments['kv_digest'], callback)
+        self.assertTrue(records[0]['full_prefix_checks'])
+        self.assertFalse(records[0]['reader_comparison'])
+
+    def test_missing_cache_fails_without_compilation(self):
+        original = lambda cache, inputs: None
+        module = SimpleNamespace(inspect_entry=original)
+        with cached_only(module):
+            with self.assertRaisesRegex(ValueError, 'prepare the build separately'):
+                module.inspect_entry('cache', {})
+        self.assertIs(module.inspect_entry, original)
+
+    def test_cache_identity_validation_is_not_bypassed(self):
+        def invalid(cache, inputs):
+            raise ValueError('binary hash changed')
+
+        module = SimpleNamespace(inspect_entry=invalid)
+        with cached_only(module):
+            with self.assertRaisesRegex(ValueError, 'binary hash changed'):
+                module.inspect_entry('cache', {})
+        manifest = dict(inputs={'source': 'exact'}, binary_sha256='binary')
+        module.inspect_entry = lambda cache, inputs: manifest
+        with cached_only(module):
+            self.assertIs(module.inspect_entry('cache', manifest['inputs']), manifest)
+
     def fixture(self):
         return (dict(passed=True, correctness_screen_passed=True, closed_cleanly=True,
             request_checks=[dict(instrumented_timing=True, blocks=[{}, {}])]),

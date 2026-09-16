@@ -16,6 +16,15 @@ from matched_combined_build import admission, identity_scope
 from qwen_lazy_weight_gate import qualify as qualify_loader
 
 
+def retain_legacy_kv(arguments, records, emit):
+    if arguments.get('audit_features') is not True or not callable(arguments.get('kv_digest')):
+        raise ValueError('Original complete KV audit callback required')
+    record = dict(event='legacy_kv_audit_retained', reader_comparison=False,
+        full_prefix_checks=True, performance_qualified=False)
+    records.append(record)
+    emit(record)
+
+
 @contextmanager
 def publication_scope(history_class, publication_module, updates, warmups):
     arm_class = publication_module.CapturedPublicationArm
@@ -80,9 +89,11 @@ def main():
     try:
         import dspark_stable_history
         import dspark_publication_scope
+        import target_kv_bulk_scope
 
         with identity_scope(), publication_scope(dspark_stable_history.StableHistoryKV,
-                dspark_publication_scope, updates, warmups):
+                dspark_publication_scope, updates, warmups), \
+                patch.object(target_kv_bulk_scope, 'install_callback', retain_legacy_kv):
             runpy.run_path(str(directory / 'dspark-64k-lazy-load-request.py'), run_name='__main__')
         validate_result(json.loads(output.read_text()), updates, warmups)
         if before != sources():

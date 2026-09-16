@@ -61,6 +61,13 @@ This is not a TG measurement or a full-response qualification. The run has a
 590-second outer deadline; previous timing admission is deliberately rejected.
 After this screen passes, measure complete responses on the exact new build.
 
+Run 35037299095 timed out during the second prefill, before decode: the cold
+build used 305 seconds and the unchanged KV-reader comparison used about 116
+seconds. It provides no request qualification or TG result. The retry requires
+an exact content-addressed build-cache hit (fails rather than compiling) and
+retains the original full-prefix KV digest at every audit boundary without
+re-benchmarking the alternative reader. Numerical/state checks are unchanged.
+
 1. Completed: repeat the previous combined 64K incremental-history candidate.
 2. Completed through 64K: context-specific draft and folded-target evidence.
    131K draft accuracy remains open; 262K still needs execution. Component
