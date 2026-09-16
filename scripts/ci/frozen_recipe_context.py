@@ -167,7 +167,11 @@ def main():
         help='Prepare guarded 32K offline candidate entry; requires retained component evidence')
     parser.add_argument('--verifier-profile', action='store_true',
         help='Instrument exact 32K shared-Q/K verifier; never a throughput benchmark')
+    parser.add_argument('--mlp-buffer', action='store_true',
+        help='Matched four-block MLP comparison; retained simulator report required')
     options = parser.parse_args()
+    if options.mlp_buffer and (not options.combined_runtime or options.verifier_profile):
+        parser.error('Buffer comparison requires uninstrumented combined runtime')
     if options.verifier_profile and not options.combined_runtime:
         parser.error('Verifier profiling requires the admitted combined runtime')
     if options.combined_runtime and (options.context != 32768 or not options.scalar_reciprocal
@@ -194,6 +198,8 @@ def main():
         from frozen_verifier_profile import FILES as PROFILE_FILES
         names += PROFILE_FILES
     sources = {}
+    if options.mlp_buffer:
+        names += ('fused_1d.py', 'dspark_request_experiment.py')
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
         actual = (checkout / 'scripts/ci' / name).read_text()
@@ -221,6 +227,19 @@ def main():
     if options.verifier_profile:
         from frozen_verifier_profile import adapt_sources
         adapted = adapt_sources(adapted)
+    if options.mlp_buffer:
+        from frozen_mlp_buffer_trial import transform
+        adapted['frozen_mlp_buffer_candidate.py'] = transform(sources['fused_1d.py'])
+        adapted['dspark_request_experiment.py'] = replace_once(adapted['dspark_request_experiment.py'],
+            'Native versus shared Q/K preparation and recurrence; complete combined runtime',
+            'Two versus four MLP buffer blocks; shared Q/K enabled in both complete runtime arms')
+        adapted['dspark_8k_scope.py'] = replace_once(adapted['dspark_8k_scope.py'],
+            '        yield evidence',
+            '        from frozen_mlp_buffer_scope import runtime_scope as buffer_scope\n'
+            '        stack.enter_context(buffer_scope(directory))\n'
+            '        yield evidence')
+        for name in ('frozen_mlp_buffer_gate.py', 'frozen_mlp_buffer_scope.py'):
+            adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -239,6 +258,7 @@ def main():
         target_replay=options.target_replay,
         combined_runtime=options.combined_runtime,
         verifier_profile=options.verifier_profile,
+        mlp_buffer=options.mlp_buffer,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 

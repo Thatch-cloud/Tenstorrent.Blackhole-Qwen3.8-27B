@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1']
 permissions:
   contents: read
   actions: read
@@ -45,6 +45,12 @@ jobs:
           mkdir -p frozen-hardware/experiment-results
           profile=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-verifier-profile-v1 ]]; then profile=(--verifier-profile); fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-buffer-v1 ]]; then
+            profile=(--mlp-buffer)
+            gh run download 35078247907 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-buffer-35078247907-1 --dir "$evidence/buffer"
+            test "$(cat "$evidence/buffer/fused-batch.exit-status")" = 0
+            cp "$evidence/buffer/fused-batch.json" frozen-hardware/scripts/ci/frozen-mlp-buffer.json
+          fi
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
             --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
             "${profile[@]}" \
