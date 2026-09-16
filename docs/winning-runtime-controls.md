@@ -296,6 +296,15 @@ model sequence capacity remains separately rounded up. Local geometry tests
 verify coverage, not available device memory, model positional limits or hardware
 correctness. No KV precision or attention algorithm changes are introduced.
 
+There is also a positional-limit blocker at the largest requested prompt:
+`DSparkRotary` pins 262,144 maximum positions and rejects positions at or above
+that limit. A 262,144-token **prompt** plus 256 output rows needs at least 262,400
+positions. The adapter now checks target and drafter configuration limits before
+opening devices/loading model weights. It does not truncate the prompt, change
+RoPE or relabel a smaller prompt as 262K. Testing a 262K total window versus
+qualifying a positional extension for a 262K prompt is an explicit remaining
+decision; allocation coverage alone does not resolve it.
+
 ### Winning 8K recipe: where the 200-TG gap actually is
 
 Recomputed from retained run 34730226400, report SHA256

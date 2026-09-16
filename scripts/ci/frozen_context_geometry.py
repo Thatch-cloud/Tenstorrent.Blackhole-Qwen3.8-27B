@@ -29,3 +29,19 @@ def selected_geometry():
 def factory_selector():
     return '(' + ' || '.join(f"Skt == {geometry(context)['padded_keys'] // 32}"
         for context in CONTEXTS) + ')'
+
+
+def validate_position_limits(target, draft, context):
+    required = geometry(context)['capacity']
+    for name, configuration in (('target', target), ('draft', draft)):
+        if isinstance(configuration, dict):
+            configuration = configuration.get('text_config', configuration)
+        else:
+            configuration = getattr(configuration, 'text_config', configuration)
+        limit = configuration.get('max_position_embeddings') if isinstance(configuration, dict) else getattr(
+            configuration, 'max_position_embeddings', None)
+        if type(limit) is not int or limit <= 0:
+            raise ValueError(f'Explicit {name} positional limit required before loading weights')
+        if required > limit:
+            raise ValueError(f'{name} positional limit {limit} is below prompt plus generation capacity {required}; '
+                'no implicit truncation or RoPE extension is permitted')

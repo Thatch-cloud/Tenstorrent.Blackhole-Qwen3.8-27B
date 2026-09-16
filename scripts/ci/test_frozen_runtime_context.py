@@ -1,14 +1,29 @@
 import os
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from frozen_context_geometry import CONTEXTS
+from frozen_context_geometry import CONTEXTS, validate_position_limits
 from frozen_recipe_context import REVISION
 from frozen_runtime_context import FILES, adapt_runtime_sources
 
 
 class RuntimeContextTests(unittest.TestCase):
+    def test_context_cannot_silently_extend_target_or_draft_positions(self):
+        draft = {'max_position_embeddings': 262144}
+        target = SimpleNamespace(text_config=SimpleNamespace(max_position_embeddings=262144))
+        for context in CONTEXTS[:-1]:
+            validate_position_limits(target, draft, context)
+        with self.assertRaisesRegex(ValueError, '262400'):
+            validate_position_limits(target, draft, 262144)
+        with self.assertRaisesRegex(ValueError, 'draft positional limit'):
+            validate_position_limits({'max_position_embeddings': 524288}, draft, 262144)
+        with self.assertRaisesRegex(ValueError, 'target positional limit'):
+            validate_position_limits({'text_config': {'max_position_embeddings': 65536}}, draft, 65536)
+        with self.assertRaisesRegex(ValueError, 'Explicit target positional limit'):
+            validate_position_limits({}, draft, 8192)
+
     def test_history_geometry_preserves_publication_and_admission(self):
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in FILES}

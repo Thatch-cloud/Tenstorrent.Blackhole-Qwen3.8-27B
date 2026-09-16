@@ -35,7 +35,11 @@ def adapt_runtime_sources(sources):
             ('Only explicit 4096 or 8192 request contexts are supported',
                 'Explicit same-recipe ladder context required; admission is checked separately')),
         'dspark-target-hardware.py': (
-            ('import os', 'import os\nfrom frozen_context_geometry import selected_geometry'),
+            ('import os', 'import os\nfrom frozen_context_geometry import selected_geometry, validate_position_limits'),
+            ('    config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)',
+                '    config = AutoConfig.from_pretrained(weights, local_files_only=True, trust_remote_code=False)\n'
+                '    if options.request:\n'
+                "        validate_position_limits(config, json.loads(options.config.read_text()), selected_geometry()['context'])"),
             ('max_batch_size=8, max_seq_len=65536',
                 "max_batch_size=8, max_seq_len=selected_geometry()['target_sequence_capacity']"),
             ('generator.allocate_kv_cache((1032, model.args.n_local_kv_heads, 64, model.args.head_dim), ttnn.bfloat16, 64)',
