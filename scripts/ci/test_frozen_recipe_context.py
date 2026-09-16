@@ -1,11 +1,22 @@
 import subprocess
 import unittest
+import os
+from unittest.mock import patch
 
 from frozen_recipe_context import REVISION, adapt_probe_sources, geometry
-from frozen_context_geometry import CONTEXTS
+from frozen_context_geometry import CONTEXTS, selected_geometry
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
+    def test_single_environment_flag_selects_all_sizes_without_fallback(self):
+        for context in CONTEXTS:
+            with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': str(context)}):
+                self.assertEqual(selected_geometry(), geometry(context))
+        for value in ('', '32k', '131000', '262000', '524288', '32768 '):
+            with patch.dict(os.environ, {'QWEN_DSPARK_REQUEST_CONTEXT': value}):
+                with self.assertRaises(ValueError):
+                    selected_geometry()
+
     def test_geometry_preserves_output_headroom_and_chunk_size(self):
         for context in CONTEXTS:
             shape = geometry(context)
