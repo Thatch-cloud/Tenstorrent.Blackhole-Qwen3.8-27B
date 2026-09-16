@@ -106,3 +106,27 @@ unchanged 900-second attempt.
 
 Partial report SHA256:
 `00658e8b2f9f04090b7c34aa3dbc707ae29d702debeead2699927a733e7efbbd`.
+
+## Shorter qualification and timing cycles
+
+The next run separates the existing six-request schedule into two phases:
+
+| Phase | Work | Evidence required |
+| --- | --- | --- |
+| Qualification | Both full feature-audited requests, final weights/source checks and clean shutdown | Fresh execution; the timed-out report is not admitted |
+| Timing | Four fresh uninstrumented A/B/B/A requests with exact output/state checks | SHA256-pinned, clean qualification with identical runtime sources, native sources, model fingerprints, context and cache formats |
+
+The qualification-only job has a 720-second hardware command cap, a 13-minute
+step cap (including cleanup), and an 18-minute whole-job cap including staging.
+It refuses to begin the audits if harness setup has already exceeded 100 seconds.
+This avoids spending another nine minutes auditing after a five-minute load.
+Normal setup previously took about 70 seconds; the budget is not a guarantee
+against future host contention.
+
+The audit report explicitly contains no PP or TG. The later timing report must
+identify the retained audit run and digest, preserve the original per-arm proposal
+and acceptance checks, and obtain four fresh complete timed requests. Changing
+any bound source or model fingerprint invalidates reuse. The full numerical
+schedule is preserved across phases; no serving configuration, tensor operation,
+precision, or timing boundary changes. The timing phase is not dispatched until
+the new qualification completes successfully.

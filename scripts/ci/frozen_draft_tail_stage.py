@@ -26,11 +26,29 @@ def adapt(sources):
     return result
 
 
+def phase_adapter(source):
+    if 'from frozen_request_phases import' in source:
+        raise ValueError('Request phases already staged')
+    source = replace_once(source,
+        "    report['coding_context'], report['request_checks'] = context, []",
+        "    from frozen_request_phases import prepare, finish\n"
+        "    request_phase = prepare(Path(__file__).parent, report, schedule)\n"
+        "    schedule = request_phase['schedule']\n"
+        "    report['coding_context'], report['request_checks'] = context, []")
+    source = replace_once(source,
+        '    if profile_verifier or profile_drafter or combined_profile:\n',
+        '    if finish(request_phase, report):\n        return\n'
+        '    if profile_verifier or profile_drafter or combined_profile:\n')
+    compile(source, 'dspark_request_experiment.py', 'exec')
+    return source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--geometry', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--request-phase', choices=('audit', 'timed'))
     options = parser.parse_args()
     metadata = json.loads(options.geometry.read_text())
     if (metadata.get('norm_prefetch') is not True or metadata.get('combined_runtime') is not True
@@ -44,6 +62,13 @@ def main():
     result = adapt({name: (scripts / name).read_text()
         for name in ('dspark_8k_scope.py', 'dspark_request_experiment.py')})
     result.update({name: Path(__file__).with_name(name).read_text() for name in HELPERS})
+    if options.request_phase:
+        result['dspark_request_experiment.py'] = phase_adapter(result['dspark_request_experiment.py'])
+        result['frozen_request_phases.py'] = Path(__file__).with_name('frozen_request_phases.py').read_text()
+        if options.request_phase == 'audit':
+            (scripts / 'frozen-request-phase.json').write_text(json.dumps(dict(mode='audit')) + '\n')
+        elif not (scripts / 'frozen-request-phase.json').is_file():
+            raise ValueError('Pinned timed-phase configuration must be staged explicitly')
     for name, source in result.items():
         compile(source, name, 'exec')
         (scripts / name).write_bytes(source.encode())
