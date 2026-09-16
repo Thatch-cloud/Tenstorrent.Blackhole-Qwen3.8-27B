@@ -42,13 +42,14 @@ def inventory(root, output):
             retain(path)
         else:
             report['missing'].append(relative)
-    for relative in ('tt_metal/tools/profiler', 'tt_metal/hw/inc'):
+    for relative in ('tt_metal/tools/profiler', 'tt_metal/hw/inc', 'tt_metal/tools/tracy'):
         directory = root / relative
         if not directory.is_dir():
             report['missing'].append(relative)
             continue
         candidates = sorted(path for path in directory.rglob('*') if path.is_file()
-            and path.suffix in ('.h', '.hpp', '.cpp', '.py') and 'profil' in path.as_posix().lower())
+            and path.suffix in ('.h', '.hpp', '.cpp', '.py')
+            and (relative != 'tt_metal/hw/inc' or 'profil' in path.as_posix().lower()))
         if len(candidates) > 120:
             raise ValueError('Profiler inventory exceeds reviewed file budget')
         for path in candidates:
@@ -63,6 +64,7 @@ def inventory(root, output):
             if matches:
                 report['profiler_candidates'].append(dict(path=path.relative_to(root).as_posix(),
                     matches=matches[:30], total_matches=len(matches)))
+            if matches or relative != 'tt_metal/hw/inc':
                 retain(path)
     (output / 'inventory.json').write_text(json.dumps(report, indent=2) + '\n')
     return report

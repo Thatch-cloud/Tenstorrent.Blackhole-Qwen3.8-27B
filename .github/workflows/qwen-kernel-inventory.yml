@@ -1,7 +1,7 @@
 name: Qwen pinned kernel capability inventory
 on:
   push:
-    tags: ['experiment/frozen-kernel-inventory-v1']
+    tags: ['experiment/frozen-kernel-inventory-v1', 'experiment/frozen-profiler-export-inventory-v1']
 permissions:
   contents: read
 concurrency:

@@ -7,6 +7,18 @@ from frozen_kernel_inventory import inventory, KERNELS
 
 
 class InventoryTests(unittest.TestCase):
+    def test_exporter_retained_without_kernel_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'runtime'
+            exporter = root / 'tt_metal/tools/tracy/export.py'
+            exporter.parent.mkdir(parents=True)
+            exporter.write_text('def export_zones(): pass\n')
+            output = Path(temporary) / 'output'
+            result = inventory(root, output)
+            self.assertEqual(len(result['files']), 1)
+            self.assertEqual((output / 'sources' / exporter.relative_to(root)).read_bytes(),
+                exporter.read_bytes())
+
     def test_bounded_read_only_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / 'runtime'
