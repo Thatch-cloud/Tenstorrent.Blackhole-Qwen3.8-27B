@@ -113,6 +113,16 @@ path. Next establish complete markers in a bounded hardware fixture before
 spending a full model load on combined-request profiling. Keep the same numerical
 gates and reject incomplete hardware markers; do not promote an instrumented TG.
 
+The hardware marker lane has a seven-minute whole-job cap and a 210-second probe
+limit. It reuses only the cached MLP fixture, opens the explicitly allocated pair,
+and refuses detected device owners. Before opening cards, admission pins the
+successful simulator report, reader sources, projection code, replay helper and
+packed-weight checks. Hardware adaptations change backend selection and record
+the actual fused trace ID, not kernel operations or arithmetic.
+The final validator requires all numerical checks plus ten matched scopes per
+execution, across four fused replays on both chips. Sources are checked before
+and after the probe. A green numerical report alone cannot qualify the markers.
+
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or
