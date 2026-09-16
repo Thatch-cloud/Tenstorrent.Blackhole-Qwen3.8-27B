@@ -10,6 +10,17 @@ import frozen_sim_build_cache as cache
 
 
 class FrozenBuildCacheTests(unittest.TestCase):
+    def test_scratch_requires_explicit_selection_and_pinned_sources(self):
+        with patch.dict(os.environ, {'QWEN_FROZEN_TARGET_SCRATCH': 'yes'}):
+            with self.assertRaisesRegex(ValueError, 'Explicit target scratch'):
+                cache.main()
+        with patch.dict(os.environ, {'QWEN_FROZEN_TARGET_SCRATCH': '1'}), \
+                patch('sdpa_tree_scratch.audit', side_effect=ValueError('source mismatch')), \
+                patch.object(cache.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'source mismatch'):
+                cache.main()
+            execute.assert_not_called()
+
     def test_cold_build_reuse_missing_and_corrupt_cache(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
