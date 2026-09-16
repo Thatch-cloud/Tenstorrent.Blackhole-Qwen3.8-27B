@@ -130,3 +130,12 @@ any bound source or model fingerprint invalidates reuse. The full numerical
 schedule is preserved across phases; no serving configuration, tensor operation,
 precision, or timing boundary changes. The timing phase is not dispatched until
 the new qualification completes successfully.
+
+Qualification attempt **35160929787** stopped cleanly in 3m42s, before either
+request audit. Setup had reached 124.60 seconds; all JIT lookups hit cache, but
+pre-load full I/O stall was **11.94%**, above the existing 1% threshold. This is
+an admission failure, not a numerical failure or timeout. The prior workflow
+only warned on host contention and still loaded weights. Audit-v2 makes that
+existing check fatal before model loading; it does not change the threshold,
+kernel, audit schedule, or phase budgets. A failed admission should not trigger
+an unchanged expensive retry.

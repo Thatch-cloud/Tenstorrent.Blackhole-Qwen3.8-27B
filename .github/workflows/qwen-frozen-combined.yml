@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3', 'experiment/frozen-32k-wait-profile-v4', 'experiment/frozen-32k-draft-tail-v1', 'experiment/frozen-32k-draft-tail-audit-v1']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3', 'experiment/frozen-32k-wait-profile-v4', 'experiment/frozen-32k-draft-tail-v1', 'experiment/frozen-32k-draft-tail-audit-v1', 'experiment/frozen-32k-draft-tail-audit-v2']
 permissions:
   contents: read
   actions: read
@@ -11,7 +11,7 @@ concurrency:
 jobs:
   combined:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' && 18 || 20 }}
+    timeout-minutes: ${{ (github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' || github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v2') && 18 || 20 }}
     steps:
       - name: Verify host and restore artifact ownership
         run: |
@@ -44,12 +44,12 @@ jobs:
           gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
           mkdir -p frozen-hardware/experiment-results
           profile=()
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-incremental-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-incremental-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then
             profile=(--incremental-history)
             gh run download 35024279412 --repo "$GITHUB_REPOSITORY" --name qwen-history-append-hardware-35024279412 --dir "$evidence/history"
             cp "$evidence/history/history-append-hardware.json" frozen-hardware/scripts/ci/history-append-hardware.json
           fi
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then
             profile=(--norm-prefetch)
             gh run download 35086789628 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35086789628-1 --dir "$evidence/norm"
             test "$(cat "$evidence/norm/gdn-shared-recurrence.exit-status")" = 0
@@ -78,12 +78,12 @@ jobs:
             --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
             "${profile[@]}" \
             --manifest frozen-hardware/experiment-results/frozen-geometry.json
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then
             gh run download 35158163367 --repo "$GITHUB_REPOSITORY" --name qwen-draft-tail-hardware-35158163367 --dir "$evidence/draft-tail"
             test "$(cat "$evidence/draft-tail/draft-tail-hardware.exit-status")" = 0
             cp "$evidence/draft-tail/draft-tail-hardware.json" frozen-hardware/scripts/ci/frozen-draft-tail-hardware.json
             phase=()
-            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 ]]; then phase=(--request-phase audit); fi
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then phase=(--request-phase audit); fi
             python3 -B frozen-orchestrator/scripts/ci/frozen_draft_tail_stage.py "${phase[@]}" --checkout frozen-hardware \
               --geometry frozen-hardware/experiment-results/frozen-geometry.json \
               --manifest frozen-hardware/experiment-results/draft-tail-sources.json
@@ -110,9 +110,13 @@ jobs:
           timeout -k 5 25 python3 -B frozen-orchestrator/scripts/ci/runner_io_gate.py \
             --output frozen-hardware/experiment-results/runner-io-admission.json || status=$?
           test "$status" = 0 -o "$status" = 75
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 && "$status" = 75 ]]; then
+            echo '::error::Host I/O contention: refusing weight loading and expensive request audits.'
+            exit 75
+          fi
           if [ "$status" = 75 ]; then echo '::warning::Host contention: results are diagnostic, not performance acceptance.'; fi
       - name: Run combined 32K candidate on allocated cards
-        timeout-minutes: ${{ github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' && 13 || 16 }}
+        timeout-minutes: ${{ (github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v1' || github.ref == 'refs/tags/experiment/frozen-32k-draft-tail-audit-v2') && 13 || 16 }}
         working-directory: frozen-hardware
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,7 +136,7 @@ jobs:
           QWEN_DSPARK_HISTORY_PROFILE: '0'
         run: |
           budget=900
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 ]]; then budget=720; fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then budget=720; fi
           timeout -k 45 "$budget" bash scripts/ci/run-dspark-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
