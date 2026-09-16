@@ -1,7 +1,7 @@
 name: Qwen matched combined full-response timing
 on:
   push:
-    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1']
+    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1']
 permissions:
   contents: read
   actions: read
@@ -33,7 +33,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_MATCHED_COMBINED: '1'
-          QWEN_SPLITK_WORKERS: ${{ github.ref_name == 'experiment/workers16-combined-timed-v1' && '16' || '8' }}
+          QWEN_SPLITK_WORKERS: ${{ startsWith(github.ref_name, 'experiment/workers16-') && '16' || '8' }}
+          QWEN_HISTORY_WAIT_PROFILE: ${{ github.ref_name == 'experiment/workers16-history-profile-v1' && '1' || '0' }}
           QWEN_SPLITK_COMBINED: '1'
           QWEN_64K_MLP_TIMED: '1'
           QWEN_64K_SHARED_QK_TIMED: '1'

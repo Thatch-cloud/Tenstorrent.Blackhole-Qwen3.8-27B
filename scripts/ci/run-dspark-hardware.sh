@@ -534,6 +534,7 @@ test_id=$(docker create --network none --hostname qwen-experiment --add-host qwe
     -e "QWEN_SPLITK_COMBINED=$splitk_combined" \
     -e "QWEN_MATCHED_COMBINED=$matched_combined" \
     -e "QWEN_SPLITK_WORKERS=$splitk_workers" \
+    -e "QWEN_HISTORY_WAIT_PROFILE=${QWEN_HISTORY_WAIT_PROFILE:-0}" \
     -e "QWEN_64K_MLP_AUDIT=$mlp_64k_audit" \
     -e "QWEN_64K_MLP_TIMED=$mlp_64k_timed" \
     -e "QWEN_64K_SHARED_QK_AUDIT=$shared_64k_audit" \
