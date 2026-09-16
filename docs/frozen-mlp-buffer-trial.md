@@ -33,7 +33,26 @@ other row widths and coding quality are not established. The staging manifest's
 qualification fields remain false: they describe pre-execution state, not the
 subsequent simulator result.
 
-Next: source-bound admission, then a matched combined-request comparison with
-shared-Q/K enabled in **both** arms and only buffering changed. Reusing the old
-native-versus-shared-Q/K schedule would confound the comparison. Keep serving
-defaults and the existing 72.27 TG baseline unchanged until hardware acceptance.
+## Matched hardware result: not adopted
+
+Run **35079244639** (`b01c3cd`) passes in **15m20s**, with shared-Q/K enabled
+in both arms. All six requests pass exact output/state/inactive-slot checks;
+both arms reproduce the same proposals and acceptance. Two audited requests
+are excluded from timing; four timed requests use A/B/B/A order.
+
+| CTX 32768, one stream | Two-block control | Four-block candidate |
+| --- | ---: | ---: |
+| Committed TG tok/s | 71.807 | 71.314 |
+| Verifier/readback ms/block | 73.936 | 74.399 |
+| Complete cycle ms/block | 148.061 | 149.081 |
+| Committed tokens/block | 10.636 | 10.636 |
+
+The candidate is approximately 0.69% slower in this sample; two timed requests
+per arm do not establish a general regression. They do establish **no demonstrated
+gain**, so retain two-block buffering and do not spend another full run on the
+same candidate without new evidence. Integrated L1 capacity and correctness pass.
+Serving defaults remain unchanged; the earlier 72.27 TG result remains the
+recorded baseline, not a speedup from this experiment.
+
+Hardware report SHA256:
+`cb1b8fbe5b3034cb17a058254015d4c40b4216ad8e8fc201306b5e3277c3ee17`.
