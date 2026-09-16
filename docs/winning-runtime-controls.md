@@ -368,3 +368,24 @@ source tests pass, but this candidate has not run in the corrected geometry.
 Do not simply rerun the full matrix under the same timeout: a successful probe
 executes more attention calls than this early failure and needs a measured
 execution budget or correctly partitioned checks.
+
+### Reciprocal candidate: 32K eager screen passes
+
+Run **35057655308**, revision `726033c`, passes both eager fixtures on both chips
+at the unchanged `rtol=atol=0.01`. All four comparisons have zero failing elements;
+24 input-immutability, eight physical-layout and eight fixture-control checks
+are retained. The probe takes **410.99 seconds**, cached preparation **3.02
+seconds**, and device/container cleanup succeeds. The native-library cache key
+and binary match the preceding failed native-reciprocal run.
+
+All 48 reported script/support source hashes match the historical sources plus
+the recorded adapter changes; all 18 deployment hashes were reconstructed.
+Report SHA256:
+`0534367dfb1fb3556fd6c9ac65d807cafcfbe2d62373647a20a397f28b6181a7`.
+
+This confirms the candidate resolves the observed eager-fixture failures, not
+that reciprocal rounding is the only possible long-context error. The artifact
+correctly records `eager_complete=true`, `passed=false` and
+`complete_probe_coverage=false`: replay and stale-input checks were not run.
+Diagnostics, replay, full-model correctness and PP/CTX/TG remain unqualified.
+The candidate has not been enabled in hardware or serving.
