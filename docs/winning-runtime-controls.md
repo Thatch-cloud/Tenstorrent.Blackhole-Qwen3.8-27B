@@ -180,3 +180,28 @@ evidence, timeout, and all correctness/admission failures still stop the job.
 The report remains diagnostic-only with unqualified per-arm timing; no serving
 or performance promotion follows from a green diagnostic run. Other tags retain
 the quiet-host cutoff. This is not a change to the kernel or benchmark timings.
+
+### Passing combined score pair
+
+Run **35049608823**, revision `402e2cc`, completed with exact output/state checks,
+clean closure and successful outer validation. Report SHA-256:
+`773d7fe34923669952e8dd07fa4c64b875967c77ea8665432fb0e3650e02d9f0`.
+
+| One stream, CTX 65,536 | PP tokens/s | Committed TG | Draft ms/block | Verify/readback ms/block | Select/commit ms/block |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native score | 2,554.47 | 38.39 | 84.07 | 81.81 | 8.06 |
+| Fused score | 2,597.57 | 41.21 | 75.22 | 81.51 | 5.69 |
+
+Each arm committed 135 tokens across 20 blocks: 6.75 committed tokens per block.
+The fused arm averaged 163.75 ms per cycle. This is a correctness-passed diagnostic
+pair, not a repeatability or held-out coding-quality qualification. Its 7.3% TG
+improvement is observed, not adopted as a serving default.
+
+At this acceptance rate, 200 TG requires **33.75 ms per complete cycle**, versus
+163.75 ms observed. Eliminating select/commit alone cannot bridge this gap. Even
+eliminating the entire draft stage leaves the measured verifier above that budget.
+The next optimization needs verifier reduction and/or materially more committed
+tokens per verification, while retaining exact recurrence/KV rollback and coding
+quality. Repeating host-I/O admission tuning or isolated score tweaks is not a
+credible route to the target. Use this composed fused path as the next diagnostic
+control; do not restart its component kernel search.
