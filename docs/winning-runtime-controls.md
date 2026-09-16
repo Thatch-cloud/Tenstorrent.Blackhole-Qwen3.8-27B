@@ -407,3 +407,32 @@ The report has `passed=true` for the numerical/replay shard but
 outstanding. The next isolated diagnostics run uses the same reciprocal candidate,
 factory, chunk size and tolerances, with the original 510-second probe limit.
 Neither this report nor its elapsed simulator time establishes model TG.
+
+### 32K candidate: complete component evidence recovered
+
+Diagnostics run **35061391709** completed its simulator work in **368.27 seconds**.
+The job failed only when GitHub's artifact upload timed out. Recovery run
+**35062238298** uploaded the retained results without checkout or simulator rerun.
+
+The numerical and diagnostic reports pass `frozen_probe_evidence.validate_pair`
+at context **32768**: matching factory and source identities, exact changed-input
+replay, both stale-input controls, and all six value diagnostics. All **48**
+diagnostic source hashes and **18** deployment hashes were independently
+reconstructed from the historical recipe and explicit adapters. Cleanup passed.
+Diagnostic report SHA256:
+`1dc508f7235cea9a52f6c34cb928581895dc6376a3cf70e7ff7644697df5820b`.
+
+| Acceptance scope | Status |
+| --- | --- |
+| 32K draft attention, scalar-FP32 reciprocal | Complete simulator component coverage |
+| Unchanged native reciprocal at 32K | Failed six eager elements; not qualified |
+| 32K combined model / coding quality / PP and TG | Not measured |
+| 64K, 131K and 262K candidate | Not qualified by these reports |
+
+Next integration work must carry this exact candidate into the historical runtime,
+not the separate split-K/incremental-publication branch. Remaining gates are the
+context-specific entry/admission/build routing and target T16 attention replay;
+the draft-attention report does not qualify the target verifier. Keep matching
+source/binary verification and the existing request correctness audit. Reuse the
+recovered component evidence rather than repeating this simulator qualification.
+Serving defaults remain unchanged; the 200 committed tok/s target remains unmet.
