@@ -9,30 +9,34 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest validated improvement: 87.53 committed tokens/s at 32K context**, one
-coding stream on both cards. Incremental history publication improves the matched
-control by **10.15%**. Exact output, target state and inactive-state checks pass.
-This is an offline coding fixture, not sustained serving or held-out quality certification.
+**Latest validated fixture result: 89.01 committed tokens/s at 32K context**,
+one coding stream on both cards. Exact output, target state and inactive-state
+checks pass. Sustained serving and held-out coding quality remain unqualified.
 
 | Matched 32K runtime | PP tok/s | CTX | Committed TG tok/s |
 | --- | ---: | ---: | ---: |
-| Full-bank publication | 2935.22 | 32768 | 79.46 |
-| Incremental publication | 2961.67 | 32768 | **87.53** |
+| Incremental publication, original norm reader | 2940.84 | 32768 | 87.41 |
+| Incremental publication, prefetched norm reader | 2962.66 | 32768 | **89.01** |
 
-Two timed responses per arm, 117 committed tokens each. Both arms use the same
-shared-Q/K, fused T16 verifier and draft attention. Publication/commit falls from
-21.56 to 6.17 ms/block; verification remains about 74 ms. The complete job takes
-14m10s. [Results and source hashes](docs/frozen-incremental-history.md).
-
-**Latest follow-up:** batched GDN norm reads reach **PP 2962.66 / CTX 32768 /
-TG 89.01**, versus 87.41 TG matched control (+1.83%), with incremental publication
-in both arms. Exact checks pass; verification drops about 1.40 ms/block. This
-single matched run is not broad performance or quality acceptance.
-[Candidate and qualification](docs/frozen-gdn-norm-prefetch.md).
+Two timed responses per arm, 117 committed tokens each; a **1.83% matched gain**.
+This follows the earlier **10.15%** incremental-publication gain. These are
+separate comparisons, not cumulative percentages.
+[Norm result](docs/frozen-gdn-norm-prefetch.md) · [Publication result](docs/frozen-incremental-history.md).
 
 The next MLP activation-prefetch trial regresses to **86.50 TG** versus **88.95**
 matched control and is rejected. Keep the original streaming MLP reader.
 [Rejected trial](docs/frozen-mlp-input-prefetch.md).
+
+### What we are doing next
+
+| Work | Evidence / status |
+| --- | --- |
+| Sampled MLP timing probes | Simulator numerical gate passed; hardware marker gate passed in **34 seconds** |
+| Full 32K runtime attribution | [Combined capture launched](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35151664646); no new TG claim |
+| Gap to 200 TG | Current mean block **131.38 ms**; needs **58.50 ms** at unchanged acceptance |
+
+Both draft and verification costs need attention; MLP buffer tweaks alone cannot
+close that gap. [Profiling evidence and limits](docs/pinned-kernel-profiling-inventory.md).
 
 The 4K/8K historical winners and the separate 64K split-K runtime below are
 **not one matched context-scaling curve**. The 32K extension explicitly adds
