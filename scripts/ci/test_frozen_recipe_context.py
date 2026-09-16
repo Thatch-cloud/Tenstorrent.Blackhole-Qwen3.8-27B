@@ -10,6 +10,7 @@ from unittest.mock import patch
 import frozen_recipe_context
 from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, geometry
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
+from frozen_runtime_context import FILES
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
@@ -46,7 +47,7 @@ timeout() {
     def test_deployment_preserves_historical_hardware_runtime(self):
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
             'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
-            'simulator-suite.sh', 'dspark_runtime_cache.py')
+            'simulator-suite.sh', 'dspark_runtime_cache.py') + FILES
         originals = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
         with tempfile.TemporaryDirectory() as temporary:
@@ -77,6 +78,9 @@ timeout() {
             self.assertNotIn('dspark_runtime_cache.py', report['after'])
             self.assertIn('frozen_binary_cache.py', report['after'])
             self.assertFalse(report['performance_qualified'])
+            self.assertIn("max_seq_len=selected_geometry()['target_sequence_capacity']",
+                (scripts / 'dspark-target-hardware.py').read_text())
+            self.assertIn("geometry(context)['capacity']", (scripts / 'dspark_8k_scope.py').read_text())
             self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
                 {'frozen_binary_cache.py', 'frozen_context_geometry.py',
                  'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py',

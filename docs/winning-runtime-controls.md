@@ -269,8 +269,10 @@ protection, not a performance result.
 
 Before another ladder run:
 - Verify the asset/cleanup bounds on the runner and measure remaining setup time.
-- Connect the context adapter to the full historical runtime: currently its
-  deployment is simulator-only and the runtime plumbing helper is not invoked.
+- Complete runtime context routing and admission. Deployment now invokes the
+  runtime plumbing helper alongside the simulator adapter, including target
+  sequence allocation and stable-history geometry; this does not yet remove
+  the historical 8K-only entry, build and target-attention admission checks.
 - Replace the hard-coded 8K admission with matching per-context evidence, without
   bypassing source/binary checks or substituting the different 64K runtime.
 - Retain one numerical recipe and report PP / CTX / committed TG independently.

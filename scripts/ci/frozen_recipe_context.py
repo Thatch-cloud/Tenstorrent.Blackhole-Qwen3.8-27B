@@ -129,8 +129,9 @@ def main():
         raise ValueError('Exact historical recipe checkout required')
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
-    names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh')
+    from frozen_runtime_context import FILES, adapt_runtime_sources
+    names = tuple(dict.fromkeys(('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
     sources = {}
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
@@ -138,7 +139,7 @@ def main():
         if original.replace('\r\n', '\n') != actual:
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
-    adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
+    adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context)))
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -151,7 +152,7 @@ def main():
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
         geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},
         after={name: checksum(source) for name, source in adapted.items()},
-        scope='Geometry-only draft probe; no numerical or runtime admission',
+        scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         performance_qualified=False), indent=2) + '\n')
 
 
