@@ -127,6 +127,20 @@ def adapt_scalar_reciprocal(sources):
     return result
 
 
+def adapt_eager_only(sources):
+    result = dict(sources)
+    name = 'dspark-native-8k-attention-probe.py'
+    result[name] = replace_once(result[name], "        update(0)\n        progress('capture')",
+        "        report['eager_complete'] = True\n"
+        "        report['complete_probe_coverage'] = False\n"
+        "        return\n        update(0)\n        progress('capture')")
+    result[name] = replace_once(result[name],
+        "'diagnostics_complete' if report.get('diagnostics_complete')",
+        "'eager_complete' if report.get('eager_complete') and report['closed_cleanly'] else "
+        "'diagnostics_complete' if report.get('diagnostics_complete')")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
@@ -134,6 +148,8 @@ def main():
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--scalar-reciprocal', action='store_true',
         help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
+    parser.add_argument('--eager-only', action='store_true',
+        help='Stop after both eager fixtures; never qualifies replay or full probe coverage')
     options = parser.parse_args()
     checkout = options.checkout.resolve(strict=True)
 
@@ -159,6 +175,8 @@ def main():
         adapted = adapt_scalar_reciprocal(adapted)
         adapted['dspark_ladder_scalar_reciprocal.py'] = Path(__file__).with_name(
             'dspark_ladder_scalar_reciprocal.py').read_text()
+    if options.eager_only:
+        adapted = adapt_eager_only(adapted)
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -173,6 +191,7 @@ def main():
         after={name: checksum(source) for name, source in adapted.items()},
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',
+        eager_only=options.eager_only,
         performance_qualified=False), indent=2) + '\n')
 
 

@@ -8,7 +8,7 @@ import sys
 from unittest.mock import patch
 
 import frozen_recipe_context
-from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, adapt_scalar_reciprocal, geometry
+from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, adapt_scalar_reciprocal, adapt_eager_only, geometry
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 from frozen_runtime_context import FILES
 
@@ -139,6 +139,11 @@ timeout() {
         self.assertIn('with scalar_reciprocal(), scoped_stats_pack()', reciprocal['dspark-native-8k-attention-probe.py'])
         self.assertIn("reciprocal_variant='scalar-fp32'", reciprocal['dspark-native-8k-attention-probe.py'])
         compile(reciprocal['dspark-native-8k-attention-probe.py'], 'reciprocal-probe', 'exec')
+        eager_only = adapt_eager_only(reciprocal)['dspark-native-8k-attention-probe.py']
+        compile(eager_only, 'eager-only-probe', 'exec')
+        self.assertIn("report['eager_complete'] = True", eager_only)
+        self.assertIn("report['complete_probe_coverage'] = False\n        return", eager_only)
+        self.assertLess(eager_only.index("report['eager_complete'] = True"), eager_only.index("progress('capture')"))
         for name in set(baseline) - {'dspark-native-8k-attention-probe.py'}:
             self.assertEqual(baseline[name], reciprocal[name])
         factories = []
