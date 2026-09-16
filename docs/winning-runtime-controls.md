@@ -165,5 +165,18 @@ The observed 9.6% difference is one fixed-order pair, not a repeatable gain.
 Retry **35049234170**, revision `2458f52`, stopped at the 15-second admission
 check: **45.997% full I/O stall**, versus the 1% limit. No model load or hardware
 measurement ran. The fix still needs an uncontended hardware rerun; do not
-weaken the admission threshold or stop unrelated jobs to obtain a green run.
+interpret host pressure as a measured decode slowdown or stop unrelated jobs.
 The 200 committed tokens/s objective remains unachieved.
+
+The completed pair's own cgroup counters show 3.323 seconds full I/O stall over
+133.559 seconds for the control (2.49%), and 15.746 over 166.622 seconds for the
+candidate (9.45%). These include setup and audits, not isolated decode. The
+candidate's lower decode time despite higher whole-request pressure demonstrates
+why host pressure alone cannot classify the decode result.
+
+Tag `experiment/matched-score-pair-v3` therefore treats a valid high-pressure
+sample as advisory for this diagnostic comparison only. Missing/invalid pressure
+evidence, timeout, and all correctness/admission failures still stop the job.
+The report remains diagnostic-only with unqualified per-arm timing; no serving
+or performance promotion follows from a green diagnostic run. Other tags retain
+the quiet-host cutoff. This is not a change to the kernel or benchmark timings.

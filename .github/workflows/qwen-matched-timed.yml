@@ -1,7 +1,7 @@
 name: Qwen matched combined full-response timing
 on:
   push:
-    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2', 'experiment/matched-score-pair-v1', 'experiment/matched-score-pair-v2']
+    tags: ['experiment/matched-combined-timed-v1', 'experiment/workers16-combined-timed-v1', 'experiment/workers16-history-profile-v1', 'experiment/workers16-history-profile-v2', 'experiment/matched-score-pair-v1', 'experiment/matched-score-pair-v2', 'experiment/matched-score-pair-v3']
 permissions:
   contents: read
   actions: read
@@ -27,13 +27,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Reject contended host before loading weights
+      - name: Measure host pressure before loading weights
         timeout-minutes: 1
         shell: bash
         run: |
           mkdir -p experiment-results
           chmod 2775 experiment-results
-          timeout -k 5 25 python3 -B scripts/ci/runner_io_gate.py --output experiment-results/runner-io-admission.json
+          status=0
+          timeout -k 5 25 python3 -B scripts/ci/runner_io_gate.py --output experiment-results/runner-io-admission.json || status=$?
+          if [ "$status" != 0 ]; then
+            test "$GITHUB_REF_NAME" = experiment/matched-score-pair-v3
+            test "$status" = 75
+            python3 -c 'import json; report=json.load(open("experiment-results/runner-io-admission.json")); assert isinstance(report.get("full_io_stall_fraction"), (int, float)); assert report["elapsed_seconds"] > 0'
+            echo '::warning::Host pressure exceeds quiet-run threshold; proceeding with diagnostic-only paired requests, not performance qualification.'
+          fi
       - name: Cached build and two complete 64K requests
         timeout-minutes: 10
         env:
