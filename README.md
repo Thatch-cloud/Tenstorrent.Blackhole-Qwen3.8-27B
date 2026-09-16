@@ -9,6 +9,13 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
+**Latest combined result: PP 2,309.96 / CTX 65,536 / TG 37.94 tok/s**
+([35039344557](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35039344557)).
+Two exact EOS responses each commit 135 tokens with FP32-maxima split-K,
+fused T16 MLP, shared Q/K and incremental history. This maintains the previous
+64K performance; it is not a new speedup. The complete job took 5m49s.
+Drafting and verification still cost about 85.5 and 82.3 ms/block, respectively.
+
 **Repeat-confirmed 64K candidate: 37.95 and 38.32 committed tok/s**, versus
 30.55 and 30.69 matched controls (35026222541 / 35027433446). Exact output/state
 and final weight audits pass, with clean shutdown in both runs. These short EOS
@@ -52,6 +59,7 @@ are not a like-for-like context-scaling curve or concurrent-serving benchmark.
 | Same-request control, 135 committed tokens to EOS | 65536 | 2603.19 | 30.55 | 35026222541; native history publication |
 | Incremental-history candidate, same output | 65536 | 2205.49 | 37.95 | Same run; exact checks and clean close |
 | Incremental-history repeat, same output | 65536 | 2597.34 | 38.32 | 35027433446; matched control 30.69 TG |
+| FP32-maxima combined runtime, two repeated EOS responses | 65536 | 2309.96 | 37.94 | 35039344557; exact outputs/state, clean close |
 | Remaining ladder: 16K, 32K, 128K, 256K | — | Not qualified | Not qualified | Pending on the combined candidate |
 | Concurrent batching / streaming endpoint | — | Not measured | Not measured | Not qualified by offline tests |
 

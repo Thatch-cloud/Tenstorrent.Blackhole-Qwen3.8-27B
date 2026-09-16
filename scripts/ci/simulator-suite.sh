@@ -95,6 +95,7 @@ PY
                 fi
                 if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
                     score_name=dspark-splitk-maxima
+                    if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then score_name=dspark-splitk-workers; fi
                     unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS TT_METAL_DPRINT_PREPEND_DEVICE_CORE_RISC TT_METAL_DPRINT_FILE
                 fi
                 QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 165 python3 -u \

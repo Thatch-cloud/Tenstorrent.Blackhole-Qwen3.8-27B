@@ -1,7 +1,7 @@
 name: Qwen split-K FP32 maxima simulator
 on:
   push:
-    tags: ['experiment/splitk-maxima-sim-v1']
+    tags: ['experiment/splitk-maxima-sim-v1', 'experiment/splitk-workers16-sim-v1']
 permissions:
   contents: read
 concurrency:
@@ -32,6 +32,7 @@ jobs:
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: dspark-splitk
           QWEN_SPLITK_MAXIMA: '1'
+          QWEN_SPLITK_WORKERS: ${{ github.ref == 'refs/tags/experiment/splitk-workers16-sim-v1' && '16' || '8' }}
         run: timeout -k 15 495 bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

@@ -12,7 +12,7 @@ and call that a scaling curve. Serving defaults remain unchanged.
 | 8192 | Pass | Exact pass | Not measured on this candidate |
 | 16384 | Pass | Exact pass | Not measured on this candidate |
 | 32768 | Pass | Exact pass | Not measured on this candidate |
-| 65536 | Pass | Exact pass | Not measured on this candidate |
+| 65536 | Pass | Exact pass | PP 2309.96 / TG 37.94; two complete repeated requests |
 | 131072 | Numerical failure: 59 elements | Not run | Not qualified |
 | 262144 | Cancelled after 131K failure | Not run | Not qualified |
 
@@ -28,6 +28,31 @@ reserves CTX+1024. Integration must account for this explicitly, not pretend
 the component fixture validates every runtime allocation. The previous 64K
 incremental-history runtime reached 37.95/38.32 committed TG, but did not use
 this FP32-maxima factory. Those are not measurements of the new candidate.
+
+## Combined 64K baseline, run 35039344557
+
+The new maxima runtime passes both complete responses with exact output/state,
+all 120 learned-parameter checks and clean shutdown. The 5m49s job uses a cache
+hit. Each response commits 135 tokens to EOS in 20 blocks; all publications use
+the incremental writer. This is an offline short coding fixture, not sustained
+serving or held-out coding-quality acceptance.
+
+| Repetition | PP tok/s | CTX | Committed TG tok/s | Decode ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2106.06 | 65536 | 37.87 | 3564.79 |
+| 2 | 2557.57 | 65536 | 38.00 | 3552.32 |
+| Pooled identical runtime | 2309.96 | 65536 | 37.94 | 7117.11 total |
+
+Mean block costs: 85.51 ms draft, 82.32 ms verification/readback, 8.07 ms
+selection/commit, 177.85 ms whole cycle. At the measured 6.75 committed tokens
+per block, 200 TG requires at most 33.75 ms per whole cycle. Neither removing
+host overhead nor draft work alone reaches the target. Both sides need work.
+
+Next controlled experiment: raise the split-K worker limit from 8 to 16 per
+KV lane, keeping maxima precision, 256-key chunks and all history unchanged.
+Run a weight-free simulator check, then full-context numerical validation and
+combined-request measurement; do not claim a speedup from configured core count.
+Report SHA: `aa5604cb21ccad7d8d920e91e5c065ab1829ce2ca8cad039d7fdcecddd6ad79e`.
 
 ## Proposed allocation contract
 
