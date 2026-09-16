@@ -1,6 +1,17 @@
 # GDN norm bridge prefetch candidate
 
-Not device-qualified or selected by the combined runtime.
+Simulator-qualified; not hardware-qualified or selected by the combined runtime.
+
+Run **35086789628**, revision `2d1b59e`, passes in **3m03s** with clean close
+and exit zero. The full matrix contains 24 exact eager/changed-input replay
+checks and 48 immutable-input checks across both chips. All 791 before/after
+source entries are unchanged; the reported candidate helper hash matches git.
+No model weights were loaded and no throughput claim follows from this result.
+The hardware admission gate pins this report and checks the deployed helper,
+shared pipeline dependencies and native source hashes before use.
+
+Report SHA256:
+`120eca72f4fde17cf79453fbfd535d393534828f1ef8ee272925125d9cf849f8`.
 
 The current norm reader fetches 16 rows times four partitions through one
 128-byte scratch read followed by a barrier for every partition. The proposal
