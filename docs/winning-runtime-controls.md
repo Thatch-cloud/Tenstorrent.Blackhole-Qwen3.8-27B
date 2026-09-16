@@ -42,6 +42,13 @@ The old shutdown logs contain a subdevice-manager warning; retain that caveat.
 4. Evaluate further optimizations against this control, not against whichever
    isolated kernel experiment most recently passed. Serving defaults stay unchanged.
 
+Use `scripts/ci/winning_control_report.py ORIGINAL_JSON REPLAY_JSON` to reconcile
+each replay. It pins the original report hash, compares source/kernel identity,
+precision, all six requests, proposals, committed output and acceptance, and
+recomputes TG from complete decode-loop durations. A timing regression remains a
+regression even when identity and correctness reproduce. Unit mutation checks and
+original-report self-comparisons test this offline checker, not the hardware replay.
+
 The separate 64K history diagnostic is not the new baseline. Its second pass
 (35044914165) passed but did not reproduce the hundreds-of-milliseconds spikes;
 it does not establish a root cause or justify another chain of profiling jobs.
