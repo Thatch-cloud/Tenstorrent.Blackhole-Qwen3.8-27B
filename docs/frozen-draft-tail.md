@@ -139,3 +139,18 @@ only warned on host contention and still loaded weights. Audit-v2 makes that
 existing check fatal before model loading; it does not change the threshold,
 kernel, audit schedule, or phase budgets. A failed admission should not trigger
 an unchanged expensive retry.
+
+Audit-v2 **35161514319** passed in 10m56s: two fresh audits, exact output and
+target/inactive state, final parameter checks, unchanged source fingerprints,
+clean shutdown, exit 0 and no OOM. Each arm committed 117 tokens. Independent
+local reconstruction matched all **857** reported source fingerprints. This is
+correctness qualification only; PP and TG remain null.
+
+Qualification SHA256:
+`25cef0eb55b19e6f7e1cac989281065dd6fb2978e2e3a226eadd6accc8ade07a`.
+
+The follow-up timed tag pins this exact report and retains identical runtime
+sources. It executes only the four fresh A/B/B/A timed requests, retaining their
+output/state and audited-proposal agreement checks. Hardware command cap is
+420 seconds, step cap 8 minutes, whole-job cap 13 minutes including staging and
+upload. Host contention still rejects admission before loading weights.
