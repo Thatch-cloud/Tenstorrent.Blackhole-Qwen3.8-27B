@@ -114,7 +114,7 @@ def main():
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
     adapted = adapt_cache_launcher(adapt_probe_sources(sources, options.context))
-    for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'dspark_runtime_cache.py',
+    for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():

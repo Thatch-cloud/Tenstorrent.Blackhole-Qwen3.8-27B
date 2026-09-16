@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import dspark_fp32_build as baseline
 from dspark_hardware_gate import digest
-from dspark_runtime_cache import IMAGE, cache_key, inspect_entry, store_entry
+from frozen_binary_cache import IMAGE, cache_key, inspect_entry, store_entry
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
             packer=digest(root / 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'),
             builders={name: digest(scripts / name) for name in
                 ('dspark_fp32_build.py', 'dspark_fp32_intermediates.py',
-                 'frozen_sim_build_cache.py', 'dspark_runtime_cache.py', 'dspark_hardware_gate.py')},
+                 'frozen_sim_build_cache.py', 'frozen_binary_cache.py', 'dspark_hardware_gate.py')},
             base_binaries={name: digest(root / name) for name in
                 ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')})
         manifest = inspect_entry(cache, inputs)

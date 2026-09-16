@@ -228,3 +228,44 @@ factory admits the explicit seven shapes in one compiled library, rather than
 rebuilding that library for each environment value. Per-shape device kernel
 compilation is still possible. This invalidates
 the old build-cache key intentionally. No corrected numerical run is claimed.
+
+### Cancelled-run audit: timeout scope and remaining work
+
+Run 35053293462 is terminal (`cancelled`). No replacement run has been launched.
+The current branch has the following **planned**, not hardware-validated budgets:
+
+| Boundary | Factory preparation job | Each numerical/diagnostic job |
+| --- | ---: | ---: |
+| GitHub job, including checkout and artifact upload | 13 min | 16 min |
+| Execution step | 11 min | 14 min |
+| Host launcher, including downloads and container setup | 630 s | 810 s |
+| In-container preparation | 510 s, build allowed | 120 s, cache hit required |
+| In-container probe | Not run | 510 s |
+
+These are nested limits, not independent allowances. The launcher downloads two
+assets with up to 180 seconds allowed **each**, before container preparation.
+Those downloads consume the outer launcher and step budgets. Cleanup also runs
+inside the outer limit; its Docker log/copy/removal commands have no individual
+deadline. A 510-second probe allowance therefore does not guarantee 510 seconds
+are available to the probe. The current design does **not** yet meet the requested
+single-digit-minute end-to-end cycle. Four serialized probe jobs plus preparation
+can still make the whole workflow lengthy; there is no single workflow-wide timer
+in this file.
+
+The deployment audit also found the simulator adapter copied a newer hardware
+runtime-cache module over the historical checkout. It now installs a separate
+binary-cache helper instead. A local deployment regression test checks the
+historical hardware module remains byte-for-byte unchanged. This is source-level
+protection, not a performance result.
+
+Before another ladder run:
+- Bound and measure asset/setup/cleanup time, not only numerical execution.
+- Connect the context adapter to the full historical runtime: currently its
+  deployment is simulator-only and the runtime plumbing helper is not invoked.
+- Replace the hard-coded 8K admission with matching per-context evidence, without
+  bypassing source/binary checks or substituting the different 64K runtime.
+- Retain one numerical recipe and report PP / CTX / committed TG independently.
+
+The current simulator matrix covers only 32K and 64K, not the complete requested
+ladder. Its split-report coverage checker is not yet a runtime admission gate.
+The 200 committed-TG objective remains unachieved.

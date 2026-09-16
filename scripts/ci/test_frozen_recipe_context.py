@@ -1,13 +1,55 @@
 import subprocess
 import unittest
 import os
+import json
+from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
+import frozen_recipe_context
 from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, geometry
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
+    def test_deployment_preserves_historical_hardware_runtime(self):
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
+            'simulator-suite.sh', 'dspark_runtime_cache.py')
+        originals = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            scripts = checkout / 'scripts/ci'
+            scripts.mkdir(parents=True)
+            for name, source in originals.items():
+                (scripts / name).write_bytes(source)
+            manifest = checkout / 'deployment.json'
+
+            def git(command):
+                arguments = command[3:]
+                if arguments == ['rev-parse', 'HEAD']:
+                    return REVISION.encode() + b'\n'
+                if arguments == ['status', '--porcelain', '--untracked-files=no']:
+                    return b''
+                if arguments[0] == 'show':
+                    return originals[arguments[1].rsplit('/', 1)[1]]
+                raise AssertionError(command)
+
+            with patch('sys.argv', ['adapter', '--checkout', str(checkout), '--context', '65536',
+                    '--manifest', str(manifest)]), \
+                    patch.object(frozen_recipe_context.subprocess, 'check_output', side_effect=git):
+                frozen_recipe_context.main()
+            self.assertEqual((scripts / 'dspark_runtime_cache.py').read_bytes(),
+                originals['dspark_runtime_cache.py'])
+            report = json.loads(manifest.read_text())
+            self.assertNotIn('dspark_runtime_cache.py', report['after'])
+            self.assertIn('frozen_binary_cache.py', report['after'])
+            self.assertFalse(report['performance_qualified'])
+            self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
+                {'frozen_binary_cache.py', 'frozen_context_geometry.py',
+                 'frozen_sim_build_cache.py', 'frozen_sim_phase.py'})
+
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')
         sources = {name: subprocess.check_output(
