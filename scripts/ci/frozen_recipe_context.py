@@ -175,7 +175,12 @@ def main():
         help='Matched qualified incremental history publication comparison')
     parser.add_argument('--norm-prefetch', action='store_true',
         help='Matched norm bridge prefetch with incremental publication in both arms')
+    parser.add_argument('--mlp-input-prefetch', action='store_true',
+        help='Matched full-K MLP activation prefetch with incremental publication and norm prefetch')
     options = parser.parse_args()
+    if options.mlp_input_prefetch and (not options.combined_runtime or options.norm_prefetch
+            or options.incremental_history or options.verifier_profile or options.mlp_buffer or options.gdn_input_cache):
+        parser.error('MLP input prefetch requires isolated combined runtime')
     if options.norm_prefetch and (not options.combined_runtime or options.incremental_history
             or options.verifier_profile or options.mlp_buffer or options.gdn_input_cache):
         parser.error('Norm prefetch requires isolated combined runtime')
@@ -214,8 +219,10 @@ def main():
     sources = {}
     if options.mlp_buffer:
         names += ('fused_1d.py', 'dspark_request_experiment.py')
-    if options.gdn_input_cache or options.incremental_history or options.norm_prefetch:
+    if options.gdn_input_cache or options.incremental_history or options.norm_prefetch or options.mlp_input_prefetch:
         names += ('dspark_request_experiment.py',)
+    if options.mlp_input_prefetch:
+        names += ('fused_1d.py', 'fused_1d_input.cpp', 'fused_1d_weights.cpp')
     for name in names:
         original = git('show', f'{REVISION}:scripts/ci/{name}').decode()
         actual = (checkout / 'scripts/ci' / name).read_text()
@@ -267,11 +274,14 @@ def main():
             '        yield evidence')
         for name in ('frozen_gdn_input_cache.py', 'frozen_gdn_cache_gate.py', 'frozen_gdn_cache_scope.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
-    if options.incremental_history or options.norm_prefetch:
+    if options.incremental_history or options.norm_prefetch or options.mlp_input_prefetch:
         scope_module = 'frozen_gdn_norm_scope' if options.norm_prefetch else 'frozen_incremental_scope'
         comparison = ('Original versus prefetched norm bridge; incremental publication and shared Q/K in both arms'
             if options.norm_prefetch else
             'Full-bank versus incremental publication; shared Q/K enabled in both complete runtime arms')
+        if options.mlp_input_prefetch:
+            scope_module = 'frozen_mlp_input_scope'
+            comparison = 'Original versus full-K MLP activation staging; incremental publication and norm prefetch in both arms'
         adapted['dspark_request_experiment.py'] = replace_once(adapted['dspark_request_experiment.py'],
             'Native versus shared Q/K preparation and recurrence; complete combined runtime',
             comparison)
@@ -284,8 +294,16 @@ def main():
                 'history_append_hardware_gate.py', 'history_append_plan.py',
                 'history_append_dma.py', 'history_append_dma.cpp', 'history-append-probe.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
-        if options.norm_prefetch:
+        if options.norm_prefetch or options.mlp_input_prefetch:
             for name in ('frozen_gdn_norm_scope.py', 'frozen_gdn_norm_gate.py', 'frozen_gdn_norm_prefetch.py'):
+                adapted[name] = Path(__file__).with_name(name).read_text()
+        if options.mlp_input_prefetch:
+            from frozen_mlp_input_prefetch import projection, reader
+            prefix = 'frozen-mlp-input-candidate/'
+            adapted[prefix + 'fused_1d.py'] = projection(sources['fused_1d.py'])
+            adapted[prefix + 'fused_1d_input.cpp'] = reader(sources['fused_1d_input.cpp'])
+            adapted[prefix + 'fused_1d_weights.cpp'] = sources['fused_1d_weights.cpp']
+            for name in ('frozen_mlp_input_scope.py', 'frozen_mlp_input_gate.py'):
                 adapted[name] = Path(__file__).with_name(name).read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
@@ -294,7 +312,9 @@ def main():
         if name.endswith('.py'):
             compile(source, name, 'exec')
     for name, source in adapted.items():
-        (checkout / 'scripts/ci' / name).write_bytes(source.encode('utf-8'))
+        destination = checkout / 'scripts/ci' / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.encode('utf-8'))
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
         geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},
@@ -309,6 +329,7 @@ def main():
         gdn_input_cache=options.gdn_input_cache,
         incremental_history=options.incremental_history,
         norm_prefetch=options.norm_prefetch,
+        mlp_input_prefetch=options.mlp_input_prefetch,
         probe_seconds=options.probe_seconds,
         performance_qualified=False), indent=2) + '\n')
 
