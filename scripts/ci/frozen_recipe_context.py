@@ -114,11 +114,26 @@ def adapt_cache_launcher(sources):
     return result
 
 
+def adapt_scalar_reciprocal(sources):
+    result = dict(sources)
+    name = 'dspark-native-8k-attention-probe.py'
+    result[name] = replace_once(result[name], '    with scoped_stats_pack(),',
+        '    from dspark_ladder_scalar_reciprocal import scalar_reciprocal\n'
+        '    with scalar_reciprocal(), scoped_stats_pack(),')
+    result[name] = replace_once(result[name], "backend='simulator', scope=__doc__,",
+        "backend='simulator', scope=__doc__, reciprocal_variant='scalar-fp32',")
+    result[name] = replace_once(result[name], "'frozen_probe_evidence.py', 'dspark_attention_8k_gate.py'",
+        "'frozen_probe_evidence.py', 'dspark_attention_8k_gate.py', 'dspark_ladder_scalar_reciprocal.py'")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--context', type=int, choices=CONTEXTS, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--scalar-reciprocal', action='store_true',
+        help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
     options = parser.parse_args()
     checkout = options.checkout.resolve(strict=True)
 
@@ -140,6 +155,10 @@ def main():
             raise ValueError('Historical source differs: ' + name)
         sources[name] = actual
     adapted = adapt_runtime_sources(adapt_cache_launcher(adapt_probe_sources(sources, options.context)))
+    if options.scalar_reciprocal:
+        adapted = adapt_scalar_reciprocal(adapted)
+        adapted['dspark_ladder_scalar_reciprocal.py'] = Path(__file__).with_name(
+            'dspark_ladder_scalar_reciprocal.py').read_text()
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
             'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
         adapted[name] = Path(__file__).with_name(name).read_text()
@@ -153,6 +172,7 @@ def main():
         geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},
         after={name: checksum(source) for name, source in adapted.items()},
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
+        reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',
         performance_qualified=False), indent=2) + '\n')
 
 

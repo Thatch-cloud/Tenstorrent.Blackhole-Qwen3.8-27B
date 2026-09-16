@@ -13,6 +13,9 @@ def validate_diagnostics(records):
 
 def validate_pair(numerical, diagnostics, context):
     shape = geometry(context)
+    variant = numerical.get('reciprocal_variant', 'native')
+    if variant not in ('native', 'scalar-fp32') or diagnostics.get('reciprocal_variant', 'native') != variant:
+        raise ValueError('Matching explicit reciprocal variants required')
     if numerical.get('passed') is not True or diagnostics.get('diagnostics_complete') is not True:
         raise ValueError('Completed numerical and diagnostic shards required')
     for report, part in ((numerical, 'numerical'), (diagnostics, 'diagnostics')):
@@ -56,6 +59,6 @@ def validate_pair(numerical, diagnostics, context):
             for name in ('oldest', 'last_proposal', 'gap_poison', 'frontier_update') for chip in range(2)}, 'detected')
     require_matrix(numerical.get('stale_controls', []), ('chip',), {(0,), (1,)}, 'detected')
     validate_diagnostics(diagnostics.get('value_diagnostics', []))
-    return dict(context=context, capacity=shape['capacity'], complete_probe_coverage=True,
+    return dict(context=context, capacity=shape['capacity'], reciprocal_variant=variant, complete_probe_coverage=True,
         source_files_verified=False, artifact_provenance_verified=False,
         full_request_qualified=False, performance_qualified=False)

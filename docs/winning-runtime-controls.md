@@ -341,3 +341,30 @@ verification work alongside draft/commit costs, or increase useful verified rows
 without proportional cost. The existing combined trace attribution identifies
 recurrence, fused MLP and down/output projections as substantial kernel groups;
 it does not support treating spare cores or host dispatch as the dominant cause.
+
+### Corrected 32K native-recipe failure
+
+Run **35056799088** fails numerically, not by timeout. Cached preparation takes
+2.46 seconds; the probe exits in 197.23 seconds and closes cleanly. The precise
+statistics factory is enabled. No hardware admission follows this result.
+
+The first eager comparison fails six elements on chip 0, head 1, rows 3 and 14,
+channels 20, 31 and 54. All six actual values are **-46.25**; references range
+from -45.7754 to -45.7809. Errors are 0.4691–0.4746 against allowed errors of
+about 0.4678 (`atol=rtol=0.01`). They are finite, and narrowly outside the
+unchanged tolerance. Other chips/replay are not qualified by this stopped test.
+
+The earlier [reciprocal investigation](context-ladder-investigation.md#reciprocal-reload-boundary-identified)
+identified a reload-rounding contribution to a similar -46.25 result. Its
+scalar-reciprocal candidate passed a different 32K component configuration:
+512-key chunks and 1,024 output-headroom rows. That is a useful hypothesis,
+**not proof of the cause or a pass for this 256-key/256-headroom recipe**.
+
+The adapter now offers explicit `--scalar-reciprocal` for a separately labelled
+simulator candidate using that existing implementation. It leaves the default
+native recipe, factory formats, chunk size and tolerances unchanged. Candidate
+reports identify `scalar-fp32`; the shard join rejects mixed variants. Local
+source tests pass, but this candidate has not run in the corrected geometry.
+Do not simply rerun the full matrix under the same timeout: a successful probe
+executes more attention calls than this early failure and needs a measured
+execution budget or correctly partitioned checks.

@@ -8,7 +8,7 @@ import sys
 from unittest.mock import patch
 
 import frozen_recipe_context
-from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, geometry
+from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, adapt_scalar_reciprocal, geometry
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 from frozen_runtime_context import FILES
 
@@ -134,6 +134,13 @@ timeout() {
         sources = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
         baseline = adapt_probe_sources(sources, 8192)
+        reciprocal = adapt_scalar_reciprocal(baseline)
+        self.assertNotIn('with scalar_reciprocal()', baseline['dspark-native-8k-attention-probe.py'])
+        self.assertIn('with scalar_reciprocal(), scoped_stats_pack()', reciprocal['dspark-native-8k-attention-probe.py'])
+        self.assertIn("reciprocal_variant='scalar-fp32'", reciprocal['dspark-native-8k-attention-probe.py'])
+        compile(reciprocal['dspark-native-8k-attention-probe.py'], 'reciprocal-probe', 'exec')
+        for name in set(baseline) - {'dspark-native-8k-attention-probe.py'}:
+            self.assertEqual(baseline[name], reciprocal[name])
         factories = []
         for context in CONTEXTS:
             adapted = adapt_probe_sources(sources, context)

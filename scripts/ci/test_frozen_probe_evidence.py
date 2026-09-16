@@ -58,6 +58,7 @@ class EvidenceTests(unittest.TestCase):
                 lambda numerical, diagnostic: numerical['replay_checks'].pop(),
                 lambda numerical, diagnostic: diagnostic.update(capacity=8448),
                 lambda numerical, diagnostic: diagnostic.update(closed_cleanly=False),
+                lambda numerical, diagnostic: diagnostic.update(reciprocal_variant='scalar-fp32'),
                 lambda numerical, diagnostic: diagnostic['sources'].update(fixture='other'),
                 lambda numerical, diagnostic: diagnostic['value_diagnostics'][0].update(failed_elements=1),
                 lambda numerical, diagnostic: numerical['layout_checks'][0].update(expected_sha256='other')):
