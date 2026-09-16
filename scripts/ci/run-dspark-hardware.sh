@@ -8,9 +8,13 @@ matched_combined=${QWEN_MATCHED_COMBINED:-0}
 [[ "$matched_combined" = 0 || "$matched_combined" = 1 ]]
 if [ "$matched_combined" = 1 ]; then
     test "$splitk_combined" = 1
-    test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
-    test "${QWEN_DSPARK_SFPU_TIMED:-0}" = 0
-    test "${QWEN_64K_SCORE_AUDIT:-0}" = 1
+    if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 0
+        test "${QWEN_64K_SCORE_TIMED:-0}" = 1
+    else
+        test "${QWEN_DSPARK_SFPU_REQUEST_SCREEN:-0}" = 1
+        test "${QWEN_64K_SCORE_AUDIT:-0}" = 1
+    fi
     test "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1
 fi
 mlp_64k_audit=${QWEN_64K_MLP_AUDIT:-0}
@@ -289,6 +293,11 @@ if [ "$timed_requests" = 1 ]; then
                 fi
             fi
         fi
+    fi
+    if [ "$matched_combined" = 1 ]; then
+        screen_run=35038298030
+        screen_artifact=qwen-matched-combined-35038298030-1
+        timing_gate=matched_combined_timed
     fi
     gh run download "$screen_run" --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
         --name "$screen_artifact" --dir "$screen_evidence"

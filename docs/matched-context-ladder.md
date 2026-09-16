@@ -68,6 +68,19 @@ an exact content-addressed build-cache hit (fails rather than compiling) and
 retains the original full-prefix KV digest at every audit boundary without
 re-benchmarking the alternative reader. Numerical/state checks are unchanged.
 
+Retry **35038298030 passed in 6m13s**, with a two-second cached build. All 120
+learned-parameter checks, native output/state checks and clean shutdown passed.
+All three bounded decode commits used the incremental writer (maximum 32 rows
+touched). Loading hit all 320 shard and 64 packed caches without preprocessing.
+The report SHA is `e9129dcb65a87d7bc25463d38eca83c4a83a276e1a6521fab0dec3b47cb4f329`.
+This qualifies only the bounded correctness screen, not full-response speed.
+
+`qwen-matched-timed.yml` now measures two complete repeated 256-budget/EOS
+requests on that exact build: native score path, maxima split-K, fused MLP,
+shared Q/K and incremental history. It rejects old audit identities and any
+build-cache miss. PP and committed TG cover complete prefill/decode work;
+loading, compilation and setup remain separately reported. No serving change.
+
 1. Completed: repeat the previous combined 64K incremental-history candidate.
 2. Completed through 64K: context-specific draft and folded-target evidence.
    131K draft accuracy remains open; 262K still needs execution. Component
