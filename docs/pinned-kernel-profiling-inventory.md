@@ -90,6 +90,29 @@ the existing combined profile uses mid-run dumping, whereas these fixtures do
 not. Inspect that path before another retry; do not disable marker validation or
 promote partial reports as successful qualification.
 
+### Mid-run drain result: numerical pass, timing incomplete
+
+Run **35148936342**, revision `c3b56fc`, passed in **5m37s**, exit 0 and clean
+container cleanup. Explicit profiler drains follow replays and precede trace
+release. Independent artifact validation confirms two exact eager comparisons,
+twelve exact changed-input comparisons, four stale-input controls, four exact
+43,520-page weight comparisons, and matching reader/replay-adapter hashes.
+Numerical report SHA256:
+`d246e6e3b23fb6a5615cafe261c90dc5e15db195cb0e78f4f6a47641584088fd`.
+
+The raw CSV is retained, but is **not qualified timing evidence**. Across four
+fused trace executions on each chip, it contains 133 sampled endpoints rather
+than 160: every input-read and output-write end marker is absent, and input-free
+has only five ends for sixteen starts. The strict raw parser rejects this data.
+The simulator also reports zero clock frequency; no hardware latency or bandwidth
+is inferred. Missing endpoints are not zero-cost waits. The cause of their loss
+is still unproven, and mid-run success does not prove profiler event completeness.
+
+This qualifies the tested kernel arithmetic/replay, not the diagnostic timing
+path. Next establish complete markers in a bounded hardware fixture before
+spending a full model load on combined-request profiling. Keep the same numerical
+gates and reject incomplete hardware markers; do not promote an instrumented TG.
+
 The prepared raw-scope validator rejects missing or duplicate endpoints,
 substituted replay identities, missing chip coverage and reported marker drops.
 It keeps per-core cycle samples separate and never converts their sum to TG or

@@ -1,9 +1,23 @@
 import unittest
+from pathlib import Path
+import tempfile
+import csv
 
-from frozen_wait_zone_report import EXPECTED, summarize
+from frozen_wait_zone_report import EXPECTED, summarize, read_raw_trace_events, RAW_FIELDS
 
 
 class WaitReportTests(unittest.TestCase):
+    def test_raw_reader_preserves_identity_without_clock_conversion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'raw.csv'
+            events, _ = self.fixture()
+            with path.open('w', newline='') as stream:
+                stream.write('ARCH: blackhole, CHIP_FREQ[MHz]: 0, Max Compute Cores: 120\n')
+                writer = csv.DictWriter(stream, fieldnames=list(RAW_FIELDS.values()))
+                writer.writeheader()
+                writer.writerow({column: events[0][field] for field, column in RAW_FIELDS.items()})
+            self.assertEqual(list(read_raw_trace_events(path)), events[:1])
+
     def fixture(self):
         executions = {(chip, 42, 7, 2) for chip in (0, 1)}
         events = []
