@@ -1,6 +1,14 @@
 # Bounded MLP compute-processor timing
 
-**Host-tested prototype; no simulator or hardware qualification yet.**
+**Simulator qualified; hardware qualification pending.**
+
+[Simulator run 35218187889](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35218187889)
+at `bebb0040a29bb81741be4aea31ed1061cc9cc97a` passed in 3m53s.
+The independent validator accepts all 180 samples, native eager/replay,
+changed-input and packed-weight checks, and the missing-execution negative
+control. Process exit and container cleanup are clean. Report SHA-256:
+`027af7feffa73ee1d3fca5c47a265d810e1a59ab27bac9ad07c9faad401f7cb3`.
+This proves simulator execution, not hardware performance or combined TG.
 
 The winning verifier's MLP group takes about 11.4 ms per replay. Reader samples
 and the rejected bank-order change do not identify whether matmul, packing or
