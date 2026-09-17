@@ -100,3 +100,17 @@ replay), and tests device NaN rejection. This does not qualify full-vocabulary
 learned feedback. Twelve host tests pass. The extended source/report schema
 supersedes the earlier finite-selection-only gate, so run 35265936552 does not
 qualify the changed reducer or new feedback loop.
+
+Run **35267717551** at `64540405bbb339fe3cfedcc729f878533cd89105`
+now passes the extended gate in **5m5s**. Independently validated: 20 selection
+checks, 40 unchanged-input checks, 60 feedback comparisons, device NaN flags,
+and whole-chain rejection with safe internal feedback. All 13 source hashes
+match; exit and container cleanup succeed. Report SHA-256:
+`22243fad7110052d740d9931fa4ff115b09008cddce64c65a95a529e2883b820`.
+
+The hardware adapter preparation changes only execution guards and the Python
+import binding; AST tests enforce unchanged function bodies after those guards.
+The request-scoped hook validates admitted sources and exact generated adapters,
+requires full fifteen-step vocabulary, counts calls, and restores on failure.
+Combined staging and measured hardware admission remain outstanding. No hardware
+run or serving path uses this candidate yet.
