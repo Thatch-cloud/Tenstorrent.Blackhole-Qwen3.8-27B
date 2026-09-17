@@ -57,6 +57,7 @@ jobs:
           python -B -m unittest test_mlp_compute_clock_combined test_mlp_compute_clock_experiment test_mlp_compute_clock_combined_report
           python -B -m unittest test_mlp_weight_pipeline
           python -B -m unittest test_dspark_projection_precision
+          python -B -m unittest test_dspark_projection_precision_stage
           python -B -m unittest test_mlp_weight_pipeline_gate test_mlp_weight_pipeline_experiment test_mlp_weight_pipeline_comparison test_mlp_weight_pipeline_report
           python -B -m unittest test_ladder_cache_reference
           python -B -m unittest test_prefill_gdn_checkpoint test_prefill_prefix_resume test_prefill_prefix_features
