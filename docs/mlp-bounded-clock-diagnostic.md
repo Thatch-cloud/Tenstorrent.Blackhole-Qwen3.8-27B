@@ -1,6 +1,6 @@
 # Bounded MLP wait diagnostic
 
-**Status: simulator replay qualified; hardware qualification pending.**
+**Status: simulator and hardware fixture qualified; combined attribution pending.**
 This does not change the winning T16 recipe or serving defaults.
 
 ## Why this experiment
@@ -87,3 +87,20 @@ The hardware lane pins that report and checks staged sources against its
 manifest before changing only simulator-versus-hardware CLI admission. The
 same diagnostic arithmetic and all numerical/freshness checks remain required.
 Hardware timing samples will not be promoted as combined-runtime throughput.
+
+## Hardware fixture acceptance
+
+Run **35208641840**, source `c5e41f44cb319488d4349653d8d0c46d55f53a06`,
+passes in **26 seconds** including setup/artifacts. The actual probe step takes
+10 seconds. Independent validation confirms the same 100 fresh samples, both
+eager outputs, 12 replay outputs, weight checks and negative controls. Source
+fingerprints remain unchanged; hardware and simulator kernel manifests match.
+The container exits zero without OOM or runtime error.
+
+Report SHA-256:
+`b47176bc1397aef8bb9115faad2c0a745c729b0b18eec75c1480fb3616059c22`.
+
+These are geometry-matched single-layer fixture observations, not target-model
+bottleneck measurements. The next gate is all 64 MLP layers inside the winning
+combined T16 runtime, with distinct persistent sample buffers per layer. Do not
+infer a throughput improvement from successful instrumentation qualification.
