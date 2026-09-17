@@ -26,7 +26,8 @@ def execute(device, inputs, history, retain):
         retain, proposals=device.max_drafts)
     owned = []
     try:
-        records = markov(operations, inputs['anchor'], logits, device.predecessor, device.successor, owned)
+        markov_backend = getattr(device, 'proposal_markov', markov)
+        records = markov_backend(operations, inputs['anchor'], logits, device.predecessor, device.successor, owned)
     finally:
         for value in owned:
             retain(value)
@@ -186,9 +187,18 @@ class PreparedDSparkProposal:
 
 
 class TracedDSparkDevice(DSparkDevice):
-    def __init__(self, *args, native_attention=True, **options):
+    def __init__(self, *args, native_attention=True, fused_score_layout=False, **options):
+        from functools import partial
+        import os
+
         from t32_attention_admission import require_active
 
+        if type(fused_score_layout) is not bool:
+            raise ValueError('Explicit boolean score-layout policy required')
+        if fused_score_layout and (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or os.environ.get('QWEN_HARDWARE_TESTS') == '1'
+                or os.environ.get('QWEN_CARDS_ALLOCATED') == '1'):
+            raise ValueError('Fused T32 feedback requires simulator-only qualification')
         self.attention_admission = require_active()
         if native_attention is not True:
             raise ValueError('Explicit native proposal attention policy required')
@@ -197,6 +207,11 @@ class TracedDSparkDevice(DSparkDevice):
             self.proposal_layer = native_layer
         self.prepared = None
         super().__init__(*args, **options)
+        self.proposal_markov = markov
+        if fused_score_layout:
+            from dspark_t32_score_layout import execute as fused_markov
+
+            self.proposal_markov = partial(fused_markov, mesh=self.mesh)
 
     def prepare_trace(self, anchor, *, audit=False):
         if self.closed or self.prepared is not None:
