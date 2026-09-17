@@ -43,9 +43,12 @@ the next token's DRAM reads even when their destination rings are already free.
 It adds no buffers, changes no arithmetic and retains every snapshot. This is
 different from the earlier 6 KiB input-cache experiment, which retained the same
 Q/K-first order and did not establish repeatable combined throughput improvement.
-Host tests, source comparison and simulator replay qualification pass; see
-[input-overlap evidence](gdn-input-overlap.md). The reordered reader still needs
-its matched uninstrumented combined hardware test.
+Host tests, simulator replay and combined correctness pass; see
+[input-overlap evidence](gdn-input-overlap.md). The matched uninstrumented
+hardware test fails performance screening: 124.14 to 122.99 TG, with verifier
+time slightly worse in both pairs. Keep the original reader. The aggregate
+input-wait interval does not establish that external input reads cause the stall;
+local state feedback and processor pipeline dependencies are also inside it.
 This targets the measured readiness stall, not an assumed DRAM bandwidth limit,
 and cannot by itself establish the 200 TG objective.
 

@@ -1,6 +1,37 @@
 # GDN input overlap
 
-**Simulator correctness passes. Combined throughput is not yet measured.**
+**Simulator and combined correctness pass. Performance screening fails; do not promote.**
+
+## Combined result
+
+[Run 35247597768](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35247597768)
+at `956d2ebc01033e0b892edceb40a14aabbc8f2661` completes in **6m23s**. Both
+fresh audits and all four timed requests pass exact token/state/inactive checks.
+Each arm commits 242 timed tokens with identical 224/300 proposal acceptance.
+The independent full-request validator passes; container exit is zero, no OOM
+is reported, and source fingerprints are unchanged.
+
+| CTX 4096, one stream | Control | Reordered reader |
+| --- | ---: | ---: |
+| Cold PP tok/s | 3,363.89 | 3,335.96 |
+| Committed TG tok/s | **124.14** | **122.99** |
+| Mean verifier/readback ms/block | 66.476 | 66.635 |
+| Mean draft ms/block | 25.150 | 26.345 |
+| Mean select/commit ms/block | 5.010 | 4.669 |
+| Mean whole cycle ms/block | 97.431 | 98.343 |
+
+TG changes by **-0.92%** overall; paired changes are **-2.67% / +0.90%**.
+Verifier time is slightly worse in both matched pairs, not just hidden by draft
+variance. Retain the original reader and do not rerun this candidate unchanged.
+Report SHA-256:
+`71e40e891c72a7d9806b6d8c217aa0e4a6fb418351812e9e7db8e3bb8858d271`.
+
+The diagnostic's aggregated input-wait interval includes local state-feedback
+and pipeline dependencies as well as reader readiness. This result contradicts
+the hypothesis that simply moving the external reads earlier removes the
+dominant wait. A subsequent GDN change needs individual wait attribution or a
+larger arithmetic redesign, not another assumption that this interval is DRAM
+latency. The complete GDN group is itself too small to close the whole 200 TG gap.
 
 The [combined phase diagnostic](gdn-recurrence-phase-diagnostic.md) found a
 roughly 5,000-cycle UNPACK input wait at token 8. The candidate moves V, beta

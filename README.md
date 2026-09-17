@@ -40,11 +40,11 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 
 | Runtime | PP tok/s | Committed TG tok/s | Decision |
 | --- | ---: | ---: | --- |
-| Unchanged T16 control | 3,371.07 | 121.67 | Retained |
-| Register-resident MLP epilogue | 3,303.60 | 123.87 | Correct, but no repeatable speed gain |
+| Unchanged T16 control | 3,363.89 | 124.14 | Retained |
+| Earlier GDN input reads | 3,335.96 | 122.99 | Correct, but slower overall |
 
-Verifier time stays approximately 66.5 ms; paired TG gains are +3.56% / +0.11%.
-The candidate is not promoted. [Combined evidence](docs/mlp-register-epilogue.md).
+Verifier/readback rises from 66.48 to 66.64 ms; paired TG changes are -2.67% / +0.90%.
+The candidate is not promoted. [Combined evidence](docs/gdn-input-overlap.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an
