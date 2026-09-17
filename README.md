@@ -11,8 +11,8 @@ Optimising coding inference on two Tenstorrent cards.
 | Host attachment | One PCIe x16; one PCIe x4 behind a switch |
 | Inter-card fabric | Two QSFP-DD cables; four configured links |
 | Mesh | TP2; explicit P150-pair physical descriptor |
-| Active benchmark recipe | T16 verifier, DSpark drafting, fused MLP, shared Q/K, incremental publication, tail-first draft assembly |
-| T32 | Code integrated as an experimental path; fresh combined qualification pending |
+| Active benchmark recipe | T16 verifier, DSpark drafting, fused MLP, shared Q/K, norm prefetch, incremental publication, tail-first draft assembly |
+| T32 | Combined correctness passes; 74.68 TG at 4K, not promoted |
 
 ## Measured combined results
 
@@ -29,12 +29,22 @@ and commit—not draft tokens or isolated kernel throughput.
 | 32,768 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 2,564.54 | **50.45** | Passed |
 | 131,072 | 2,124.78 | **53.69** | Passed |
-| 261,888 | — | — | 262,144 total window including 256 output; qualification underway |
+| 261,888 | — | — | Failed full-history allocation; 262,144 total window remains unqualified |
 | 262,144 | — | — | Prompt + 256 output tokens exceeds position limit |
 
 These are **offline complete-runtime tests**, not a streaming serving benchmark.
 Current-recipe concurrent users, sustained generation and held-out coding quality
 are not yet qualified. Historical B8 serving results use a different runtime.
+
+**Later matched 4K control:** cold PP **3,288.00**, committed TG **123.80**.
+The bank-staggered reader gives 123.82 TG, only +0.016%, so it is rejected.
+This is a separate rerun, not a replacement measurement for the whole ladder.
+[Matched evidence](docs/mlp-weight-read-order.md).
+
+The 261,888-token prompt attempt failed during full-history allocation/concat;
+there is no accepted 262K-window result. It needs a memory-layout fix, not an
+unchanged retry. The T32 result above also lacks full T16 optimisation parity;
+it is not a width-only comparison. [T32 evidence](docs/t32-score-reuse.md).
 
 At 64K, mean drafting costs 55.50 ms/block and verification/readback 81.12 ms;
 both need improvement. T32 is not automatically faster and is not the default.

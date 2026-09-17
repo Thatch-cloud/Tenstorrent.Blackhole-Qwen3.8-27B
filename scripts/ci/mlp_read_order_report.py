@@ -20,8 +20,17 @@ def validate_route(request, arm):
     if (type(enabled) is not bool or arm != 'publication'
             or identity.get('simulator_report_sha256') != (REPORT_SHA256 if enabled else None)):
         raise ValueError('Source-bound reader identity required')
+    validate_fusion(request, REPORT_SHA256 if enabled else BASELINE_SHA256)
+    norm, history = request.get('gdn_norm_prefetch', {}), request.get('incremental_history', {})
+    if (norm.get('enabled') is not True or norm.get('report_sha256') != NORM_SHA256
+            or type(norm.get('builds')) is not int or norm['builds'] < 48 or norm['builds'] % 48
+            or history.get('enabled') is not True or history.get('report_sha256') != HISTORY_SHA256):
+        raise ValueError('Winning norm prefetch and incremental publication required in both arms')
+
+
+def validate_fusion(request, expected_sha256=BASELINE_SHA256):
     fusion = request.get('fused_t16_mlp', {})
-    if (fusion.get('passed_simulator') != (REPORT_SHA256 if enabled else BASELINE_SHA256)
+    if (fusion.get('passed_simulator') != expected_sha256
             or fusion.get('rows') != 16 or fusion.get('layers') != 64
             or fusion.get('restored') is not True or fusion.get('native_bindings_unchanged') is not True
             or fusion.get('extra_weight_allocations') != 0 or len(fusion.get('hits', [])) != 64
@@ -36,11 +45,6 @@ def validate_route(request, arm):
             or any(check.get('exact') is not True or check.get('pages') != 43520
                 or check.get('mismatched_words') != 0 for check in checks)):
         raise ValueError('Complete actual target packed-weight audit required')
-    norm, history = request.get('gdn_norm_prefetch', {}), request.get('incremental_history', {})
-    if (norm.get('enabled') is not True or norm.get('report_sha256') != NORM_SHA256
-            or type(norm.get('builds')) is not int or norm['builds'] < 48 or norm['builds'] % 48
-            or history.get('enabled') is not True or history.get('report_sha256') != HISTORY_SHA256):
-        raise ValueError('Winning norm prefetch and incremental publication required in both arms')
 
 
 def validate_audit(request):
