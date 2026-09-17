@@ -31,8 +31,8 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 1 | — | — | Prompt length rejected before model execution; retry required |
-| 131,072 | 1 | — | — | Running |
-| 262,144 | 1 | — | — | Pending |
+| 131,072 | 1 | — | — | Verifier cache-writer page-table guard failed |
+| 262,144 | 1 | — | — | Prompt plus output exceeds target positional limit |
 
 ### 16K evidence and next bottleneck
 
@@ -61,3 +61,11 @@ The host-pressure check passed (0.097% full stall), but Python preflight rejecte
 The retry builder preserves already-exact prompts and searches adjacent excerpt boundaries when tokenization is non-monotonic. It never pads/truncates token IDs or weakens the exact-length runtime guard. Six local prompt tests pass; real-tokenizer and hardware retry remain necessary.
 
 Retry tag `experiment/combined-ladder-retry-v2` selects only 4K, 8K and 64K, carrying the prompt-boundary and build-cache fixes. It shares the hardware concurrency lock, so it waits for the original larger-context jobs rather than interrupting them. The validated 16K/32K rows are not rerun; model math and serving defaults remain unchanged.
+
+### 131K and 262K failures
+
+131K completes prefill but fails during verifier warmup in `ordered_cache.validate_shapes`: the legacy validator permits at most 1,024 pages, while the allocated page table has 2,052. The selected 64K geometry also exceeds that guard at 1,028 pages. Container exit 1, no OOM, no timed request result. The underlying writer already sizes its page-table buffer and compile arguments from the tensor dimensions.
+
+`frozen_ladder_ordered_cache.py` prepares an explicitly scoped geometry validator, retaining bounds against both selected context and actual cache storage. Three host tests pass, including restoring the original guard on exceptions. It is **not yet wired into hardware**; larger-page writer correctness/replay must be checked before deployment. Default serving validation remains unchanged.
+
+262K fails before model loading: a 262,144-token prompt plus 256 output slots requires 262,400 positions, exceeding the target's declared 262,144 limit. A full-window test would instead use 261,888 prompt tokens plus 256 output slots and must be labelled separately; no implicit truncation or positional extension has been applied.
