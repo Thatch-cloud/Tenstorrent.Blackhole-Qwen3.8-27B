@@ -1,5 +1,35 @@
 # Combined-runtime trace attribution
 
+## Exclusive-interval re-analysis
+
+`winning_interval_attribution.py` revalidates the retained request and CSV hashes,
+then sweeps timestamped intervals for all operations in four steady T16 replays
+on each chip. Three host tests cover same-group overlap, cross-group overlap,
+gaps and invalid timestamps. The retained artifact analysis completes locally
+in seconds without another hardware run or global Tracy capture.
+
+In these recorded replays, different operation/core groups have **0 ms observed
+overlap** on both chips. This is an observation of an instrumented trace, not
+proof that independent operations exist or that concurrent scheduling is safe.
+
+| Chip 0 observed exclusive group time | ms/replay |
+| --- | ---: |
+| Generic / 99 cores | 11.396 |
+| Matmul / 32 cores | 10.786 |
+| Generic / 96 cores | 9.534 |
+| Matmul / 43 cores | 5.738 |
+| All-gather / 10 cores | 1.701 |
+| Reduce-scatter / 10 cores | 1.434 |
+| Argmax / 110 cores | 0.659 |
+
+This reinforces prioritizing the large target computation groups over another
+sampling or link-count tweak. Generic-group identities still require source
+confirmation. Exclusive intervals include waits; they are not active compute
+time, a dependency critical path or predicted TG savings. The recent combined
+HiFi2 experiment did not improve drafting or the approximately 66.5-ms verifier.
+Keep its HiFi4 control and use these retained measurements to select the next
+target-kernel change, rather than rerunning a rejected reader/precision recipe.
+
 ## Winning-recipe refresh: recovered device attribution
 
 Run **35185624322** completed the audited 4K request and closed both devices
