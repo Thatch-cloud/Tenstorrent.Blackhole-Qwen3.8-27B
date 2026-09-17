@@ -21,9 +21,24 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
         gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False,
-        bias_cache=False, bias_cache_build=None):
+        bias_cache=False, bias_cache_build=None, t32=False):
     import torch
     from full_request import measure_request
+    if type(t32) is not bool:
+        raise ValueError('Explicit boolean T32 lifecycle policy required')
+    if t32:
+        import os
+
+        if (os.environ.get('QWEN_SIM_ONLY') != '1'
+                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))
+                or not (audit_features and proposal_trace and commit_only_gdn and native_attention)
+                or any((target_attention_t16, score_layout, banked_proposal, native_slot_gdn, fused_t16_mlp,
+                    history_profile, gdn_output_l1, gdn_output_grid, gdn_copy_pairs, gdn_outer_add,
+                    combined_profile, gdn_shared_qk, bias_cache, profile_verifier))
+                or score_layout_evidence is not None or banked_proposal_evidence is not None
+                or bias_cache_build is not None or len(prompt) + max_new_tokens > 8192):
+            raise ValueError('T32 lifecycle requires an audited simulator request without T16-only routes')
+    proposal_count, verifier_rows = (31, 32) if t32 else (15, 16)
     if type(bias_cache) is not bool or (bias_cache and not (
             proposal_trace and score_layout and captured_publication and gdn_shared_qk
             and fused_t16_mlp and target_attention_t16 and isinstance(bias_cache_build, dict))):
@@ -130,7 +145,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             or type(max_new_tokens) is not int or not 2 <= max_new_tokens <= 513
             or not 1 <= len(prompt) <= history_limit() - max_new_tokens):
         raise ValueError('Explicit audit policy and full-history capacity for the complete request required')
-    if native_attention:
+    if t32:
+        from t32_attention_admission import require_active
+
+        require_active()
+    elif native_attention:
         import os
         from pathlib import Path
         from dspark_native_fixed_gate import qualify
@@ -248,8 +267,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         preparing_engine = engine
         status('prepare_proposal_trace_after_verifier_persistent_allocation')
         drafter.prepare_trace(seed, audit=audit_features)
-        status('warm_fifteen_query_proposal_before_verifier_capture')
-        drafter.propose(seed, 15)
+        status('warm_thirty_one_query_proposal_before_verifier_capture' if t32
+            else 'warm_fifteen_query_proposal_before_verifier_capture')
+        drafter.propose(seed, proposal_count)
 
         if bias_cache:
             score_arm.reset_after_warmup()
@@ -261,6 +281,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if proposal_trace:
             from dspark_prepared_proposal import TracedDSparkDevice
             implementation = TracedDSparkDevice
+        if t32:
+            from dspark_t32_prepared import TracedDSparkDevice
+            implementation = TracedDSparkDevice
         if banked_proposal:
             from dspark_banked_device import BankedDSparkDevice
             implementation = BankedDSparkDevice
@@ -269,7 +292,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             from dspark_64k_scope import require_scope
             history_capacity = require_scope()['capacity']
         drafter = implementation(operations, model, collectives, parameters, layer_weights, predecessor, successor,
-            capture.outputs(), rotary, position=len(prompt), proposals=15,
+            capture.outputs(), rotary, position=len(prompt), proposals=proposal_count,
+            **(dict(fused_score_layout=True) if t32 else {}),
             **(dict(native_attention=True) if native_attention else {}),
             history_capacity=history_capacity)
         proposal_device = drafter
@@ -300,9 +324,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                     lambda: dict(gdn=live_digest(), kv=kv_digest(drafter.position), inactive=inactive_digest()),
                     protected_snapshot=protected_verifier_snapshot)
         else:
-            status('warm_fifteen_query_proposal_before_verifier_capture')
-            drafter.propose(seed, 15)
-        runtime = DSparkRequestRuntime(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
+            status('warm_thirty_one_query_proposal_before_verifier_capture' if t32
+                else 'warm_fifteen_query_proposal_before_verifier_capture')
+            drafter.propose(seed, proposal_count)
+        runtime_type = DSparkRequestRuntime
+        if t32:
+            from dspark_t32_runtime import T32DSparkRequestRuntime
+            runtime_type = T32DSparkRequestRuntime
+        runtime = runtime_type(drafter, position=len(prompt), validate_features=validate_features if audit_features else None)
         return runtime
 
     observer = native_slot_arm = fusion_arm = None
@@ -343,7 +372,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest, eos_ids=eos_ids,
             max_new_tokens=max_new_tokens, norm_batch=True, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=audit_features and commit_only_gdn,
-            lookup_max_rows=16, feature_factory=factory, feature_drafter_name='dspark',
+            lookup_max_rows=verifier_rows, feature_factory=factory, feature_drafter_name='dspark',
             **(dict(target_attention_t16=True, attention_replay=True, family_routing=True)
                if target_attention_t16 else {}),
             **(dict(verifier_before_capture=prepare_proposal_trace) if proposal_trace else {}),
@@ -368,7 +397,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if history_observer is not None:
             result['history_publication_profile'] = dict(records=list(history_observer.records),
                 scope='Nested host-wall timers; total includes projection and bank assembly; no added fences; not device-kernel timing')
-        result['dspark'] = dict(proposals=15, verifier_rows=16, full_history=True, prefill_chunks=prefill_records,
+        result['dspark'] = dict(proposals=proposal_count, verifier_rows=verifier_rows, full_history=True, prefill_chunks=prefill_records,
             prefill_hashes=prefill_hashes, feature_checks=feature_checks, audit_features=audit_features,
             history_checks=history_checks,
             fixed_history_capacity=drafter.history.capacity, persistent_history_allocated_before_verifier=True,
@@ -378,6 +407,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             proposal_trace=proposal_trace, proposal_checks=proposal_checks, native_attention=native_attention,
             packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
+        if t32:
+            result['dspark']['t32_lifecycle'] = dict(fused_score_layout=True, hardware_qualified=False,
+                performance_qualified=False, target_attention='native', target_mlp='native')
         if observer is not None:
             result['verifier_profile'] = observer.summary()
         if banked_proposal:

@@ -83,6 +83,17 @@ than being relabelled a pass. Hardware throughput workflows retain their strict
 
 ## Recipe parity before a T16/T32 speed comparison
 
+`full_dspark_request.measure_dspark_request(..., t32=True)` now connects the
+31-query prepared drafter, T32 publication adapter, 32-row verifier request cap,
+proposal warmup and final frontier accounting in the shared request lifecycle.
+This is an **audit-only simulator route**, covered by host integration fixtures;
+it is not a measured full-model run. It retains native target attention/MLP and
+explicitly rejects T16-only recipe flags rather than silently treating them as
+T32 optimisations. Timed and hardware execution remain rejected. T16 stays the
+default. Target fusion/replay parity and hardware admission remain required before
+this route can become a fair performance comparison; no full-weight sim retry is
+scheduled to test this wiring.
+
 | Area | Current T32 path | Required next evidence |
 | --- | --- | --- |
 | Markov score layout | Opt-in fused adapter; native default | Learned complete-proposal output and replay parity |

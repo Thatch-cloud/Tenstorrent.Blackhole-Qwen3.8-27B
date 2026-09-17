@@ -1,5 +1,6 @@
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
+import os
 import sys
 from types import SimpleNamespace
 import unittest
@@ -13,6 +14,35 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def test_t32_lifecycle_routes_31_proposals_and_32_verifier_rows(self):
+        self.drafter.max_drafts = 31
+        self.drafter.propose.return_value = tuple(range(31))
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch('t32_attention_admission.require_active', return_value={}), \
+                patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter) as constructor:
+            result = self.measure(audit=True, proposal_trace=True, commit_only_gdn=True,
+                native_attention=True, t32=True)
+        self.assertEqual(constructor.call_args.kwargs['proposals'], 31)
+        self.assertTrue(constructor.call_args.kwargs['fused_score_layout'])
+        self.drafter.propose.assert_called_once_with(17, 31)
+        self.traced_device.assert_not_called()
+        self.assertEqual(result['dspark']['verifier_rows'], 32)
+        self.assertEqual(result['dspark']['proposals'], 31)
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertFalse(result['dspark']['t32_lifecycle']['performance_qualified'])
+        self.drafter.close.assert_called_once()
+
+    def test_t32_rejects_timing_and_t16_recipe_options_before_prefill(self):
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}):
+            for options in (dict(t32=1), dict(t32=True),
+                    dict(t32=True, audit=True, proposal_trace=True, commit_only_gdn=True,
+                        native_attention=True, target_attention_t16=True)):
+                with self.subTest(options=options), self.assertRaisesRegex(ValueError, 'T32'):
+                    self.measure(**options)
+        self.base_prefill.assert_not_called()
+
     def test_combined_profile_rejects_partial_runtime_before_prefill(self):
         for options in (dict(combined_profile=True), dict(combined_profile=1),
                 dict(combined_profile=True, proposal_trace=True, commit_only_gdn=True, captured_publication=True)):
@@ -110,7 +140,7 @@ class FullDSparkRequestTests(unittest.TestCase):
                 self.drafter.propose.assert_not_called()
                 options['verifier_before_capture'](SimpleNamespace(initial=[]))
             self.assertEqual(options['feature_drafter_name'], 'dspark')
-            self.assertEqual(options['lookup_max_rows'], 16)
+            self.assertEqual(options['lookup_max_rows'], 32 if experiment_options.get('t32') else 16)
             self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
             self.assertIs(options['commit_only_gdn'], commit_only_gdn)
             self.assertIs(options['audit_commit_only_gdn'], audit and commit_only_gdn)
