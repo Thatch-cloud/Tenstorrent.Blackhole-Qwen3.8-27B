@@ -18,7 +18,7 @@ def snapshot(operations, cache, initial, physical_pages):
             ranges.append([page, page + 1])
     original_addresses = tuple(part.buffer_address() for part in operations.get_device_tensors(cache))
     for start, end in ranges:
-        region = operations.slice(cache, (start, 0, 0, 0), (end, *cache.shape[1:]))
+        region = operations.slice(cache, (start, 0, 0, 0), (end, *tuple(cache.shape)[1:]))
         try:
             parts = operations.get_device_tensors(region)
             if len(parts) != 2:

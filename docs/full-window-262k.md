@@ -67,3 +67,9 @@ unwritten pages. Kernel math, page-table width, eager/replay sequence and all te
 checks remain unchanged. The new helper is included in source-bound admission.
 Host tests cover expected pages, writes outside the expected region, invalid
 initial state and cleanup after failed readback. Simulator acceptance is pending.
+
+Run **35190488209** exits after about two minutes with a Python `TypeError`,
+not a timeout: native TT-NN `Shape` supports integer indexing, not slices.
+The reference helper now converts the shape to a tuple before slicing. Host
+fixtures reproduce the native indexing restriction so this error is covered.
+No kernel or admission criteria changed; full-window qualification remains pending.

@@ -7,8 +7,18 @@ import torch
 from ladder_cache_reference import snapshot
 
 
+class NativeShape:
+    def __init__(self, dimensions):
+        self.dimensions = tuple(dimensions)
+
+    def __getitem__(self, index):
+        if not isinstance(index, int):
+            raise TypeError('Native Shape only accepts integer indexing')
+        return self.dimensions[index]
+
+
 def tensor(parts, addresses):
-    return SimpleNamespace(shape=parts[0].shape,
+    return SimpleNamespace(shape=NativeShape(parts[0].shape),
         parts=[SimpleNamespace(host=value, buffer_address=lambda address=address: address)
             for value, address in zip(parts, addresses, strict=True)])
 
