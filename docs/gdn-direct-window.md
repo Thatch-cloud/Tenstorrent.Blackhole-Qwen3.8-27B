@@ -59,6 +59,12 @@ only an additional private 8 KiB scratch CB is introduced. Four native source
 hashes, including the original program factory, are pinned before construction.
 The simulator probe compares all seven outputs on both chips, poisons captured
 outputs before changed-input replay, and checks all eleven inputs remain intact.
-Fresh frozen staging and six host tests pass. Next: execute the simulator gate.
-Only after that gate may it enter the matched combined hardware test. This
-roughly 3.49-ms opportunity alone cannot close the full gap to 200 TG.
+Fresh frozen combined staging and twelve host tests pass. The L1 simulator
+gate above admits the candidate to the matched combined hardware test.
+The new hardware workflow runs two complete correctness audits followed by
+unchanged/direct/direct/unchanged timed requests, loading weights once.
+Only window construction changes; shorter tails, native math, checkpoint
+publication, drafting and the retained T16 recipe remain unchanged.
+Both paired complete-cycle TG improvements must exceed 2% to pass the screen;
+hardware performance is not yet measured. This roughly 3.49-ms opportunity
+alone cannot close the full gap to 200 TG.
