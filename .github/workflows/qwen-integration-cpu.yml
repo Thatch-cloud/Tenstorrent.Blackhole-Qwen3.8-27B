@@ -60,6 +60,7 @@ jobs:
           python -B -m unittest test_gdn_recurrence_clock_report
           python -B -m unittest test_gdn_recurrence_clock_combined
           python -B -m unittest test_gdn_recurrence_clock_experiment
+          python -B -m unittest test_gdn_recurrence_clock_combined_report
           python -B -m unittest test_mlp_compute_clock_capture
           python -B -m unittest test_mlp_compute_clock_report
           python -B -m unittest test_mlp_compute_clock_hardware
