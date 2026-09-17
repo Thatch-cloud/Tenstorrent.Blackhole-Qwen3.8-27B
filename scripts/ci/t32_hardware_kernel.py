@@ -65,9 +65,9 @@ def request_admission(root, evidence):
 
 
 @contextmanager
-def installed(root, evidence, directory):
+def installed(root, evidence, directory, *, fused_score_evidence=None):
     forbidden = ('QWEN_SIM_ONLY', 'QWEN_T32_SFPU_SUM', 'QWEN_T32_FP32_BUILD',
-        'QWEN_T32_PRECISE_RECIP', 'QWEN_T32_EXPLICIT_PACK')
+        'QWEN_T32_PRECISE_RECIP', 'QWEN_T32_EXPLICIT_PACK', 'QWEN_CONTEXT_LADDER_SIM')
     if (any(os.environ.get(name) == '1' for name in forbidden)
             or any(os.environ.get(name) for name in ('TT_METAL_SIMULATOR', 'TT_METAL_MOCK_CLUSTER_DESC_PATH'))
             or os.environ.get('QWEN_T32_NUMERATOR_TAP', '0') != '0'
@@ -76,7 +76,16 @@ def installed(root, evidence, directory):
     links = validate(os.environ)
     if links['backend'] != 'hardware':
         raise ValueError('Allocated hardware required')
-    report = qualify(evidence, directory)
+    if fused_score_evidence is None:
+        report = qualify(evidence, directory)
+    else:
+        if os.environ.get('QWEN_T32_FUSED_SCORE_HARDWARE') != '1':
+            raise ValueError('Explicit fused-score hardware correctness experiment required')
+        from t32_score_composition import audit
+        composition = audit(directory, evidence, fused_score_evidence)
+        report = dict(run=34660555430, report_sha256=composition['proposal_report_sha256'],
+            source_count=composition['dependency_count'], sources=composition['sources'],
+            score_composition=composition, full_request_qualified=False, serving_qualified=False)
     root = Path(root)
     runtime = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in RUNTIME}
     if runtime != RUNTIME:

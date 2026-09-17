@@ -35,18 +35,27 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             or (target_attention_t32 and (not t32 or target_attention_t32_evidence is None))
             or (not target_attention_t32 and target_attention_t32_evidence is not None)):
         raise ValueError('T32 target attention requires an explicit T32 lifecycle and component evidence')
+    hardware_t32 = False
     if t32:
         import os
 
-        if (os.environ.get('QWEN_SIM_ONLY') != '1'
-                or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))
+        hardware_t32 = os.environ.get('QWEN_T32_FUSED_SCORE_HARDWARE') == '1'
+        if hardware_t32:
+            from t32_score_hardware import require_active
+
+            require_active(model.mesh_device)
+            if not (fused_t32_mlp and target_attention_t32):
+                raise ValueError('Hardware T32 requires combined target attention and MLP fusion')
+        simulator_t32 = (os.environ.get('QWEN_SIM_ONLY') == '1'
+            and not any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED')))
+        if (not (hardware_t32 or simulator_t32)
                 or not (audit_features and proposal_trace and commit_only_gdn and native_attention)
                 or any((target_attention_t16, score_layout, banked_proposal, native_slot_gdn, fused_t16_mlp,
                     history_profile, gdn_output_l1, gdn_output_grid, gdn_copy_pairs, gdn_outer_add,
                     combined_profile, gdn_shared_qk, bias_cache, profile_verifier))
                 or score_layout_evidence is not None or banked_proposal_evidence is not None
                 or bias_cache_build is not None or len(prompt) + max_new_tokens > 8192):
-            raise ValueError('T32 lifecycle requires an audited simulator request without T16-only routes')
+            raise ValueError('T32 lifecycle requires an audited admitted request without T16-only routes')
     proposal_count, verifier_rows = (31, 32) if t32 else (15, 16)
     t32_attention_audit = None
     if target_attention_t32:
@@ -308,6 +317,9 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if t32:
             from dspark_t32_prepared import TracedDSparkDevice
             implementation = TracedDSparkDevice
+            if hardware_t32:
+                from t32_score_hardware import HardwareTracedDSparkDevice
+                implementation = HardwareTracedDSparkDevice
         if banked_proposal:
             from dspark_banked_device import BankedDSparkDevice
             implementation = BankedDSparkDevice
@@ -439,6 +451,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             result['dspark']['prefix_cache'] = cache_records
         if t32:
             result['dspark']['t32_lifecycle'] = dict(fused_score_layout=True, hardware_qualified=False,
+                hardware_audit_experiment=hardware_t32,
                 performance_qualified=False, target_attention='replay-t32' if target_attention_t32 else 'native',
                 target_mlp='fused-t32' if fused_t32_mlp else 'native')
             if target_attention_t32:

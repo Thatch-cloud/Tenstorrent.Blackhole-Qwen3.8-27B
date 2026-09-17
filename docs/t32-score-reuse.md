@@ -193,3 +193,26 @@ removal alone cannot close this gap. Keep the proven T16 recipe as the control.
 These are source-level gaps or audit items, not measured speedups. No T16 admission
 or geometry guard should be bypassed to claim T32 parity. Compare committed tokens
 per total decode wall time, with draft, verify and commit phases recorded together.
+
+## Combined hardware audit adapter
+
+The explicit `QWEN_T32_FUSED_SCORE_HARDWARE=1` route now selects the fused
+31-query scorer inside `full_dspark_request`, with T32 target attention and
+fused target MLP required. It remains audit-only: native token/state checks,
+feature checks and proposal replay comparisons stay enabled; TG is not reported
+as a performance result. A flag alone cannot enable the route: it requires an
+owned mesh scope, the retained source-bound component composition and the
+installed simulator-qualified attention arithmetic. Serving defaults are unchanged.
+
+`t32_score_hardware.py` checks AST equality of its feedback math against the
+simulator-covered function, validates runtime and source bindings, and restores
+the admission scope on failure. The original simulator modules remain unchanged.
+Local tests cover selection, missing ownership, partial target recipes, denied
+timing, all 31 feedback positions and failure cleanup. These are orchestration
+tests, not physical-device acceptance.
+
+Next: connect the outer CI probe to the installer and owned scope, validate the
+target-attention evidence against current sources, then run the complete learned
+proposal/native-score comparison and target request audit on hardware. No new
+hardware result is claimed yet. T32 still needs the T16 optimization parity work
+listed above before it can be described as a matched winning-recipe comparison.

@@ -10,6 +10,32 @@ import t32_hardware_kernel as kernel
 
 
 class HardwareKernelTests(unittest.TestCase):
+    def test_fused_component_install_requires_opt_in_and_retains_unqualified_status(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            directory = root / kernel.KERNEL_DIRECTORY
+            directory.mkdir(parents=True)
+            original = {name: ('original-' + name).encode() for name in kernel.SOURCE_HASHES}
+            for name, payload in original.items():
+                (directory / name).write_bytes(payload)
+            (root / 'binary').write_bytes(b'runtime')
+            stack.enter_context(patch.dict(os.environ, {'QWEN_PROJECTION_LINKS': '4'}, clear=True))
+            stack.enter_context(patch.object(kernel, 'validate', return_value={'backend': 'hardware'}))
+            stack.enter_context(patch.object(kernel, 'RUNTIME', {'binary': hashlib.sha256(b'runtime').hexdigest()}))
+            stack.enter_context(patch.object(kernel, 'build_sources', return_value={name: b'candidate' for name in original}))
+            composition = dict(proposal_report_sha256='proposal', dependency_count=68, sources={'retained': 'hash'})
+            audit = stack.enter_context(patch('t32_score_composition.audit', return_value=composition))
+            with self.assertRaisesRegex(ValueError, 'Explicit fused-score'):
+                with kernel.installed(root, 'proposal', 'sources', fused_score_evidence='score'):
+                    self.fail('Unselected candidate installed')
+            audit.assert_not_called()
+            with patch.dict(os.environ, QWEN_T32_FUSED_SCORE_HARDWARE='1'):
+                with kernel.installed(root, 'proposal', 'sources', fused_score_evidence='score') as evidence:
+                    self.assertEqual(evidence['proposal']['score_composition'], composition)
+                    self.assertFalse(evidence['full_request_qualified'])
+            audit.assert_called_once_with('sources', 'proposal', 'score')
+            self.assertTrue(all((directory / name).read_bytes() == payload for name, payload in original.items()))
+
     def test_request_admission_restores_hook_and_detects_kernel_mutation(self):
         import t32_attention_admission
 
