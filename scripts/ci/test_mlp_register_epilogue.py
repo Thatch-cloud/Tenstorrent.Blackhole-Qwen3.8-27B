@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from frozen_recipe_context import REVISION
 from fused_1d import BF16_PRODUCT, fused_compute
-from mlp_register_epilogue import CAST, END, FINAL, START, TAIL, activation_control, adapt_projection, transform
+from mlp_register_epilogue import CAST, END, FINAL, START, TAIL, activation_control, adapt_projection, rounding_control, transform
 
 
 def fixture():
@@ -26,6 +26,20 @@ def fixture():
 
 
 class RegisterEpilogueTests(unittest.TestCase):
+    def test_rounding_diagnostic_only_adds_two_casts(self):
+        control = activation_control(fixture())
+        candidate = rounding_control(fixture())
+        cast = (f'                                typecast_tile_init<{CAST}>();\n'
+            f'                                typecast_tile<{CAST}>(0);\n'
+            f'                                typecast_tile<{CAST}>(1);\n')
+        restored = candidate.removeprefix('#include "api/compute/eltwise_unary/typecast.h"\n').replace(cast, '')
+        self.assertEqual(restored, control)
+        self.assertEqual(candidate[candidate.index(TAIL):], control[control.index(TAIL):])
+        self.assertLess(candidate.index('silu_tile(0);'), candidate.index(cast))
+        self.assertLess(candidate.index(cast), candidate.index('tile_regs_commit();'))
+        with self.assertRaises(ValueError):
+            rounding_control(candidate)
+
     def test_activation_diagnostic_keeps_original_packing_and_product(self):
         source = fixture()
         result = activation_control(source)
@@ -79,6 +93,13 @@ class RegisterEpilogueTests(unittest.TestCase):
         self.assertIn('register_epilogue=False, activation_diagnostic=True', diagnostic)
         self.assertIn('intermediate_rounding="native-pack"', diagnostic)
         self.assertEqual(diagnostic[diagnostic.index('    def __call__'):], original_call)
+        rounding = adapt_projection(source, diagnose_rounding=True)
+        self.assertIn('import rounding_control as register_epilogue', rounding)
+        self.assertIn('register_epilogue=False, activation_diagnostic=False', rounding)
+        self.assertIn('rounding_diagnostic=True', rounding)
+        for options in ({'diagnose_activation': True, 'diagnose_rounding': True}, {'diagnose_rounding': 1}):
+            with self.assertRaises(ValueError):
+                adapt_projection(source, **options)
         with self.assertRaises(ValueError):
             adapt_projection(candidate)
 

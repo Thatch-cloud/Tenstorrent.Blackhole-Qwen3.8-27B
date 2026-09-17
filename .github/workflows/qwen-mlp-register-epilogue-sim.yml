@@ -28,7 +28,7 @@ jobs:
           python3 -B epilogue-orchestrator/scripts/ci/frozen_recipe_context.py --checkout epilogue-candidate \
             --context 8192 --manifest epilogue-candidate/experiment-results/frozen-geometry.json
           python3 -B epilogue-orchestrator/scripts/ci/mlp_register_epilogue_stage.py --checkout epilogue-candidate \
-            --manifest epilogue-candidate/experiment-results/register-epilogue-candidate.json --diagnose-activation
+            --manifest epilogue-candidate/experiment-results/register-epilogue-candidate.json --diagnose-rounding
           git -C epilogue-candidate diff --check
       - name: Exact T16 eager replay and packed-weight checks
         timeout-minutes: 10

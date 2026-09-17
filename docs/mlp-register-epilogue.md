@@ -16,7 +16,7 @@ The next simulator-only diagnostic moves SiLU to MATH but retains the original
 BF16 pack/reload and product. This separates activation relocation from explicit
 register rounding and product scheduling. It is not a faster candidate or an
 acceptance override. Mismatch values and row distribution are now retained.
-The current workflow explicitly selects `--diagnose-activation`; a pass qualifies
+The v2 workflow explicitly selects `--diagnose-activation`; a pass qualifies
 only this diagnostic, not the rejected register-resident epilogue.
 
 ## Activation diagnostic passes
@@ -37,6 +37,15 @@ pack/reload conversion and product scheduling remain different in the rejected
 version. Next isolate explicit rounding while keeping the passing diagnostic's
 pack/reload and product; do not waive the 216 mismatches or promote this
 diagnostic as a throughput improvement. Hardware and serving are unchanged.
+
+## Rounding isolation
+
+The current workflow selects `--diagnose-rounding`: the exact activation-control
+source plus two explicit FP32-to-BF16 casts before its unchanged native packing.
+The post-loop unpack and BF16 product are byte-identical to the passing control.
+This asks whether the casts themselves change the observed numerical result;
+it does not yet test removing native packing. Mode flags are mutually exclusive
+and recorded in both the staging manifest and executed kernel metadata.
 
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
