@@ -1,7 +1,21 @@
 # Direct causal windows inside GDN convolution
 
-Status: DRAM-projection simulator pass; exact L1 runtime placement awaiting
-qualification. **No hardware measurement; not installed into combined runtime.**
+Status: DRAM and exact L1 projection simulator checks pass. The request-scoped
+hardware adapter is prepared. **No hardware measurement or serving change.**
+
+L1 run **35271886537**, commit `c86d9dd2b27faf0fdd78453470f28c546d9795dd`,
+passes in **59 seconds**. The strict validator independently confirms all 56
+output/checkpoint comparisons, 88 immutable checks, seven script hashes and four
+native pins. Exit and container cleanup succeed. Admission pins report SHA-256
+`f1837c9621c53cdb69a8c9047e867acc843b65b3762ca99c5e48a3dcf5345835`.
+
+The adapter replaces only the frozen batched path's window/convolution section.
+Recurrence, normalization, prefix availability, ownership and deferred publication
+remain byte-identical after that section. Both imported call bindings are scoped
+and restored; T2/T4/T8 tails stay native. It rejects non-L1 or unexpected T16
+geometry and requires all four deferred-checkpoint flags. Eight host tests pass,
+including failure restoration and unchanged descriptor arithmetic. Next is the
+matched complete-runtime hardware experiment, not an isolated speed claim.
 
 Run **35271222958** at `16cae4e643f69ace42e9925d85be973de4723291`
 passes in **57 seconds**. Independently checked: all 56 output/checkpoint
