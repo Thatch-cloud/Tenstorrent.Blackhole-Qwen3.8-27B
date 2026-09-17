@@ -22,13 +22,8 @@ def adapt(sources):
     result = drain_setup(adapt_sources(sources))
     name = 'full_dspark_request.py'
     result[name] = replace_once(result[name],
-        '    import torch\n    from full_request import measure_request',
-        "    if len(prompt) != 4096 or max_new_tokens != 64 or not combined_profile:\n"
-        "        raise ValueError('Bounded 4K attribution request required')\n"
-        '    import torch\n    from full_request import measure_request')
-    result[name] = replace_once(result[name],
         'history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)',
-        'history_capacity=4352)')
+        'history_capacity=4352 if combined_profile else ((len(prompt) + max_new_tokens + 31) // 32) * 32)')
     name = 'dspark_request_experiment.py'
     result[name] = replace_once(result[name],
         "    if profile_verifier or profile_drafter or combined_profile:\n"
@@ -36,6 +31,8 @@ def adapt(sources):
         "    schedule = (('publication', True), ('publication', False), ('publication', False))",
         "    if profile_verifier or profile_drafter or not combined_profile:\n"
         "        raise ValueError('Explicit combined winning-recipe profile required')\n"
+        "    if len(prompt) != 4096 or output_limit != 64:\n"
+        "        raise ValueError('Bounded 4K attribution request required')\n"
         "    schedule = (('publication', True),)")
     result[name] = replace_once(result[name],
         '    from frozen_ladder_requests import finish\n    finish(report, summarize)',
