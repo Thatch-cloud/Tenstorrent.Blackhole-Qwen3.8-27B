@@ -9,7 +9,18 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Latest validated fixture result: 89.47 committed tokens/s at 32K context**,
+**Same-recipe context ladder underway: 16K passes at 87.11 committed tokens/s.**
+
+| Streams | CTX | PP tok/s | Committed TG tok/s |
+| ---: | ---: | ---: | ---: |
+| 1 | 16,384 | 3,170.94 | **87.11** |
+
+One fresh feature audit and two timed full requests; exact output/state checks
+and clean shutdown pass. The 4K/8K rows stopped before model execution because
+of host I/O contention and need retries. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
+This pinned workload is separate from the historical measurements below.
+
+**Earlier matched fixture result: 89.47 committed tokens/s at 32K context**,
 one coding stream on both cards. Exact output, target state and inactive-state
 checks pass. Sustained serving and held-out coding quality remain unqualified.
 
@@ -25,7 +36,7 @@ included. [Combined result](docs/frozen-draft-tail.md).
 
 This is not an 11% gain over the earlier 89.01 result: two prompt tokens changed
 between runs because the fixture incorporates live source text. Comparisons
-within each run remain matched; future workload fixtures must be pinned.
+within each run remain matched; the new ladder now uses a pinned corpus.
 
 The next MLP activation-prefetch trial regresses to **86.50 TG** versus **88.95**
 matched control and is rejected. Keep the original streaming MLP reader.
