@@ -56,5 +56,24 @@ the reducer read a DRAM record into an L1 address with incompatible alignment
 (`src=0x6866c0`, `dst=0x1b3a0`). This was not a timeout or a numerical failure.
 The reducer now spaces its 32-byte records at 64-byte L1 boundaries and reserves
 8 KiB scratch, including the aligned final result. External records remain
-32 bytes; arithmetic and acceptance checks are unchanged. Retry qualification
-is required before any hardware admission.
+32 bytes; arithmetic and acceptance checks are unchanged.
+
+## Simulator qualification
+
+Run **35265936552**, commit `2fc4252399080611cad5da7816091139cfb03b4c`,
+passes in **4m24s**. The downloaded report independently passes
+`compact_score_report.py`: 20 exact two-chip eager/replay comparisons and
+40 immutable-input checks, complete 248,320-token vocabulary, steps 0 and 14,
+random inputs, cross-partition ties, signed zeros and subnormals. Every worker
+record matches its native SFPU score partition, and final tokens match native
+argmax and CPU argmax of those native scores. Ten source hashes are unchanged
+and match the candidate checkout; device teardown succeeds.
+
+Report SHA-256:
+`1d26ba993ff5f1e0cf1b5213a522fba82c45202c6f9ef3e3390f5155c2a1ae0b`.
+
+This qualifies finite-score selection, not learned Markov feedback, nonfinite
+device handling, combined hardware throughput or coding quality. The next gate
+must validate token-only feedback into the existing Markov loop without feeding
+an invalid sentinel into embedding. Then measure the combined matched runtime;
+retain native selection unless complete-cycle TG improves with correctness intact.
