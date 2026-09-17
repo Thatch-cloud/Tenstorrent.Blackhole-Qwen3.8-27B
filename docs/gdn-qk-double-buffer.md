@@ -1,6 +1,19 @@
 # Two-slot normalized Q/K reader rings
 
-**Unqualified candidate. Serving and the winning recipe are unchanged.**
+**Simulator-qualified candidate; hardware performance is unqualified.**
+Serving and the winning recipe are unchanged.
+
+## Simulator result
+
+[Run 35250900553](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35250900553)
+at `3ba2aadf9d9d4c57c747dc05373a06366256c4c6` passes in **3m4s**.
+All 24 output/state/bridge comparisons and 48 immutable-input checks pass,
+including eager and three changed-input replays. Both ring slots initialize
+correctly in these fixtures. Exit and all cleanup statuses are zero.
+Report SHA-256: `181173b7b6ab22e36f2068cce66255c621d5d30915ab7659ce9a5b6c755ea21c`.
+Candidate reader SHA-256: `3adef6c2b0a46d5ee6ba5172ab279e00b0f37d4a8ffa6aae1b293e82f6c3d889`.
+There is no hardware speed claim. Next is a matched complete-runtime comparison,
+not another isolated performance test.
 
 The combined dependency diagnostic measures roughly 978 query-wait cycles and
 1,666 key-wait cycles, versus 77 for previous-token state. Moving reads earlier

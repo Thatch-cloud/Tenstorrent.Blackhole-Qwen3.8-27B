@@ -63,6 +63,7 @@ jobs:
           python -B -m unittest test_gdn_recurrence_clock_combined_report
           python -B -m unittest test_gdn_input_overlap
           python -B -m unittest test_gdn_qk_double_buffer
+          python -B -m unittest test_gdn_qk_double_buffer_gate
           python -B -m unittest test_gdn_wait_clock test_gdn_wait_clock_program test_gdn_wait_clock_capture test_gdn_wait_clock_report
           python -B -m unittest test_gdn_wait_clock_combined test_gdn_wait_clock_experiment test_gdn_wait_clock_combined_report
           python -B -m unittest test_gdn_input_overlap_gate test_gdn_input_overlap_scope
