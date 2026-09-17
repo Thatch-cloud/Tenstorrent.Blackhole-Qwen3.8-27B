@@ -79,6 +79,16 @@ The host integration test uses this native-method boundary rather than calling
 the suffix loop directly. No global patch, environment default or serving route
 enables it; the combined cache controller still needs to invoke it explicitly.
 
+`prefill_prefix_controller.py` now joins cold checkpoint capture, metadata
+publication, feature ownership and native cache-hit routing. After a successful
+cold request it retains only prefix feature chunks. Hits restore GDN and execute
+the suffix; changed-prefix misses invalidate before cold overwrite, and lost
+residency or request failures discard the entry. It requires a caller-provided
+live page-residency validator and exclusive page ownership: no serving allocator
+or hardware lease has been connected yet. The synthetic integration test covers
+cold → changed-suffix hit → changed-prefix miss → lost lease, comparing hit state,
+features and output with a fresh reference. Device integration remains unqualified.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native

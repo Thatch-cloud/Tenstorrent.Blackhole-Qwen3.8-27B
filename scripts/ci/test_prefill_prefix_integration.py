@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 import torch
 
@@ -11,6 +12,7 @@ from prefill_prefix_boundary import checkpoint_boundary
 from prefill_prefix_features import prefix_features
 from prefill_prefix_lookup import PrefixIdentity, PrefixLookup
 from prefill_prefix_resume import native_resume_scope
+from prefill_prefix_controller import PrefixController
 
 
 class HostOperations:
@@ -70,7 +72,7 @@ class HostModel:
         pass
 
     def _prefill_chunked_eager_tp(self, *args, **kwargs):
-        raise AssertionError('Cache-hit test must execute the scoped native resume route')
+        return self.cold(args[0])
 
     def _forward_prefill_chunk_masked_tp(self, tokens, valid_len, chunk_start, page_table, bucket, **kwargs):
         self.starts.append(chunk_start)
@@ -104,6 +106,57 @@ def feature_values(capture):
 
 
 class PrefixIntegrationTests(unittest.TestCase):
+    def test_controller_cold_hit_miss_and_failed_residency(self):
+        operations = HostOperations()
+        model = HostModel(operations)
+        checkpoint = PrefillGDNCheckpoint(operations, model.device, model.gdn,
+            [operations.tensor() for unused in model.states])
+        residency = Mock()
+        controller = PrefixController(operations, model, checkpoint, residency)
+        tokens = torch.arange(6144).reshape(1, -1)
+        pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
+        identity = PrefixIdentity('a' * 64, 'b' * 64, 'c' * 64, 'session', 0)
+        prefill = lambda values: model._prefill_chunked_eager_tp(values, pages, 6144, 3, 2048, 0)
+        with controller.request(identity, tokens, pages, prefill,
+                prefix_position=4096, inactive_pages=[100]) as (result, capture, evidence):
+            self.assertFalse(evidence['cache_hit'])
+            self.assertEqual(len(capture.outputs()), 3)
+        self.assertEqual(len(controller.owner.outputs()), 2)
+        self.assertEqual(controller.owner.position, 4096)
+        changed = tokens.clone()
+        changed[:, 4096:] += 7
+        for value in model.states:
+            value.values = (-333, -444)
+        model.starts.clear()
+        with controller.request(identity, changed, pages, prefill,
+                prefix_position=4096, inactive_pages=[100]) as (actual, capture, evidence):
+            self.assertTrue(evidence['cache_hit'])
+            actual_features = feature_values(capture)
+        self.assertEqual(model.starts, [4096])
+        expected_model = HostModel(HostOperations())
+        expected_capture = FullHistoryCapture(expected_model.operations, expected_model, 6144)
+        with expected_capture.capture():
+            expected = expected_model.cold(changed)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual_features, feature_values(expected_capture))
+        self.assertEqual([value.values for value in model.states],
+            [value.values for value in expected_model.states])
+        self.assertEqual(model.kv, expected_model.kv)
+        changed[0, 0] += 1
+        model.starts.clear()
+        with controller.request(identity, changed, pages, prefill,
+                prefix_position=4096, inactive_pages=[100]) as (unused, capture, evidence):
+            self.assertFalse(evidence['cache_hit'])
+        self.assertEqual(model.starts, [0, 2048, 4096])
+        residency.side_effect = ValueError('lease lost')
+        with self.assertRaisesRegex(ValueError, 'lease lost'):
+            with controller.request(identity, changed, pages, prefill,
+                    prefix_position=4096, inactive_pages=[100]):
+                self.fail('Lost page lease admitted')
+        self.assertIsNone(controller.owner)
+        self.assertIsNone(controller.lookup.identity)
+        expected_capture.close()
+
     def test_changed_suffix_matches_cold_state_features_and_output(self):
         operations = HostOperations()
         model = HostModel(operations)

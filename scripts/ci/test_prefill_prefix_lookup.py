@@ -19,6 +19,9 @@ class PrefixLookupTests(unittest.TestCase):
         self.assertEqual(lookup.match(identity, tokens, pages), 4096)
         tokens[0] = 99998
         self.assertEqual(lookup.match(identity, tokens, pages), 0)
+        self.assertIsNone(lookup.identity)
+        tokens[0] = 0
+        self.assertEqual(lookup.match(identity, tokens, pages), 0)
 
     def test_identity_changes_invalidate(self):
         for change in (dict(target_sha256='d' * 64), dict(drafter_sha256='e' * 64),

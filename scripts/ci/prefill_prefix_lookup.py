@@ -68,5 +68,6 @@ class PrefixLookup:
             return 0
         position = len(self.tokens)
         if len(prompt) <= position or prompt[:position] != self.tokens:
+            self.invalidate()
             return 0
         return position
