@@ -11,6 +11,10 @@ from frozen_context_geometry import CONTEXTS
 CORPUS_SHA256 = '83ba40b9d7045cc674b54c4b03cd56a1535659590463dd099bbbff87d7c97939'
 
 
+class ExactContextUnavailable(ValueError):
+    pass
+
+
 def exact_frontier(encode, best, total_characters, target):
     if best is not None and len(best[1]) == target:
         return best
@@ -22,8 +26,24 @@ def exact_frontier(encode, best, total_characters, target):
                 tokens = encode(characters)
                 if len(tokens) == target:
                     return characters, tokens
-    raise ValueError(f'Exact context {target} unavailable near tokenizer frontier; '
+    raise ExactContextUnavailable(f'Exact context {target} unavailable near tokenizer frontier; '
         f'best binary-search length was {len(best[1])}; task/template remain unmodified')
+
+
+def exact_excerpt(encode, best, total_characters, target):
+    try:
+        characters, tokens = exact_frontier(lambda size: encode(size, 0), best, total_characters, target)
+        return 0, characters, tokens
+    except ExactContextUnavailable:
+        for start in range(1, 33):
+            for delta in (0, *(value for distance in range(1, 9) for value in (distance, -distance))):
+                characters = best[0] + delta
+                if 0 <= characters <= total_characters - start:
+                    tokens = encode(characters, start)
+                    if len(tokens) == target:
+                        return start, characters, tokens
+        raise ExactContextUnavailable(f'Exact context {target} unavailable across bounded excerpt boundaries; '
+            'task/template remain unmodified')
 
 
 def make_context_prompt(tokenizer, *, context_tokens=4096):
@@ -37,10 +57,10 @@ def make_context_prompt(tokenizer, *, context_tokens=4096):
     repeated = context
     repetitions = 1
 
-    def encode(characters):
+    def encode(characters, start=0):
         content = ('Repository context excerpt for background only; it may end partway through a file.\n'
             'Do not reproduce or modify this excerpt. Complete only the coding task after it.\n'
-            '<repository_context>\n' + repeated[:characters] + '\n</repository_context>\n\nCoding task:\n'
+            '<repository_context>\n' + repeated[start:start + characters] + '\n</repository_context>\n\nCoding task:\n'
             + corpus['task'])
         encoded = tokenizer.apply_chat_template([
             {'role': 'system', 'content': 'You are a careful coding assistant.'},
@@ -67,12 +87,13 @@ def make_context_prompt(tokenizer, *, context_tokens=4096):
             low = characters + 1
         else:
             high = characters - 1
-    characters, tokens = exact_frontier(encode, best, len(repeated), context_tokens)
+    start, characters, tokens = exact_excerpt(encode, best, len(repeated), context_tokens)
     return tokens, dict(task='merge_intervals_frozen_ladder_v1', requested_context=context_tokens,
         actual_context=len(tokens), corpus_sha256=CORPUS_SHA256,
-        corpus_repetitions=(characters + 2 + len(context) - 1) // (len(context) + 2),
+        corpus_repetitions=(start + characters + 2 + len(context) - 1) // (len(context) + 2),
+        excerpt_start=start,
         excerpt_characters=characters,
-        excerpt_sha256=hashlib.sha256(repeated[:characters].encode()).hexdigest(),
+        excerpt_sha256=hashlib.sha256(repeated[start:start + characters].encode()).hexdigest(),
         prompt_sha256=hashlib.sha256(json.dumps(tokens, separators=(',', ':')).encode()).hexdigest(),
         sources={name: hashlib.sha256(source.encode()).hexdigest() for name, source in corpus['sources'].items()},
         scope=__doc__)

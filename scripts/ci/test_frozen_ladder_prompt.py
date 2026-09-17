@@ -3,10 +3,40 @@ from unittest.mock import Mock, patch
 
 from coding_request import TASK
 from frozen_context_geometry import CONTEXTS
-from frozen_ladder_prompt import exact_frontier, make_context_prompt
+from frozen_ladder_prompt import exact_excerpt, exact_frontier, make_context_prompt
 
 
 class FrozenLadderPromptTests(unittest.TestCase):
+    def test_shift_excerpt_only_when_prefix_cannot_hit_exact_length(self):
+        calls = []
+
+        def encode(characters, start):
+            calls.append((characters, start))
+            return [1] * (4096 if start == 1 and characters == 101 else 4095)
+
+        self.assertEqual(exact_excerpt(encode, (100, [1] * 4095), 200, 4096)[:2], (1, 101))
+        self.assertTrue(all(start == 0 for characters, start in calls[:128]))
+        untouched = Mock()
+        self.assertEqual(exact_excerpt(untouched, (100, [1] * 4096), 200, 4096)[:2], (0, 100))
+        untouched.assert_not_called()
+
+    def test_boundary_fallback_never_accepts_short_or_changes_task(self):
+        with self.assertRaisesRegex(ValueError, 'bounded excerpt boundaries'):
+            exact_excerpt(lambda characters, start: [1] * 4095, (100, [1] * 4095), 200, 4096)
+        tokenizer = Mock()
+
+        def encode(messages, **options):
+            content = messages[1]['content']
+            self.assertTrue(content.endswith(TASK))
+            excerpt = content.split('<repository_context>\n', 1)[1].split('\n</repository_context>', 1)[0]
+            count = len(content) // 4
+            return [1] * (count // 2 * 2 + 1 if excerpt.startswith('File:') else count)
+
+        tokenizer.apply_chat_template.side_effect = encode
+        tokens, metadata = make_context_prompt(tokenizer, context_tokens=4096)
+        self.assertEqual(len(tokens), 4096)
+        self.assertGreater(metadata['excerpt_start'], 0)
+
     def test_exact_existing_prompts_are_not_changed(self):
         encode = Mock()
         best = (100, [1] * 4096)
