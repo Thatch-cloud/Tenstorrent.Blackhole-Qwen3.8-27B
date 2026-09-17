@@ -1,7 +1,31 @@
 # Find the remaining GDN cost inside the combined verifier
 
-**Host instrumentation and program-adapter tests pass; simulator qualification
-is pending. No performance result or serving change.**
+**Simulator qualification passes; combined hardware integration is next.
+No performance result or serving change.**
+
+## Simulator acceptance
+
+[Run 35243917766](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35243917766)
+at `6057beb32e3ef0e0bccd87d4ee5a0bb924bead9d` completes in **3m8s**.
+No target weights are loaded. The independently checked artifact contains:
+
+| Check | Result |
+| --- | --- |
+| Output, every prefix state and FP32 bridge | 24 exact comparisons |
+| Original input immutability | 48 exact comparisons |
+| Eager and three changed-input replays | 168 valid phase samples |
+| Unexecuted poisoned samples | Rejected before and after replay |
+| Exit and container cleanup | All zero |
+| Staged helpers and generated kernels | Reconstructed locally and matched |
+
+Report SHA-256:
+`fa3897309763ea33703cbac7c5455cb114b6746342a78b9b81ebe68a1b88670a`.
+Generated control/candidate compute SHA-256:
+`ce404cf287f9962243dc65f30d9736f45b0c95cfff503c6c20d68f8981a41153` /
+`cc615d298e69867c49c66a5a3c92c099a75386cc86db5e335ba760c4f3028a45`.
+The simulator uses pinned TT-Metal
+`9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9`. Its cycle values must not be
+used to rank physical hardware bottlenecks or predict TG.
 
 ## Why this is next
 
@@ -61,7 +85,7 @@ writer backpressure. Do not remove barriers based on these samples.
    unchanged three-stage GDN program. Readers, writers, CB sizes, precision and
    arithmetic are retained. Samples are an additional operand only for
    recurrence; normalization and norm/gate operands remain unchanged.
-2. Simulator: exact output and every prefix state, changed-input replay,
+2. Passed: simulator exact output and every prefix state, changed-input replay,
    immutable inputs, and rejection of unexecuted/poisoned samples.
 3. Collect a bounded sample during the **combined loaded T16/DSpark request**,
    without Tracy or full-model simulator loading. Instrumented timings cannot
