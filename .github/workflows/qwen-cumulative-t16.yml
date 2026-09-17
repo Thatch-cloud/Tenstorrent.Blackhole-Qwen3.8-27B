@@ -1,7 +1,7 @@
 name: Qwen cumulative T16 windows and compact drafting
 on:
   push:
-    tags: ['experiment/cumulative-t16-v*']
+    tags: ['experiment/cumulative-t16-v*', 'experiment/cumulative-t16-down-v*']
 permissions:
   contents: read
   actions: read
@@ -58,8 +58,14 @@ jobs:
             --manifest read-combined/experiment-results/ladder-sources.json
           python3 -B read-orchestrator/scripts/ci/gdn_direct_window_combined_stage.py --checkout read-combined \
             --evidence "$evidence/direct-window" --native-root "$evidence/conv-native/sources" --manifest read-combined/experiment-results/read-combined-sources.json
+          down_args=()
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-down-v* ]]; then
+            gh run download 35254182130 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35254182130-1 --dir "$evidence/mlp-down-grid"
+            gh run download 35189721030 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35189721030 --dir "$evidence/model-native"
+            down_args=(--down-evidence "$evidence/mlp-down-grid" --native-root "$evidence/model-native/sources")
+          fi
           python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
-            --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json
+            --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json "${down_args[@]}"
           git -C read-combined diff --check
       - name: Check host pressure before loading
         run: |
@@ -74,6 +80,7 @@ jobs:
           QWEN_GDN_DIRECT_WINDOW: '1'
           QWEN_COMPACT_SCORE_HARDWARE: '1'
           QWEN_CUMULATIVE_T16: '1'
+          QWEN_CUMULATIVE_MLP_DOWN: ${{ startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-down-') && '1' || '0' }}
           QWEN_DSPARK_REQUEST_CONTEXT: '4096'
           QWEN_DSPARK_MODE: request-target-attention
           QWEN_DSPARK_CODING_TASK: merge_intervals

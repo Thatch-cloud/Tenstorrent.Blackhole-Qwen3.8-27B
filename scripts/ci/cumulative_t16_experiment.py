@@ -10,13 +10,15 @@ import gdn_direct_window_experiment as direct_experiment
 from compact_score_gate import qualify, REPORT_SHA256
 from cumulative_t16_scope import scoped_cumulative_t16, validate_request
 from gdn_direct_window_comparison import repeatability
+from mlp_down_grid_gate import qualify as qualify_down, REPORT_SHA256 as DOWN_SHA256
 
 
 COMPACT_FILES = ('compact_score_gate.py', 'compact_score_report.py', 'compact_score_hardware_sources.py',
     'compact_score_scope.py', 'compact_score_device.py', 'compact_markov.py', 'compact-score-probe.py',
     'compact_score_hardware_device.py', 'compact_score_hardware_markov.py',
     'compact_score_io.cpp', 'compact_score_compute.cpp', 'compact_score_reduce.cpp')
-FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES +
+DOWN_FILES = ('mlp_down_grid_gate.py', 'mlp_down_grid_scope.py', 'mlp_down_grid.py', 'mlp-down-grid-probe.py')
+FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES + DOWN_FILES +
     ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py')))
 
 
@@ -26,6 +28,11 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         raise ValueError('Explicit cumulative T16 and compact-score opt-ins required')
     directory = Path(__file__).parent
     evidence = qualify(directory, directory / 'compact-score-evidence')
+    down_flag = os.environ.get('QWEN_CUMULATIVE_MLP_DOWN', '0')
+    if down_flag not in ('0', '1'):
+        raise ValueError('Explicit zero/one cumulative MLP-down policy required')
+    down = qualify_down(directory / 'mlp-down-grid-evidence', directory, '/opt/tt-metal') if down_flag == '1' else None
+    components = ['direct_windows', 'compact_scores'] + (['wider_mlp_down'] if down is not None else [])
 
     def fingerprints():
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in FILES}
@@ -36,7 +43,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     def combined(direct_admission, source_directory):
         if Path(source_directory).resolve() != directory.resolve():
             raise ValueError('Both components must come from the same staged runtime')
-        with scoped_cumulative_t16(direct_admission, evidence, directory) as audit:
+        with scoped_cumulative_t16(direct_admission, evidence, directory,
+                **(dict(down_admission=down) if down is not None else {})) as audit:
             audits.append(audit)
             yield audit['direct']
 
@@ -58,12 +66,18 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             request['compact_score'] = dict(compact=enabled,
                 hits=audit['compact']['calls'] if enabled else 0,
                 report_sha256=REPORT_SHA256 if enabled else None, restored=True)
-        report.update(cumulative_t16=True, cumulative_components=['direct_windows', 'compact_scores'],
+            if down is not None:
+                request['mlp_down_grid'] = dict(wider_down=enabled,
+                    hits=list(audit['down']['hits']) if enabled else [0] * 64,
+                    report_sha256=DOWN_SHA256 if enabled else None, restored=True)
+        report.update(cumulative_t16=True, cumulative_components=components,
             cumulative_route_diagnostics=audits,
             cumulative_measurement_quality=repeatability(report['gdn_direct_window_comparison']),
-            scope='Native retained T16 versus direct windows and compact draft selection together')
+            scope='Native retained T16 versus cumulative components: ' + ', '.join(components))
     finally:
         report['cumulative_sources'] = sources
         report['cumulative_sources_after'] = fingerprints()
         if report['cumulative_sources_after'] != sources or qualify(directory, directory / 'compact-score-evidence') != evidence:
             raise ValueError('Cumulative sources or compact admission changed')
+        if down is not None and qualify_down(directory / 'mlp-down-grid-evidence', directory, '/opt/tt-metal') != down:
+            raise ValueError('Cumulative down-grid admission changed')

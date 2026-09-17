@@ -4,6 +4,10 @@ Objective: 200 committed TG for one coding stream on two P150A cards, with
 correctness preserved. Standalone gains below 2% are not automatically excluded
 from cumulative testing. Serving defaults remain unchanged.
 
+User decision: preserve current quantization and precision. Further weight/cache
+quantization and lower-fidelity alternatives are deferred pending discussion,
+not automatically enabled by this historical review.
+
 ## Coverage and evidence
 
 This is the first review pass, not a completed audit of every historical branch
@@ -57,7 +61,7 @@ composition; they must not be advertised as established incremental gains.
 | [Small activation tiles](tiny-tile-projections-2026-09-09.md) | T8 layer +4.70% latency | Requires layout-compatible producer/consumer composition; standalone conversion penalty is included |
 | [T32 runtime](t32-score-reuse.md) | Older 4K 74.68 TG | Alternative verifier width; port T16 optimizations with new simulator coverage, not simultaneous T16/T32 hooks |
 | [GDN input overlap](gdn-input-overlap.md) | TG -0.92%; verifier 66.476 to 66.635 ms | Same recurrence-reader family as Q/K rings; compose transformed sources rather than nesting unverified hooks |
-| [Drafter HiFi2](dspark-projection-precision.md) | TG -1.56%; no repeatable draft gain | Separate precision arm; retain target precision and recheck acceptance and held-out coding |
+| [Drafter HiFi2](dspark-projection-precision.md) | TG -1.56%; no repeatable draft gain | Deferred under unchanged-precision policy; retained for historical completeness |
 | [Bank-bound proposal traces](dspark-banked-runtime-admission.md) | 4K TG +0.036%; commit faster but draft slower | Alternative to copied-history proposal ownership; integrate compact selection into both graphs and audit both bank transitions |
 | [Markov bias cache](markov-bias-cache-experiment.md) | 8K TG -6.93% | Interacts directly with compact selection and sequential feedback; retain reset epochs and count full-vocabulary cache traffic |
 
@@ -131,3 +135,17 @@ both route hit counts and all source fingerprints. A separate report validator
 requires both component identities, complete request correctness and repeatability.
 The staging workflow retains both simulator admissions and loads weights once.
 There is no cumulative hardware performance result yet.
+
+Optional third component: `QWEN_CUMULATIVE_MLP_DOWN=1` adds the simulator-qualified
+wider native down grid without changing weights, arithmetic or gate/up fusion.
+Its admission pins run 35254182130 and the runtime `tp_common.py` source; current
+local files and retained native inventory match. Reports require all 64 layer
+hit counts to match fused MLP execution, as well as restoration of all three
+scopes. Fifteen local tests cover two/three-component staging, missing execution,
+failure unwinding and report identity. Three-component performance is unmeasured.
+
+The workflow selects this stack only for `experiment/cumulative-t16-down-v*`;
+the original tag family remains the two-component control experiment. No new
+hardware job is dispatched while the user's other CI is creating I/O pressure.
+First cumulative run 35275657339 stopped at the pre-load disk gate: it provides
+staging evidence, not combined kernel correctness or a TG result.

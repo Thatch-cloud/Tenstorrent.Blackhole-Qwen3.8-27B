@@ -6,7 +6,7 @@ import cumulative_t16_scope as scope
 
 
 class CumulativeScopeTests(unittest.TestCase):
-    def exercise(self, fail_entry=False, fail_body=False):
+    def exercise(self, fail_entry=False, fail_body=False, with_down=False, fail_down=False):
         active, audits = [], {}
 
         @contextmanager
@@ -36,11 +36,28 @@ class CumulativeScopeTests(unittest.TestCase):
                 self.assertEqual(active.pop(), 'compact')
                 audit['restored'] = True
 
-        with patch.object(scope, 'scoped_direct_windows', direct), \
-                patch.object(scope, 'scoped_compact_scores', compact):
+        @contextmanager
+        def down(admission):
+            self.assertEqual(admission, 'down-admission')
+            self.assertEqual(active, ['direct', 'compact'])
+            if fail_down:
+                raise RuntimeError('down entry failed')
+            audit = dict(hits=[2] * 64, restored=False)
+            audits['down'] = audit
+            active.append('down')
             try:
-                with scope.scoped_cumulative_t16('direct-admission', 'compact-admission', '.') as audit:
-                    self.assertEqual(active, ['direct', 'compact'])
+                yield audit
+            finally:
+                self.assertEqual(active.pop(), 'down')
+                audit['restored'] = True
+
+        with patch.object(scope, 'scoped_direct_windows', direct), \
+                patch.object(scope, 'scoped_compact_scores', compact), \
+                patch.object(scope, 'scoped_down_grid', down):
+            try:
+                with scope.scoped_cumulative_t16('direct-admission', 'compact-admission', '.',
+                        down_admission='down-admission' if with_down else None) as audit:
+                    self.assertEqual(active, ['direct', 'compact'] + (['down'] if with_down else []))
                     if fail_body:
                         raise RuntimeError('request failed')
             finally:
@@ -65,3 +82,20 @@ class CumulativeScopeTests(unittest.TestCase):
     def test_request_failure_unwinds_both_routes(self):
         with self.assertRaisesRegex(RuntimeError, 'request failed'):
             self.exercise(fail_body=True)
+
+    def test_three_routes_and_all_layer_engagement(self):
+        audit = self.exercise(with_down=True)
+        request = dict(gdn_shared_qk=dict(loads=[{}] * 96), score_layout=dict(calls=2),
+                       fused_t16_mlp=dict(hits=[2] * 64))
+        scope.validate_request(request, audit)
+        audit['down']['hits'][17] = 0
+        with self.assertRaisesRegex(ValueError, 'Every fused MLP layer'):
+            scope.validate_request(request, audit)
+
+    def test_third_entry_failure_restores_first_two(self):
+        with self.assertRaisesRegex(RuntimeError, 'down entry failed'):
+            self.exercise(with_down=True, fail_down=True)
+
+    def test_request_failure_restores_three_routes(self):
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            self.exercise(with_down=True, fail_body=True)
