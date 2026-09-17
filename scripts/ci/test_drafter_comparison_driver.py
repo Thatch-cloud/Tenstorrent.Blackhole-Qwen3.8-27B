@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from drafter_comparison_experiment import run_loaded_requests
 from drafter_comparison_report import SCHEDULE
+from sampling_link_policy import SOURCES
 
 
 class ComparisonDriverTests(unittest.TestCase):
@@ -30,13 +31,13 @@ class ComparisonDriverTests(unittest.TestCase):
                     self.assertIs(kwargs[key], True)
             elif fail:
                 raise RuntimeError('DFlash2 failed')
-            return {}
+            return dict(emitted=[20, 1], eos_ids=[1])
 
         callbacks = dict(prefill=object(), decode=object(), live_digest=object(),
                          kv_digest=object(), inactive_digest=object(), eos_ids=[1])
-        sampler = SimpleNamespace(tt_sampling=object())
+        sampler = SimpleNamespace(tt_sampling=SimpleNamespace(num_argmax_gather_links=4))
         model = SimpleNamespace(mesh_device=object(), layers=[], _paged_kv_caches=[])
-        report = dict(streams=1)
+        report = dict(streams=1, sampling_link_sources=dict(SOURCES))
         environment = {name: '1' for name in ('QWEN_DRAFTER_COMPARISON', 'QWEN_CARDS_ALLOCATED',
             'QWEN_HARDWARE_TESTS', 'QWEN_CUMULATIVE_NORM', 'QWEN_CUMULATIVE_REGISTER', 'QWEN_CUMULATIVE_MLP_DOWN')}
         environment.update(TT_METAL_HOME='.', TT_METAL_SIMULATOR='', TT_METAL_DEVICE_PROFILER='')
@@ -49,6 +50,7 @@ class ComparisonDriverTests(unittest.TestCase):
             'dspark_request_experiment.warm_native_control': lambda *args: None,
             'dspark_request_experiment.cache_formats': lambda *args: {},
             'sampling_link_policy.sampler_links': lambda *args: nullcontext(),
+            'sampling_link_policy.audit': lambda *args: dict(SOURCES),
             'native_draft_sdpa.precise_draft_kernel': lambda *args: nullcontext({}),
             'cumulative_t16_scope.scoped_cumulative_t16': lambda *args, **kwargs: nullcontext(audit),
             'cumulative_t16_scope.validate_request': lambda *args: None,
@@ -78,6 +80,8 @@ class ComparisonDriverTests(unittest.TestCase):
                 self.assertFalse(active)
         self.assertEqual(calls, list(SCHEDULE))
         self.assertEqual(len(report['request_checks']), 6)
+        self.assertTrue(all(request['ended_with_eos'] and request['sampler_num_links'] == 4
+                            and request['fabric_sources'] == SOURCES for request in report['request_checks']))
         self.assertEqual(report['drafter_comparison_sources'], report['drafter_comparison_sources_after'])
 
     def test_all_six_complete_requests_share_target_callbacks(self):

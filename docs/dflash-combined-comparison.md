@@ -67,3 +67,16 @@ The comparison stage now runs the real shared-source preflight before and after
 its overlay. Independent CPU visibility-formula tests cover T16 masks; the
 original source-pin regression and existing widths remain checked. No source
 hash, numerical threshold or simulator admission was bypassed.
+
+Run 35287122216 subsequently reached both audit generation paths, but failed
+at the DFlash2 summary before timed requests. The new driver omitted
+`ended_with_eos`, `sampler_num_links` and `fabric_sources`, previously populated
+by `full-prefix.py`. The retained DSpark audit also lacked these fields. This
+is an integration-reporting failure, not an accepted benchmark or kernel-speed
+result. DFlash2's request was not retained because validation preceded append.
+
+The driver now derives completion from emitted/EOS IDs, reads the active sampler
+link count, and checks fabric-source hashes against the runtime audit before
+attaching them. It records completed requests before summary validation so a
+future rejection retains its evidence. Source identities are rechecked after
+the comparison; validation thresholds and exact-state gates are unchanged.

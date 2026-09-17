@@ -14,7 +14,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     from dflash_combined_request import measure_combined_dflash
     from drafter_request_environment import prepare
     from dspark_request_experiment import warm_native_control, cache_formats
-    from sampling_link_policy import sampler_links
+    from sampling_link_policy import sampler_links, audit as audit_sampling
+    from drafter_request_metadata import record_request
     from native_draft_sdpa import precise_draft_kernel
     from cumulative_t16_scope import scoped_cumulative_t16, validate_request
     from cumulative_register_runtime import runtime_scope
@@ -41,6 +42,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     require_active()
     directory = Path(__file__).parent
     runtime_root = os.environ['TT_METAL_HOME']
+    fabric_sources = audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
+    if report.get('sampling_link_sources') != fabric_sources:
+        raise ValueError('Loaded runtime sampling provenance differs from the matched request')
     fixtures = load_dflash_fixtures('/experiment-dflash-fixture')
     windows = qualify_windows(directory, directory / 'gdn-direct-window-evidence')
     compact = qualify_compact(directory, directory / 'compact-score-evidence')
@@ -74,6 +78,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                             rotary=rotary, score_layout_evidence=report['score_layout_hardware_audit'],
                             **common, **POLICIES['publication'])
                         result['native_attention_kernel'] = kernel_audit
+                    record_request(report, result, drafter, sampler.tt_sampling, fabric_sources)
                     validate_request(result, audit)
                     validate_norm_history(result, 'scatter')
                     result['gdn_direct_window'] = dict(direct=True, hits=audit['direct']['hits'],
@@ -90,11 +95,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 else:
                     result = measure_combined_dflash(operations, model, sampler, prompt, pages, helpers,
                         directory=directory, runtime_root=runtime_root, fixtures=fixtures, **common)
+                    record_request(report, result, drafter, sampler.tt_sampling, fabric_sources)
                     if audited:
                         from full_dflash_request import summarize_dflash_requests
                         summarize_dflash_requests([result], audit_only=True)
-                result['comparison_drafter'] = drafter
-                report['request_checks'].append(result)
                 progress(f'combined_drafter_{ordinal}_complete')
         comparison = summarize(report['request_checks'])
         report.update(drafter_comparison=comparison, pp=None, committed_tg=None,
@@ -104,3 +108,5 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['drafter_comparison_sources_after'] = fingerprints()
         if report['drafter_comparison_sources_after'] != sources:
             raise ValueError('Drafter comparison sources changed during complete requests')
+        if audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'}) != fabric_sources:
+            raise ValueError('Sampling provenance changed during complete requests')
