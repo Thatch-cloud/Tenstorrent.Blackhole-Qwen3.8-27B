@@ -1,7 +1,7 @@
 name: Qwen pinned kernel capability inventory
 on:
   push:
-    tags: ['experiment/frozen-kernel-inventory-v1', 'experiment/frozen-profiler-export-inventory-v1']
+    tags: ['experiment/frozen-kernel-inventory-v1', 'experiment/frozen-profiler-export-inventory-v1', 'experiment/prefill-cache-inventory-*']
 permissions:
   contents: read
 concurrency:
@@ -23,12 +23,16 @@ jobs:
           output=$(mktemp -d "$RUNNER_TEMP/qwen-kernel-inventory.XXXXXX")
           echo "QWEN_INVENTORY_OUTPUT=$output" >> "$GITHUB_ENV"
           image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          inventory_script=frozen_kernel_inventory.py
+          if [[ "$GITHUB_REF_NAME" = experiment/prefill-cache-inventory-* ]]; then
+            inventory_script=prefill_cache_inventory.py
+          fi
           timeout -k 10 90 docker run --rm --pull never --network none --read-only \
             --cpus 2 --memory 2g --user "$(id -u):$(id -g)" \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m \
             --mount "type=bind,src=$GITHUB_WORKSPACE/kernel-inventory-orchestrator/scripts/ci,dst=/inventory-scripts,readonly" \
             --mount "type=bind,src=$output,dst=/inventory-output" \
-            --entrypoint python3 "$image" -B /inventory-scripts/frozen_kernel_inventory.py \
+            --entrypoint python3 "$image" -B "/inventory-scripts/$inventory_script" \
             --output /inventory-output
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
