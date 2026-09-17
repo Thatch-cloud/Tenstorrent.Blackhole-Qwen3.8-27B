@@ -80,8 +80,8 @@ def validate_buffers(mesh, buffers):
         shards = ttnn.get_device_tensors(tensor)
         if len(shards) != 2:
             raise ValueError('Two-chip sample storage required')
-        for shard in shards:
-            identity = (shard.device().id(), shard.buffer_address())
+        for chip, shard in enumerate(shards):
+            identity = (chip, shard.buffer_address())
             if identity in addresses:
                 raise ValueError('Input and weight sample pages must not alias')
             addresses.add(identity)

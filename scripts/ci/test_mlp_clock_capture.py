@@ -26,7 +26,7 @@ class ClockCaptureTests(unittest.TestCase):
         address = self.counter
         return SimpleNamespace(shape=value.shape, dtype='uint32', layout='row',
             device=lambda: self.mesh, memory_config=lambda: 'dram',
-            shards=[SimpleNamespace(device=lambda chip=chip: SimpleNamespace(id=lambda: chip),
+            shards=[SimpleNamespace(device=lambda: SimpleNamespace(id=lambda: 0),
                 buffer_address=lambda: address, words=value.clone()) for chip in (0, 2)])
 
     def copy(self, payload, tensor):

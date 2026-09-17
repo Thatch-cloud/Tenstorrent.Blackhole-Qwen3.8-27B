@@ -26,7 +26,7 @@ class ClockCapture:
         self.identity = self.addresses()
 
     def addresses(self):
-        return tuple(tuple((shard.device().id(), shard.buffer_address())
+        return tuple(tuple(shard.buffer_address()
             for shard in self.operations.get_device_tensors(tensor)) for tensor in self.buffers)
 
     def prepare(self):

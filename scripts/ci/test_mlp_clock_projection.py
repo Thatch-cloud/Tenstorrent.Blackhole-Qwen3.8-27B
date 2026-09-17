@@ -28,7 +28,7 @@ class ClockProjectionTests(unittest.TestCase):
         def tensor(rows, address):
             return SimpleNamespace(shape=(rows, 32), dtype='uint32', layout='row',
                 device=lambda: mesh, memory_config=lambda: 'dram',
-                shards=[SimpleNamespace(device=lambda chip=chip: SimpleNamespace(id=lambda: chip),
+                shards=[SimpleNamespace(device=lambda: SimpleNamespace(id=lambda: 0),
                     buffer_address=lambda: address) for chip in (0, 2)])
 
         with patch.dict('sys.modules', ttnn=operations):

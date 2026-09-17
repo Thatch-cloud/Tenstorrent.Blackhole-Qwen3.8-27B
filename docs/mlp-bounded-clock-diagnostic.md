@@ -63,3 +63,10 @@ native comparisons, and requires five complete sample sets (one eager, four
 replays). Its process cap is 510 seconds and whole job cap 12 minutes, including
 setup and artifacts. It does not load the full target model or enable the global
 profiler. These caps do not alter the full context ladder workflow.
+
+First simulator attempt `35207165540` failed in sample allocation validation,
+before kernel compilation, and closed cleanly. TT-NN shard `device().id()` exposes
+the mesh identity here; it is not a unique chip identifier. Alias validation now
+compares addresses within each ordered shard, matching the existing replay
+binding checks. Host fixtures reproduce equal mesh IDs and equal cross-chip
+addresses while continuing to reject input/weight aliasing on the same shard.
