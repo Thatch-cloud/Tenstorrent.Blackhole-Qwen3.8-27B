@@ -130,6 +130,30 @@ context-ladder option; the latter two implement the explicit fused-score path.
 Next hardware admission must bind and validate that specific delta against the
 retained proposal plus new score evidence, not relabel the old pass as current.
 
+## Keep the 200 TG target tied to measured costs
+
+Re-read the retained **35167726511**, 4096-context hardware artifact rather than
+using isolated-kernel timings. Its two non-instrumented `request_checks` contain
+20 blocks and 242 committed tokens, with pooled TG **118.2196**:
+
+| Mean per block | ms |
+| --- | ---: |
+| Draft | 26.650 |
+| Verify/readback | 67.249 |
+| Selection/commit | 6.839 |
+| Whole block | 102.281 |
+| Blocking trace call, contained in verification | 65.803 |
+| Output readback, contained in verification | 0.433 |
+
+These are host intervals, not isolated device-kernel times; nested columns must
+not be added together. At the measured 12.1 committed tokens per block, 200 TG
+requires **60.5 ms per block**, roughly **41.8 ms less** than measured. Even free
+drafting would leave about 75.6 ms per block, or at most about 160 TG at unchanged
+acceptance. Therefore T32 wiring is not enough: the next performance experiment
+must attribute the winning T16 verifier's combined execution, or demonstrate that
+T32 increases accepted tokens enough to amortize its additional work. Readback
+removal alone cannot close this gap. Keep the proven T16 recipe as the control.
+
 | Area | Current T32 path | Required next evidence |
 | --- | --- | --- |
 | Markov score layout | Opt-in fused adapter; native default | Learned complete-proposal output and replay parity |
