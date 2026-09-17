@@ -27,7 +27,10 @@ CHANGES = {
         ('request_context() == 32768', "request_context() == selected_geometry()['context']"),
         ('history_limit() != 33024', "history_limit() != selected_geometry()['capacity']")),
     'dspark_runtime_cache.py': (
-        ('enabled=request_context() == 32768', "enabled=request_context() == selected_geometry()['context']"),),
+        ('enabled=request_context() == 32768', "enabled=request_context() == selected_geometry()['context']"),
+        ("inputs['draft_8k_factory'] = factory",
+            "from frozen_ladder_cache import build_identity\n"
+            "        inputs['draft_8k_factory'] = build_identity(factory)")),
     'dspark_8k_build.py': (
         ('capacity=33024, target_tree_scratch=scratch', "capacity=selected_geometry()['capacity'], target_tree_scratch=scratch"),),
     'target_t16_attention_gate.py': (
@@ -93,7 +96,7 @@ def main():
     before = {name: (scripts / name).read_bytes() for name in CHANGES}
     result = adapt({name: payload.decode() for name, payload in before.items()})
     result['coding_context_request.py'] = 'from frozen_ladder_prompt import make_context_prompt\n'
-    for name in ('frozen_ladder_prompt.py', 'frozen_ladder_requests.py'):
+    for name in ('frozen_ladder_prompt.py', 'frozen_ladder_requests.py', 'frozen_ladder_cache.py'):
         result[name] = Path(__file__).with_name(name).read_text()
     payloads = {name: source.encode() for name, source in result.items()}
     payloads['frozen-ladder-corpus.json'] = Path(__file__).with_name('frozen-ladder-corpus.json').read_bytes()
