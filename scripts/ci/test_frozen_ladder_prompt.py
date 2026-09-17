@@ -3,10 +3,26 @@ from unittest.mock import Mock, patch
 
 from coding_request import TASK
 from frozen_context_geometry import CONTEXTS
-from frozen_ladder_prompt import make_context_prompt
+from frozen_ladder_prompt import exact_frontier, make_context_prompt
 
 
 class FrozenLadderPromptTests(unittest.TestCase):
+    def test_exact_existing_prompts_are_not_changed(self):
+        encode = Mock()
+        best = (100, [1] * 4096)
+        self.assertIs(exact_frontier(encode, best, 200, 4096), best)
+        encode.assert_not_called()
+
+    def test_nonmonotonic_token_boundary_is_searched_locally(self):
+        encode = Mock(side_effect=lambda characters: [1] * (4096 if characters == 102 else 4095))
+        characters, tokens = exact_frontier(encode, (100, [1] * 4095), 200, 4096)
+        self.assertEqual(characters, 102)
+        self.assertEqual(len(tokens), 4096)
+
+    def test_short_prompt_is_never_returned_as_full_context(self):
+        with self.assertRaisesRegex(ValueError, 'best binary-search length was 4095'):
+            exact_frontier(lambda characters: [1] * 4095, (100, [1] * 4095), 200, 4096)
+
     def test_all_contexts_preserve_task_and_template(self):
         tokenizer = Mock()
 

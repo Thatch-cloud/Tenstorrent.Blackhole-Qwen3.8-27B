@@ -9,11 +9,12 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Same-recipe context ladder underway: 16K passes at 87.11 committed tokens/s.**
+**Same-recipe context ladder underway: 16K and 32K pass; 64K needs a prompt-preparation retry.**
 
 | Streams | CTX | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: |
 | 1 | 16,384 | 3,170.94 | **87.11** |
+| 1 | 32,768 | 2,968.87 | **89.96** |
 
 One fresh feature audit and two timed full requests; exact output/state checks
 and clean shutdown pass. The 4K/8K rows stopped before model execution because

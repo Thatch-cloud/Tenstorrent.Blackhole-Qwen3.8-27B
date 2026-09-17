@@ -11,6 +11,21 @@ from frozen_context_geometry import CONTEXTS
 CORPUS_SHA256 = '83ba40b9d7045cc674b54c4b03cd56a1535659590463dd099bbbff87d7c97939'
 
 
+def exact_frontier(encode, best, total_characters, target):
+    if best is not None and len(best[1]) == target:
+        return best
+    if best is None:
+        raise ValueError('No complete task/template fits requested context')
+    for distance in range(1, 65):
+        for characters in (best[0] + distance, best[0] - distance):
+            if 0 <= characters <= total_characters:
+                tokens = encode(characters)
+                if len(tokens) == target:
+                    return characters, tokens
+    raise ValueError(f'Exact context {target} unavailable near tokenizer frontier; '
+        f'best binary-search length was {len(best[1])}; task/template remain unmodified')
+
+
 def make_context_prompt(tokenizer, *, context_tokens=4096):
     if type(context_tokens) is not int or context_tokens not in CONTEXTS:
         raise ValueError('Explicit ladder context required')
@@ -52,9 +67,7 @@ def make_context_prompt(tokenizer, *, context_tokens=4096):
             low = characters + 1
         else:
             high = characters - 1
-    if best is None or not context_tokens - 32 <= len(best[1]) <= context_tokens:
-        raise ValueError('Cannot fill context without changing task or template')
-    characters, tokens = best
+    characters, tokens = exact_frontier(encode, best, len(repeated), context_tokens)
     return tokens, dict(task='merge_intervals_frozen_ladder_v1', requested_context=context_tokens,
         actual_context=len(tokens), corpus_sha256=CORPUS_SHA256,
         corpus_repetitions=(characters + 2 + len(context) - 1) // (len(context) + 2),
