@@ -86,3 +86,12 @@ needs source-bound admission and complete candidate eager/replay verification.
 Existing native-precision numerical gates remain unchanged. A separate candidate
 qualification must distinguish expected drafter approximation from target
 correctness: no relaxing target checks to accommodate this experiment.
+
+`dspark_precision_comparison.py` now provides the combined comparison boundary:
+two independent full audits followed by HiFi4/HiFi2/HiFi2/HiFi4 timing. Each
+timed arm must reproduce its own audited proposals; both arms must reproduce
+the same native target tokens and exact state. Block counts must reconcile
+with acceptance and committed tokens, and TG uses the entire decode loop.
+Four host tests cover changed proposals, audit/target failures, false accounting
+and a regressing timing pair. Existing identical-proposal comparators remain
+unchanged. This comparator is not yet wired into a hardware experiment.
