@@ -28,6 +28,19 @@ the default; hardware selection is rejected before model allocation. Local proto
 tests cover selection, isolation and failure-path ownership, not device execution.
 Pending: learned full-vocabulary and complete-proposal qualification, followed by
 a matched complete-request T16/T32 comparison.
+
+The complete-proposal probe accepts `--fused-score-layout`. It compares the
+candidate's captured hidden states, logits and tokens against a separate native-score
+eager proposal on both chips, initially and after each changed anchor. This prevents
+candidate-versus-itself replay checks from being mistaken for recipe parity.
+The probe still uses synthetic cached K/V, so even a pass cannot qualify target
+prefill, commit/rollback, coding quality or combined TG. This new comparison has
+host protocol coverage but has not yet executed on the simulator.
+
+Do not dispatch the old `t32-combined` lane unchanged: its probe timeout is 9,000
+seconds and it uploads the target embedding/head and all five learned draft layers.
+A bounded, reusable weight-loading route is needed before this becomes a practical
+iteration test. The three-minute weight-free score result does not predict its cost.
 The first bounded run, 35177093623, stopped at the host-I/O gate before Docker:
 15.63% full I/O stall measured over 15 seconds, against the unchanged 1% limit.
 The simulator step was skipped; that run produced no numerical result. The whole job

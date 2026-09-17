@@ -32,7 +32,10 @@ def main():
     for name in ('checkpoint', 'config', 'target', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--publication-only', action='store_true')
+    parser.add_argument('--fused-score-layout', action='store_true')
     options = parser.parse_args()
+    if options.publication_only and options.fused_score_layout:
+        parser.error('Fused score qualification requires complete proposal execution')
     require_projection_environment(os.environ, False)
     run_precise_probe(__file__)
     admission = require_active()
@@ -44,7 +47,8 @@ def main():
 
     report = dict(passed=False, closed_cleanly=False, scope=__doc__, context=4096, capacity=4384,
         proposals=31, learned_layers=5, full_request_qualified=False, numerical_oracle_qualified=False,
-        attention=admission, sources=sources(), resources_before=snapshot(), checks=[])
+        attention=admission, sources=sources(), resources_before=snapshot(), checks=[],
+        score_layout='fused' if options.fused_score_layout else 'native', score_reference_checks=[])
     if options.publication_only:
         report.update(scope='Learned captured history projection with synthetic feature taps; no target request or TG',
             proposals=0, publication_only=True)
@@ -136,13 +140,24 @@ def main():
             layer_weights=tuple({name: parameters[f'layers.{layer}.{name}'] for name in SPECIFICATIONS}
                 for layer in range(5)),
             history=SimpleNamespace(capacity=4384, layers=tuple(history), spare_layers=(), pending=None))
+        if options.fused_score_layout:
+            from functools import partial
+            from dspark_t32_score_layout import execute as fused_markov
+
+            device.proposal_markov = partial(fused_markov, mesh=mesh)
         progress('complete_proposal_eager_warmup')
         prepared = PreparedDSparkProposal(device, 10, audit=True, defer_capture=True)
         progress('complete_proposal_capture')
         prepared.capture()
+        if options.fused_score_layout:
+            from t32_proposal_score_audit import compare
+
+            report['score_reference_checks'].append(compare(prepared))
         for anchor in (20, 10):
             progress('complete_proposal_changed_anchor_' + str(anchor))
             tokens = prepared.propose(anchor, 31)
+            if options.fused_score_layout:
+                report['score_reference_checks'].append(compare(prepared))
             report['checks'].append(dict(anchor=anchor, tokens=list(tokens), exact=True))
         report['replay_checks'] = prepared.checks
         report['passed'] = True

@@ -19,6 +19,40 @@ class FakeTensor:
 
 
 class PreparedProposalTests(unittest.TestCase):
+    def test_native_score_audit_checks_both_replicas_and_restores_candidate(self):
+        import t32_proposal_score_audit as audit
+
+        candidate = Mock()
+        self.device.proposal_markov = candidate
+        proposal = prepared.PreparedDSparkProposal(self.device, 10)
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), patch.object(audit, 'execute', side_effect=self.execute):
+            result = audit.compare(proposal)
+            self.assertEqual(result['tensors'], 6)
+            self.assertTrue(result['exact'])
+            self.assertIs(self.device.proposal_markov, candidate)
+            proposal.outputs['tokens'].value.add_(1)
+            with self.assertRaisesRegex(AssertionError, 'differs'):
+                audit.compare(proposal)
+            self.assertIs(self.device.proposal_markov, candidate)
+            self.assertTrue(self.scopes[-1].release.called)
+        proposal.close()
+
+    def test_native_score_audit_restores_backend_on_reference_failure(self):
+        import t32_proposal_score_audit as audit
+
+        candidate = Mock()
+        self.device.proposal_markov = candidate
+        proposal = prepared.PreparedDSparkProposal(self.device, 10)
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch.object(audit, 'execute', side_effect=RuntimeError('reference failed')), \
+                self.assertRaisesRegex(RuntimeError, 'reference failed'):
+            audit.compare(proposal)
+        self.assertIs(self.device.proposal_markov, candidate)
+        self.assertTrue(self.scopes[-1].release.called)
+        proposal.close()
+
     def test_score_policy_is_instance_scoped_and_default_remains_native(self):
         mesh = object()
 
