@@ -1,7 +1,52 @@
 # Find the remaining GDN cost inside the combined verifier
 
-**Simulator qualification passes; combined hardware integration is next.
-No performance result or serving change.**
+**Simulator and combined hardware diagnostics pass.
+No throughput improvement or serving change is claimed.**
+
+## Combined hardware finding
+
+[Run 35245533179](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35245533179)
+at `ee025f464ba28381d1458cb1dba201b9ae3b7f22` finishes in **4m1s**. The full
+4K request passes native token/state/inactive checks, 100 feature checks and
+11 proposal checks. All 96 norm-prefetched builds use the admitted recurrence;
+4,032 phase samples cover two verifier replays, 48 GDN layers and both chips.
+Container exit is zero, no OOM is reported, and source fingerprints are stable.
+The independent combined-report validator passes. Report SHA-256:
+`e59e1ba57cd5d8e79d6fbbdf18d254ba9a6dde2eb655001909eafd5f460dd1ce`.
+
+Median cycles on chip 0, sampled token 8:
+
+| Phase | UNPACK | MATH | PACK |
+| --- | ---: | ---: | ---: |
+| Input wait | 5,019 | 19 | 21 |
+| Input conversion | 1,181 | 6,079.5 | 6,068.5 |
+| State decay | 2,513 | 2,467.5 | 2,410 |
+| Value read / delta | 1,162 | 1,224 | 1,163 |
+| Rank update | 2,266 | 2,194 | 2,284 |
+| Output projection | 372 | 204 | 257 |
+| State publication | 842 | 1,204 | 1,158 |
+
+Chip 1 is similar: UNPACK input wait 4,977.5 cycles and MATH conversion
+6,046 cycles. These phases overlap across processors: the long MATH conversion
+interval includes waiting for UNPACK readiness, not six thousand cycles of
+conversion arithmetic. Do not sum the columns or extrapolate one core/token
+to an exact model speedup.
+
+### Candidate selected from the evidence
+
+The reader currently reserves normalized Q/K rings **before** reading V, beta
+and gate. Q is held until output projection near the end of the current token;
+V/beta/gate are consumed and released near its beginning. That ordering delays
+the next token's DRAM reads even when their destination rings are already free.
+
+`gdn_input_overlap.py` moves V/beta/gate gathering ahead of Q/K gathering.
+It adds no buffers, changes no arithmetic and retains every snapshot. This is
+different from the earlier 6 KiB input-cache experiment, which retained the same
+Q/K-first order and did not establish repeatable combined throughput improvement.
+Host tests and source comparison pass; the reordered reader still needs its own
+simulator replay qualification and matched uninstrumented combined hardware test.
+This targets the measured readiness stall, not an assumed DRAM bandwidth limit,
+and cannot by itself establish the 200 TG objective.
 
 ## Simulator acceptance
 
