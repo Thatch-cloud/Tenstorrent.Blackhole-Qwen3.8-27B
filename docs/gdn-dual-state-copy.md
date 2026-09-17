@@ -23,6 +23,18 @@ unchanged output/feedback CB18/CB30. Next: bind hardware admission to this
 generated source and integrate only the copy change into the winning combined
 T16/HiFi4 runtime, preserving its norm-prefetch path and target correctness gates.
 
+The hardware admission helper now pins the report, both generated recurrence
+hashes, selected Python/native dependencies and clean simulator teardown. It
+regenerates the candidate against the runtime before admission rather than
+trusting a success flag. The retained report passes its independent matrix gate;
+live-runtime source regeneration must still run on CI.
+
+The request construction scope wraps only the recurrence kernel loader. The
+existing norm-prefetch builder composes inside it and remains responsible for
+its own reader and buffer changes. Nine host tests cover the transform, report
+matrix and successful/failing scope restoration, including norm-prefetch
+composition. Full combined comparison staging and hardware launch remain next.
+
 ## Implementation and qualification history
 
 The shared-Q/K recurrence copies each new state twice for intermediate tokens:
