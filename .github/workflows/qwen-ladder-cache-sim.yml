@@ -1,7 +1,7 @@
 name: Qwen wide page-table replay qualification
 on:
   push:
-    tags: ['experiment/ladder-cache-sim-v1', 'experiment/ladder-cache-sim-v2']
+    tags: ['experiment/ladder-cache-sim-v1', 'experiment/ladder-cache-sim-v2', 'experiment/ladder-cache-sim-v3']
 permissions:
   contents: read
 concurrency:

@@ -30,6 +30,24 @@ class LadderSimLaunchTests(unittest.TestCase):
         self.assertIn('ladder-cache-probe.py', suite)
         self.assertIn('ladder-cache.exit-status', suite)
 
+    def test_support_staged_before_container_execution(self):
+        bash = 'C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else shutil.which('bash')
+        if not bash:
+            self.skipTest('bash unavailable')
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        staging = 'docker cp scripts' + runner.split('docker cp scripts', 1)[1].split('docker start -a', 1)[0]
+        command = 'set -eu\ncontainer=fixture\ndocker() { printf "%s\\n" "$*"; }\n' + staging
+        result = subprocess.run([bash, '-c', command],
+            env=dict(os.environ, QWEN_SIM_CASE='ladder-cache', QWEN_CCL_LAZY_BUILD='0'),
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'cp scripts fixture:/experiment-scripts',
+            'cp optimisation/sim fixture:/simulator-support'])
+        root = Path(__file__).resolve().parents[2]
+        for name in ('run-native-fixed-attention.py', 'blackhole-packer-zero-flags.patch'):
+            self.assertTrue((root / 'optimisation/sim' / name).is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
