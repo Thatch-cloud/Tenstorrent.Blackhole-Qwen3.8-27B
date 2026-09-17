@@ -28,6 +28,7 @@ jobs:
         run: |
           python -B -m unittest discover -s scripts/ci -p 'test_*t32*.py'
           python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli test_winning_verifier_profile
+          python -B -m unittest test_dspark_confidence_reference test_dspark_confidence_fixture test_dspark_confidence_parity
           python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
