@@ -107,3 +107,10 @@ device unchanged, rejects baseline eager fallback, and inherits trace teardown.
 Four host tests cover isolation, failed initialization cleanup, closed-device
 rejection and successful-call accounting. The caller must still perform source
 admission before construction; no global backend or serving default changes.
+
+`dspark_precision_gate.py` now binds all seven reviewed report hashes to the
+actual staged source files, checkpoint, simulator runtime, candidate manifests
+and clean exits/teardown. It rejects incomplete reviews rather than deriving
+trust from whatever artifacts happen to be present. Three host tests cover
+successful component-only admission and source/runtime/report tampering. The
+remaining up/down artifacts and combined hardware wrapper are still required.
