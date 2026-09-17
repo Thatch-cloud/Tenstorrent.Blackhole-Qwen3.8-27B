@@ -1,6 +1,6 @@
 # Register-resident rounded MLP epilogue
 
-**Candidate only. No new throughput or correctness acceptance.**
+**Nearest-away candidate passes simulator exactness; hardware speed is unqualified.**
 
 ## First simulator outcome
 
@@ -87,6 +87,36 @@ implementations fail closed. Host tests enumerate every finite BF16 exponent/
 mantissa bin and both signs at five rounding boundaries, confirming that the
 two host policies differ only on even midpoints. This is not device validation.
 The unused CB, readers, K accumulation and serving defaults stay unchanged.
+
+### Full register-resident candidate passes simulation
+
+[35238822290](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35238822290),
+source `b6764c410e21d064196efa6630a10caef22f326f`, passes in **3m53s**.
+Independent validation confirms two exact eager outputs, 12 changed-input
+replay comparisons, four stale-input controls and four packed-weight checks.
+Exit and all cleanup statuses are zero. The complete register-resident version,
+not the packing-retaining diagnostic, was executed. No latency is qualified.
+
+Report: `cda39d8936cbe2056510c0cbcadb41df8e5c478ad277b3641f13fb121986e543`.
+Generated compute: `d212a495967dd0db31ee447ed7761b7ce6af3306b35fa42611e1296c4a1b1a82`.
+Staged projection: `d26d67ab4c893de327c8a2c6aa9ec949d904332a9b2a91353c5889f30272b6d4`.
+
+`mlp_register_epilogue_gate.py` binds admission to that report, both unchanged
+readers, both exact helper sources, the projection, native baseline and runtime.
+It checks the entire replay/weight matrix, not just `passed`. Local tests admit
+the downloaded artifact and reject altered readers and the wrong physical packer.
+
+The simulator uses the existing packer-zero graft (`8aaf199a...`). Physical
+admission explicitly requires the original packer (`87b9c251...`), observed in
+the retained native-source inventory of combined run 35233247736. The cast
+header must stay `1cfea093...` on both. This known simulator/physical distinction
+is explicit in admission and still requires full combined hardware correctness;
+the passing simulator is not hardware acceptance. No serving defaults change.
+
+Next: wire this admitted source into the existing loaded 4K T16/DSpark ABBA
+comparison, retaining all winning features, fresh native token/state/feature
+audits, all 64 target layers and complete-cycle TG. Do not benchmark the
+activation-only diagnostic or report simulated time as a speed improvement.
 
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
