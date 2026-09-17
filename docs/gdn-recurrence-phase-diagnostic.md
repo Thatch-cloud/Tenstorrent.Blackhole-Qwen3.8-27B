@@ -1,7 +1,7 @@
 # Find the remaining GDN cost inside the combined verifier
 
-**Host instrumentation tests pass; device integration and simulator qualification
-are pending. No performance result or serving change.**
+**Host instrumentation and program-adapter tests pass; simulator qualification
+is pending. No performance result or serving change.**
 
 ## Why this is next
 
@@ -57,8 +57,10 @@ writer backpressure. Do not remove barriers based on these samples.
 
 ## Remaining gates
 
-1. Wire caller-owned, poisoned sample buffers into the unchanged three-stage
-   GDN program; retain reader, writer, CB sizes and arithmetic.
+1. Implemented and host-tested: caller-owned, poisoned sample buffers in the
+   unchanged three-stage GDN program. Readers, writers, CB sizes, precision and
+   arithmetic are retained. Samples are an additional operand only for
+   recurrence; normalization and norm/gate operands remain unchanged.
 2. Simulator: exact output and every prefix state, changed-input replay,
    immutable inputs, and rejection of unexecuted/poisoned samples.
 3. Collect a bounded sample during the **combined loaded T16/DSpark request**,
@@ -70,3 +72,10 @@ writer backpressure. Do not remove barriers based on these samples.
 Host tests verify lossless source removal against the retained hash-checked
 native export, phase order, processor/token identities, clock rollover and
 missing-sample rejection. They do not establish compilability or device safety.
+
+The simulator workflow runs the small synthetic recurrence fixture, not model
+weights: 24 exact output/state/bridge comparisons, 48 immutable-input checks,
+and four poisoned sample captures (eager plus three changed-input replays).
+Missing-execution rejection runs before and after the numerical matrix. This
+first qualification samples token 8; first/final-token device sampling remains
+unqualified. Local fresh staging at the frozen revision imports successfully.
