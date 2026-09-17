@@ -34,12 +34,17 @@ if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
 fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
     weight_flags=()
+    markov_limit=9000
+    if [ "$QWEN_SIM_CASE" = t32-markov-fused ]; then
+        weight_flags=(--fused-score-layout)
+        markov_limit=360
+    fi
     if [ "$QWEN_SIM_CASE" = t32-markov-learned ]; then
         weight_flags=(--checkpoint /dspark-model.safetensors)
     fi
     python3 -B -m unittest test_dspark_t32_weights test_dspark_t32_reference
     status=0
-    timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-markov-probe.py \
+    timeout -k 15 "$markov_limit" python3 -u /experiment-scripts/ci/dspark-t32-markov-probe.py \
         --native-reference "${weight_flags[@]}" --output /experiment/results/t32-markov.json || status=$?
     printf '%s\n' "$status" > /experiment/results/t32-markov.exit-status
     exit "$status"
