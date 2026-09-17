@@ -51,6 +51,23 @@ has `passed=false` and `closed_cleanly=false`; it cannot qualify the candidate.
 Added persisted elapsed-time stage markers for metadata, matrix read, finite check,
 hash, head transpose, combined TT-NN conversion/upload and synchronization. The
 previous log cannot distinguish these costs, and no longer timeout is justified yet.
+
+Run **35179275796** isolated the bottleneck (exit 124, whole job 3m13s):
+
+| Target embedding setup | Seconds |
+| --- | ---: |
+| Read matrix | 1.004 |
+| Finite-value check | 3.960 |
+| Hash matrix | 1.027 |
+| TT-NN conversion/upload | Did not return before the probe cap |
+
+Conversion/upload began 12.243 seconds after opening the mesh. The head and draft
+layers were never reached. This rules out checkpoint reads as the dominant delay
+in this run; it does not yet separate host TT-NN conversion from simulated device
+transfer. Do not spend another full-proposal run on the same loading route or
+attribute this timeout to the fused score kernel. Full-weight simulator execution
+is not presently a practical iteration gate; kernel simulator evidence must stay
+distinct from subsequent complete-runtime hardware correctness and timing evidence.
 The first bounded run, 35177093623, stopped at the host-I/O gate before Docker:
 15.63% full I/O stall measured over 15 seconds, against the unchanged 1% limit.
 The simulator step was skipped; that run produced no numerical result. The whole job
