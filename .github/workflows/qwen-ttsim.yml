@@ -25,8 +25,10 @@ jobs:
         run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          path: simulator-source-${{ github.run_id }}-${{ github.run_attempt }}
           persist-credentials: false
       - name: Run CPU-only simulator
+        working-directory: simulator-source-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
@@ -37,11 +39,14 @@ jobs:
           else
             bash scripts/ci/run-simulator.sh
           fi
+          if [ "$QWEN_SIM_CASE" = gdn-slot-copy ]; then
+            PYTHONPATH=scripts/ci python3 -c 'import json; from gdn_slot_copy_gate import qualify; print(json.dumps(qualify("experiment-results/gdn-slot-copy.json", "scripts/ci")))' > experiment-results/gdn-slot-copy-qualification.json
+          fi
       - name: Retain simulator evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: qwen-ttsim-${{ github.run_id }}
-          path: experiment-results/
+          path: simulator-source-${{ github.run_id }}-${{ github.run_attempt }}/experiment-results/
           if-no-files-found: error
           retention-days: 14
