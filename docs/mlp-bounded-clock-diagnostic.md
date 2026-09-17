@@ -104,3 +104,23 @@ These are geometry-matched single-layer fixture observations, not target-model
 bottleneck measurements. The next gate is all 64 MLP layers inside the winning
 combined T16 runtime, with distinct persistent sample buffers per layer. Do not
 infer a throughput improvement from successful instrumentation qualification.
+
+## Combined ownership adapter (host-tested, not deployed)
+
+`mlp_clock_combined.py` binds one distinct preallocated capture to each of the
+64 ordered native target MLP weight tensors. It rejects cross-layer sample
+aliasing and T32 substitutions. The scoped verifier wrapper samples only the
+first two full T16 verification calls; later blocks and tail widths still run
+the unchanged verifier exactly once. No profiling is added to gold decoding.
+
+The caller must create these buffers before trace capture and retain their
+ownership through verifier teardown. Engine construction is tracked before
+capture begins, so a constructor failure cannot accidentally authorize freeing
+buffers still referenced by a partially captured trace. Failed execution does
+not retry or publish partial samples. Scoped methods restore on exit.
+
+Remaining integration: instantiate the bank in the winning frozen request
+runner, bind the hardware-qualified candidate source, retain the native feature/
+state checks, and collect a complete two-replay/64-layer report. No combined
+CI job has been dispatched for this adapter yet; fixture acceptance above does
+not qualify this new host integration or establish a speedup.
