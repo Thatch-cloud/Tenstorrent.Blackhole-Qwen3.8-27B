@@ -132,6 +132,33 @@ retained proposal plus new score evidence, not relabel the old pass as current.
 
 ## Keep the 200 TG target tied to measured costs
 
+### Source composition review after the 4K cache result
+
+The retained T32 hardware run `34689543028` was re-read, not inferred from a
+component timer: its two timed requests deliver **36.56 TG** at 4K, with 128
+committed tokens and 110/316 accepted proposals. Its older recipe and prompt
+are not matched to today's T16 result, so it does not establish a T32 speedup.
+
+`t32_score_composition.py` now independently checks the retained full-proposal
+simulator artifact, the 31-query fused-feedback artifact, and both 64- and
+248,320-vocabulary score-layout gates. It accounts for all **68** current
+Python dependencies: 65 match retained proposal evidence and exactly three
+have pinned, reviewed source changes. The feedback report has 186 exact eager
+queries and 248 changed-input replay queries, plus input/weight/stale controls.
+The audit passes against the retained real artifacts locally.
+
+This is **not** full-proposal candidate or hardware qualification. Existing
+simulator-only guards remain intact. The next integration must explicitly
+combine this evidence with hardware runtime admission, native-score proposal
+comparison and the full target-state audit; it must not retry multi-gigabyte
+simulator weight upload or silently admit arbitrary changed dependencies.
+
+The current cached-prefill T16 screen measures **123.93 committed TG**, with
+**66.39 ms** verifier/readback and **97.60 ms** whole blocks. Prefix reuse fixes
+prompt work, not the 200-TG decode shortfall. Wider drafting must be compared
+on the same prompt and fused target recipe, rather than using the old 36.56-TG
+line as its control.
+
 Re-read the retained **35167726511**, 4096-context hardware artifact rather than
 using isolated-kernel timings. Its two non-instrumented `request_checks` contain
 20 blocks and 242 committed tokens, with pooled TG **118.2196**:
