@@ -1,8 +1,38 @@
 # DFlash2 versus the promoted combined runtime
 
-Status: combined adapter and CI staging implemented; hardware qualification pending.
-Control is the user-promoted T16/DSpark stack at `239c7c1`, not the older
-DFlash2 74.27-TG recipe. No new throughput result is available.
+Status: matched combined comparison passed in run 35287866254; DFlash2 is not promoted.
+Control is the user-promoted T16/DSpark stack, not the older DFlash2 recipe.
+
+| Drafter | CTX | Streams | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| DSpark | 4096 | 1 | 3333.91 | 131.05 |
+| DFlash2 | 4096 | 1 | 3360.78 | 97.58 |
+
+Source: run 35287866254 artifact `cumulative-validation.json`, two timed
+requests per drafter after correctness audits. This is a coding-fixture pilot,
+not held-out quality certification or serving acceptance. DFlash2 is 25.54%
+slower here; target optimizations are shared but drafter optimizations are not.
+
+## DFlash2 optimization sequence
+
+Hardware is paused at the user's request. Do not dispatch hardware jobs or
+reset cards until explicitly released. Continue CPU and bounded simulator work.
+
+1. Qualify a separate T16 native proposal-attention candidate. Preserve the
+   existing T8 gates and pinned shared sources. Check all 16 live queries,
+   finite padding, masked-key isolation, changed-input replay and stable bindings.
+2. Integrate only after simulator evidence, then compare against composed
+   attention in the same combined runtime when hardware becomes available.
+   Native proposal arithmetic is not assumed identical: exact target output
+   and state, acceptance, and complete-request TG remain mandatory gates.
+3. Reduce DFlash2 history-publication and selection overhead, measuring each
+   change in combination rather than substituting kernel timing for TG.
+
+`dflash_t16_native_attention.py` is an opt-in experimental adapter only; no
+runtime calls it yet. CPU tests cover mask rejection, second-half live-row
+diagnostics, dispatch configuration and reference masked-key isolation. They
+do not certify device numerics, trace replay, performance or coding quality.
+The next simulator probe must use T16 operands, not relabel T8 learned fixtures.
 
 ## Comparison contract
 

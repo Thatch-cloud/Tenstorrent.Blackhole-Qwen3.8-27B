@@ -63,7 +63,7 @@ if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-bitwise ]; then
     score_bitwise=1
     export QWEN_SIM_CASE=dspark-ladder-attention
 fi
-case "${QWEN_SIM_CASE:-stack}" in t32-markov-fused|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|history-concat|ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in dflash-t16-native-attention|t32-markov-fused|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|history-concat|ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
 mkdir -p experiment-results
 case "${QWEN_T32_FUSED_SCORE:-0}" in 0|1) ;; *) exit 2 ;; esac
 case "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" in 0|1) ;; *) exit 2 ;; esac
@@ -105,6 +105,7 @@ printf 'preflight_complete\n' | tee "$results/preflight-stage.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = history-concat || "${QWEN_SIM_CASE:-stack}" = history-append || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = ladder-cache ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
@@ -216,6 +217,9 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then
+    docker cp optimisation/sim "$container:/simulator-support"
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
     docker cp optimisation "$container:/optimisation"
 fi

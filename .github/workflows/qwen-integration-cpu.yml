@@ -119,7 +119,7 @@ jobs:
           python -B -m unittest discover -s scripts/ci -p 'test_cumulative*.py'
           python -B -m unittest test_dflash_proposal_inputs test_draft_shared_head test_draft_attention test_dflash_cached_trace
           python -B -m unittest discover -s scripts/ci -p 'test_drafter_comparison*.py'
-          python -B -m unittest test_dflash_combined_request test_dflash_request_runtime test_dflash_attention_mask
+          python -B -m unittest test_dflash_combined_request test_dflash_request_runtime test_dflash_attention_mask test_dflash_t16_native_attention
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
           bash -n scripts/ci/run-simulator.sh
