@@ -53,6 +53,19 @@ This is not a calibrated policy or device qualification. Actual hidden-tensor se
 checkpoint-weight parity, EOS behavior and hardware cost tables remain open.
 This inspected main revision is not asserted to be the model card's v0.5.17.
 
+The bounded confidence fixture now fetches only the pinned 6640-byte header and
+10754 bytes of learned head weights/bias. Eight additional upstream comparisons
+pass exactly with those learned weights and synthetic hidden/Markov features.
+It rejects corrupted payloads; nine offline unit tests cover the reference and
+fixture together. No complete checkpoint, target weights or hardware were loaded.
+The fixture pins both tensor hashes independently of the header.
+
+Upstream `DFlashDraftModel.forward` applies its final norm before returning the
+hidden states consumed by the sampler. Our prepared proposal exposes the final
+`normalized` tensor, making it the source-level candidate for the same tap.
+Actual learned hidden-feature parity and token-row alignment still need device
+validation; matching the head arithmetic alone does not establish them.
+
 1. Inspect the pinned serving implementation for confidence inputs, predecessor
    alignment, normalization and the actual length-selection rule. Do not infer
    these from the head constructor or substitute an arbitrary threshold.
