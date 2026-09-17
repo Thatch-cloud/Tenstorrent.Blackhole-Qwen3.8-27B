@@ -28,6 +28,16 @@ failed copy. It does not allocate device storage during restore. Four host tests
 cover restoration, carry, aliasing, wrong boundaries, changed bindings and
 partial failure. These tests are not hardware acceptance or a working cache.
 
+`prefill_prefix_resume.py` adds the explicit eager suffix loop matching the
+exported native chunk boundary. It restores first, does not reset GDN, skips
+completed 2,048-token prefix chunks and retains absolute suffix positions.
+It requires at least one uncached token: tail-only hits do not need a retained
+prefix hidden tensor, while full suffix chunks supply their own final hidden.
+This is text-only and not installed into the runtime yet. Its caller must supply
+the complete KV/GDN/feature restore and validate identity and page ownership;
+passing only the GDN checkpoint is not sufficient. Six host tests cover skipped
+chunks, tail-only hits, final logits, restore failure and hidden-buffer cleanup.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
