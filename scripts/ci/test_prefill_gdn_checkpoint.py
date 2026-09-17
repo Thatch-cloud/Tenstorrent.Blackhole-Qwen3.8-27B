@@ -18,6 +18,8 @@ class PrefillGDNCheckpointTests(unittest.TestCase):
         layers = [SimpleNamespace(B=1, _stable_state=True, rec_state=tensor(),
             conv_states=[tensor() for unused in range(4)], conv_carry=tensor()) for unused in range(48)]
         buffers = [tensor() for unused in range(288)]
+        for index, layer in enumerate(layers):
+            layer.rec_state.dtype = buffers[index * 6].dtype = 'fp32'
         operations = SimpleNamespace(get_device_tensors=lambda value: value.parts,
             synchronize_device=Mock(), copy=Mock(side_effect=lambda source, destination:
                 setattr(destination, 'data', list(source.data))))
@@ -35,6 +37,8 @@ class PrefillGDNCheckpointTests(unittest.TestCase):
         self.assertEqual(operations.copy.call_count, 576)
         self.assertEqual(operations.synchronize_device.call_count, 4)
         self.assertEqual(layers[-1].conv_carry.data, expected[-1])
+        self.assertTrue(all(layer.rec_state.dtype == 'fp32' for layer in layers))
+        self.assertTrue(all(layer.conv_carry.dtype == 'bf16' for layer in layers))
 
     def test_wrong_boundary_and_changed_storage_rejected(self):
         operations, layers, buffers = self.fixture()

@@ -2,7 +2,6 @@
 
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
 
 import torch
 
@@ -13,6 +12,7 @@ from prefill_prefix_features import prefix_features
 from prefill_prefix_lookup import PrefixIdentity, PrefixLookup
 from prefill_prefix_resume import native_resume_scope
 from prefill_prefix_controller import PrefixController
+from prefill_prefix_residency import OfflinePrefixResidency
 
 
 class HostOperations:
@@ -62,6 +62,8 @@ class HostModel:
             conv_states=self.states[index + 1:index + 5], conv_carry=self.states[index + 5])
             for index in range(0, 288, 6)]
         self.layers = [SimpleNamespace(forward=self.layer_forward) for unused in range(64)]
+        self._paged_kv_caches = [tuple(operations.tensor((104, 1, 64, 256))
+            for unused in range(2)) for unused in range(16)]
         self.kv, self.starts = {}, []
         self.inactive = ('untouched', 42)
 
@@ -111,11 +113,11 @@ class PrefixIntegrationTests(unittest.TestCase):
         model = HostModel(operations)
         checkpoint = PrefillGDNCheckpoint(operations, model.device, model.gdn,
             [operations.tensor() for unused in model.states])
-        residency = Mock()
-        controller = PrefixController(operations, model, checkpoint, residency)
         tokens = torch.arange(6144).reshape(1, -1)
         pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
         identity = PrefixIdentity('a' * 64, 'b' * 64, 'c' * 64, 'session', 0)
+        residency = OfflinePrefixResidency(operations, model, identity, list(range(96)))
+        controller = PrefixController(operations, model, checkpoint, residency)
         prefill = lambda values: model._prefill_chunked_eager_tp(values, pages, 6144, 3, 2048, 0)
         with controller.request(identity, tokens, pages, prefill,
                 prefix_position=4096, inactive_pages=[100]) as (result, capture, evidence):
@@ -148,8 +150,8 @@ class PrefixIntegrationTests(unittest.TestCase):
                 prefix_position=4096, inactive_pages=[100]) as (unused, capture, evidence):
             self.assertFalse(evidence['cache_hit'])
         self.assertEqual(model.starts, [0, 2048, 4096])
-        residency.side_effect = ValueError('lease lost')
-        with self.assertRaisesRegex(ValueError, 'lease lost'):
+        residency.invalidate()
+        with self.assertRaisesRegex(ValueError, 'reservation'):
             with controller.request(identity, changed, pages, prefill,
                     prefix_position=4096, inactive_pages=[100]):
                 self.fail('Lost page lease admitted')

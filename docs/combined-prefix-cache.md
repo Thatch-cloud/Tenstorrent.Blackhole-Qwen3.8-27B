@@ -89,6 +89,16 @@ or hardware lease has been connected yet. The synthetic integration test covers
 cold → changed-suffix hit → changed-prefix miss → lost lease, comparing hit state,
 features and output with a fresh reference. Device integration remains unqualified.
 
+`prefill_prefix_residency.py` checks the actual 16 native K/V pairs on both chips:
+addresses, geometry, dtype, layout, memory placement, session identity and valid
+page ranges. It rejects aliases, remapping and another slot claiming any reserved
+page, even one unused by the current prompt. Failure revokes the validator.
+The controller host test now uses this implementation rather than a stub. It
+validates an existing exclusive reservation; it does not create one or detect
+out-of-band writes to unchanged addresses. Integration must invalidate before
+such writes. GDN checkpoint tests now explicitly preserve native mixed FP32
+recurrence and BF16 convolution/carry types.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
