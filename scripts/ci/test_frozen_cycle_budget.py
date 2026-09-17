@@ -31,6 +31,29 @@ class CycleBudgetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize(report)
 
+    def test_single_recipe_ladder_preserves_complete_request_tg(self):
+        report = self.fixture()
+        del report['request_comparison']
+        report.update(fresh_context_audit=True, committed_tg=74,
+            request_summary=dict(ctx=32768, committed_tg=74, measured_requests=1))
+        result = summarize(report)['arms']['publication']
+        self.assertEqual(result['request_tg'], 74)
+        self.assertEqual(result['required_cycle_reduction_ms'], 92)
+        for field, value in (('ctx', 8192), ('committed_tg', 200), ('measured_requests', 2)):
+            changed = copy.deepcopy(report)
+            changed['request_summary'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                summarize(changed)
+
+    def test_ladder_summary_cannot_be_used_for_multiple_arms(self):
+        report = self.fixture()
+        del report['request_comparison']
+        report.update(fresh_context_audit=True, committed_tg=74,
+            request_summary=dict(ctx=32768, committed_tg=74, measured_requests=1))
+        report['request_checks'].append(dict(report['request_checks'][1], arm='control'))
+        with self.assertRaises(ValueError):
+            summarize(report)
+
     def test_failed_audit_rejected(self):
         report = self.fixture()
         report['request_checks'][0]['state_exact'] = False

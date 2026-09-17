@@ -22,6 +22,15 @@ def summarize(report, target_tg=200.0):
             raise ValueError('Explicit timing classification required')
         grouped.setdefault(request['arm'], []).append(request)
     arms = {}
+    comparison = report.get('request_comparison')
+    if comparison is None:
+        summary = report.get('request_summary', {})
+        if (set(grouped) != {'publication'} or report.get('fresh_context_audit') is not True
+                or summary.get('ctx') != report.get('ctx_tokens')
+                or summary.get('committed_tg') != report.get('committed_tg')
+                or summary.get('measured_requests') != len(grouped['publication'])):
+            raise ValueError('One matching full-request ladder summary required')
+        comparison = dict(arms=dict(publication=summary))
     for arm, requests in grouped.items():
         blocks = [block for request in requests for block in request['blocks']]
         if not blocks:
@@ -44,7 +53,7 @@ def summarize(report, target_tg=200.0):
             required_cycle_reduction_ms=max(0, means['cycle_ms'] - target_cycle),
             hypothetical_zero_component_block_tg=removal_bounds,
             block_only_tg=1000 * means['committed'] / means['cycle_ms'],
-            request_tg=report['request_comparison']['arms'][arm]['committed_tg'])
+            request_tg=comparison['arms'][arm]['committed_tg'])
     if not arms:
         raise ValueError('No uninstrumented requests')
     return dict(context=report['ctx_tokens'], streams=1, target_tg=target_tg, arms=arms,
