@@ -19,6 +19,25 @@ acceptance override. Mismatch values and row distribution are now retained.
 The current workflow explicitly selects `--diagnose-activation`; a pass qualifies
 only this diagnostic, not the rejected register-resident epilogue.
 
+## Activation diagnostic passes
+
+[35236664694](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35236664694),
+source `133107e83313977558b71e4118359507d06809a7`, passes in **3m53s**.
+Independent artifact validation confirms both eager outputs, 12 changed-input
+replay comparisons, four stale-input controls and four packed-weight checks.
+Exit and all container cleanup statuses are zero. Reconstructed staged source,
+executed source fingerprint, helper fingerprint and pinned runtime match.
+
+Report: `196582cf05e57534b98a3c28cda896904c5ec0113625a75b31819bf81f92c2bf`.
+Generated compute: `70d5b1e73dca6a1d98d6bdf92312743e2838b9390ae1651bae0470a19f700449`.
+
+This rules out activation relocation alone on this fixture. It does **not**
+prove the register-resident product correct: explicit rounding, removal of the
+pack/reload conversion and product scheduling remain different in the rejected
+version. Next isolate explicit rounding while keeping the passing diagnostic's
+pack/reload and product; do not waive the 216 mismatches or promote this
+diagnostic as a throughput improvement. Hardware and serving are unchanged.
+
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
 pack/reload and separate post-loop product, not the already-tested weight reader.
