@@ -1,0 +1,47 @@
+name: Qwen native T16 MLP down grid simulation
+on:
+  push:
+    tags: ['experiment/mlp-down-grid-sim-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  simulator:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: mlp-down-grid-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: mlp-down-grid-candidate
+          persist-credentials: false
+      - name: Stage native T16 MLP down projection
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p mlp-down-grid-candidate/experiment-results
+          python3 -B mlp-down-grid-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout mlp-down-grid-candidate --context 8192 \
+            --manifest mlp-down-grid-candidate/experiment-results/frozen-geometry.json
+          python3 -B mlp-down-grid-orchestrator/scripts/ci/mlp_down_grid_stage.py \
+            --checkout mlp-down-grid-candidate > mlp-down-grid-candidate/experiment-results/cache-candidate.json
+          git -C mlp-down-grid-candidate diff --check
+          git -C mlp-down-grid-candidate diff > mlp-down-grid-candidate/experiment-results/cache.patch
+      - name: Synthetic eager and changed-input replay qualification
+        timeout-minutes: 10
+        working-directory: mlp-down-grid-candidate
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: gdn-output-grid
+        run: timeout -k 30 570 bash scripts/ci/run-simulator.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-mlp-down-grid-${{ github.run_id }}-${{ github.run_attempt }}
+          path: mlp-down-grid-candidate/experiment-results/
