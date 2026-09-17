@@ -38,6 +38,15 @@ the complete KV/GDN/feature restore and validate identity and page ownership;
 passing only the GDN checkpoint is not sufficient. Six host tests cover skipped
 chunks, tail-only hits, final logits, restore failure and hidden-buffer cleanup.
 
+`prefill_prefix_features.py` supplies a scoped feature-history borrower for that
+suffix loop. It seeds the existing full-history capture at the cached absolute
+boundary, retains the original five-tap prefix chunks without cloning them, and
+owns only newly captured suffix chunks. The owner cannot close while borrowed;
+suffix failures release only suffix storage. The combined caller must retain
+this scope through all feature consumers. Four host tests exercise full-history
+coverage, lifetime protection, failure cleanup and invalid owners. Runtime
+integration and actual cold-versus-hit feature comparisons remain outstanding.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
