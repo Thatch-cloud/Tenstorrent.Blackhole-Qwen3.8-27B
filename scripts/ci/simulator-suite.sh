@@ -63,7 +63,7 @@ if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then
     printf '%s\n' "$status" > /experiment/results/markov-cache-control.exit-status
     exit "$status"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = history-concat || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
     if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then
         mkdir -p /optimisation
         ln -s /simulator-support /optimisation/sim
@@ -120,6 +120,13 @@ PY
         timeout -k 15 9000 python3 -u /experiment-scripts/ci/target-t32-attention-probe.py \
             --output /experiment/results/t32-attention.json || status=$?
         printf '%s\n' "$status" > /experiment/results/t32-attention.exit-status
+        exit "$status"
+    fi
+    if [ "${QWEN_SIM_CASE:-stack}" = history-concat ]; then
+        status=0
+        timeout -k 10 240 python3 -u /experiment-scripts/ci/history-concat-probe.py \
+            --output /experiment/results/history-concat.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/history-concat.exit-status
         exit "$status"
     fi
     if [ "${QWEN_SIM_CASE:-stack}" = ladder-cache ]; then
