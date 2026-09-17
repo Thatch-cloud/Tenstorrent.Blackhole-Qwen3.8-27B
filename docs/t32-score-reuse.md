@@ -39,8 +39,11 @@ host protocol coverage but has not yet executed on the simulator.
 
 Do not dispatch the old `t32-combined` lane unchanged: its probe timeout is 9,000
 seconds and it uploads the target embedding/head and all five learned draft layers.
-A bounded, reusable weight-loading route is needed before this becomes a practical
-iteration test. The three-minute weight-free score result does not predict its cost.
+The new `qwen-t32-proposal-sim.yml` explicitly sets `QWEN_T32_FUSED_SCORE=1`:
+six-minute probe, 450-second launcher and nine-minute whole-job cap. It preserves
+the full vocabulary and five learned layers and rejects missing native-reference
+checks. Weight loading is included in the cap; a setup timeout is not a numerical
+failure. The three-minute weight-free score result does not predict its cost.
 The first bounded run, 35177093623, stopped at the host-I/O gate before Docker:
 15.63% full I/O stall measured over 15 seconds, against the unchanged 1% limit.
 The simulator step was skipped; that run produced no numerical result. The whole job

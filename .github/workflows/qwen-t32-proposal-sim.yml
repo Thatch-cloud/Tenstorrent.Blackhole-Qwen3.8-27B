@@ -1,0 +1,35 @@
+name: Qwen T32 fused complete proposal qualification
+on:
+  push:
+    tags: ['experiment/t32-proposal-sim-*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  simulator:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 9
+    steps:
+      - name: Verify dedicated host
+        run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: proposal-source-${{ github.run_id }}-${{ github.run_attempt }}
+          persist-credentials: false
+      - name: Complete learned proposal and native-score comparison
+        working-directory: proposal-source-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: t32-combined
+          QWEN_T32_FUSED_SCORE: '1'
+        run: |
+          timeout -k 15 450 bash scripts/ci/run-simulator.sh
+          python3 -B scripts/ci/t32-proposal-result.py --report experiment-results/t32-combined.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-t32-proposal-${{ github.run_id }}
+          path: proposal-source-${{ github.run_id }}-${{ github.run_attempt }}/experiment-results/

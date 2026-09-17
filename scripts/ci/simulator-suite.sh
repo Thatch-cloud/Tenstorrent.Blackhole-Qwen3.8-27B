@@ -82,9 +82,15 @@ PY
     if [[ "$QWEN_SIM_CASE" = t32-combined || "$QWEN_SIM_CASE" = t32-publication ]]; then
         python3 -B -m unittest test_dspark_t32_prepared test_t32_sim_target test_t32_target_weights test_t32_combined_upload test_dspark_publication_trace
         publication_args=()
+        proposal_limit=9000
+        if [ "${QWEN_T32_FUSED_SCORE:-0}" = 1 ]; then
+            test "$QWEN_SIM_CASE" = t32-combined
+            publication_args+=(--fused-score-layout)
+            proposal_limit=360
+        fi
         if [ "$QWEN_SIM_CASE" = t32-publication ]; then publication_args+=(--publication-only); fi
         status=0
-        QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/t32-combined-proposal-probe.py \
+        QWEN_T32_SFPU_SUM=1 timeout -k 15 "$proposal_limit" python3 -u /experiment-scripts/ci/t32-combined-proposal-probe.py \
             --checkpoint /dspark-model.safetensors --config /dspark-config.json \
             --target /target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
             "${publication_args[@]}" --output "/experiment/results/$QWEN_SIM_CASE.json" || status=$?
