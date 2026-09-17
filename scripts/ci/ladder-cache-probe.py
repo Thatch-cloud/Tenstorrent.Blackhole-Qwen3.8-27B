@@ -15,7 +15,7 @@ from ordered_cache import HASHES, load_kernels, update
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--context', type=int, choices=(65536, 131072), required=True)
+    parser.add_argument('--context', type=int, choices=(65536, 131072, 261888), required=True)
     options = parser.parse_args()
     if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or Path('/dev/tenstorrent').exists() or options.output.exists()):

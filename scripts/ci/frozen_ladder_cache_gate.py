@@ -13,7 +13,7 @@ RUNTIME = '9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9'
 
 
 def validate(report, context):
-    if (type(context) is not int or context not in (65536, 131072)
+    if (type(context) is not int or context not in (65536, 131072, 261888)
             or type(report.get('context')) is not int or report['context'] != context
             or any(report.get(key) is not True for key in ('passed', 'closed_cleanly'))
             or report.get('backend') != 'simulator' or report.get('stage') != 'complete'

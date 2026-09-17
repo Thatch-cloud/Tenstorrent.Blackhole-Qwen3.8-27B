@@ -20,7 +20,7 @@ def fixture(context=65536):
 
 class CacheGateTests(unittest.TestCase):
     def test_complete_matrix_and_partial_timeout_rejected(self):
-        for context in (65536, 131072):
+        for context in (65536, 131072, 261888):
             self.assertEqual(validate(fixture(context), context)['context'], context)
         for key, value in (('passed', False), ('closed_cleanly', False), ('stage', 'replay'),
                 ('backend', 'hardware'), ('context', 131072), ('performance_qualified', True)):

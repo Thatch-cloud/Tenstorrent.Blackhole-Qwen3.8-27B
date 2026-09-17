@@ -4,12 +4,24 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from frozen_context_geometry import CONTEXTS, validate_position_limits
+from frozen_context_geometry import CONTEXTS, geometry, validate_position_limits
 from frozen_recipe_context import REVISION
 from frozen_runtime_context import FILES, adapt_runtime_sources
 
 
 class RuntimeContextTests(unittest.TestCase):
+    def test_full_window_reserves_generation_without_extending_positions(self):
+        shape = geometry(261888)
+        self.assertEqual(shape['context'], 261888)
+        self.assertEqual(shape['capacity'], 262144)
+        self.assertEqual(shape['target_sequence_capacity'], 262144)
+        self.assertEqual(shape['target_page_count'], 4096)
+        self.assertEqual(shape['target_cache_blocks'], 4104)
+        configuration = {'max_position_embeddings': 262144}
+        validate_position_limits(configuration, configuration, 261888)
+        with self.assertRaises(ValueError):
+            validate_position_limits(configuration, configuration, 262144)
+
     def test_context_cannot_silently_extend_target_or_draft_positions(self):
         draft = {'max_position_embeddings': 262144}
         target = SimpleNamespace(text_config=SimpleNamespace(max_position_embeddings=262144))
