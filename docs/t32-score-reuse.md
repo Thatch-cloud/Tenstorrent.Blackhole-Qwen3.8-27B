@@ -103,6 +103,15 @@ not accepted as evidence. Host tests cover routing, restoration and rejection of
 a missed layer. This has not yet executed as a complete device request; target
 attention replay and other T16 recipe optimisations still need integration.
 
+`target_attention_t32=True` plus `target_attention_t32_evidence=<report.json>`
+now connects the existing replay reader and family routing without setting the
+T16-only attention flag. Admission checks a clean simulator exit, all component
+checks and current source fingerprints, and restricts the request to a 4096-token
+prompt with at most 224 post-seed tokens (4352-capacity family). It does not extend
+the component's evidence to larger contexts. Host tests cover route selection,
+missing evidence, source changes, timeouts and geometry limits. Complete-device
+correctness, execution coverage and hardware admission are still pending.
+
 | Area | Current T32 path | Required next evidence |
 | --- | --- | --- |
 | Markov score layout | Opt-in fused adapter; native default | Learned complete-proposal output and replay parity |

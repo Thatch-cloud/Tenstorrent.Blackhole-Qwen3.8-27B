@@ -10,6 +10,19 @@ SOURCES = {'attention_replay.py', 'attention_mask_replay.py', 'attention_mask_re
            'target-t32-attention-probe.py'}
 
 
+def qualify_request(path, *, position, remaining, directory=None):
+    if (type(position) is not int or position != 4096 or type(remaining) is not int
+            or not 1 <= remaining <= 224):
+        raise ValueError('T32 replay request must remain within its 4096-to-4320 simulator window')
+    path = Path(path)
+    if path.with_suffix('.exit-status').read_text().strip() != '0':
+        raise ValueError('Clean T32 attention simulator exit required')
+    raw = path.read_bytes()
+    evidence = validate(json.loads(raw), Path(__file__).parent if directory is None else directory)
+    return dict(evidence, report_sha256=hashlib.sha256(raw).hexdigest(), position=position,
+        remaining=remaining, capacity=4352)
+
+
 def validate(report, directory):
     if report.get('rows') != 32 or report.get('passed') is not True or report.get('closed') is not True or report.get('backend') != 'simulator':
         raise ValueError('Complete closed simulator result required')

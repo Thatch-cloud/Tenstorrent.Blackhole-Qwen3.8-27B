@@ -14,7 +14,7 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
-    def t32_fusion_request(self, hits):
+    def t32_fusion_request(self, hits, **extra_options):
         self.drafter.max_drafts = 31
         self.drafter.propose.return_value = tuple(range(31))
         events = []
@@ -36,12 +36,13 @@ class FullDSparkRequestTests(unittest.TestCase):
                 'QWEN_CARDS_ALLOCATED': '0'}), \
                 patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': collective}), \
                 patch('t32_attention_admission.require_active', return_value={}), \
+                patch('target_t32_attention_gate.qualify_request', return_value={'component_fixture': True}), \
                 patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter), \
                 patch('fused_t16_scope.FusedT32Arm', return_value=arm) as candidate, \
                 patch('fused_t16_scope.FusedT16Arm') as control:
             try:
                 result = self.measure(audit=True, proposal_trace=True, commit_only_gdn=True,
-                    native_attention=True, t32=True, fused_t32_mlp=True)
+                    native_attention=True, t32=True, fused_t32_mlp=True, **extra_options)
             finally:
                 self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
                 candidate.assert_called_once()
@@ -62,6 +63,18 @@ class FullDSparkRequestTests(unittest.TestCase):
     def test_t32_fusion_cannot_enable_on_t16(self):
         with self.assertRaisesRegex(ValueError, 'T32 MLP'):
             self.measure(fused_t32_mlp=True)
+        self.base_prefill.assert_not_called()
+
+    def test_t32_target_attention_routes_replay_without_the_t16_flag(self):
+        result = self.t32_fusion_request([1] * 64,
+            target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        self.assertEqual(result['dspark']['t32_lifecycle']['target_attention'], 'replay-t32')
+        self.assertEqual(result['dspark']['t32_lifecycle']['attention_component'], {'component_fixture': True})
+
+    def test_t32_target_attention_rejects_missing_or_unused_evidence(self):
+        for options in (dict(target_attention_t32=True), dict(target_attention_t32_evidence='unused.json')):
+            with self.assertRaisesRegex(ValueError, 'T32 target attention'):
+                self.measure(**options)
         self.base_prefill.assert_not_called()
 
     def test_t32_lifecycle_routes_31_proposals_and_32_verifier_rows(self):
@@ -191,6 +204,10 @@ class FullDSparkRequestTests(unittest.TestCase):
                 options['verifier_before_capture'](SimpleNamespace(initial=[]))
             self.assertEqual(options['feature_drafter_name'], 'dspark')
             self.assertEqual(options['lookup_max_rows'], 32 if experiment_options.get('t32') else 16)
+            if experiment_options.get('target_attention_t32'):
+                self.assertTrue(options['attention_replay'])
+                self.assertTrue(options['family_routing'])
+                self.assertNotIn('target_attention_t16', options)
             self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
             self.assertIs(options['commit_only_gdn'], commit_only_gdn)
             self.assertIs(options['audit_commit_only_gdn'], audit and commit_only_gdn)

@@ -21,13 +21,18 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
         gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False,
-        bias_cache=False, bias_cache_build=None, t32=False, fused_t32_mlp=False):
+        bias_cache=False, bias_cache_build=None, t32=False, fused_t32_mlp=False,
+        target_attention_t32=False, target_attention_t32_evidence=None):
     import torch
     from full_request import measure_request
     if type(t32) is not bool:
         raise ValueError('Explicit boolean T32 lifecycle policy required')
     if type(fused_t32_mlp) is not bool or (fused_t32_mlp and not t32):
         raise ValueError('T32 MLP fusion requires the explicit T32 lifecycle')
+    if (type(target_attention_t32) is not bool
+            or (target_attention_t32 and (not t32 or target_attention_t32_evidence is None))
+            or (not target_attention_t32 and target_attention_t32_evidence is not None)):
+        raise ValueError('T32 target attention requires an explicit T32 lifecycle and component evidence')
     if t32:
         import os
 
@@ -41,6 +46,12 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 or bias_cache_build is not None or len(prompt) + max_new_tokens > 8192):
             raise ValueError('T32 lifecycle requires an audited simulator request without T16-only routes')
     proposal_count, verifier_rows = (31, 32) if t32 else (15, 16)
+    t32_attention_audit = None
+    if target_attention_t32:
+        from target_t32_attention_gate import qualify_request
+
+        t32_attention_audit = qualify_request(target_attention_t32_evidence,
+            position=len(prompt), remaining=max_new_tokens - 1)
     if type(bias_cache) is not bool or (bias_cache and not (
             proposal_trace and score_layout and captured_publication and gdn_shared_qk
             and fused_t16_mlp and target_attention_t16 and isinstance(bias_cache_build, dict))):
@@ -378,6 +389,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             lookup_max_rows=verifier_rows, feature_factory=factory, feature_drafter_name='dspark',
             **(dict(target_attention_t16=True, attention_replay=True, family_routing=True)
                if target_attention_t16 else {}),
+            **(dict(attention_replay=True, family_routing=True) if target_attention_t32 else {}),
             **(dict(verifier_before_capture=prepare_proposal_trace) if proposal_trace else {}),
             **(dict(verifier_observer=observer) if observer is not None else {}),
             progress=lambda block: status('committed-block', **block))
@@ -412,8 +424,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
         if t32:
             result['dspark']['t32_lifecycle'] = dict(fused_score_layout=True, hardware_qualified=False,
-                performance_qualified=False, target_attention='native',
+                performance_qualified=False, target_attention='replay-t32' if target_attention_t32 else 'native',
                 target_mlp='fused-t32' if fused_t32_mlp else 'native')
+            if target_attention_t32:
+                result['dspark']['t32_lifecycle']['attention_component'] = t32_attention_audit
         if observer is not None:
             result['verifier_profile'] = observer.summary()
         if banked_proposal:

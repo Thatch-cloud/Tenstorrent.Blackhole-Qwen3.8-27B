@@ -1,12 +1,29 @@
 import copy
 import hashlib
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
-from target_t32_attention_gate import SOURCES, validate
+from target_t32_attention_gate import SOURCES, validate, qualify_request
 
 
 class GateTests(unittest.TestCase):
+    def test_request_requires_clean_exit_and_bounded_geometry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'attention.json'
+            path.write_text(json.dumps(self.report))
+            path.with_suffix('.exit-status').write_text('0')
+            result = qualify_request(path, position=4096, remaining=224)
+            self.assertEqual(result['capacity'], 4352)
+            self.assertFalse(result['full_request_qualified'])
+            for position, remaining in ((4095, 224), (4096, 225), (4096, 0), (4096, True)):
+                with self.assertRaises(ValueError):
+                    qualify_request(path, position=position, remaining=remaining)
+            path.with_suffix('.exit-status').write_text('124')
+            with self.assertRaisesRegex(ValueError, 'exit'):
+                qualify_request(path, position=4096, remaining=224)
+
     def setUp(self):
         self.directory = Path(__file__).parent
         hashes = {name: hashlib.sha256((self.directory / name).read_bytes()).hexdigest() for name in SOURCES}
