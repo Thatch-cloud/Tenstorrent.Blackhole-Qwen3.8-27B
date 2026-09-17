@@ -43,6 +43,7 @@ both need improvement. T32 is not automatically faster and is not the default.
 - [Exact recipe, image pins and CI replay](docs/runtime-reproduction.md)
 - [Context ladder evidence and failures](docs/combined-context-ladder.md)
 - [T16/T32 integration validation](docs/runtime-integration-validation.md)
+- [Batching and concurrent-user programme](docs/concurrent-runtime-plan.md)
 - [Tuning playbook](docs/blackhole-tuning-playbook.md) · [Experiment programme](docs/two-card-experiment-programme.md)
 - [Historical results](docs/results-history-2026-09-17.md) · [Serving/harness guide](docs/serving-harness-history.md)
 - [Upstream contribution history](docs/upstream-status-history.md) · [Gotchas](docs/gotchas.md)

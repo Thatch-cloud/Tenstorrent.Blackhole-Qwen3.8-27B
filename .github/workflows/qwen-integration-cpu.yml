@@ -27,7 +27,7 @@ jobs:
       - name: T32 and unchanged T16 regression gates
         run: |
           python -B -m unittest discover -s scripts/ci -p 'test_*t32*.py'
-          python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli
+          python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli test_dspark_concurrent_protocol
           python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
