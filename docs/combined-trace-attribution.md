@@ -1,6 +1,29 @@
 # Combined-runtime trace attribution
 
-## Winning-recipe refresh: awaiting hardware admission
+## Winning-recipe refresh: recovered device attribution
+
+Run **35185624322** completed the audited 4K request and closed both devices
+cleanly. CI failed afterward because the host Tracy export was missing, not
+because inference failed. The retained device CSV is usable independently.
+`winning_device_attribution.py` pins the request/device hashes, verifies request
+correctness and source stability, and checks replay markers/counts on both chips.
+Four steady T16 replays per chip pass those checks.
+
+| Median T16 device timing | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Kernel envelope | 66.158 ms | 66.155 ms |
+| Kernel interval union | 64.916 ms | 64.899 ms |
+| Uncovered intervals | 1.243 ms | 1.256 ms |
+
+Chip 0's largest groups are the 99-core generic group (11.396 ms), 32-core
+matmuls (10.786 ms), and 96-core generic group (9.534 ms). Their geometry is
+consistent with fused MLP, down/output projections and GDN recurrence,
+respectively; generic labels do not prove kernel identity. Group sums can
+overlap. This is attribution, not a new TG result or proof of internal stalls.
+No hardware rerun is needed just to recover this evidence. The 131K/262K
+combined context ladder takes priority over further short-context profiling.
+
+## Earlier admission attempts
 
 Attempt three passed disk admission (0.53% full I/O stall), entered the audited
 request after about 148 seconds and completed five speculative blocks before
