@@ -18,9 +18,25 @@ manifest must match simulation. Independent downloaded-report validation passes,
 and the container exits zero without OOM. Hardware report SHA-256:
 `f95a0a568250b00e338accfc0904e3f2e98646de52e76e7b0d3b6348db143634`.
 
-Next: apply these bounded intervals to the winning combined verifier across
+The opt-in combined adapter applies these bounded intervals across
 all 64 MLP layers and two replay positions. The fixture alone does not establish
 which operation dominates the full request; no throughput promotion is justified.
+
+## Combined qualification
+
+`qwen-mlp-compute-clock-combined.yml` stages the unchanged winning 4K T16/DSpark
+recipe and runs one native-reference feature/state/token audit. Each MLP layer
+owns a separate preallocated sample tensor; no sample allocation occurs during
+trace capture or replay. Two actual verifier blocks must yield all 4,608
+chip/processor/interval records. Missing writes, aliases and changed bindings
+fail closed. Trace ownership must end before sample buffers can be released.
+
+The adapter requires explicit `QWEN_MLP_COMPUTE_CLOCK_COMBINED=1`; ordinary
+ladder and serving routes are unchanged. Hardware admission pins both the
+simulator and fixture report hashes and the instrumented projection source.
+Fresh full-recipe staging and host ownership/report tests pass. Combined
+hardware qualification is pending. PP/TG remain null because poisoning,
+synchronization and readback intentionally perturb request timing.
 
 The winning verifier's MLP group takes about 11.4 ms per replay. Reader samples
 and the rejected bank-order change do not identify whether matmul, packing or
