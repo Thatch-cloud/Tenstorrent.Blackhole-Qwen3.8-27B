@@ -57,6 +57,11 @@ Report hashes:
 | --- | --- |
 | Value | `33d1cebe54648ff48180b228011f48c270a8b0810b3be75a10207c5271c14e3a` |
 | Output | `649f2f11c50d691bbb3842da5a541af9fba29ccdd21648163af1a7b40e99a23d` |
+| MLP gate | `797d9797e0a806c34eadc6417b26cd9288766d5564c14a0be728f7fbf71a75e1` |
+
+The gate projection also passes all six replays, five integrity checks and
+clean teardown. Its RMS difference is 0.01195–0.01216. Up is running and down
+is queued; the complete projection set is still not admitted.
 
 The report validator now also checks a complete seven-projection set against
 independently supplied source and checkpoint fingerprints. Missing or duplicate
@@ -95,3 +100,10 @@ with acceptance and committed tokens, and TG uses the entire decode loop.
 Four host tests cover changed proposals, audit/target failures, false accounting
 and a regressing timing pair. Existing identical-proposal comparators remain
 unchanged. This comparator is not yet wired into a hardware experiment.
+
+`dspark_precision_device.py` supplies per-instance proposal routing after native
+history construction and before trace capture. It keeps the ordinary control
+device unchanged, rejects baseline eager fallback, and inherits trace teardown.
+Four host tests cover isolation, failed initialization cleanup, closed-device
+rejection and successful-call accounting. The caller must still perform source
+admission before construction; no global backend or serving default changes.
