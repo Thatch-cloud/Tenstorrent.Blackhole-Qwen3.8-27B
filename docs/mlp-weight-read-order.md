@@ -1,6 +1,37 @@
 # T16 weight-read issue order
 
-**Simulator qualified; combined hardware performance remains unqualified.**
+**Combined hardware passes correctness but shows no repeatable speedup. Rejected
+for promotion; retain the unchanged reader.**
+
+## Combined result
+
+Run **35212745723**, source `b0dca2927b49c84099344334cde8cd2af06d5304`,
+finishes in **6m26s**, including loading, two feature audits and four timed
+requests in unchanged/staggered/staggered/unchanged order.
+
+| Reader | CTX | Streams | Cold PP (tok/s) | Committed TG (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged | 4,096 | 1 | 3,288.00 | **123.8046** |
+| Bank-staggered | 4,096 | 1 | 3,337.50 | **123.8245** |
+
+Aggregate TG changes only **+0.0161%**. The two paired changes are **-0.9078%**
+and **+0.9581%**; neither demonstrates the required repeatable improvement.
+Blocking verifier replay remains approximately **65.77-65.79 ms** in both arms.
+The reader changes decode only: prefill variation is not an attributed PP gain.
+
+Both arms commit 242 timed tokens and accept 224 of 300 proposals. Native
+tokens, state, inactive slots, five-tap features and proposal checks pass.
+All 64 fused layers retain their weights and bindings; the 256 layer/offset/chip
+packed-weight checks per request pass. All 863 script, 1,520 native and seven
+read-order fingerprints remain unchanged, and teardown completes cleanly.
+
+`mlp_read_order_report.py` independently checks the evidence and recomputes the
+saved complete-cycle comparison. Report SHA-256:
+`4219ce163c518693faa96f55490a77bdae66283e766d37ce23160dd5844c5635`.
+Held-out coding quality and serving are not qualified by this experiment.
+Do not repeat ordering or buffer sweeps on the analytical bank model alone.
+
+## Hypothesis and qualification history
 
 Combined run 35210079674 found larger weight-read completion waits than the
 isolated fixture. This experiment changes request ordering, not buffer capacity,
@@ -54,7 +85,7 @@ gate and simulator evidence. The dedicated `qwen-mlp-read-order-combined.yml`
 loads the model once, keeps the normal disk-pressure and exclusive-card gates,
 and schedules two audits plus four complete timed requests at 4K. Its launcher
 cap is 600 seconds and whole-job cap is 12 minutes; the full context ladder is
-unchanged. Hardware acceptance and throughput improvement remain unproven.
+unchanged. The completed hardware result above supersedes this staging gate.
 
 Host integration tests exercise all six calls, verify the candidate projection
 and simulator identity are installed only for their intended arm, and check
