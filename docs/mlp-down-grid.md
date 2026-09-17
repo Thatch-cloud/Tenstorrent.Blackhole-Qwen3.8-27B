@@ -1,6 +1,25 @@
 # Native T16 MLP-down grid
 
-**Unqualified experiment; winning and serving defaults are unchanged.**
+**Simulator qualification passes; hardware performance is unqualified.**
+Winning and serving defaults are unchanged.
+
+## Simulator acceptance
+
+[Run 35254182130](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35254182130)
+at `b881571eb702fc3862a748e7fb42fdb0568097af` passes in **2m23s**. All 12
+eager/replay comparisons, 14 activation/weight integrity checks and three
+poisoned-replay negative controls pass. Exit and all cleanup statuses are zero.
+Independent admission reproduces the complete matrix and verifies all four
+measured source fingerprints, including the retained native projection factory.
+Report SHA-256: `fb677f9c1dde8c1badd3f7a6f81378b8e6fa7fde06fd62e102d07a3a94d87404`.
+
+The pending combined adapter is scoped to `FusedT16Arm.forward` at exactly
+16 rows. It temporarily changes only that call's MLP-down program, restores
+shared model arguments immediately and leaves native/tail calls alone. It checks
+both chips' BF8 weight geometry and native LoFi/FP32/packer-accumulation policy.
+Host tests cover normal and exceptional restoration, untouched smaller buckets,
+source admission and rejection of incomplete numerical evidence. No hardware
+request has yet qualified this adapter or measured its performance.
 
 The retained combined trace attributes approximately 7.804 ms to 64 MLP-down
 calls per verifier replay. This experiment changes only native output-column
