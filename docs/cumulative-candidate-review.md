@@ -251,6 +251,15 @@ must match the simulator report hash; corrupt retained files fail rather than
 falling back. A fresh empty-destination replay restored and verified all nine
 native files, and 40 cumulative host tests pass. No kernel arithmetic changed.
 
+Retry 35281569220 also stopped before loading: inventory 35189721030 contains
+`prefill-cache/sources`, not a top-level `sources` directory. A fresh artifact
+download confirmed the layout. Both workflow references now use that same nested
+root, with a regression test. The complete staging sequence was then replayed
+from a fresh checkout of baseline 8c102b2 in
+`D:\qwen-cumulative-clean-retry-20260918`, using the freshly downloaded model
+inventory; all five admissions and `git diff --check` passed. This replaces the
+earlier partial-staging check that missed the workflow's artifact layout.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

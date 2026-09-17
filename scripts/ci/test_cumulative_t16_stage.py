@@ -70,3 +70,11 @@ class CumulativeStageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'supplied together'):
                 staging.stage(root, root, root / 'manifest.json', down_evidence=root)
             self.assertFalse((root / 'scripts').exists())
+
+    def test_workflow_uses_the_downloaded_inventory_subdirectory(self):
+        workflow = Path(staging.__file__).resolve().parents[2] / '.github/workflows/qwen-cumulative-t16.yml'
+        source = workflow.read_text()
+        native = '"$evidence/model-native/prefill-cache/sources"'
+        self.assertIn('--native-root ' + native, source)
+        self.assertIn('--destination ' + native, source)
+        self.assertNotIn('"$evidence/model-native/sources"', source)

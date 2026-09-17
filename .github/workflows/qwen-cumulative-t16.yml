@@ -62,7 +62,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-down-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
             gh run download 35254182130 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35254182130-1 --dir "$evidence/mlp-down-grid"
             gh run download 35189721030 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35189721030 --dir "$evidence/model-native"
-            down_args=(--down-evidence "$evidence/mlp-down-grid" --native-root "$evidence/model-native/sources")
+            down_args=(--down-evidence "$evidence/mlp-down-grid" --native-root "$evidence/model-native/prefill-cache/sources")
           fi
           native_args=()
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
@@ -77,7 +77,7 @@ jobs:
             python3 -B read-orchestrator/scripts/ci/cumulative_native_sources.py \
               --report "$evidence/norm-scatter/gdn-shared-recurrence.json" \
               --retained-root "$evidence/gdn-native/sources" \
-              --destination "$evidence/model-native/sources" "${native_args[@]}" > read-combined/experiment-results/cumulative-native-sources.json
+              --destination "$evidence/model-native/prefill-cache/sources" "${native_args[@]}" > read-combined/experiment-results/cumulative-native-sources.json
             down_args+=(--norm-report "$evidence/norm-scatter/gdn-shared-recurrence.json")
           fi
           python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
