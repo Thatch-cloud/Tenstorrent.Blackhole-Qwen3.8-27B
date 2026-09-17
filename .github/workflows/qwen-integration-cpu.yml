@@ -41,6 +41,7 @@ jobs:
           python -B -m unittest test_prefill_prefix_residency
           python -B -m unittest test_prefill_checkpoint_allocation
           python -B -m unittest test_prefill_prefix_session
+          python -B -m unittest test_prefill_prefix_stage test_prefill_prefix_experiment.PrefixExperimentTests
           python -B -m unittest test_dspark_request_experiment.DSparkRequestExperimentTests.test_cached_pp_is_separate_from_cold_pp_and_keeps_full_cycle_tg test_dspark_request_experiment.DSparkRequestExperimentTests.test_incomplete_cached_accounting_or_scope_rejected
           python -B -m unittest test_history_concat_lifetime test_history_concat_gate
           bash -n scripts/ci/run-simulator.sh

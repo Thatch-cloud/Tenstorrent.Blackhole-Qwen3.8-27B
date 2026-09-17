@@ -139,6 +139,19 @@ Priority: qualify the combined T16/DSpark runtime first, then integrate serving.
 The host controller, bounded lookup, checkpoint allocation and request hook exist;
 65 focused host tests pass. This is not device acceptance or an enabled cache.
 
+The opt-in `prefill_prefix_stage.py` now applies only the cache hook and cached
+accounting to a freshly staged frozen T16 ladder. It does not copy the current
+T32 request implementation. `prefill_prefix_experiment.py` allocates the session
+before native warm-up, then runs the existing full feature audit and two timed
+requests with a 2,048-token prefix at 4K. It retains the ladder's acceptance and
+proposal checks, fingerprints its added sources, and rejects incomplete runs.
+This initial combined screen compares a cold prompt with reuse of the same
+prompt; changed-suffix device qualification is still required separately.
+The experiment requires explicit `QWEN_PREFIX_CACHE_EXPERIMENT=1` and a
+`experiment/combined-ladder-prefix-*` tag. That CI route selects only 4K and keeps
+the cold ladder unchanged. Four host staging/routing tests pass; hardware
+acceptance is still pending.
+
 1. Stage the optional request hook into the frozen winning T16 runtime without
    importing unrelated T32 changes. Allocate checkpoints before trace capture;
    connect explicit exclusive KV-page ownership and loaded-model identity.

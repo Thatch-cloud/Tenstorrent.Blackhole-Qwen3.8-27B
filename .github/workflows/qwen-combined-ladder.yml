@@ -1,7 +1,7 @@
 name: Qwen same-recipe combined context ladder
 on:
   push:
-    tags: ['experiment/combined-ladder-v1', 'experiment/combined-ladder-retry-v2', 'experiment/combined-ladder-wide-cache-v1', 'experiment/combined-ladder-wide-cache-v2', 'experiment/combined-ladder-wide-cache-v3', 'experiment/combined-ladder-wide-cache-v4', 'experiment/combined-ladder-window-*']
+    tags: ['experiment/combined-ladder-v1', 'experiment/combined-ladder-retry-v2', 'experiment/combined-ladder-wide-cache-v1', 'experiment/combined-ladder-wide-cache-v2', 'experiment/combined-ladder-wide-cache-v3', 'experiment/combined-ladder-wide-cache-v4', 'experiment/combined-ladder-window-*', 'experiment/combined-ladder-prefix-*']
 permissions:
   contents: read
   actions: read
@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        context: ${{ fromJSON(startsWith(github.ref_name, 'experiment/combined-ladder-window-') && '[261888]' || (github.ref_name == 'experiment/combined-ladder-wide-cache-v3' || github.ref_name == 'experiment/combined-ladder-wide-cache-v4') && '[131072]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v2' && '[65536]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v1' && '[65536,131072]' || github.ref_name == 'experiment/combined-ladder-retry-v2' && '[4096,8192,65536]' || '[4096,8192,16384,32768,65536,131072,262144]') }}
+        context: ${{ fromJSON(startsWith(github.ref_name, 'experiment/combined-ladder-prefix-') && '[4096]' || startsWith(github.ref_name, 'experiment/combined-ladder-window-') && '[261888]' || (github.ref_name == 'experiment/combined-ladder-wide-cache-v3' || github.ref_name == 'experiment/combined-ladder-wide-cache-v4') && '[131072]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v2' && '[65536]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v1' && '[65536,131072]' || github.ref_name == 'experiment/combined-ladder-retry-v2' && '[4096,8192,65536]' || '[4096,8192,16384,32768,65536,131072,262144]') }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     steps:
       - name: Verify host and restore artifact ownership
@@ -85,6 +85,10 @@ jobs:
             --manifest frozen-hardware/experiment-results/ladder-sources.json
           python3 -B frozen-orchestrator/scripts/ci/frozen_benchmark_timeout.py --checkout frozen-hardware \
             > frozen-hardware/experiment-results/benchmark-timeout-policy.json
+          if [[ "$GITHUB_REF_NAME" = experiment/combined-ladder-prefix-* ]]; then
+            python3 -B frozen-orchestrator/scripts/ci/prefill_prefix_stage.py --checkout frozen-hardware \
+              --manifest frozen-hardware/experiment-results/prefix-cache-sources.json
+          fi
           if [[ "$GITHUB_REF_NAME" = experiment/combined-ladder-window-concat-* ]]; then
             gh run download 35193888951 --repo "$GITHUB_REPOSITORY" \
               --name qwen-history-concat-sim-35193888951 --dir "$evidence/history-concat"
@@ -106,6 +110,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_FROZEN_COMBINED_RUNTIME: '1'
+          QWEN_PREFIX_CACHE_EXPERIMENT: ${{ startsWith(github.ref_name, 'experiment/combined-ladder-prefix-') && '1' || '0' }}
           QWEN_DSPARK_REQUEST_CONTEXT: '${{ matrix.context }}'
           QWEN_DSPARK_MODE: request-target-attention
           QWEN_DSPARK_CODING_TASK: merge_intervals
