@@ -126,6 +126,19 @@ validation. Until that is implemented, do not claim scatter is present in the
 cumulative recipe. The wider-down candidate uses a different forward hook and
 is a simpler next independent addition while this identity boundary is repaired.
 
+`cumulative_norm_runtime.py` now provides a separate opt-in normalization wrapper
+for integration, leaving the frozen default wrapper unchanged. Selection is
+request-owned: prefetch is the control, and scatter changes both the actual
+builder and the checked simulator admission together. Scatter is explicitly
+reported as **not** executing prefetch. Its validator cross-checks the shared-Q/K
+admission, report identity, full-layer build count and restored bindings.
+Host tests cover prefetch/scatter/prefetch ordering, wrong admissions, false
+prefetch labels, nested selection and exceptions. This resolves the local
+selection mechanism, not hardware integration: staging must replace the imported
+`frozen_draft_tail_scope.norm_scope` binding, and cumulative report validators must
+understand the distinct norm identity before scatter can be enabled. The current
+two/three-component hardware recipes do not enable it.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.
