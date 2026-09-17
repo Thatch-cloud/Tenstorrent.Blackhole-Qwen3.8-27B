@@ -1,4 +1,5 @@
 import copy
+import os
 import unittest
 from unittest.mock import patch
 
@@ -46,6 +47,16 @@ class WinningProfileTests(unittest.TestCase):
         report['request_output_limit'] = 256
         with patch('frozen_ladder_requests.validate_audit'), self.assertRaises(ValueError):
             profile.finish_profile(report)
+
+    def test_profile_headroom_does_not_change_normal_admission(self):
+        with patch.dict(os.environ, {'QWEN_COMBINED_TRACE_PROFILE': '0'}):
+            self.assertEqual(profile.admission_output_tokens(4096, 64), 64)
+            self.assertEqual(profile.admission_output_tokens(4096, 256), 256)
+        with patch.dict(os.environ, {'QWEN_COMBINED_TRACE_PROFILE': '1'}):
+            self.assertEqual(profile.admission_output_tokens(4096, 64), 256)
+            for context, output in ((8192, 64), (4096, 256), (4096, True), (4096.0, 64)):
+                with self.assertRaises(ValueError):
+                    profile.admission_output_tokens(context, output)
 
 
 if __name__ == '__main__':

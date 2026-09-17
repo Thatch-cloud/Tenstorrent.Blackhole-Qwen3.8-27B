@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from frozen_recipe_context import replace_once
@@ -10,7 +11,16 @@ from frozen_recipe_context import replace_once
 
 SOURCE_FILES = ('dspark_request_experiment.py', 'full_dspark_request.py',
     'request_verifier_profile_report.py', 'dspark-combined-profile.sh',
-    'run-dspark-hardware.sh', 'dspark-hardware-suite.sh', 'verifier_engine.py', 'frozen_draft_tail_scope.py')
+    'run-dspark-hardware.sh', 'dspark-hardware-suite.sh', 'verifier_engine.py', 'frozen_draft_tail_scope.py',
+    'dspark_context_selection.py')
+
+
+def admission_output_tokens(context, output_tokens):
+    if os.environ.get('QWEN_COMBINED_TRACE_PROFILE') != '1':
+        return output_tokens
+    if type(context) is not int or context != 4096 or type(output_tokens) is not int or output_tokens != 64:
+        raise ValueError('Only bounded 4K profiling may use separate allocation headroom')
+    return 256
 
 
 def adapt(sources):
@@ -20,6 +30,11 @@ def adapt(sources):
     if set(sources) != set(SOURCE_FILES):
         raise ValueError('Exact winning-recipe host instrumentation source set required')
     result = drain_setup(adapt_sources(sources))
+    name = 'dspark_context_selection.py'
+    result[name] = replace_once(result[name],
+        '        validate_request(context, output_tokens)',
+        '        from winning_verifier_profile import admission_output_tokens\n'
+        '        validate_request(context, admission_output_tokens(context, output_tokens))')
     name = 'full_dspark_request.py'
     result[name] = replace_once(result[name],
         'history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)',
