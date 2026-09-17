@@ -13,6 +13,21 @@ Next admission must bind the generated reader and unchanged projection to this
 report before a matched combined baseline/candidate hardware comparison.
 No throughput claim, default change or hardware promotion follows from SIM.
 
+## Combined comparison
+
+The opt-in `qwen-mlp-weight-pipeline-combined.yml` route loads the winning runtime
+once, performs separate baseline/candidate feature audits, then times complete
+requests in baseline/candidate/candidate/baseline order. Context is 4,096 and
+stream count is one. Both arms retain shared-Q/K GDN, norm prefetch, incremental
+feature publication and native weight/attention checks. Only the weight reader
+changes. Source admission pins the simulator report, reader transformation,
+unchanged projection, replay helper and compute manifest.
+
+`QWEN_MLP_WEIGHT_PIPELINE=1` is experiment-only. Results report cold PP and full
+committed TG per arm, including draft, verify, selection/publication and host
+overheads. The screen requires >2% improvement in both matched pairs; that alone
+does not qualify held-out coding quality or authorize serving promotion.
+
 Combined timing run `35221730435` shows the sampled MATH issue interval tracks
 UNPACK input/weight readiness. Earlier read-order and larger-buffer trials did
 not improve complete-request TG. This candidate changes a different boundary:
