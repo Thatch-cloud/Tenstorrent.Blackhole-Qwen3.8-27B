@@ -60,6 +60,19 @@ It rejects corrupted payloads; nine offline unit tests cover the reference and
 fixture together. No complete checkpoint, target weights or hardware were loaded.
 The fixture pins both tensor hashes independently of the header.
 
+Reproduce the bounded CPU parity check with:
+
+```powershell
+python -B scripts/ci/dspark_confidence_parity.py
+```
+
+This now covers sixteen learned-head cases including scalar and per-position
+calibration. It hashes the reviewed upstream source before extracting just the
+confidence class, and emits source/tensor identities with the result. Ten local
+unit tests pass, including refusal to parse unpinned upstream code. The emitted
+report explicitly rejects hardware and performance qualification. No CI run or
+multi-gigabyte download is needed.
+
 Upstream `DFlashDraftModel.forward` applies its final norm before returning the
 hidden states consumed by the sampler. Our prepared proposal exposes the final
 `normalized` tensor, making it the source-level candidate for the same tap.
