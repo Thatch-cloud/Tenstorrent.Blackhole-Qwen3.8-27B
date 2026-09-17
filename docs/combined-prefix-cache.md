@@ -152,6 +152,14 @@ The experiment requires explicit `QWEN_PREFIX_CACHE_EXPERIMENT=1` and a
 the cold ladder unchanged. Four host staging/routing tests pass; hardware
 acceptance is still pending.
 
+First hardware attempt `35197029809` stopped before loading weights: the added
+261,888 context option changed the historical geometry fingerprint even for 4K.
+Ordinary ladder staging now restores the exact original geometry bytes; only
+the explicit full-window route retains the narrowly admitted extension. All
+42 component source checks pass locally against the retained real evidence
+with the original geometry restored. No cache performance was measured in that
+failed attempt.
+
 1. Stage the optional request hook into the frozen winning T16 runtime without
    importing unrelated T32 changes. Allocate checkpoints before trace capture;
    connect explicit exclusive KV-page ownership and loaded-model identity.

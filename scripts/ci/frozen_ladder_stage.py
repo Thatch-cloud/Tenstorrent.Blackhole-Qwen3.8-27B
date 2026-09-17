@@ -102,10 +102,14 @@ def main():
     for name in ('frozen_ladder_prompt.py', 'frozen_ladder_requests.py', 'frozen_ladder_cache.py'):
         result[name] = Path(__file__).with_name(name).read_text()
     payloads = {name: source.encode() for name, source in result.items()}
+    from full_window_geometry_admission import staged_geometry
+    before['frozen_context_geometry.py'] = (scripts / 'frozen_context_geometry.py').read_bytes()
+    payloads['frozen_context_geometry.py'] = staged_geometry(before['frozen_context_geometry.py'],
+        full_window=options.full_window_cache_evidence is not None)
     payloads['frozen-ladder-corpus.json'] = Path(__file__).with_name('frozen-ladder-corpus.json').read_bytes()
     if options.wide_cache_evidence:
         payloads.update(wide_cache_payloads(scripts, options.wide_cache_evidence,
-            payloads['dspark_request_experiment.py']))
+            payloads['dspark_request_experiment.py'], geometry_source=payloads['frozen_context_geometry.py']))
     if options.full_window_cache_evidence:
         from full_window_geometry_admission import adapt as adapt_geometry_admission
         payloads['frozen_combined_runtime.py'] = adapt_geometry_admission(
@@ -113,7 +117,8 @@ def main():
         payloads['full_window_geometry_admission.py'] = Path(__file__).with_name(
             'full_window_geometry_admission.py').read_bytes()
         payloads.update(wide_cache_payloads(scripts, options.full_window_cache_evidence,
-            payloads['dspark_request_experiment.py'], full_window=True))
+            payloads['dspark_request_experiment.py'], full_window=True,
+            geometry_source=payloads['frozen_context_geometry.py']))
     for name, payload in payloads.items():
         (scripts / name).parent.mkdir(parents=True, exist_ok=True)
         (scripts / name).write_bytes(payload)
@@ -127,7 +132,7 @@ def main():
         serving_defaults_changed=False), indent=2) + '\n')
 
 
-def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False):
+def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False, geometry_source=None):
     from frozen_ladder_cache_gate import qualify
     evidence = Path(evidence)
     raw = (evidence / 'reports.json').read_bytes()
@@ -157,7 +162,8 @@ def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False)
     for context, digest in digests.items():
         report = qualify(Path(__file__).parent, evidence / context, digest, int(context))
         for name in ('frozen_context_geometry.py', 'ordered_cache.py', 'attention_batch.py'):
-            if hashlib.sha256((scripts / name).read_bytes()).hexdigest() != report['sources'][name]:
+            payload = geometry_source if name == 'frozen_context_geometry.py' and geometry_source is not None else (scripts / name).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != report['sources'][name]:
                 raise ValueError('Staged cache source differs from simulator: ' + name)
         for name in ('ladder-cache.json', 'ladder-cache.exit-status', 'simulator-runtime.txt'):
             result[f'frozen-cache-evidence/{context}/{name}'] = (evidence / context / name).read_bytes()

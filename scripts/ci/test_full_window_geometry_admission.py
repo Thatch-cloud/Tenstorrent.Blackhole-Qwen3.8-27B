@@ -1,10 +1,27 @@
 from pathlib import Path
 import unittest
 
-from full_window_geometry_admission import ORIGINAL, admit, adapt
+from full_window_geometry_admission import ORIGINAL, EXTENDED, admit, adapt, staged_geometry
 
 
 class GeometryAdmissionTests(unittest.TestCase):
+    def test_non_window_staging_restores_exact_qualified_source(self):
+        import hashlib
+
+        payload = Path(__file__).with_name('frozen_context_geometry.py').read_bytes()
+        original = staged_geometry(payload, full_window=False)
+        self.assertEqual(hashlib.sha256(original).hexdigest(), ORIGINAL)
+        self.assertEqual(staged_geometry(original, full_window=False), original)
+        self.assertEqual(hashlib.sha256(staged_geometry(payload, full_window=True)).hexdigest(), EXTENDED)
+        for value, window in ((payload + b'\n', False), (original, True), (payload, 1)):
+            with self.assertRaises(ValueError):
+                staged_geometry(value, full_window=window)
+        before, after = {}, {}
+        exec(compile(original, 'original-geometry', 'exec'), before)
+        exec(compile(payload, 'extended-geometry', 'exec'), after)
+        for context in before['CONTEXTS']:
+            self.assertEqual(before['geometry'](context), after['geometry'](context))
+
     def test_only_context_list_extension_admitted(self):
         payload = Path(__file__).with_name('frozen_context_geometry.py').read_bytes()
         self.assertFalse(admit(payload, ORIGINAL, 261888)['performance_qualified'])

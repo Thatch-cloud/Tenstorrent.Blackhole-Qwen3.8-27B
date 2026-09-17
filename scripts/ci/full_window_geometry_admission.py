@@ -7,6 +7,16 @@ ORIGINAL = '03b9627aa16ca8ed53c7623b336ca462ceb5176f3b2df15ca15bc7cb70ea3672'
 EXTENDED = 'a5bcc57042153ad09ff0dcc151bda16532b974d57c6afdc2d49574b746234c0f'
 
 
+def staged_geometry(payload, *, full_window):
+    if type(full_window) is not bool:
+        raise ValueError('Explicit geometry source selection required')
+    checksum = hashlib.sha256(payload).hexdigest()
+    if checksum == ORIGINAL and not full_window:
+        return payload
+    admit(payload, ORIGINAL, 261888)
+    return payload if full_window else payload.replace(b', 261888', b'')
+
+
 def admit(payload, expected, context):
     if (context != 261888 or type(context) is not int or expected != ORIGINAL
             or hashlib.sha256(payload).hexdigest() != EXTENDED
