@@ -10,7 +10,7 @@ from prefill_gdn_checkpoint import PrefillGDNCheckpoint
 from prefill_prefix_boundary import checkpoint_boundary
 from prefill_prefix_features import prefix_features
 from prefill_prefix_lookup import PrefixIdentity, PrefixLookup
-from prefill_prefix_resume import resume_eager_prefill
+from prefill_prefix_resume import native_resume_scope
 
 
 class HostOperations:
@@ -54,6 +54,7 @@ class HostOperations:
 class HostModel:
     def __init__(self, operations):
         self.operations, self.device = operations, 'mesh'
+        self.num_devices, self._chunked_trace_id = 2, None
         self.states = [operations.tensor() for unused in range(288)]
         self.gdn = [SimpleNamespace(B=1, _stable_state=True, rec_state=self.states[index],
             conv_states=self.states[index + 1:index + 5], conv_carry=self.states[index + 5])
@@ -67,6 +68,9 @@ class HostModel:
 
     def _set_vision_merge(self, *args):
         pass
+
+    def _prefill_chunked_eager_tp(self, *args, **kwargs):
+        raise AssertionError('Cache-hit test must execute the scoped native resume route')
 
     def _forward_prefill_chunk_masked_tp(self, tokens, valid_len, chunk_start, page_table, bucket, **kwargs):
         self.starts.append(chunk_start)
@@ -123,9 +127,12 @@ class PrefixIntegrationTests(unittest.TestCase):
         self.assertEqual(position, 4096)
         model.starts.clear()
         with prefix_features(operations, model, 6144, owner, position) as capture:
-            with capture.capture():
-                actual = resume_eager_prefill(operations, model, changed, None,
-                    actual_len=6144, prefix_position=position, restore=checkpoint.restore)
+            page_table = torch.tensor([pages], dtype=torch.int32)
+            with native_resume_scope(operations, model, changed, page_table,
+                    prefix_position=position, restore=checkpoint.restore) as native_route:
+                with capture.capture():
+                    actual = model._prefill_chunked_eager_tp(changed, page_table, 6144, 3, 2048, 0)
+            self.assertTrue(native_route['completed'] and native_route['restored'])
             actual_features = feature_values(capture)
         self.assertEqual(model.starts, [4096])
         actual_state = [value.values for value in model.states]

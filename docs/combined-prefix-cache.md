@@ -71,6 +71,14 @@ the final chunk. Output, all 288 state tensors, KV fixture and five-tap feature
 history match a fresh cold request. This checks orchestration and ownership;
 it does **not** test TT-NN numerics, DSpark projection or actual page retention.
 
+The suffix helper now exposes `native_resume_scope`, an explicit one-request
+override of `_prefill_chunked_eager_tp`. This leaves the native outer request
+RoPE setup, prefill-scratch binding and decode-slot publication intact. It rejects
+traced-prefill mode, vision input, changed tokens/page tables and repeated calls.
+The host integration test uses this native-method boundary rather than calling
+the suffix loop directly. No global patch, environment default or serving route
+enables it; the combined cache controller still needs to invoke it explicitly.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native

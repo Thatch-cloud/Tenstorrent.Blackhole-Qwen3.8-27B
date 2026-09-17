@@ -4,10 +4,39 @@ from unittest.mock import Mock
 
 import torch
 
-from prefill_prefix_resume import resume_eager_prefill
+from prefill_prefix_resume import native_resume_scope, resume_eager_prefill
 
 
 class PrefixResumeTests(unittest.TestCase):
+    def test_native_route_preserves_outer_preparation_and_restores_method(self):
+        operations, model = self.fixture()
+        model.num_devices, model._chunked_trace_id = 2, None
+        model._prefill_chunked_eager_tp = Mock()
+        original = model._prefill_chunked_eager_tp
+        tokens = torch.zeros(1, 6144, dtype=torch.int32)
+        pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
+        prepared = []
+        restore = Mock(side_effect=lambda position: self.assertEqual(prepared, ['rope', 'scratch']))
+        with native_resume_scope(operations, model, tokens, pages, prefix_position=4096, restore=restore) as evidence:
+            prepared.extend(['rope', 'scratch'])
+            result = model._prefill_chunked_eager_tp(tokens, pages, 6144, 3, 2048, 0)
+        self.assertEqual(result, 'full-logits')
+        self.assertTrue(evidence['completed'] and evidence['restored'])
+        self.assertIs(model._prefill_chunked_eager_tp, original)
+        original.assert_not_called()
+
+    def test_native_route_rejects_changed_request_before_restore(self):
+        operations, model = self.fixture()
+        model.num_devices, model._chunked_trace_id = 2, None
+        model._prefill_chunked_eager_tp = Mock()
+        tokens = torch.zeros(1, 6144, dtype=torch.int32)
+        pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
+        restore = Mock()
+        with self.assertRaises(ValueError):
+            with native_resume_scope(operations, model, tokens, pages, prefix_position=4096, restore=restore):
+                model._prefill_chunked_eager_tp(tokens + 1, pages, 6144, 3, 2048, 0)
+        restore.assert_not_called()
+
     def fixture(self):
         operations = SimpleNamespace(synchronize_device=Mock(), deallocate=Mock())
         model = SimpleNamespace(device='mesh', _set_vision_merge=Mock(),
