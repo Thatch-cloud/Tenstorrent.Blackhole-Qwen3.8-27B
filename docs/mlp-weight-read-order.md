@@ -1,6 +1,6 @@
 # T16 weight-read issue order
 
-**Candidate only: no simulator or hardware acceptance yet.**
+**Simulator qualified; combined hardware performance remains unqualified.**
 
 Combined run 35210079674 found larger weight-read completion waits than the
 isolated fixture. This experiment changes request ordering, not buffer capacity,
@@ -28,3 +28,26 @@ Qualification order:
 
 The simulator fixture has a 510-second process cap and 12-minute whole-job cap;
 it does not load the full target model. Serving defaults remain unchanged.
+
+## Simulator result
+
+Run **35211351632**, source `526bc70edac46dec956d8d09c39594273ba5eaa0`,
+passes in **3m56s**. Both eager outputs, all 12 native/candidate replay outputs,
+four stale-input controls and four complete packed-weight comparisons pass.
+Independent admission checks clean process/container teardown, pinned runtime,
+exact projection/replay sources and an otherwise unchanged T16 kernel manifest.
+The candidate weight-reader SHA-256 is
+`5150f285c437cd53bf8dab407e433ce096336c5c2aa6a4797c2dd820b4a3a222`.
+Report SHA-256:
+`3bac1b049aef7a12affd6463282aa773b199becfa1cddc605bb2f0074a41fbf8`.
+
+The comparison wrapper retains shared Q/K, norm prefetch, incremental history,
+fused T16 MLP, target attention and score layout in **both** arms. It plans two
+fresh feature audits followed by complete unchanged/staggered/staggered/unchanged
+timed requests in one loaded model. Output and proposal acceptance must match
+across all six requests. Each arm reports cold PP and complete-cycle TG separately.
+Both paired TG gains must exceed 2% to pass the improvement screen; passing that
+screen is not automatic promotion or held-out coding-quality acceptance.
+
+The source gate passes against a local frozen runtime staging. Hardware workflow
+integration and execution are still pending; no throughput result is claimed.
