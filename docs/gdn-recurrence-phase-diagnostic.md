@@ -103,3 +103,24 @@ and four poisoned sample captures (eager plus three changed-input replays).
 Missing-execution rejection runs before and after the numerical matrix. This
 first qualification samples token 8; first/final-token device sampling remains
 unqualified. Local fresh staging at the frozen revision imports successfully.
+
+## Combined hardware integration
+
+The combined adapter now preallocates 48 separate sample pages per chip before
+request warmup, retains them until verifier traces close, and samples only the
+first two complete T16 verifier replays. Warmup/capture construction can make
+multiple ordered 48-layer passes; each layer reuses its own diagnostic page.
+Incomplete layer sets, source drift, aliases and failed replay are rejected.
+
+The existing winning norm-prefetch builder still runs. Only its recurrence
+compute descriptor receives the simulator-qualified markers; reader/writer
+programs, norm staging, MLP, attention, drafter and publication are unchanged.
+One complete native-reference request audits tokens, state, inactive slots,
+features and proposals. This diagnostic publishes neither PP nor TG.
+
+Fresh combined staging passes retained-artifact/source admission locally.
+The complete native API check runs against the pinned image on hardware; the
+local exported source inventory does not contain every required API header.
+The workflow retains exclusive two-card scheduling, the disk-pressure check,
+and a bounded 600-second hardware command. No separate isolated hardware
+benchmark is inserted between simulator acceptance and this combined request.
