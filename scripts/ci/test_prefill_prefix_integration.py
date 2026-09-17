@@ -108,6 +108,41 @@ def feature_values(capture):
 
 
 class PrefixIntegrationTests(unittest.TestCase):
+    def test_factory_changed_suffix_prime_matches_cold_requested_state_and_features(self):
+        operations = HostOperations()
+        model = HostModel(operations)
+        checkpoint = PrefillGDNCheckpoint(operations, model.device, model.gdn,
+            [operations.tensor() for unused in model.states])
+        identity = PrefixIdentity('a' * 64, 'b' * 64, 'c' * 64, 'session', 0)
+        pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
+        controller = PrefixController(operations, model, checkpoint,
+            OfflinePrefixResidency(operations, model, identity, list(range(96))))
+        factory = full_request_factory(controller, identity, pages, prefix_position=4096, inactive_pages=[100])
+        tokens = list(range(6144))
+        prime = [*tokens[:-1], 1]
+
+        def prefill(values):
+            return model._prefill_chunked_eager_tp(torch.tensor([values]), pages, 6144, 3, 2048, 0)
+
+        with factory(tokens, prefill, 0) as (cold, capture, unused):
+            expected_features = feature_values(capture)
+            expected_state = tuple(value.values for value in model.states)
+            expected_kv = dict(model.kv)
+        model.starts.clear()
+        with factory(tokens, prefill, 1, prime_tokens=prime) as (hit, capture, evidence):
+            self.assertEqual(hit, cold)
+            self.assertEqual(feature_values(capture), expected_features)
+            self.assertEqual(tuple(value.values for value in model.states), expected_state)
+            self.assertEqual(model.kv, expected_kv)
+            self.assertEqual(model.starts, [0, 2048, 4096, 4096])
+            self.assertTrue(evidence['changed_suffix_priming']['changed_suffix'])
+            self.assertTrue(evidence['changed_suffix_priming']['checkpoint_boundary']['complete'])
+        for wrong in (tokens, [1, *prime[1:]], prime[:-1]):
+            with self.assertRaisesRegex(ValueError, 'Changed-suffix'):
+                with factory(tokens, prefill, 1, prime_tokens=wrong):
+                    self.fail('Invalid priming admitted')
+        controller.invalidate()
+
     def test_full_request_factory_unwinds_cached_consumer_failure(self):
         operations = HostOperations()
         model = HostModel(operations)

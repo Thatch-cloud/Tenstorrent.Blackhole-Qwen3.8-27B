@@ -145,8 +145,11 @@ T32 request implementation. `prefill_prefix_experiment.py` allocates the session
 before native warm-up, then runs the existing full feature audit and two timed
 requests with a 2,048-token prefix at 4K. It retains the ladder's acceptance and
 proposal checks, fingerprints its added sources, and rejects incomplete runs.
-This initial combined screen compares a cold prompt with reuse of the same
-prompt; changed-suffix device qualification is still required separately.
+The feature-audited request now primes the cache with a different suffix before
+reusing the prefix for the original prompt. Its tokens, state and features must
+still match the original cold control. This extra cold priming is confined to
+the untimed audit; both timed requests use ordinary cache hits. Changed-prefix
+and failure paths remain host-tested, not device-qualified.
 The experiment requires explicit `QWEN_PREFIX_CACHE_EXPERIMENT=1` and a
 `experiment/combined-ladder-prefix-*` tag. That CI route selects only 4K and keeps
 the cold ladder unchanged. Four host staging/routing tests pass; hardware
@@ -159,6 +162,12 @@ the explicit full-window route retains the narrowly admitted extension. All
 42 component source checks pass locally against the retained real evidence
 with the original geometry restored. No cache performance was measured in that
 failed attempt.
+
+Retry `35197650746` passed preflight and loaded the model, then stopped before
+checkpoint allocation because the frozen report lacks the newer
+`target_capacity` field. The adapter now derives capacity from all 16 allocated
+K/V pairs and the actual page table, rejecting inconsistent shapes or conflicting
+metadata. There was no cached-prefill or TG measurement in this attempt.
 
 1. Stage the optional request hook into the frozen winning T16 runtime without
    importing unrelated T32 changes. Allocate checkpoints before trace capture;

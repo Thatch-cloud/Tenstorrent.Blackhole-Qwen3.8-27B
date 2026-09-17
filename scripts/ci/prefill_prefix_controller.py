@@ -104,15 +104,33 @@ def full_request_factory(controller, identity, pages, *, prefix_position, inacti
     inactive = tuple(inactive_pages)
 
     @contextmanager
-    def factory(tokens, prefill, ordinal):
+    def factory(tokens, prefill, ordinal, *, prime_tokens=None):
         if type(ordinal) is not int or ordinal not in (0, 1):
             raise ValueError('One cold control and one cached candidate required')
+        requested = tokens_tuple(tokens)
+        priming = None
+        if prime_tokens is not None:
+            prime = tokens_tuple(prime_tokens)
+            if (ordinal != 1 or len(prime) != len(requested)
+                    or prime[:prefix_position] != requested[:prefix_position]
+                    or prime[prefix_position:] == requested[prefix_position:]):
+                raise ValueError('Changed-suffix priming requires the exact same prefix and request length')
+            controller.invalidate()
+            with controller.request(identity, torch.tensor([prime], dtype=torch.int32), page_table,
+                    lambda values: prefill(values[0].tolist()), prefix_position=prefix_position,
+                    inactive_pages=inactive) as (unused, unused_capture, prime_record):
+                if prime_record['cache_hit'] is not False:
+                    raise ValueError('Changed-suffix priming must be cold')
+                priming = dict(changed_suffix=True, prefix_tokens=prefix_position,
+                    prompt_tokens=len(prime), checkpoint_boundary=prime_record['checkpoint_boundary'])
         if ordinal == 0:
             controller.invalidate()
-        host_tokens = torch.tensor([tokens_tuple(tokens)], dtype=torch.int32)
+        host_tokens = torch.tensor([requested], dtype=torch.int32)
         with controller.request(identity, host_tokens, page_table,
                 lambda values: prefill(values[0].tolist()), prefix_position=prefix_position,
                 inactive_pages=inactive) as result:
+            if priming is not None:
+                result[2]['changed_suffix_priming'] = priming
             yield result
 
     return factory
