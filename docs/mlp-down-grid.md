@@ -1,7 +1,45 @@
 # Native T16 MLP-down grid
 
-**Simulator qualification passes; hardware performance is unqualified.**
-Winning and serving defaults are unchanged.
+**Combined correctness passes; full-cycle performance does not improve. Not promoted.**
+Winning and serving defaults are unchanged. Do not retry the same wider grid.
+
+## Combined hardware result
+
+[Run 35255552263](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35255552263)
+at `a4b0e84d1b0f356f92e6d202e595fa678a6eb561` completes in **6m26s**.
+Independent validation passes the two native-reference audits and four timed
+requests. Tokens, target state, inactive slots, feature/proposal checks and
+acceptance match; each arm commits 242 tokens and accepts 224/300 proposals.
+All 64 candidate MLP layers record the same two construction hits as the fused
+arm, with shared args and forward bindings restored afterward.
+
+| CTX / streams | Runtime | PP tok/s | Complete-cycle TG tok/s |
+| --- | --- | ---: | ---: |
+| 4,096 / 1 | Unchanged T16 | 3,294.40 | 123.58 |
+| 4,096 / 1 | Wider MLP down | 3,351.35 | 123.08 |
+
+Aggregate TG changes **-0.40%**; paired changes are **+1.05% / -1.83%**.
+Verifier/readback decreases in both pairs, but by only 0.405 and 0.198 ms.
+This is insufficient to establish a complete-cycle win. The unchanged prefill
+path's PP variation is not credited to a decode-only grid change.
+
+| ABBA request | Draft ms | Verify/readback ms | Commit ms | Whole cycle ms |
+| --- | ---: | ---: | ---: | ---: |
+| Control A | 25.174 | 66.764 | 5.893 | 98.787 |
+| Candidate B | 26.007 | 66.359 | 4.710 | 97.774 |
+| Candidate B | 27.426 | 66.238 | 4.527 | 98.763 |
+| Control A | 24.929 | 66.436 | 4.877 | 96.949 |
+
+The average verifier change is approximately -0.301 ms, not a 2.5x improvement
+from using 80 rather than 32 productive workers. This does not prove DRAM
+saturation, but rules out that simple core-count scaling claim for this recipe.
+Keep the original grid; a follow-up needs a different mechanism and measured
+whole-cycle benefit, not another unchanged grid sweep.
+
+All 865 script, 1,520 native and six adapter fingerprints remain unchanged.
+Exit is zero, the container is not OOM-killed, and devices close cleanly.
+Report SHA-256: `d002f6f15cd88ebe66e690f005bc328aa279d7c87f1d5495a19efc0c2272e140`.
+Held-out coding quality and the 200-TG objective remain unqualified.
 
 ## Simulator acceptance
 

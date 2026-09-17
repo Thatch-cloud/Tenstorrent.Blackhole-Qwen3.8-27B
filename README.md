@@ -40,11 +40,11 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 
 | Runtime | PP tok/s | Committed TG tok/s | Decision |
 | --- | ---: | ---: | --- |
-| Unchanged T16 control | 3,331.52 | 122.26 | Retained |
-| Double-buffered GDN Q/K | 3,349.04 | 124.35 | Correct; below promotion threshold |
+| Unchanged T16 control | 3,294.40 | 123.58 | Retained |
+| Wider MLP down grid | 3,351.35 | 123.08 | Correct; no full-cycle gain |
 
-Verifier/readback rises from 66.52 to 66.96 ms; paired TG changes are +2.05% / +1.36%.
-The candidate is not promoted. [Combined evidence](docs/gdn-qk-double-buffer.md).
+Verifier/readback falls by 0.30 ms on average; paired TG changes are +1.05% / -1.83%.
+The candidate is not promoted. [Combined evidence](docs/mlp-down-grid.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an
