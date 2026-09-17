@@ -50,12 +50,19 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 or any(kwargs.get(name) for name in ('t32', 'banked_proposal', 'profile_verifier', 'profile_drafter'))):
             raise ValueError('Both MLP-down arms must retain the complete winning T16 runtime')
         calls.append((enabled, audited))
-        with (scoped_window_writes(evidence, directory) if enabled else nullcontext()) as audit:
-            result = original_measure(*args, **kwargs)
+        audit = None
+        try:
+            with (scoped_window_writes(evidence, directory) if enabled else nullcontext()) as audit:
+                result = original_measure(*args, **kwargs)
+        finally:
+            report.setdefault('window_route_diagnostics', []).append(dict(
+                request_index=len(calls) - 1, candidate=enabled, scope=dict(audit) if audit is not None else None))
         hits = audit['hits'] if audit is not None else 0
+        loads = len(result.get('gdn_shared_qk', {}).get('loads', []))
+        report['window_route_diagnostics'][-1]['shared_qk_builds'] = loads
         if enabled and (not audit['restored'] or type(hits) is not int or hits < 48 or hits % 48
-                or hits != len(result.get('gdn_shared_qk', {}).get('loads', []))):
-            raise ValueError('Every T16 GDN window call must use the admitted write schedule')
+                or hits != loads):
+            raise ValueError(f'T16 window route mismatch: hits={hits}, shared_qk_builds={loads}, scope={audit}')
         result['gdn_window_write'] = dict(overlap=enabled, hits=hits,
             report_sha256=REPORT_SHA256 if enabled else None, restored=True)
         return result

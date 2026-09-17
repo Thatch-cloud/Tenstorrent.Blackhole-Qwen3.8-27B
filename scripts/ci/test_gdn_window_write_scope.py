@@ -31,6 +31,8 @@ class WindowScopeTests(unittest.TestCase):
                     try:
                         with scoped_window_writes(admission, directory) as audit:
                             self.assertEqual(module.build_windows(None, SimpleNamespace(shape=(1, 8, 8256)), []), 'native')
+                            with self.assertRaisesRegex(ValueError, 'Unqualified T16 window geometry'):
+                                module.build_windows(None, SimpleNamespace(shape=(1, 16, 8240)), [])
                             with self.assertRaises(ValueError):
                                 with scoped_window_writes(admission, directory):
                                     self.fail('Nested override entered')
@@ -42,6 +44,7 @@ class WindowScopeTests(unittest.TestCase):
                     self.assertTrue(audit['restored'])
                     self.assertEqual(audit['hits'], 0 if failed else 1)
                     self.assertEqual(audit['fallbacks'], 1)
+                    self.assertEqual(audit['shapes']['(1, 16, 8240)'], 1)
                     (candidate / 'gdn_conv_windows.cpp').write_bytes(b'changed')
                     with self.assertRaises(ValueError):
                         with scoped_window_writes(admission, directory):

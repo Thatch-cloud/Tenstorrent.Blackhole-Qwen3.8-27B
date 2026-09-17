@@ -2,6 +2,19 @@
 
 Status: simulator correctness passes. Combined hardware performance is untested.
 
+Combined attempt **35261517322**, `c38a701`, failed in 5m14s at the route-coverage
+gate after the candidate audit, before timed ABBA requests. It was not a timeout.
+The control recorded 96 shared-Q/K builds. The adapter failed to retain the
+candidate's hit/fallback counts before raising, so the artifact cannot distinguish
+an unselected shape from an incorrect call-count assumption. No candidate TG is
+qualified. Runtime closure succeeded.
+
+The adapter now retains per-request route diagnostics even on failure and rejects
+unqualified T16 shapes immediately rather than silently falling back through a
+whole audit. Native projections permit logical widths 8240 and 8256; only 8256
+was simulated here. Qualify the other geometry before admitting it; do not simply
+remove the route gate or claim this failed run measured overlapping writes.
+
 The original builder uses one output scratch tile and waits after each of four
 window writes. The candidate uses four separate output scratch tiles, issues
 the writes, then waits once before reusing scratch for the next page. Arithmetic,

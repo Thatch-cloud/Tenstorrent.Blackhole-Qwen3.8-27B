@@ -27,10 +27,15 @@ def scoped_window_writes(admission, directory):
         directory / 'window-write-candidate/gdn_conv_windows.py')
     candidate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(candidate)
-    audit = dict(report_sha256=REPORT_SHA256, hits=0, fallbacks=0, restored=False)
+    audit = dict(report_sha256=REPORT_SHA256, hits=0, fallbacks=0, restored=False, shapes={})
 
     def build(mesh, projected, history):
-        if tuple(projected.shape) != (1, 16, 8256):
+        shape = tuple(projected.shape)
+        label = str(shape)
+        audit['shapes'][label] = audit['shapes'].get(label, 0) + 1
+        if len(shape) == 3 and shape[1] == 16 and shape != (1, 16, 8256):
+            raise ValueError('Unqualified T16 window geometry: ' + label)
+        if shape != (1, 16, 8256):
             audit['fallbacks'] += 1
             return original(mesh, projected, history)
         if len(history) != 4 or any(tuple(value.shape) != (1, 1, 5120) for value in history):

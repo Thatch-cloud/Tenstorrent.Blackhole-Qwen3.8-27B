@@ -60,6 +60,8 @@ class DownGridExperimentTests(unittest.TestCase):
                 experiment.run_loaded_requests(None, None, None, None, None, None, None, None, None, None,
                     None, None, report, lambda stage: None, prompt=[1] * 4096, captured_publication=True)
             self.assertEqual(calls, list(experiment.SCHEDULE))
+            self.assertEqual(len(report['window_route_diagnostics']), 6)
+            self.assertEqual([entry['shared_qk_builds'] for entry in report['window_route_diagnostics']], [96] * 6)
             self.assertEqual(report['gdn_window_write_comparison']['arms']['overlap']['committed_tg'], 120)
             self.assertEqual(report['gdn_window_write_sources'], report['gdn_window_write_sources_after'])
             self.assertIs(full.measure_dspark_request, measure)
