@@ -172,6 +172,16 @@ in CI, without loading weights or opening cards. The opt-in
 runs independent combined-report validation. No tag has been dispatched; this
 remains preparation, not new hardware correctness or throughput evidence.
 
+Next reintegration: `cumulative_register_scope.py` isolates the already-qualified
+register epilogue without replacing `FusedT16Arm.forward`, so it does not displace
+the wider-down hook. It selects the projection and its simulator admission
+together, counts all 64 constructions and projection calls, and restores both
+bindings on failure. Host tests check width rejection, nested-scope rejection,
+restoration and missing layer execution. The four-component CI stack does not
+enable this fifth candidate yet: cumulative runtime/report fusion identities must
+first support the distinct epilogue admission. Its previous +1.81% result had
+mixed paired gains and remains unpromoted; this preparation is not a new speedup.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.
