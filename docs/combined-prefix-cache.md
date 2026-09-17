@@ -127,13 +127,26 @@ test module still fail against historical source pins; they were not relaxed.
 
 ## Remaining integration gates
 
-1. Connect owned KV-prefix storage and captured feature chunks at the native
-   completed-chunk boundary, with buffers allocated before trace capture.
-2. Implement bounded single-stream lookup/invalidation and restore all components
-   atomically before processing a changed suffix. Never reuse generated-state
-   checkpoints as prompt-prefix state.
-3. Compare cold and cached changed-suffix requests: exact emitted tokens, GDN,
-   valid KV, inactive slots and DSpark features; exercise misses and failures.
-4. Measure hit tokens, suffix tokens, restore cost, suffix PP, setup and complete
-   TG independently. Keep the cold context ladder unchanged. Only then enable
-   the combined path and start serving integration.
+`prefill_prefix_session.py` now composes checkpoint allocation, native KV
+residency checks and the combined request factory into one explicit offline
+lifetime. It rejects nested sessions and overlapping reservations, releases
+prefix features before checkpoint buffers, and revokes reuse on exit. Three
+host tests cover cold/hit execution and cleanup on failure. The caller must
+still hold an exclusive page lease; this helper does not create a serving lease
+or enable hardware caching by itself.
+
+Priority: qualify the combined T16/DSpark runtime first, then integrate serving.
+The host controller, bounded lookup, checkpoint allocation and request hook exist;
+65 focused host tests pass. This is not device acceptance or an enabled cache.
+
+1. Stage the optional request hook into the frozen winning T16 runtime without
+   importing unrelated T32 changes. Allocate checkpoints before trace capture;
+   connect explicit exclusive KV-page ownership and loaded-model identity.
+2. Run a small combined cold-versus-cached changed-suffix qualification before
+   spending time on long contexts. Require exact emitted tokens, GDN, valid KV,
+   inactive slots and DSpark features; exercise misses and failure cleanup.
+3. Measure hit tokens, suffix tokens, restore cost, suffix PP, setup and complete
+   TG separately. Keep cached effective PP out of the cold context ladder.
+4. Expand accepted combined tests to larger contexts, then connect serving's
+   allocator and request lifecycle. Serving prefix caching remains disabled
+   until that separate ownership and correctness gate passes.
