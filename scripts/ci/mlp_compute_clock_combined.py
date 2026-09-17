@@ -1,7 +1,10 @@
 """One-request diagnostic ownership; caller must preallocate before trace capture."""
 
 from contextlib import contextmanager
+from copy import deepcopy
 from unittest.mock import patch
+
+from mlp_compute_clock_hardware import SIMULATOR_SHA256
 
 
 class CombinedComputeClockCapture:
@@ -78,6 +81,15 @@ class CombinedComputeClockCapture:
         if self.active or self.engines or self.projections or self.records or self.failed:
             raise ValueError('Fresh one-request diagnostic scope required')
         original_init, original_verify = engine_class.__init__, engine_class.verify
+        original_qualify = fusion_module.qualify_simulator
+        evidence = getattr(self.candidate, 'diagnostic_evidence', {})
+        if (evidence.get('passed') is not True or evidence.get('report_sha256') != SIMULATOR_SHA256
+                or len(evidence.get('kernels', [])) != 1 or evidence['kernels'][0].get('token_rows') != 16):
+            raise ValueError('Source-admitted diagnostic T16 manifest required')
+
+        def qualify():
+            original_qualify()
+            return deepcopy(evidence)
 
         def initialize(engine, model, *args, **kwargs):
             self.register_engine(engine, model)
@@ -93,6 +105,7 @@ class CombinedComputeClockCapture:
         self.active = True
         try:
             with patch.object(fusion_module, 'FusedProjection', self.projection), \
+                    patch.object(fusion_module, 'qualify_simulator', qualify), \
                     patch.object(engine_class, '__init__', initialize), patch.object(engine_class, 'verify', verify):
                 yield self
         except BaseException:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from mlp_compute_clock_capture import ComputeClockCapture
 from mlp_compute_clock_combined import CombinedComputeClockCapture
 from mlp_compute_clock_hardware import retained
+from mlp_compute_clock_hardware import SIMULATOR_SHA256
 from mlp_compute_clock_projection import instrument_projection
 from mlp_compute_clock_report import validate
 
@@ -43,6 +44,8 @@ def candidate_class(directory, evidence):
     module = ModuleType('qualified_mlp_compute_clock_candidate')
     module.__file__ = str(directory / 'fused_1d.py')
     exec(compile(source, module.__file__, 'exec'), module.__dict__)
+    module.FusedProjection.diagnostic_evidence = dict(passed=True,
+        report_sha256=SIMULATOR_SHA256, kernels=simulator['kernels'])
     return module.FusedProjection
 
 

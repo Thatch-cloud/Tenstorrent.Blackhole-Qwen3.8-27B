@@ -38,6 +38,14 @@ Fresh full-recipe staging and host ownership/report tests pass. Combined
 hardware qualification is pending. PP/TG remain null because poisoning,
 synchronization and readback intentionally perturb request timing.
 
+First combined attempt `35220106378` stopped at fusion admission, before
+prefill or verifier execution: the adapter retained the original compute hash
+although instrumentation changes it. The scoped admission now runs the original
+qualification first, then supplies the exact simulator/hardware-qualified T16
+diagnostic manifest. The per-layer manifest equality and native-weight checks
+remain intact. Host tests cover original-gate failure and scope restoration;
+the actual exported native source reproduces the admitted diagnostic manifest.
+
 The winning verifier's MLP group takes about 11.4 ms per replay. Reader samples
 and the rejected bank-order change do not identify whether matmul, packing or
 processor handoffs dominate. This diagnostic adds six bounded intervals on

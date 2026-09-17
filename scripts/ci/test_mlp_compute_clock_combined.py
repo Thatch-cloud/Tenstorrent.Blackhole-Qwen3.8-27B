@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import unittest
 
 from mlp_compute_clock_combined import CombinedComputeClockCapture
+from mlp_compute_clock_hardware import SIMULATOR_SHA256
 
 
 class Capture:
@@ -49,7 +50,8 @@ class CombinedClockTests(unittest.TestCase):
             feed_forward=SimpleNamespace(weights=SimpleNamespace(w_gate_up=object()))) for unused in range(64)])
         captures = [Capture(mesh, index) for index in range(64)]
         candidate = lambda mesh, weights, **kwargs: SimpleNamespace(**kwargs)
-        module = SimpleNamespace(FusedProjection=candidate)
+        candidate.diagnostic_evidence = dict(passed=True, report_sha256=SIMULATOR_SHA256, kernels=[dict(token_rows=16)])
+        module = SimpleNamespace(FusedProjection=candidate, qualify_simulator=lambda: dict(passed=True))
         bank = CombinedComputeClockCapture(model, captures, candidate)
         return model, captures, module, bank
 
@@ -61,6 +63,7 @@ class CombinedClockTests(unittest.TestCase):
         model, captures, module, bank = self.fixture()
         original, initializer, verifier = module.FusedProjection, Engine.__init__, Engine.verify
         with bank.install(module, Engine):
+            self.assertEqual(module.qualify_simulator(), bank.candidate.diagnostic_evidence)
             projections = self.bind(model, module)
             self.assertEqual([projection.compute_samples for projection in projections], [capture.buffer for capture in captures])
             engine = Engine(model)
@@ -76,6 +79,21 @@ class CombinedClockTests(unittest.TestCase):
         self.assertEqual(bank.summary()['sampled_verifier_replays'], 2)
         self.assertTrue(all(capture.events == ['poison', 'read', 'poison', 'read'] for capture in captures))
         with self.assertRaises(ValueError):
+            with bank.install(module, Engine):
+                pass
+
+    def test_diagnostic_admission_preserves_original_gate_and_restores_it(self):
+        model, captures, module, bank = self.fixture()
+        def failed_original():
+            raise ValueError('Original numerical qualification failed')
+        module.qualify_simulator = failed_original
+        with bank.install(module, Engine):
+            with self.assertRaisesRegex(ValueError, 'Original numerical'):
+                module.qualify_simulator()
+        self.assertIs(module.qualify_simulator, failed_original)
+        model, captures, module, bank = self.fixture()
+        bank.candidate.diagnostic_evidence['report_sha256'] = 'unqualified'
+        with self.assertRaisesRegex(ValueError, 'Source-admitted'):
             with bank.install(module, Engine):
                 pass
 
