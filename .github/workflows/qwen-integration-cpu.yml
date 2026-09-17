@@ -55,6 +55,7 @@ jobs:
           python -B -m unittest test_shared_qk_norm_comparison
           python -B -m unittest test_shared_qk_norm_report
           python -B -m unittest test_mlp_compute_clock
+          python -B -m unittest test_gdn_recurrence_clock
           python -B -m unittest test_mlp_compute_clock_capture
           python -B -m unittest test_mlp_compute_clock_report
           python -B -m unittest test_mlp_compute_clock_hardware
