@@ -14,7 +14,13 @@ class CompactDeviceTests(unittest.TestCase):
                 reduce_winners(None, None, None, 64, None)
 
     def test_reducer_scratch_covers_records_and_result(self):
-        self.assertLessEqual((110 + 1) * 32, 4096)
+        self.assertLessEqual(110 * 64 + 32, 8192)
+        source = Path(__file__).with_name('compact_score_reduce.cpp').read_text()
+        self.assertIn('scratch + worker * 64, 32)', source)
+        self.assertIn('scratch + workers * 64, output.get_noc_addr(0), 32)', source)
+        self.assertNotIn('scratch + worker * 32', source)
+        for worker in range(111):
+            self.assertEqual((worker * 64) % 64, 0)
 
     def test_full_vocabulary_tile_partitions_cover_once(self):
         for width in (64, 248320):

@@ -9,7 +9,7 @@ void kernel_main() {
     const uint32_t tiles = get_arg_val<uint32_t>(3);
     const uint32_t scratch = get_write_ptr(0);
     for (uint32_t worker = 0; worker < workers; ++worker) {
-        noc_async_read(input.get_noc_addr(worker), scratch + worker * 32, 32);
+        noc_async_read(input.get_noc_addr(worker), scratch + worker * 64, 32);
     }
     noc_async_read_barrier();
     uint32_t best_key = 0;
@@ -17,7 +17,7 @@ void kernel_main() {
     uint32_t best_bits = 0;
     uint32_t invalid = 0;
     for (uint32_t worker = 0; worker < workers; ++worker) {
-        const auto record = reinterpret_cast<volatile const uint32_t*>(scratch + worker * 32);
+        const auto record = reinterpret_cast<volatile const uint32_t*>(scratch + worker * 64);
         const uint32_t bits = record[0];
         const uint32_t token = record[1];
         if (record[2] != 0 || (bits & 0x7f800000) == 0x7f800000 ||
@@ -34,12 +34,12 @@ void kernel_main() {
             best_bits = bits;
         }
     }
-    auto result = reinterpret_cast<volatile uint32_t*>(scratch + workers * 32);
+    auto result = reinterpret_cast<volatile uint32_t*>(scratch + workers * 64);
     result[0] = invalid ? 0xffffffff : best_token;
     result[1] = invalid;
     result[2] = best_bits;
     for (uint32_t word = 3; word < 8; ++word) { result[word] = 0; }
     asm volatile("" ::: "memory");
-    noc_async_write(scratch + workers * 32, output.get_noc_addr(0), 32);
+    noc_async_write(scratch + workers * 64, output.get_noc_addr(0), 32);
     noc_async_write_barrier();
 }

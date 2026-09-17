@@ -50,3 +50,11 @@ below target even with drafting removed. A useful candidate must reduce complete
 combined request time, while verifier work continues separately. If local
 reduction overhead exceeds saved writes/argmax cost, reject it rather than
 claiming the payload ratio as a speedup.
+
+Simulator run 35265211320 stopped in eager execution after 20.48 seconds:
+the reducer read a DRAM record into an L1 address with incompatible alignment
+(`src=0x6866c0`, `dst=0x1b3a0`). This was not a timeout or a numerical failure.
+The reducer now spaces its 32-byte records at 64-byte L1 boundaries and reserves
+8 KiB scratch, including the aligned final result. External records remain
+32 bytes; arithmetic and acceptance checks are unchanged. Retry qualification
+is required before any hardware admission.

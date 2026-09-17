@@ -85,7 +85,7 @@ def reduce_winners(operations, mesh, winners, vocabulary, retain):
     output = retain(operations.empty((1, 1, 1, 8), dtype=operations.uint32,
         layout=operations.ROW_MAJOR_LAYOUT, device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG))
     cores = operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(0, 0), operations.CoreCoord(0, 0))])
-    buffer = operations.CBDescriptor(total_size=4096, core_ranges=cores,
+    buffer = operations.CBDescriptor(total_size=8192, core_ranges=cores,
         format_descriptors=[operations.CBFormatDescriptor(buffer_index=0, data_format=operations.uint32,
             page_size=4096, tile=operations.TileDescriptor(operations.Tile([32, 32])))])
     shards = [operations.get_device_tensors(value) for value in (winners, output)]
