@@ -1,6 +1,29 @@
 # GDN state-copy fan-out candidate
 
-**Host prototype only. Not simulator-admitted, hardware-tested or enabled.**
+**Simulator execution passes; combined hardware performance remains unqualified.**
+
+## Simulator result
+
+[Run 35231694382](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35231694382)
+at `225720f33b7d4879eac62fe4e9e4a69dbba1e026` passes in **3m05s**.
+Independent inspection confirms all 24 output/prefix-state/bridge comparisons
+and 48 immutable-input checks, including changed-input replay. All 791 captured
+source hashes remain stable; the 14 selected local probe/dependency hashes match
+the staged files. Runtime is the pinned `9f9cd4f`; exit and all cleanup statuses
+are zero. This supplies no TG measurement or held-out coding acceptance.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Report | `30910463b67866b0ccad62784cedf9e82d88cc9b6f074368d71ea983f09c5f9e` |
+| Generated control recurrence | `ce404cf287f9962243dc65f30d9736f45b0c95cfff503c6c20d68f8981a41153` |
+| Generated candidate recurrence | `abf6a1d2ce0fd9f8380656a09d7963fcd7ac8ed9017f6dff49bcbcccb3cd7a68` |
+
+Exactly one transformed recurrence is recorded, with four state tiles and
+unchanged output/feedback CB18/CB30. Next: bind hardware admission to this
+generated source and integrate only the copy change into the winning combined
+T16/HiFi4 runtime, preserving its norm-prefetch path and target correctness gates.
+
+## Implementation and qualification history
 
 The shared-Q/K recurrence copies each new state twice for intermediate tokens:
 once into the externally published state buffer and once into local next-token
