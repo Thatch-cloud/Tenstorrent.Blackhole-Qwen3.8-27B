@@ -58,11 +58,26 @@ def transform(source):
     return '#include "api/compute/eltwise_unary/typecast.h"\n' + result
 
 
-def adapt_projection(source):
+def activation_control(source):
+    transform(source)
+    result = replace_once(source,
+        '                                constexpr uint32_t rounded_cb = 30;\n                                tile_regs_commit();',
+        '                                constexpr uint32_t rounded_cb = 30;\n'
+        '                                silu_tile_init();\n'
+        '                                silu_tile(0);\n'
+        '                                tile_regs_commit();')
+    return replace_once(result, '                                apply_activation_from_pack<KernelActivation::SILU>(1);',
+        '                                tile_regs_wait();')
+
+
+def adapt_projection(source, *, diagnose_activation=False):
+    if type(diagnose_activation) is not bool:
+        raise ValueError('Explicit activation diagnostic policy required')
     if 'mlp_register_epilogue' in source:
         raise ValueError('Projection already contains the register epilogue')
+    function = 'activation_control' if diagnose_activation else 'transform'
     result = replace_once(source, 'import hashlib\n',
-        'import hashlib\nfrom mlp_register_epilogue import transform as register_epilogue\n')
+        f'import hashlib\nfrom mlp_register_epilogue import {function} as register_epilogue\n')
     anchor = '        self.compute = fused_compute(original, intermediates=intermediates, pairs_per_worker=pairs_per_worker)'
     result = replace_once(result, anchor, anchor + '''
         if intermediates or pairs_per_worker != 3 or token_rows != 16 or math_approx_mode is not True:
@@ -70,6 +85,7 @@ def adapt_projection(source):
         self.compute = register_epilogue(self.compute)''')
     result = replace_once(result, 'intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,',
         'intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,\n'
-        '                             register_epilogue=True, intermediate_rounding="sfpu-fp32-to-bf16",')
+        f'                             register_epilogue={not diagnose_activation}, activation_diagnostic={diagnose_activation},\n'
+        f'                             intermediate_rounding="{"native-pack" if diagnose_activation else "sfpu-fp32-to-bf16"}",')
     compile(result, 'fused_1d.py', 'exec')
     return result

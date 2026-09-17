@@ -2,6 +2,23 @@
 
 **Candidate only. No new throughput or correctness acceptance.**
 
+## First simulator outcome
+
+[35235850613](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35235850613),
+source `db35b7315f16a4d7f82c67727fe3362bdedfc794`, finishes in 2m05s.
+Compilation and all four packed-weight comparisons pass. The first chip's eager
+output has **216 mismatches out of 139,264 values**; the test stops before replay
+or chip-1 numerical acceptance. Exit is 1; container cleanup succeeds. This is
+a numerical rejection, not a timeout. No hardware run is permitted for this version.
+Report SHA-256: `eba85c2867612bbe44efa1bd5245dc7984a5772a345d17a247f2f5a03075e353`.
+
+The next simulator-only diagnostic moves SiLU to MATH but retains the original
+BF16 pack/reload and product. This separates activation relocation from explicit
+register rounding and product scheduling. It is not a faster candidate or an
+acceptance override. Mismatch values and row distribution are now retained.
+The current workflow explicitly selects `--diagnose-activation`; a pass qualifies
+only this diagnostic, not the rejected register-resident epilogue.
+
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
 pack/reload and separate post-loop product, not the already-tested weight reader.

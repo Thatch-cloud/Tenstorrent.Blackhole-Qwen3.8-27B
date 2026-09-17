@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from frozen_recipe_context import REVISION
 from fused_1d import BF16_PRODUCT, fused_compute
-from mlp_register_epilogue import CAST, END, FINAL, START, TAIL, adapt_projection, transform
+from mlp_register_epilogue import CAST, END, FINAL, START, TAIL, activation_control, adapt_projection, transform
 
 
 def fixture():
@@ -26,6 +26,19 @@ def fixture():
 
 
 class RegisterEpilogueTests(unittest.TestCase):
+    def test_activation_diagnostic_keeps_original_packing_and_product(self):
+        source = fixture()
+        result = activation_control(source)
+        self.assertEqual(result[result.index(TAIL):], source[source.index(TAIL):])
+        restored = result.replace('                                silu_tile_init();\n'
+            '                                silu_tile(0);\n', '').replace(
+            '                                tile_regs_wait();',
+            '                                apply_activation_from_pack<KernelActivation::SILU>(1);', 1)
+        self.assertEqual(restored, source)
+        self.assertNotIn('typecast_tile', result)
+        with self.assertRaises(ValueError):
+            activation_control(result)
+
     def test_rounds_both_operands_before_unchanged_product(self):
         candidate = transform(fixture())
         positions = [candidate.index(anchor) for anchor in ('silu_tile(0);',
@@ -61,6 +74,11 @@ class RegisterEpilogueTests(unittest.TestCase):
         self.assertIn('token_rows != 16', candidate)
         self.assertIn('math_approx_mode is not True', candidate)
         self.assertIn('intermediates or pairs_per_worker != 3', candidate)
+        diagnostic = adapt_projection(source, diagnose_activation=True)
+        self.assertIn('import activation_control as register_epilogue', diagnostic)
+        self.assertIn('register_epilogue=False, activation_diagnostic=True', diagnostic)
+        self.assertIn('intermediate_rounding="native-pack"', diagnostic)
+        self.assertEqual(diagnostic[diagnostic.index('    def __call__'):], original_call)
         with self.assertRaises(ValueError):
             adapt_projection(candidate)
 
