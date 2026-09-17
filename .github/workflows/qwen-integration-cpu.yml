@@ -63,6 +63,7 @@ jobs:
           python -B -m unittest test_dspark_precision_gate
           python -B -m unittest test_dspark_precision_experiment
           python -B -m unittest test_dspark_precision_stage
+          python -B -m unittest test_dspark_precision_report
           python -B -m unittest test_dspark_projection_precision_stage
           python -B -m unittest test_dspark_projection_precision_report
           python -B -m unittest test_mlp_weight_pipeline_gate test_mlp_weight_pipeline_experiment test_mlp_weight_pipeline_comparison test_mlp_weight_pipeline_report

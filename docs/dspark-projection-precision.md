@@ -152,3 +152,15 @@ The complete-set check also caught and fixed an admission bug: `weight_sha256`
 identifies each selected tensor, not the whole checkpoint. Each projection now
 has its own reviewed tensor digest; the pinned loader still verifies the whole
 checkpoint. Ten focused report/admission tests pass. Hardware TG remains unmeasured.
+
+Combined hardware run `35229622229` uses source
+`856e1f29bfa69a40b67569a0e249b00936343047` and tag
+`experiment/dspark-precision-combined-v1`. Exact-commit CPU CI and fresh local
+staging passed before launch. The runner has passed projection admission and
+host-pressure checks and is executing the combined audit/timing step.
+
+`dspark_precision_report.py` independently recomputes both arms from complete
+requests, checking actual packed target weights, unchanged fusion/norm/history,
+per-arm proposal and five-tap feature audits, executed precision-layer identity,
+stable sources and complete-cycle TG. Two report tests plus four comparison
+tests pass locally; no result is accepted merely because the workflow is green.
