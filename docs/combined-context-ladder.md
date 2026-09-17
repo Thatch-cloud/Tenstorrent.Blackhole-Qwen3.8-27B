@@ -26,7 +26,7 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 
 | CTX | Streams | PP tok/s | Committed TG tok/s | Status |
 | ---: | ---: | ---: | ---: | --- |
-| 4,096 | 1 | — | — | Pre-load host I/O gate failed: 33.94% full stall; model not run |
+| 4,096 | 1 | 3,249.81 | **118.22** | Retry passed; original attempt blocked by host pressure |
 | 8,192 | 1 | — | — | Pre-load host I/O gate failed: 6.07% full stall; model not run |
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
@@ -69,3 +69,11 @@ Retry tag `experiment/combined-ladder-retry-v2` selects only 4K, 8K and 64K, car
 `frozen_ladder_ordered_cache.py` prepares an explicitly scoped geometry validator, retaining bounds against both selected context and actual cache storage. Three host tests pass, including restoring the original guard on exceptions. It is **not yet wired into hardware**; larger-page writer correctness/replay must be checked before deployment. Default serving validation remains unchanged.
 
 262K fails before model loading: a 262,144-token prompt plus 256 output slots requires 262,400 positions, exceeding the target's declared 262,144 limit. A full-window test would instead use 261,888 prompt tokens plus 256 output slots and must be labelled separately; no implicit truncation or positional extension has been applied.
+
+### 4K retry
+
+[Run 35167726511](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35167726511), revision `f907f9b`: exact output/state, source immutability, clean close and exit 0. Independent recomputation confirms **PP 3,249.81 / CTX 4,096 / TG 118.22**. Two timed requests commit 242 tokens, accepting 224/300 draft proposals (74.67%). Mean cycle 102.28 ms with 12.1 committed tokens; verifier/readback accounts for 67.25 ms. This is not a matched speedup claim over older prompts.
+
+Report SHA-256: `833b09c6a975a53374fd558c24b8947f9e760c91972619def2bd38c362fbc209`.
+
+The wider page-table correctness/replay check is queued as [35168996959](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35168996959). It loads no model weights and does not measure TG.

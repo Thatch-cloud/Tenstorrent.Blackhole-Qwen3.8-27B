@@ -9,16 +9,17 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Same-recipe context ladder underway: 16K and 32K pass; 64K needs a prompt-preparation retry.**
+**Same-recipe context ladder underway: 4K reaches 118.22 TG; long-context fixes remain under qualification.**
 
 | Streams | CTX | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: |
+| 1 | 4,096 | 3,249.81 | **118.22** |
 | 1 | 16,384 | 3,170.94 | **87.11** |
 | 1 | 32,768 | 2,968.87 | **89.96** |
 
 One fresh feature audit and two timed full requests; exact output/state checks
-and clean shutdown pass. The 4K/8K rows stopped before model execution because
-of host I/O contention and need retries. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
+and clean shutdown pass. The 4K retry passes; 8K is retrying after host I/O
+contention. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
 This pinned workload is separate from the historical measurements below.
 
 **Earlier matched fixture result: 89.47 committed tokens/s at 32K context**,
