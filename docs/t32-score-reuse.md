@@ -112,6 +112,24 @@ the component's evidence to larger contexts. Host tests cover route selection,
 missing evidence, source changes, timeouts and geometry limits. Complete-device
 correctness, execution coverage and hardware admission are still pending.
 
+## Recovered hardware groundwork
+
+The earlier T32 line did execute a combined hardware request: run **34689543028**
+at `d6d5a309263d243f8cef4dad26c5ba88e23555fc` passed. That revision is not an
+ancestor of this experiment branch. Its `t32_hardware_kernel.py`,
+`t32_proposal_gate.py` and scope-restoration tests have been recovered unchanged,
+retaining the original runtime and simulator-report pins. This avoids inventing
+a second hardware deployment mechanism. It does not admit the current candidate.
+
+The retained complete-proposal simulator artifact from run **34660555430** is
+still available and independently reads `passed=true`, `closed_cleanly=true`.
+The restored gate correctly rejects the current dependency closure for exactly
+three changed Python files: `attention_mask_replay.py`, `dspark_t32_prepared.py`
+and `dspark_t32_score_layout.py`. The mask change adds the separate simulator
+context-ladder option; the latter two implement the explicit fused-score path.
+Next hardware admission must bind and validate that specific delta against the
+retained proposal plus new score evidence, not relabel the old pass as current.
+
 | Area | Current T32 path | Required next evidence |
 | --- | --- | --- |
 | Markov score layout | Opt-in fused adapter; native default | Learned complete-proposal output and replay parity |
