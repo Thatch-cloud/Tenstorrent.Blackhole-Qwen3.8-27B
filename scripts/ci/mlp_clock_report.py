@@ -8,7 +8,7 @@ from pathlib import Path
 from mlp_clock_samples import ZONES
 
 
-def validate(report, *, backend):
+def validate_numerics(report, *, backend):
     if (backend not in ('simulator', 'hardware') or report.get('backend') != backend
             or report.get('passed') is not True or report.get('math_approx_mode') is not True
             or report.get('missing_execution_rejected') is not True
@@ -33,6 +33,10 @@ def validate(report, *, backend):
             or replays[0].get('checks') != checks or replays[0].get('negative_controls') != negative
             or replays[0].get('timings') != []):
         raise ValueError('All changed-input native and fused replay checks required')
+
+
+def validate(report, *, backend):
+    validate_numerics(report, backend=backend)
     expected_samples = []
     for role, workers in (('input', (0, 1)), ('weights', (0,))):
         for chip in range(2):
