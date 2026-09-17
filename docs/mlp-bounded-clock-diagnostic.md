@@ -1,6 +1,6 @@
 # Bounded MLP wait diagnostic
 
-**Status: host-tested source adapter only. No simulator or hardware acceptance.**
+**Status: simulator replay qualified; hardware qualification pending.**
 This does not change the winning T16 recipe or serving defaults.
 
 ## Why this experiment
@@ -70,3 +70,20 @@ the mesh identity here; it is not a unique chip identifier. Alias validation now
 compares addresses within each ordered shard, matching the existing replay
 binding checks. Host fixtures reproduce equal mesh IDs and equal cross-chip
 addresses while continuing to reject input/weight aliasing on the same shard.
+
+## Simulator acceptance
+
+Run **35207583937**, source `237d38eab89dc24995091918548672e4070afec4`,
+passes in **3m54s** including setup/artifacts. Independent report validation
+confirms both T16 eager outputs, all 12 native/fused replay outputs, four
+byte-exact weight comparisons, stale-input controls and the missing-execution
+sample control. Five complete captures contain **100 fresh samples** across
+both chips. Process exit and all four container-cleanup statuses are zero.
+
+Report SHA-256:
+`6eb70a4126095ce96b14c78ff23453e470e3a78199f2dacdc4d2867038f9753e`.
+
+The hardware lane pins that report and checks staged sources against its
+manifest before changing only simulator-versus-hardware CLI admission. The
+same diagnostic arithmetic and all numerical/freshness checks remain required.
+Hardware timing samples will not be promoted as combined-runtime throughput.
