@@ -56,6 +56,10 @@ composition; they must not be advertised as established incremental gains.
 | [Fixed-packet reads](weight-read-packets-2026-09-10.md) | T8 layer +26.92% latency | Extension of sixteen-producer design; charge full conversion/collective boundary |
 | [Small activation tiles](tiny-tile-projections-2026-09-09.md) | T8 layer +4.70% latency | Requires layout-compatible producer/consumer composition; standalone conversion penalty is included |
 | [T32 runtime](t32-score-reuse.md) | Older 4K 74.68 TG | Alternative verifier width; port T16 optimizations with new simulator coverage, not simultaneous T16/T32 hooks |
+| [GDN input overlap](gdn-input-overlap.md) | TG -0.92%; verifier 66.476 to 66.635 ms | Same recurrence-reader family as Q/K rings; compose transformed sources rather than nesting unverified hooks |
+| [Drafter HiFi2](dspark-projection-precision.md) | TG -1.56%; no repeatable draft gain | Separate precision arm; retain target precision and recheck acceptance and held-out coding |
+| [Bank-bound proposal traces](dspark-banked-runtime-admission.md) | 4K TG +0.036%; commit faster but draft slower | Alternative to copied-history proposal ownership; integrate compact selection into both graphs and audit both bank transitions |
+| [Markov bias cache](markov-bias-cache-experiment.md) | 8K TG -6.93% | Interacts directly with compact selection and sequential feedback; retain reset epochs and count full-vocabulary cache traffic |
 
 ## Source-level conflicts already found
 
@@ -89,7 +93,14 @@ composition; they must not be advertised as established incremental gains.
 
 ## Remaining historical reconciliation
 
-- Inventory earlier commits and other experiment branches, not just current docs.
+- A bounded `git log --all` pass now reconciles rejection records for HiFi2
+  (`5aa1eb6`), input overlap (`d48057d`), bias cache (`478a7a9`), banked history
+  (`ab021c3`) and two-tile outer-add (`34699539483` hardware record). The four
+  newly identified families are included above, not omitted because they lost.
+- Local refs inspected include `experiment/t16-matched`, `experiment/t32-score-reuse`,
+  `experiment/concurrent-runtime`, `ci/qwen-hardware-correctness`, integration/main
+  and retained PR refs. This is not yet a commit-by-commit or deleted-ref audit;
+  those remaining histories must still be reconciled.
 - Reconcile DFlash/MTP/drafter precision, banked history, score fusion, split-K,
   Markov bias caching and KV precision with the current DSpark path. Separate
   already-incorporated fixes from rejected alternatives and never-run hypotheses.
@@ -99,6 +110,17 @@ composition; they must not be advertised as established incremental gains.
 - Read remaining numerical investigation histories through their final corrected
   outcome. A launch failure, timeout, wrong prompt or missing artifact is not a
   performance rejection of the kernel.
+
+### Normalization composition finding
+
+The frozen runtime wraps each measurement with its own norm-prefetch `build`
+and admission overrides. A naive outer scatter scope would be overwritten by
+that wrapper. Changing only the loader could also falsely label scatter as the
+prefetch-qualified implementation. Integration must select the actual per-request
+builder and its corresponding admission together, and update independent report
+validation. Until that is implemented, do not claim scatter is present in the
+cumulative recipe. The wider-down candidate uses a different forward hook and
+is a simpler next independent addition while this identity boundary is repaired.
 
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
