@@ -32,19 +32,35 @@ def evaluate(before, after, elapsed_seconds, maximum_fraction=0.01):
         scope='Pre-load host pressure only; no proof of subsequent isolation or benchmark quality')
 
 
+def observe(attempts, read_pressure, sleep, monotonic, emit):
+    if type(attempts) is not int or not 1 <= attempts <= 4:
+        raise ValueError('One to four bounded pressure observations required')
+    observations = []
+    for ordinal in range(attempts):
+        if ordinal:
+            sleep(15)
+        before = read_pressure()
+        started = monotonic()
+        sleep(15)
+        report = evaluate(before, read_pressure(), monotonic() - started)
+        observations.append(report)
+        emit(dict(attempt=ordinal + 1, **report))
+        if report['passed']:
+            break
+    return dict(report, observations=observations, maximum_attempts=attempts)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--attempts', type=int, choices=range(1, 5), default=1)
     args = parser.parse_args()
     if args.output.exists():
         raise ValueError('Fresh pressure report required')
     try:
         pressure = Path('/proc/pressure/io')
-        before = pressure.read_text()
-        started = time.monotonic()
-        time.sleep(15)
-        after = pressure.read_text()
-        report = evaluate(before, after, time.monotonic() - started)
+        report = observe(args.attempts, pressure.read_text, time.sleep, time.monotonic,
+            lambda value: print(json.dumps(value), flush=True))
     except Exception as error:
         report = dict(passed=False, error=f'{type(error).__name__}: {error}')
     args.output.write_text(json.dumps(report, indent=2) + '\n')
