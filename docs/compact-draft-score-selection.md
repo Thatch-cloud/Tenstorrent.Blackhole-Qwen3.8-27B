@@ -1,7 +1,8 @@
 # Compact draft score selection
 
-Status: host semantic specification only. No kernel, simulator qualification,
-hardware measurement or runtime integration yet.
+Status: host specification and simulator-only local-reduction kernel source.
+No device compilation, simulator qualification, hardware measurement or runtime
+integration yet. The final cross-worker reduction remains to be implemented.
 
 The current fused score-layout kernel adds one FP32 base row to the unchanged
 FP32 Markov bias, then writes all 248,320 scores to DRAM for native argmax.
@@ -13,6 +14,15 @@ Candidate: retain that exact SFPU addition, reduce its outputs to one score/toke
 pair per worker, then reduce the compact winners. At 110 workers, the winner
 payload is 880 bytes per step before alignment. No vocabulary truncation, top-k
 approximation or learned-weight precision change is permitted.
+
+`compact_score_device.execute_local_winners` now builds the first stage. It uses
+contiguous whole-tile partitions and leaves the SFPU addition body unchanged.
+The data-movement processor compares FP32 encodings using integer keys; each
+worker writes a 32-byte record containing score bits, original token ID and a
+nonfinite flag. Reserved words are zero. At 110 workers this actual record
+payload is 3,520 bytes, rather than the idealized 880-byte pair-only payload.
+Scratch reuse waits for the last compute consumer before overwriting its input
+buffer. No host argmax or production feedback route has been introduced.
 
 `compact_score_selection.py` specifies finite FP32 comparison via integer keys,
 canonicalizes signed zero, and resolves ties to the lowest original token ID.
