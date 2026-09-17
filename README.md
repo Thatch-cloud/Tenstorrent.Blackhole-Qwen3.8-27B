@@ -36,7 +36,7 @@ These are **offline complete-runtime tests**, not a streaming serving benchmark.
 Current-recipe concurrent users, sustained generation and held-out coding quality
 are not yet qualified. Historical B8 serving results use a different runtime.
 
-**Latest matched 4K comparison** (one stream; separate from the cold ladder):
+**Retained matched 4K comparison** (one stream; separate from the cold ladder):
 
 | Runtime | PP tok/s | Committed TG tok/s | Decision |
 | --- | ---: | ---: | --- |
@@ -45,6 +45,12 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 
 Paired TG changes are +0.56% / +1.48%; aggregate gain is 1.02%.
 The candidate is not promoted. [Combined evidence](docs/compact-draft-score-selection.md).
+
+Latest direct-window convolution test: **126.46 TG at 4K** (124.03 and 128.99
+per request), with exact output/state checks. Verifier time falls from about
+66.6 to 63.1 ms, but one native control stalls badly. An identical repeat is
+underway; no speedup promotion or ladder update yet.
+[Combined measurements](docs/gdn-direct-window.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an

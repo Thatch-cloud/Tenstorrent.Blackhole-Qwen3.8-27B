@@ -96,5 +96,5 @@ unchanged/direct/direct/unchanged timed requests, loading weights once.
 Only window construction changes; shorter tails, native math, checkpoint
 publication, drafting and the retained T16 recipe remain unchanged.
 Both paired complete-cycle TG improvements must exceed 2% to pass the screen;
-hardware performance is not yet measured. This roughly 3.49-ms opportunity
-alone cannot close the full gap to 200 TG.
+repeatability is additionally required after the first hardware result above.
+This roughly 3.49-ms opportunity alone cannot close the full gap to 200 TG.
