@@ -1,7 +1,7 @@
 name: Qwen T32 fused complete proposal qualification
 on:
   push:
-    tags: ['experiment/t32-proposal-sim-*']
+    tags: ['experiment/t32-proposal-sim-*', 'experiment/t32-load-diag-*']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   simulator:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 9
+    timeout-minutes: ${{ startsWith(github.ref_name, 'experiment/t32-load-diag-') && 4 || 9 }}
     steps:
       - name: Verify dedicated host
         run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
@@ -25,8 +25,11 @@ jobs:
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: t32-combined
           QWEN_T32_FUSED_SCORE: '1'
+          QWEN_T32_LOAD_DIAGNOSTIC: ${{ startsWith(github.ref_name, 'experiment/t32-load-diag-') && '1' || '0' }}
         run: |
-          timeout -k 15 450 bash scripts/ci/run-simulator.sh
+          limit=450
+          if [ "$QWEN_T32_LOAD_DIAGNOSTIC" = 1 ]; then limit=180; fi
+          timeout -k 15 "$limit" bash scripts/ci/run-simulator.sh
           python3 -B scripts/ci/t32-proposal-result.py --report experiment-results/t32-combined.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

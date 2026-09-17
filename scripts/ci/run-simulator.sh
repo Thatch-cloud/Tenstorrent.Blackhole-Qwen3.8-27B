@@ -66,6 +66,8 @@ fi
 case "${QWEN_SIM_CASE:-stack}" in t32-markov-fused|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
 mkdir -p experiment-results
 case "${QWEN_T32_FUSED_SCORE:-0}" in 0|1) ;; *) exit 2 ;; esac
+case "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" = 1 ]; then test "${QWEN_T32_FUSED_SCORE:-0}" = 1; fi
 if [ "${QWEN_T32_FUSED_SCORE:-0}" = 1 ]; then test "${QWEN_SIM_CASE:-stack}" = t32-combined; fi
 results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
@@ -194,6 +196,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
     -e "QWEN_T32_FUSED_SCORE=${QWEN_T32_FUSED_SCORE:-0}" \
+    -e "QWEN_T32_LOAD_DIAGNOSTIC=${QWEN_T32_LOAD_DIAGNOSTIC:-0}" \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
     -e "QWEN_SIM_CONTEXT=${QWEN_SIM_CONTEXT:-2048}" \
     -e "QWEN_SCORE_BITWISE=$score_bitwise" \

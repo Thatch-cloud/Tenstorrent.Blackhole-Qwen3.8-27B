@@ -87,6 +87,7 @@ PY
             test "$QWEN_SIM_CASE" = t32-combined
             publication_args+=(--fused-score-layout)
             proposal_limit=360
+            if [ "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" = 1 ]; then proposal_limit=120; fi
         fi
         if [ "$QWEN_SIM_CASE" = t32-publication ]; then publication_args+=(--publication-only); fi
         status=0
