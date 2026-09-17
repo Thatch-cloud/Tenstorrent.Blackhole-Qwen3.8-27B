@@ -52,3 +52,18 @@ Host tests are preparation evidence, not device numerical or performance
 acceptance. Serving defaults and the immutable promoted DSpark recipe remain
 unchanged. Source-qualified artifacts must be regenerated/reconciled where
 the new host-source hashes differ; old admissions are not silently reused.
+
+## First hardware launch: preflight failure
+
+Run 35285659419 attempt 3 passed the disk gate but stopped before device
+execution: the shared simulator-source gate detected modified `draft_attention.py`.
+The integration had widened a host mask argument check in a file shared with
+DSpark. This was a staging regression, not a kernel crash or numerical failure.
+The follow-on Apport `FileNotFoundError` was only error-reporting noise.
+
+The fix restores that file exactly to its simulator-pinned bytes and puts the
+T16 host mask specialization in `dflash_attention_mask.py`, used only by DFlash2.
+The comparison stage now runs the real shared-source preflight before and after
+its overlay. Independent CPU visibility-formula tests cover T16 masks; the
+original source-pin regression and existing widths remain checked. No source
+hash, numerical threshold or simulator admission was bypassed.

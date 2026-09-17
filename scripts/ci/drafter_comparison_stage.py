@@ -10,7 +10,7 @@ from frozen_recipe_context import replace_once
 FILES = ('drafter_comparison_experiment.py', 'drafter_comparison_report.py',
          'drafter_request_environment.py', 'dflash_combined_request.py', 'full_dflash_request.py',
          'dflash_device.py', 'dflash_request_runtime.py', 'draft_attention_branch.py', 'dflash_proposal_inputs.py',
-         'draft_attention.py', 'draft_shared_head.py', 'cumulative_t16_scope.py', 'dflash-fixtures.sh')
+         'dflash_attention_mask.py', 'draft_shared_head.py', 'cumulative_t16_scope.py', 'dflash-fixtures.sh')
 
 
 def stage(checkout, manifest):
@@ -21,6 +21,8 @@ def stage(checkout, manifest):
     for name in ('compact-score-evidence', 'mlp-down-grid-evidence', 'register-epilogue-evidence'):
         if not (scripts / name).is_dir():
             raise ValueError('Complete promoted component evidence required: ' + name)
+    from dspark_hardware_gate import simulator_preflight
+    simulator_preflight(scripts)
     originals = {name: (scripts / name).read_text() for name in ('dspark-target-hardware.py', 'run-dspark-hardware.sh')}
     payloads = {name: (directory / name).read_text() for name in FILES}
     payloads['dspark-target-hardware.py'] = replace_once(originals['dspark-target-hardware.py'],
@@ -50,6 +52,7 @@ copy_dflash_fixtures
             compile(source, name, 'exec')
     for name, source in payloads.items():
         (scripts / name).write_bytes(source.encode())
+    simulator_preflight(scripts)
     record = dict(before={name: hashlib.sha256(source.encode()).hexdigest() for name, source in originals.items()},
         after={name: hashlib.sha256(source.encode()).hexdigest() for name, source in payloads.items()},
         target_context=4096, target_rows=16, streams=1, hardware_qualified=False,

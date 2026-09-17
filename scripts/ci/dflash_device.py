@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from contextlib import nullcontext
 
-from draft_attention import draft_attention_mask
+from dflash_attention_mask import draft_attention_mask
 from draft_attention_branch import prepare_attention_branch, execute_attention_branch
 from draft_head_preparation import rope_tables
 from draft_mlp_branch import prepare_mlp_branch, execute_mlp_branch

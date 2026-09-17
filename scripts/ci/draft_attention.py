@@ -5,7 +5,7 @@ def draft_attention_mask(context_rows, block_rows=8, *, padded_rows=32, key_mult
     import torch
 
     if (type(context_rows) is not int or not 0 <= context_rows <= 262144
-            or type(block_rows) is not int or block_rows not in (1, 8, 16, 32)
+            or type(block_rows) is not int or block_rows not in (1, 8, 32)
             or padded_rows != 32 or key_multiple not in (32, 128) or window != 2048):
         raise ValueError('Bounded context and configured DFlash2 attention geometry required')
     key_rows = ((context_rows + block_rows + key_multiple - 1) // key_multiple) * key_multiple

@@ -2,13 +2,15 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from drafter_comparison_stage import stage
 
 
 class ComparisonStageTests(unittest.TestCase):
     def test_overlay_keeps_control_and_copies_only_pinned_cached_fixtures(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch('dspark_hardware_gate.simulator_preflight') as preflight:
             root = Path(temporary)
             scripts = root / 'scripts/ci'
             scripts.mkdir(parents=True)
@@ -26,6 +28,8 @@ class ComparisonStageTests(unittest.TestCase):
             self.assertNotIn('prepare_dflash_fixtures', shell)
             self.assertLess(shell.index('copy_dflash_fixtures'), shell.index('docker start'))
             self.assertFalse(result['hardware_qualified'])
+            self.assertEqual(preflight.call_count, 2)
+            self.assertNotIn('draft_attention.py', result['after'])
             with self.assertRaises(ValueError):
                 stage(root, manifest)
 

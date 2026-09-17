@@ -1,6 +1,6 @@
 """Fixed-shape proposal contexts with masked holes and absolute rotary positions."""
 
-from draft_attention import draft_attention_mask
+from dflash_attention_mask import draft_attention_mask
 from draft_head_preparation import rope_tables
 
 
