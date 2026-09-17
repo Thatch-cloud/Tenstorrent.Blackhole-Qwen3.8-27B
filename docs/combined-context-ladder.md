@@ -30,7 +30,7 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 | 8,192 | 1 | 3,293.61 | **106.50** | Retry passed; original attempt blocked by host pressure |
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
-| 65,536 | 1 | — | — | Prompt length rejected before model execution; retry required |
+| 65,536 | 1 | 2,564.54 | **50.45** | Passed after exact-prompt and page-table fixes |
 | 131,072 | 1 | — | — | Verifier cache-writer page-table guard failed |
 | 262,144 | 1 | — | — | Prompt plus output exceeds target positional limit |
 
@@ -99,3 +99,21 @@ In hardware run `35171542810`, 64K still fails tokenizer preflight: no prefix wi
 The 131K row in `35171542810` advances past the cache guard (512 scoped validation calls), but fails during the first request's eager proposal audit. `PreparedDSparkProposal.propose` holds the captured trace's buffers while a second eager execution retains all five layers' temporaries. A 134,742,016-byte V-padding allocation fails: each DRAM bank needs 16,842,752 bytes, but only 11,020,864 bytes are free. Device close succeeds; container exit 1, no host OOM kill. There is no qualified TG result.
 
 `frozen_ladder_reference_memory.py` bounds only the eager audit's per-layer temporary lifetime. It executes the same layer backend, synchronizes before releasing scratch, and preserves the output and borrowed tensors. Captured execution, timed requests, full proposal-output comparisons and state audits are unchanged. Host tests cover ownership, exception restoration and audit-only routing; hardware acceptance remains pending under the 131K-only retry tag `experiment/combined-ladder-wide-cache-v3`.
+
+### 64K combined result
+
+[Run 35172072077](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35172072077), revision `aa1cad7`, passes: **PP 2,564.54 / CTX 65,536 / committed TG 50.45**, one stream. A fresh feature audit and two timed requests pass exact output/state/inactive-state checks, source immutability, checkpoint/device close and exit 0. PP/TG are independently recomputed. The selected source excerpt starts at character 4, producing exactly 65,536 tokens with the task/template unchanged.
+
+| Timed observation | Result |
+| --- | ---: |
+| Committed tokens, two requests | 268 |
+| Draft acceptance | 234/540 (43.33%) |
+| Mean committed tokens/block | 7.44 |
+| Draft | 55.50 ms/block |
+| Verification/readback | 81.12 ms/block |
+| Selection/commit | 8.71 ms/block |
+| Complete cycle | 147.49 ms/block |
+
+At this acceptance, 200 TG needs at most **37.22 ms/block** before remaining request overhead. Removing drafting entirely would still yield only about 80.93 block-level tok/s; this is a bound, not a speedup prediction. Longer-context kernel cost and lower accepted-token yield both matter. The result is not a matched speedup over older, differently configured 64K fixtures, nor held-out coding-quality or serving acceptance.
+
+Report SHA-256: `9f69fda886d0bb1ce7fe493920471683e0906a597acbaf8faa79cf9d4a9d6854`. Cache validation executes 1,536 times and restores the default guard. This run does not include the later audit-memory lifetime change. The 131K retry is run `35172695250`.

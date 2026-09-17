@@ -9,7 +9,7 @@ and [experiment record template](docs/tuning-experiment-template.md).
 
 ## Current position
 
-**Same-recipe context ladder underway: 4K reaches 118.22 TG; long-context fixes remain under qualification.**
+**Same-recipe context ladder: 4K reaches 118.22 TG and 64K reaches 50.45 TG; 131K is under test.**
 
 | Streams | CTX | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: |
@@ -17,11 +17,13 @@ and [experiment record template](docs/tuning-experiment-template.md).
 | 1 | 8,192 | 3,293.61 | **106.50** |
 | 1 | 16,384 | 3,170.94 | **87.11** |
 | 1 | 32,768 | 2,968.87 | **89.96** |
+| 1 | 65,536 | 2,564.54 | **50.45** |
 
 One fresh feature audit and two timed full requests; exact output/state checks
 and clean shutdown pass. Both 4K/8K retries pass; 8K reuses the native build,
 reducing build setup from 263 to 3 seconds. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
 This pinned workload is separate from the historical measurements below.
+At 64K, draft acceptance is 43.33%; mean drafting/verification cost is 55.50/81.12 ms per block.
 
 **Earlier matched fixture result: 89.47 committed tokens/s at 32K context**,
 one coding stream on both cards. Exact output, target state and inactive-state
