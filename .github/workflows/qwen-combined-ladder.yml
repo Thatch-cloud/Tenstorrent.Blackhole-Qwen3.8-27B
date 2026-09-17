@@ -85,6 +85,14 @@ jobs:
             --manifest frozen-hardware/experiment-results/ladder-sources.json
           python3 -B frozen-orchestrator/scripts/ci/frozen_benchmark_timeout.py --checkout frozen-hardware \
             > frozen-hardware/experiment-results/benchmark-timeout-policy.json
+          if [[ "$GITHUB_REF_NAME" = experiment/combined-ladder-window-concat-* ]]; then
+            gh run download 35193888951 --repo "$GITHUB_REPOSITORY" \
+              --name qwen-history-concat-sim-35193888951 --dir "$evidence/history-concat"
+            python3 -B frozen-orchestrator/scripts/ci/history_concat_stage.py \
+              --checkout frozen-hardware --evidence "$evidence/history-concat" \
+              --sha256 b60dbf434da64e19807a9a8000c02367c7ecc8c98841a90502cae3adc5fb4e33 \
+              --manifest frozen-hardware/experiment-results/history-concat-sources.json
+          fi
           git -C frozen-hardware diff --check
           git -C frozen-hardware diff > frozen-hardware/experiment-results/geometry.patch
       - name: Check host pressure before weight loading

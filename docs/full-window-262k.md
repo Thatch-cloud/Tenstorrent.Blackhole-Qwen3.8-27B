@@ -107,3 +107,12 @@ preserving the same eight-way grouping and borrowed storage. Host tests check
 exact row order, lower peak live rows, aliases and failure cleanup. It still
 needs device lifetime validation before another full-window hardware run;
 no quantization, context truncation or relaxed numerical checks are proposed.
+
+Simulator run **35193888951** passes in **1m42s**, with 32 exact checks across
+original/candidate trees, 65/128 pieces, two seeds and both chips. Borrowed inputs
+remain unchanged and devices close cleanly. Report SHA-256:
+`b60dbf434da64e19807a9a8000c02367c7ecc8c98841a90502cae3adc5fb4e33`.
+The `combined-ladder-window-concat-*` trigger stages only this source-bound
+candidate into the combined 261,888-token request. Runtime admission rechecks
+the report and source fingerprints before and after the scoped change. Simulator
+acceptance is not proof that the full model now fits or reaches the TG target.
