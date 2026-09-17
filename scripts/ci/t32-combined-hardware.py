@@ -59,6 +59,9 @@ def main():
     admission['target_sources'] = actual
     from t32_hardware_kernel import installed
     with installed(root, options.proposal_evidence, directory, fused_score_evidence=options.score_evidence) as installation:
+        from t32_score_hardware import native_sources, sources as score_sources
+        admission['installed_native_sources'] = native_sources(root)
+        admission['score_sources'] = score_sources(directory)
         admission['runtime_preflight'] = installation
     if options.preflight:
         options.output.write_text(json.dumps(admission, indent=2))

@@ -1,5 +1,7 @@
 from contextlib import ExitStack
 from pathlib import Path
+import hashlib
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +13,23 @@ from test_dspark_markov_device import operands, tensor
 
 
 class ScoreHardwareTests(unittest.TestCase):
+    def test_native_source_checks_accept_string_kernel_directory_and_detect_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kernel = root / hardware.KERNEL_DIRECTORY
+            kernel.mkdir(parents=True)
+            (root / 'runtime.so').write_bytes(b'runtime')
+            (kernel / 'compute.hpp').write_bytes(b'compute')
+            runtime = {'runtime.so': hashlib.sha256(b'runtime').hexdigest()}
+            patched = {'compute.hpp': hashlib.sha256(b'compute').hexdigest()}
+            with patch.object(hardware, 'RUNTIME', runtime), patch.object(hardware, 'PATCHED', patched):
+                result = hardware.native_sources(root)
+                self.assertEqual(len(result), 2)
+                self.assertEqual(result[str(Path(hardware.KERNEL_DIRECTORY) / 'compute.hpp')], patched['compute.hpp'])
+                (kernel / 'compute.hpp').write_bytes(b'changed')
+                with self.assertRaisesRegex(ValueError, 'Installed simulator-qualified'):
+                    hardware.native_sources(root)
+
     def test_complete_proposal_compares_native_backend_and_restores_on_failure(self):
         device = hardware.HardwareTracedDSparkDevice.__new__(hardware.HardwareTracedDSparkDevice)
         device.mesh, device.proposal_markov = object(), object()

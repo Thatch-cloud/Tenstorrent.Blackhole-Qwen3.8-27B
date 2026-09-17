@@ -236,3 +236,11 @@ timeout policy. Stage logs stream live and cleanup retains failure artifacts.
 
 No new hardware result is claimed yet. T32 still needs the T16 optimization parity work
 listed above before it can be described as a matched winning-recipe comparison.
+
+First combined hardware run **35202489941** failed in 6m28s, not by timeout:
+the native-source checker joined two strings with `/`. Runtime cache restoration
+missed and rebuilt first; target/drafter loading then reached 73 seconds before
+the checker failed. Cleanup completed and no proposal/request correctness was
+measured. The fix normalizes the kernel directory to `Path`, adds a real-filesystem
+regression test, and executes that checker during preflight before weight loading.
+The unchanged runtime build inputs can reuse the newly populated cache on retry.

@@ -33,6 +33,7 @@ class CombinedCliTests(unittest.TestCase):
                     patch.object(module, 'qualify_request', return_value={'attention': True}), \
                     patch('fused_t16_admission.qualify_simulator', return_value={'mlp': True}), \
                     patch('t32_commit_gate.qualify', return_value={'prefixes': 33}), \
+                    patch('t32_score_hardware.native_sources', return_value={'native': 'verified'}), \
                     patch('t32_hardware_kernel.installed', return_value=nullcontext({'runtime': True})) as installed, \
                     patch.object(module, 'run_request') as loaded:
                 module.main()

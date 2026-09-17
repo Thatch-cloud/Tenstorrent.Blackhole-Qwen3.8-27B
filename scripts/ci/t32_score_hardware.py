@@ -50,7 +50,7 @@ def environment():
 
 def native_sources(root):
     root = Path(root)
-    expected = dict(RUNTIME, **{str(KERNEL_DIRECTORY / name): checksum for name, checksum in PATCHED.items()})
+    expected = dict(RUNTIME, **{str(Path(KERNEL_DIRECTORY) / name): checksum for name, checksum in PATCHED.items()})
     actual = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in expected}
     if actual != expected:
         raise ValueError('Installed simulator-qualified T32 arithmetic and hardware runtime required')
