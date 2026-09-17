@@ -135,7 +135,8 @@ def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False)
             else 'Both long-context simulator reports required')
     result = {}
     for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
-            'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py'):
+            'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py',
+            'ladder_cache_reference.py'):
         result[name] = Path(__file__).with_name(name).read_bytes()
     if full_window:
         from frozen_recipe_context import replace_once

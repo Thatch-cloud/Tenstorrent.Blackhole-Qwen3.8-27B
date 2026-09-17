@@ -34,6 +34,7 @@ jobs:
           python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
           python -B -m unittest test_full_window_tail test_frozen_runtime_context test_frozen_recipe_context
           python -B -m unittest test_prefill_cache_inventory test_winning_device_attribution
+          python -B -m unittest test_ladder_cache_reference
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           git diff --check

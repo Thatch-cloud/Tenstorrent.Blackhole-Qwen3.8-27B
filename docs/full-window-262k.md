@@ -55,3 +55,15 @@ The bounded retry keeps the exact kernel/probe sources and all ten checks.
 Only the 261,888-token case receives a 480-second probe and 510-second launcher;
 the whole job remains capped at nine minutes. Smaller cases retain their old
 budgets. No incomplete evidence is admitted to the hardware lane.
+
+The retry **35189341242** also times out, after the first replay and while
+checking the changed-input replay. Do not extend the budget again. The next
+fixture removes two full native-reference readbacks: native writes touch only
+two physical pages of a zero-initialized cache. It reads those pages, including
+the cumulative written-page set across seeds, and reconstructs the full expected
+zero-plus-written-pages tensor on the host. Every candidate comparison still
+reads and checks the **complete allocated cache on both chips**, including all
+unwritten pages. Kernel math, page-table width, eager/replay sequence and all ten
+checks remain unchanged. The new helper is included in source-bound admission.
+Host tests cover expected pages, writes outside the expected region, invalid
+initial state and cleanup after failed readback. Simulator acceptance is pending.

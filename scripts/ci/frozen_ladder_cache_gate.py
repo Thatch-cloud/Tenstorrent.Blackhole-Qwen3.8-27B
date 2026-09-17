@@ -8,7 +8,7 @@ from ordered_cache import HASHES
 
 
 SOURCES = ('ladder-cache-probe.py', 'frozen_ladder_ordered_cache.py', 'frozen_context_geometry.py',
-    'ordered_cache.py', 'attention_batch.py')
+    'ordered_cache.py', 'attention_batch.py', 'ladder_cache_reference.py')
 RUNTIME = '9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9'
 
 
