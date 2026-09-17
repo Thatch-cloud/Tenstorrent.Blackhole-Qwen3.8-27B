@@ -38,7 +38,12 @@ jobs:
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: ladder-cache
           QWEN_LADDER_CONTEXT: '${{ matrix.context }}'
-        run: timeout -k 15 450 bash scripts/ci/run-simulator.sh
+        run: |
+          launcher_seconds=450
+          if [ "$QWEN_LADDER_CONTEXT" = 261888 ]; then
+            launcher_seconds=510
+          fi
+          timeout -k 15 "$launcher_seconds" bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

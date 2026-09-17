@@ -124,7 +124,11 @@ PY
     fi
     if [ "${QWEN_SIM_CASE:-stack}" = ladder-cache ]; then
         status=0
-        timeout -k 10 360 python3 -u /experiment-scripts/ci/ladder-cache-probe.py \
+        probe_seconds=360
+        if [ "${QWEN_LADDER_CONTEXT:?}" = 261888 ]; then
+            probe_seconds=480
+        fi
+        timeout -k 10 "$probe_seconds" python3 -u /experiment-scripts/ci/ladder-cache-probe.py \
             --context "${QWEN_LADDER_CONTEXT:?}" \
             --output /experiment/results/ladder-cache.json || status=$?
         printf '%s\n' "$status" > /experiment/results/ladder-cache.exit-status

@@ -41,3 +41,17 @@ Adding the context changes the geometry source hash. Old cache qualifications
 must not be silently relabeled or reused against that changed source. Existing
 131K CI uses its immutable prior tag and is unaffected by this preparation.
 The simulator alone does not prove full-model memory capacity or performance.
+
+## First cache-check attempt
+
+Run **35186984447** timed out at the inner 360-second probe limit (exit 124),
+not the nine-minute job limit. Allocation completed in about 33 seconds;
+both native-reference seeds completed and both-chip eager comparison was exact.
+Replay began at about 348 seconds, leaving only twelve seconds for two replay
+checks and shutdown. The partial report is rejected: `passed=false` and
+`closed_cleanly=false`. This is not a hardware OOM or a numerical-failure result.
+
+The bounded retry keeps the exact kernel/probe sources and all ten checks.
+Only the 261,888-token case receives a 480-second probe and 510-second launcher;
+the whole job remains capped at nine minutes. Smaller cases retain their old
+budgets. No incomplete evidence is admitted to the hardware lane.
