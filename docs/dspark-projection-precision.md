@@ -58,10 +58,12 @@ Report hashes:
 | Value | `33d1cebe54648ff48180b228011f48c270a8b0810b3be75a10207c5271c14e3a` |
 | Output | `649f2f11c50d691bbb3842da5a541af9fba29ccdd21648163af1a7b40e99a23d` |
 | MLP gate | `797d9797e0a806c34eadc6417b26cd9288766d5564c14a0be728f7fbf71a75e1` |
+| MLP up | `dcba1c4b0fe1421a59d4a508dc8900bb3eb05a079d3d9bf93d0b9ccd203719fe` |
 
 The gate projection also passes all six replays, five integrity checks and
-clean teardown. Its RMS difference is 0.01195–0.01216. Up is running and down
-is queued; the complete projection set is still not admitted.
+clean teardown. Its RMS difference is 0.01195–0.01216. Up now passes the same
+checks with RMS difference 0.01168–0.01173. Down is running; the complete
+projection set is still not admitted.
 
 The report validator now also checks a complete seven-projection set against
 independently supplied source and checkpoint fingerprints. Missing or duplicate
@@ -113,4 +115,12 @@ actual staged source files, checkpoint, simulator runtime, candidate manifests
 and clean exits/teardown. It rejects incomplete reviews rather than deriving
 trust from whatever artifacts happen to be present. Three host tests cover
 successful component-only admission and source/runtime/report tampering. The
-remaining up/down artifacts and combined hardware wrapper are still required.
+remaining down artifact and hardware staging are still required.
+
+`dspark_precision_experiment.py` now wraps the loaded combined runtime with two
+independent audits and ABBA timing. It changes only the request-owned proposal
+device for HiFi2, retains target admission unchanged, checks executed layer calls
+and closed traces, restores routing after every request, and rechecks sources
+and evidence afterward. Two host integration tests cover all six requests and
+cleanup after candidate failure. No hardware result is implied: the immutable
+review manifest, frozen-recipe staging and CI launch remain pending.
