@@ -63,6 +63,14 @@ copy failure releases the otherwise orphaned hidden output. Four host tests
 check callback ordering and failure restoration. Publication must require the
 whole scope to complete, not merely observe the intermediate `captured` flag.
 
+The host integration test now composes the real boundary, GDN checkpoint,
+lookup, feature capture and suffix-loop helpers around a synthetic two-chip
+state model. A 6,144-token request caches 4,096 tokens, changes the suffix,
+deliberately corrupts current recurrent state, then restores and processes only
+the final chunk. Output, all 288 state tensors, KV fixture and five-tap feature
+history match a fresh cold request. This checks orchestration and ownership;
+it does **not** test TT-NN numerics, DSpark projection or actual page retention.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native

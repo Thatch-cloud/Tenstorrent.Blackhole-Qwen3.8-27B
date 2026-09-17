@@ -37,6 +37,7 @@ jobs:
           python -B -m unittest test_ladder_cache_reference
           python -B -m unittest test_prefill_gdn_checkpoint test_prefill_prefix_resume test_prefill_prefix_features
           python -B -m unittest test_prefill_prefix_lookup test_prefill_prefix_boundary
+          python -B -m unittest test_prefill_prefix_integration
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           git diff --check

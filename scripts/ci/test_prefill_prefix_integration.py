@@ -1,0 +1,146 @@
+"""Host orchestration equivalence, not TT-NN numerical or hardware acceptance."""
+
+from types import SimpleNamespace
+import unittest
+
+import torch
+
+from dspark_prefill import FullHistoryCapture
+from prefill_gdn_checkpoint import PrefillGDNCheckpoint
+from prefill_prefix_boundary import checkpoint_boundary
+from prefill_prefix_features import prefix_features
+from prefill_prefix_lookup import PrefixIdentity, PrefixLookup
+from prefill_prefix_resume import resume_eager_prefill
+
+
+class HostOperations:
+    bfloat16 = 'bf16'
+    TILE_LAYOUT = 'tile'
+    DRAM_MEMORY_CONFIG = 'dram'
+
+    def __init__(self):
+        self.next_address = 1
+
+    def tensor(self, shape=(1, 1, 32, 32), values=(0, 0)):
+        address = self.next_address
+        self.next_address += 1
+        return SimpleNamespace(shape=shape, dtype=self.bfloat16, layout=self.TILE_LAYOUT,
+            values=values, freed=False, memory_config=lambda: self.DRAM_MEMORY_CONFIG,
+            parts=tuple(SimpleNamespace(buffer_address=lambda chip=chip: address + chip * 100000)
+                for chip in (0, 1)))
+
+    def get_device_tensors(self, value):
+        if value.freed:
+            raise ValueError('Released host-fixture storage')
+        return value.parts
+
+    def copy(self, source, destination):
+        self.get_device_tensors(source)
+        self.get_device_tensors(destination)
+        destination.values = source.values
+
+    def clone(self, source, **kwargs):
+        self.get_device_tensors(source)
+        return self.tensor(source.shape, source.values)
+
+    def deallocate(self, value):
+        self.get_device_tensors(value)
+        value.freed = True
+
+    def synchronize_device(self, mesh):
+        pass
+
+
+class HostModel:
+    def __init__(self, operations):
+        self.operations, self.device = operations, 'mesh'
+        self.states = [operations.tensor() for unused in range(288)]
+        self.gdn = [SimpleNamespace(B=1, _stable_state=True, rec_state=self.states[index],
+            conv_states=self.states[index + 1:index + 5], conv_carry=self.states[index + 5])
+            for index in range(0, 288, 6)]
+        self.layers = [SimpleNamespace(forward=self.layer_forward) for unused in range(64)]
+        self.kv, self.starts = {}, []
+        self.inactive = ('untouched', 42)
+
+    def layer_forward(self, hidden):
+        return hidden
+
+    def _set_vision_merge(self, *args):
+        pass
+
+    def _forward_prefill_chunk_masked_tp(self, tokens, valid_len, chunk_start, page_table, bucket, **kwargs):
+        self.starts.append(chunk_start)
+        total = int(tokens.sum())
+        for index, value in enumerate(self.states):
+            value.values = tuple(previous + total * (index + 1) for previous in value.values)
+        self.kv[chunk_start] = tuple(tokens.flatten().tolist())
+        hidden = self.operations.tensor((1, 1, bucket, 2560), self.states[0].values)
+        for layer in self.layers:
+            hidden = layer.forward(hidden)
+        return hidden
+
+    def _masked_bucket_logits_tp(self, hidden, valid_len, bucket):
+        return hidden.values
+
+    def cold(self, tokens):
+        for value in self.states:
+            value.values = (0, 0)
+        self.kv.clear()
+        for start in range(0, tokens.shape[1], 2048):
+            hidden = self._forward_prefill_chunk_masked_tp(tokens[:, start:start + 2048],
+                2048, start, None, 2048)
+            logits = self._masked_bucket_logits_tp(hidden, 2048, 2048)
+            self.operations.deallocate(hidden)
+        return logits
+
+
+def feature_values(capture):
+    return tuple((chunk.start, chunk.rows, tuple(value.values for value in chunk.features))
+        for chunk in capture.outputs())
+
+
+class PrefixIntegrationTests(unittest.TestCase):
+    def test_changed_suffix_matches_cold_state_features_and_output(self):
+        operations = HostOperations()
+        model = HostModel(operations)
+        checkpoint = PrefillGDNCheckpoint(operations, model.device, model.gdn,
+            [operations.tensor() for unused in model.states])
+        tokens = torch.arange(6144).reshape(1, -1)
+        owner = FullHistoryCapture(operations, model, 6144)
+        with checkpoint_boundary(model, checkpoint, 4096) as boundary:
+            with owner.capture():
+                model.cold(tokens)
+        self.assertTrue(boundary['complete'] and boundary['restored'])
+        identity = PrefixIdentity('a' * 64, 'b' * 64, 'c' * 64, 'session', 0)
+        pages = list(range(96))
+        lookup = PrefixLookup()
+        lookup.publish(identity, tokens.flatten().tolist(), 4096, pages, inactive_pages=[100])
+        changed = tokens.clone()
+        changed[:, 4096:] += 5
+        for value in model.states:
+            value.values = (-777, -888)
+        position = lookup.match(identity, changed.flatten().tolist(), pages, inactive_pages=[100])
+        self.assertEqual(position, 4096)
+        model.starts.clear()
+        with prefix_features(operations, model, 6144, owner, position) as capture:
+            with capture.capture():
+                actual = resume_eager_prefill(operations, model, changed, None,
+                    actual_len=6144, prefix_position=position, restore=checkpoint.restore)
+            actual_features = feature_values(capture)
+        self.assertEqual(model.starts, [4096])
+        actual_state = [value.values for value in model.states]
+        actual_kv = dict(model.kv)
+        cold_capture = FullHistoryCapture(operations, model, 6144)
+        with cold_capture.capture():
+            expected = model.cold(changed)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual_state, [value.values for value in model.states])
+        self.assertEqual(actual_kv, model.kv)
+        self.assertEqual(actual_features, feature_values(cold_capture))
+        self.assertEqual(model.inactive, ('untouched', 42))
+        owner.close()
+        cold_capture.close()
+
+
+if __name__ == '__main__':
+    unittest.main()
