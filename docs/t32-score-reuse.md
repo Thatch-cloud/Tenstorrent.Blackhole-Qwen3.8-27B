@@ -94,6 +94,15 @@ default. Target fusion/replay parity and hardware admission remain required befo
 this route can become a fair performance comparison; no full-weight sim retry is
 scheduled to test this wiring.
 
+The additional `fused_t32_mlp=True` option connects the existing simulator-covered
+`FusedT32Arm` to that lifecycle. It installs before verifier capture, uses the
+existing packed weights and restores the original MLP methods before releasing
+the drafter. A successful request must report positive fusion invocation counts
+for all 64 target layers and unchanged weight bindings; enabling a flag alone is
+not accepted as evidence. Host tests cover routing, restoration and rejection of
+a missed layer. This has not yet executed as a complete device request; target
+attention replay and other T16 recipe optimisations still need integration.
+
 | Area | Current T32 path | Required next evidence |
 | --- | --- | --- |
 | Markov score layout | Opt-in fused adapter; native default | Learned complete-proposal output and replay parity |

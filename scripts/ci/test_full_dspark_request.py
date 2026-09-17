@@ -14,6 +14,56 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def t32_fusion_request(self, hits):
+        self.drafter.max_drafts = 31
+        self.drafter.propose.return_value = tuple(range(31))
+        events = []
+
+        @contextmanager
+        def install():
+            events.append('install')
+            try:
+                yield
+            finally:
+                events.append('restore')
+
+        arm = SimpleNamespace(install=install, audit=dict(rows=32, hits=hits,
+            restored=True, native_bindings_unchanged=True))
+        collective = SimpleNamespace(tt_all_reduce=Mock())
+        self.drafter.prepare_trace.side_effect = lambda *args, **kwargs: events.append('capture')
+        self.drafter.close.side_effect = lambda: events.append('close')
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': collective}), \
+                patch('t32_attention_admission.require_active', return_value={}), \
+                patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter), \
+                patch('fused_t16_scope.FusedT32Arm', return_value=arm) as candidate, \
+                patch('fused_t16_scope.FusedT16Arm') as control:
+            try:
+                result = self.measure(audit=True, proposal_trace=True, commit_only_gdn=True,
+                    native_attention=True, t32=True, fused_t32_mlp=True)
+            finally:
+                self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
+                candidate.assert_called_once()
+                control.assert_not_called()
+        return result
+
+    def test_t32_fusion_installs_before_capture_and_reports_executed_layers(self):
+        result = self.t32_fusion_request([1] * 64)
+        self.assertNotIn('fused_t16_mlp', result)
+        self.assertEqual(result['fused_t32_mlp']['hits'], [1] * 64)
+        self.assertEqual(result['dspark']['t32_lifecycle']['target_mlp'], 'fused-t32')
+        self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_t32_fusion_rejects_an_unexecuted_target_layer(self):
+        with self.assertRaisesRegex(AssertionError, 'Every target layer'):
+            self.t32_fusion_request([1] * 63 + [0])
+
+    def test_t32_fusion_cannot_enable_on_t16(self):
+        with self.assertRaisesRegex(ValueError, 'T32 MLP'):
+            self.measure(fused_t32_mlp=True)
+        self.base_prefill.assert_not_called()
+
     def test_t32_lifecycle_routes_31_proposals_and_32_verifier_rows(self):
         self.drafter.max_drafts = 31
         self.drafter.propose.return_value = tuple(range(31))

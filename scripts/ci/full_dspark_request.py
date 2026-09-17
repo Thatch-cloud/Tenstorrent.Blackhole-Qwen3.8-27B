@@ -21,11 +21,13 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         banked_proposal=False, banked_proposal_evidence=None, native_slot_gdn=False, fused_t16_mlp=False,
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
         gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False,
-        bias_cache=False, bias_cache_build=None, t32=False):
+        bias_cache=False, bias_cache_build=None, t32=False, fused_t32_mlp=False):
     import torch
     from full_request import measure_request
     if type(t32) is not bool:
         raise ValueError('Explicit boolean T32 lifecycle policy required')
+    if type(fused_t32_mlp) is not bool or (fused_t32_mlp and not t32):
+        raise ValueError('T32 MLP fusion requires the explicit T32 lifecycle')
     if t32:
         import os
 
@@ -355,10 +357,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             from models.demos.blackhole.qwen36.tt.tp_common import matmul_1d_decode
             output_arm = GDNOutputL1Arm(operations, model, matmul_1d_decode)
             score_scope.enter_context(output_arm.install())
-        if fused_t16_mlp:
-            from fused_t16_scope import FusedT16Arm
+        if fused_t16_mlp or fused_t32_mlp:
+            from fused_t16_scope import FusedT16Arm, FusedT32Arm
             from models.tt_transformers.tt.ccl import tt_all_reduce
-            fusion_arm = FusedT16Arm(operations, model, tt_all_reduce)
+            fusion_type = FusedT32Arm if fused_t32_mlp else FusedT16Arm
+            fusion_arm = fusion_type(operations, model, tt_all_reduce)
             score_scope.enter_context(fusion_arm.install())
         if native_slot_gdn:
             from gdn_native_slot_scope import NativeSlotArm
@@ -409,7 +412,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
         if t32:
             result['dspark']['t32_lifecycle'] = dict(fused_score_layout=True, hardware_qualified=False,
-                performance_qualified=False, target_attention='native', target_mlp='native')
+                performance_qualified=False, target_attention='native',
+                target_mlp='fused-t32' if fused_t32_mlp else 'native')
         if observer is not None:
             result['verifier_profile'] = observer.summary()
         if banked_proposal:
@@ -432,7 +436,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             result['gdn_output_grid' if gdn_output_grid else 'gdn_output_l1'] = dict(hits=list(output_arm.hits), restored=not output_arm.active,
                 admission=output_admission)
         if fusion_arm is not None:
-            result['fused_t16_mlp'] = fusion_arm.audit
+            if fused_t32_mlp:
+                audit = fusion_arm.audit
+                hits = audit.get('hits', [])
+                if (audit.get('rows') != 32 or len(hits) != 64
+                        or any(type(count) is not int or count <= 0 for count in hits)
+                        or audit.get('restored') is not True or audit.get('native_bindings_unchanged') is not True):
+                    raise AssertionError('Every target layer must execute T32 fusion and restore native bindings')
+            result['fused_t32_mlp' if fused_t32_mlp else 'fused_t16_mlp'] = fusion_arm.audit
         if native_slot_arm is not None:
             result['native_slot_gdn'] = native_slot_arm.summary()
         if score_arm is not None:
