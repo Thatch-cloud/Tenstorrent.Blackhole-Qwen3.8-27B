@@ -73,3 +73,13 @@ not a timeout: native TT-NN `Shape` supports integer indexing, not slices.
 The reference helper now converts the shape to a tuple before slicing. Host
 fixtures reproduce the native indexing restriction so this error is covered.
 No kernel or admission criteria changed; full-window qualification remains pending.
+
+## Simulator admission
+
+Run **35191010712** at `868a7c3` passes in approximately six minutes: all ten
+eager, changed-input replay and unchanged-input checks are exact on both chips,
+with clean device closure and unchanged source fingerprints. Report SHA-256:
+`72f19c80ed0339e5c28c1a7bde23e950d2c105de75a708b03ad98a9e5d0a9938`.
+The full-window hardware workflow now consumes this pinned report, not either
+timed-out attempt. This qualifies page-cache operations only, not model TG or
+the full-window combined request; those still require hardware acceptance.
