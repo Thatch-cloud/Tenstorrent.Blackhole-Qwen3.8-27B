@@ -11,8 +11,8 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
     if type(native_head_layout) is not bool:
         raise ValueError('Explicit boolean native head-layout selection required')
-    if type(block_rows) is not int or block_rows not in (8, 32):
-        raise ValueError('Explicit eight-row control or 32-row draft extrapolation required')
+    if type(block_rows) is not int or block_rows not in (8, 16, 32):
+        raise ValueError('Explicit eight-row control or 16/32-row draft extrapolation required')
     if type(live_query_qk) is not bool or (live_query_qk and (block_rows != 8 or precise_native)):
         raise ValueError('Live-query QK requires the eight-row composed-attention path')
     if type(native_proposal_attention) is not bool or (native_proposal_attention and

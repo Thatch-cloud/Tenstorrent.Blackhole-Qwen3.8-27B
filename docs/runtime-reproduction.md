@@ -2,6 +2,24 @@
 
 ## Choose the right recipe
 
+The active experimental baseline is now the user-promoted five-component stack:
+tag `experiment/cumulative-t16-full-v3`, orchestration commit
+`239c7c15d35c9d0f06c05b215cdf8f78b0662fae`, workflow
+`.github/workflows/qwen-cumulative-t16.yml`. It stages the frozen runtime below
+and applies all five source-qualified components; the frozen checkout alone is
+not the promoted recipe. Replay it with:
+
+```powershell
+gh run rerun 35281976597 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B
+```
+
+This runs real hardware at CTX 4,096, one stream, unchanged precision, with fresh
+audits and ABBA controls. Keep the I/O gate and source/numerical admissions.
+The repeat's automatic improvement gate did not pass; promotion is an explicit
+user decision for experimentation, not serving qualification.
+[Results and caveats](cumulative-candidate-review.md#experimental-promotion-2026-09-18).
+The context rows below remain evidence for the earlier recipe, not this stack.
+
 The measured ladder uses the **T16 combined offline runtime**, not the historical
 vLLM serving command and not the newly integrated T32 experiments. The unchanged
 recipe varies `QWEN_DSPARK_REQUEST_CONTEXT`; each geometry still needs its own

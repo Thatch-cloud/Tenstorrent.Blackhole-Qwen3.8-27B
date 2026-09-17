@@ -4,7 +4,17 @@ The [combined-runtime reintegration checklist](combined-runtime-reintegration.md
 tracks which short-context optimisations remain absent at 64K and the gates for
 restoring one matched runtime across the context ladder.
 
-## Current checkpoint - 2026-09-17
+## Current checkpoint - 2026-09-18
+
+The user has promoted the complete five-component T16/DSpark experimental
+baseline at `239c7c1` (`experiment/cumulative-t16-full-v3`). Combined CTX4096
+measurements are 128.65 and 127.74 committed TG, with correctness passing in
+both attempts. The repeat fails the automatic improvement screen; the explicit
+promotion does not change that evidence or serving defaults. Next, qualify this
+same complete stack across the context ladder rather than return to isolated
+component tests. [Decision and evidence](cumulative-candidate-review.md#experimental-promotion-2026-09-18).
+
+## Previous ladder checkpoint - 2026-09-17
 
 The same-recipe combined ladder now passes through **131,072 prompt tokens**:
 PP **2,124.78**, committed TG **53.69**, one stream, two timed requests after

@@ -50,6 +50,16 @@ class SharedHeadTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             merge_chunk_candidates(chunks)
 
+    def test_t16_head_keeps_all_15_proposal_rows(self):
+        values, chunks = self.fixture(16)
+        tokens, scores = merge_chunk_candidates(list(reversed(chunks)), block_rows=16)
+        expected_scores, expected_tokens = values.topk(16, dim=-1)
+        self.assertEqual(tokens.shape, (1, 15, 16))
+        self.assertTrue(torch.equal(tokens, expected_tokens[None, 1:16]))
+        self.assertTrue(torch.equal(scores, expected_scores[None, 1:16]))
+        with self.assertRaises(ValueError):
+            merge_chunk_candidates(chunks, block_rows=8)
+
     def test_missing_duplicate_and_padded_indices_rejected(self):
         _, chunks = self.fixture()
         for selected in (chunks[:-1], chunks + [chunks[0]]):

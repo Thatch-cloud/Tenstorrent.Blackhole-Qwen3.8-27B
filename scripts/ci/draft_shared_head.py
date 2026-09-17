@@ -37,8 +37,8 @@ def local_head_candidates(operations, logits, owned):
 def merge_chunk_candidates(chunks, *, block_rows=8):
     import torch
 
-    if type(block_rows) is not int or block_rows not in (8, 32):
-        raise ValueError('Explicit eight/32-row candidate block required')
+    if type(block_rows) is not int or block_rows not in (8, 16, 32):
+        raise ValueError('Explicit eight/16/32-row candidate block required')
     expected = {(chip, start, stop) for chip in range(2) for start, stop in candidate_chunks()}
     seen, scores, identifiers = set(), [], []
     for chunk in chunks:

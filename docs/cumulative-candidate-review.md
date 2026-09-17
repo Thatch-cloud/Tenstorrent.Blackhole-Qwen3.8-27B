@@ -10,6 +10,48 @@ not automatically enabled by this historical review.
 
 ## Coverage and evidence
 
+## Experimental promotion: 2026-09-18
+
+User instruction: "nah lets promote it". The active experimental baseline is
+the five-component T16/DSpark stack at commit
+`239c7c15d35c9d0f06c05b215cdf8f78b0662fae`, tag
+`experiment/cumulative-t16-full-v3`: direct windows, compact scores, wider MLP
+down grid, scatter normalization and register epilogue. Precision is unchanged.
+
+| Attempt | CTX / streams | Control PP / TG | Combined PP / TG | TG change |
+| --- | --- | --- | --- | --- |
+| 1 | 4,096 / 1 | 3,342.79 / 121.91 | 3,320.13 / 128.65 | +5.53% |
+| 2 | 4,096 / 1 | 3,314.58 / 122.37 | 3,344.64 / 127.74 | +4.39% |
+
+[Hardware run 35281976597](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35281976597)
+passes full-request correctness and independent validation in both attempts.
+Each attempt contains two fresh audits and four ABBA timed requests. Acceptance
+is identical between arms: 224/300 proposals, 242 committed tokens per timed arm.
+Whole-job durations are 8m04s and 6m50s.
+
+The second attempt's paired improvements are +0.23% and +8.77%; its automatic
+improvement screen fails. Promotion is a user-authorized experimental decision,
+not a waiver of correctness, proof of statistical significance or a changed
+validator threshold. Retain raw `performance_promoted: false` and
+`improvement_screen_passed: false` in the second report as generated.
+
+Raw request-report SHA-256, attempt 1:
+`d0a8cb65f6939fa43b62f09d243ef4b89a632dd5a7613fc7e5857d44f0170a3c`;
+attempt 2:
+`83458b1c55faadf4c2abb61420a7b44203c3b6f7e8f04b5785dc0fba0e550d7c`.
+Local retained copies are `D:\qwen-evidence\35281976597` and
+`D:\qwen-evidence\35281976597-attempt2`. Rerun artifact names are shared, so
+preserve attempt identity and report hashes rather than treating the latest
+download as the first attempt.
+
+Next qualification uses this complete stack across the context ladder, retaining
+same-run controls and fresh correctness audits. Longer contexts, concurrent
+users, held-out coding quality and serving remain unqualified for this stack.
+No serving defaults change; 200 committed TG remains unmet. Historical notes
+below describe earlier checkpoints, not the current promotion decision.
+
+### Historical review scope
+
 This is the first review pass, not a completed audit of every historical branch
 or failed attempt. Outcomes below are read from retained experiment documents;
 they are not new measurements. Before execution, recover each exact source,

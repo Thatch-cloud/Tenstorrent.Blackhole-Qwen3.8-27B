@@ -11,10 +11,21 @@ Optimising coding inference on two Tenstorrent cards.
 | Host attachment | One PCIe x16; one PCIe x4 behind a switch |
 | Inter-card fabric | Two QSFP-DD cables; four configured links |
 | Mesh | TP2; explicit P150-pair physical descriptor |
-| Active benchmark recipe | T16 verifier, DSpark drafting, fused MLP, shared Q/K, norm prefetch, incremental publication, tail-first draft assembly |
+| Active benchmark recipe | T16/DSpark plus direct windows, compact scores, wider MLP down grid, scatter normalization and register epilogue; user-promoted experimental stack |
 | T32 | Combined correctness passes; 74.68 TG at 4K, not promoted |
 
 ## Measured combined results
+
+**Active experimental baseline (2026-09-18):** the five-component combined
+recipe is promoted by user decision, with precision and serving defaults unchanged.
+At CTX 4,096, single stream, the first run measured **128.65 TG / 3,320.13 PP**;
+the repeat measured **127.74 TG / 3,344.64 PP**. Both correctness validations pass.
+The repeat misses the automatic improvement gate: paired gains are +0.23% and
++8.77%. This is an explicit experimental promotion, not a repeatability claim.
+[Evidence and decision](docs/cumulative-candidate-review.md#experimental-promotion-2026-09-18).
+
+The ladder below belongs to the earlier recipe; larger contexts have not yet
+been requalified with all five components.
 
 One stream / batch 1, pinned synthetic coding prompt, two timed requests after
 a fresh correctness audit. **PP** is prompt-processing tok/s; **CTX** is actual

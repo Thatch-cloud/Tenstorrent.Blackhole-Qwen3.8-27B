@@ -295,14 +295,15 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
                           audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False,
                           commit_only_gdn=False, fused_convolution=False, cache_history=False, cache_projection_capture=False,
-                          profile_verifier=False, live_query_qk=False, native_proposal_attention=False):
+                          profile_verifier=False, live_query_qk=False, native_proposal_attention=False,
+                          target_attention_t16=False):
     import torch
     from full_request import measure_request
     from models.tt_transformers.tt.ccl import TT_CCL
 
     if (type(audit_features) is not bool or type(proposal_capture) is not bool or type(commit_only_gdn) is not bool
             or type(fused_convolution) is not bool or (fused_convolution and not proposal_capture)
-            or type(cache_history) is not bool or (cache_history and (not proposal_capture or block_rows != 8))
+            or type(cache_history) is not bool or (cache_history and (not proposal_capture or block_rows not in (8, 16)))
             or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
             or type(live_query_qk) is not bool or (live_query_qk and (not cache_history or cache_projection_capture))
             or type(native_proposal_attention) is not bool or (native_proposal_attention and
@@ -312,7 +313,12 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                 or not proposal_capture or not fused_convolution or not cache_history or cache_projection_capture
                 or block_rows != 8 or len(prompt) != 4096 or live_query_qk))
             or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 65536 - len(prompt) - 32
-            or type(block_rows) is not int or block_rows not in (8, 32)):
+            or type(block_rows) is not int or block_rows not in (8, 16, 32)
+            or type(target_attention_t16) is not bool
+            or (block_rows == 16) != target_attention_t16
+            or (target_attention_t16 and (not proposal_capture or not cache_history or not commit_only_gdn
+                or not fused_convolution or profile_verifier or native_proposal_attention or live_query_qk
+                or cache_projection_capture))):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
     window = prefill_window(len(prompt))
     manifests, layers, projection, selector = fixtures
@@ -384,12 +390,20 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows,
             proposal_capture=proposal_capture, max_new_tokens=max_new_tokens, fused_convolution=fused_convolution,
             feature_start=window['start'], cache_history=cache_history, cache_projection_capture=cache_projection_capture,
-            live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention)
+            live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention,
+            **(dict(defer_proposal_capture=True) if target_attention_t16 else {}))
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
         faulthandler.dump_traceback_later(180, exit=True)
         return runtime
+
+    def prepare_proposal_trace(engine):
+        from dflash_proposal_trace import PreparedDFlashProposal
+        if device is None or device.proposal_capture is not None:
+            raise ValueError('DFlash2 proposal capture requires allocated verifier state and a fresh device')
+        status('capture_proposal_after_verifier_allocation')
+        device.proposal_capture = PreparedDFlashProposal(device, max_new_tokens=max_new_tokens)
 
     observer = None
     try:
@@ -403,6 +417,9 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             norm_batch=True, lookup_max_rows=block_rows, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=commit_only_gdn and audit_features,
             feature_factory=factory, progress=lambda block: status('committed-block', **block),
+            **(dict(target_attention_t16=True, attention_replay=True, family_routing=True)
+               if target_attention_t16 else {}),
+            **(dict(verifier_before_capture=prepare_proposal_trace) if target_attention_t16 else {}),
             **(dict(verifier_observer=observer) if observer is not None else {}))
         if observer is not None:
             result['verifier_profile'] = observer.summary()

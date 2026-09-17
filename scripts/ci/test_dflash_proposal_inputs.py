@@ -21,7 +21,7 @@ class ProposalInputTests(unittest.TestCase):
                 proposal_contexts(position, budget)
 
     def test_mask_and_rope_relocation_preserve_every_visible_token(self):
-        for block in (8, 32):
+        for block in (8, 16, 32):
             for position, rows, context in ((170, 170, 256), (178, 178, 256), (256, 256, 256),
                     (257, 257, 512), (3072, 2048, 2048), (4093, 2048, 2048), (64504, 2048, 2048)):
                 with self.subTest(block=block, position=position):
@@ -42,8 +42,18 @@ class ProposalInputTests(unittest.TestCase):
 
     def test_rejects_unbounded_or_uncommitted_geometry(self):
         valid = (17, 170, 170, 8, 256)
-        for index, value in ((0, -1), (0, 248320), (1, 169), (2, 0), (2, 257), (3, 16), (4, 128), (4, True)):
+        for index, value in ((0, -1), (0, 248320), (1, 169), (2, 0), (2, 257), (3, 17), (4, 128), (4, True)):
             arguments = list(valid)
             arguments[index] = value
             with self.assertRaises(ValueError):
                 proposal_inputs(*arguments)
+
+    def test_t16_noncausal_block_and_sliding_history_are_independent(self):
+        values = proposal_inputs(17, 4096, 2048, 16, 2048)
+        mask = values['mask'][0, 0]
+        for row in range(16):
+            self.assertTrue(torch.isneginf(mask[row, :row + 1]).all())
+            self.assertTrue((mask[row, row + 1:2048] == 0).all())
+            self.assertTrue((mask[row, 2048:2064] == 0).all())
+            self.assertTrue(torch.isneginf(mask[row, 2064:]).all())
+        self.assertTrue(torch.isfinite(mask[16:]).any(dim=-1).all())

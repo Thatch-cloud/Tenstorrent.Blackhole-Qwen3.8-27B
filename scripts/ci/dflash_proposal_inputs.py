@@ -19,7 +19,7 @@ def proposal_inputs(seed, position, history_rows, block_rows, context_rows):
     if (type(seed) is not int or not 0 <= seed < 248320
             or type(position) is not int or not 1 <= position <= 262112
             or type(history_rows) is not int or not 1 <= history_rows <= min(position, 2048)
-            or type(block_rows) is not int or block_rows not in (8, 32)
+            or type(block_rows) is not int or block_rows not in (8, 16, 32)
             or type(context_rows) is not int or context_rows not in (256, 512, 1024, 2048)
             or history_rows > context_rows):
         raise ValueError('Committed history, anchor and explicit fixed draft bucket required')

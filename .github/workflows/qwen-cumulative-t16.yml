@@ -82,6 +82,10 @@ jobs:
           fi
           python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
             --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json "${down_args[@]}"
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
+            python3 -B read-orchestrator/scripts/ci/drafter_comparison_stage.py --checkout read-combined \
+              --manifest read-combined/experiment-results/drafter-comparison-sources.json
+          fi
           git -C read-combined diff --check
       - name: Check host pressure before loading
         run: |
@@ -114,7 +118,11 @@ jobs:
         run: timeout -k 20 600 bash scripts/ci/run-dspark-hardware.sh
       - name: Independently validate combined request evidence
         run: |
-          python3 -B read-orchestrator/scripts/ci/cumulative_t16_report.py \
+          validator=cumulative_t16_report.py
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
+            validator=drafter_comparison_report.py
+          fi
+          python3 -B "read-orchestrator/scripts/ci/$validator" \
             read-combined/experiment-results/dspark-captured-publication-request-hardware.json \
             > read-combined/experiment-results/cumulative-validation.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
