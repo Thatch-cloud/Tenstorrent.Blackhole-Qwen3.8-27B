@@ -53,6 +53,18 @@ or infer this candidate reaches 200 TG.
    loaded model, with native token/state/feature checks and complete-cycle TG.
    Keep incremental publication and every other winning option in both arms.
 
-The source-bound simulator admission helper is now implemented. Hardware
-integration and combined performance remain outstanding. Serving defaults and
-the accepted recipe remain unchanged.
+The source-bound simulator admission helper and combined comparison are now
+implemented. Fresh frozen-runtime staging passes against the retained evidence.
+The scoped comparison replaces only the norm scope inside the existing draft-tail
+scope, retaining tail assembly and incremental history in both arms. It records
+the actual reader, report hash and executed three-stage builds per request; it
+does not label direct scatter as prefetch. Host tests exercise all six requests,
+reader selection, admission identities and restoration after an injected failure.
+
+`qwen-shared-qk-norm-combined.yml` loads the model once for two fresh audits and
+four complete ABBA requests at 4K. It retains the exclusive-card and disk-pressure
+gates, a 600-second launcher cap and 12-minute whole-job cap. The context ladder
+is unchanged. Both paired TG changes must exceed 2% for the improvement screen;
+neither a green job nor that screen automatically promotes the candidate.
+Combined hardware performance remains unqualified. Serving defaults and the
+accepted recipe remain unchanged.
