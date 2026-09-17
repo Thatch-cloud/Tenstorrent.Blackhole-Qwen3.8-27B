@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-REPORT_SHA256 = 'fc63f7f84a1b2291ef6d3790e77bb83e2f8ee932e8e1cb0784f762e544794b83'
+REPORT_SHA256 = '92b90c94fefaf8171fc82acec8714e53ba97d709e797775b71574dd6bd377428'
 SOURCES = ('gdn-output-grid-probe.py', 'window-write-candidate/gdn_conv_windows.py',
     'window-write-candidate/gdn_conv_windows.cpp', 'gdn_conv_windows.py', 'gdn_conv_windows.cpp',
     'attention_batch.py', 'feature_projection.py', 'gdn_multitoken_conv.py')
@@ -14,6 +14,7 @@ SOURCES = ('gdn-output-grid-probe.py', 'window-write-candidate/gdn_conv_windows.
 def validate(report):
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('backend') != 'simulator' or report.get('stage') != 'complete'
+            or report.get('logical_width') != 8240
             or report.get('hardware_qualified') is not False or report.get('timing_qualified') is not False
             or report.get('sources') != report.get('sources_after')
             or set(report.get('sources', {})) != set(SOURCES)):
@@ -45,4 +46,4 @@ def qualify(directory, evidence):
         if hashlib.sha256((directory / name).read_bytes()).hexdigest() != report['sources'][name]:
             raise ValueError('Simulator-qualified source changed: ' + name)
     return dict(report_sha256=REPORT_SHA256, source_hashes=report['sources'], passed=True,
-        hardware_qualified=False, performance_qualified=False)
+        logical_width=8240, hardware_qualified=False, performance_qualified=False)

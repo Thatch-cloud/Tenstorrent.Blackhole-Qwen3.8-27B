@@ -26,17 +26,17 @@ class WindowScopeTests(unittest.TestCase):
                     hashes[name] = hashlib.sha256(payload).hexdigest()
                 native = lambda *args: 'native'
                 module = SimpleNamespace(build_windows=native)
-                admission = dict(report_sha256=REPORT_SHA256, passed=True, source_hashes=hashes)
+                admission = dict(report_sha256=REPORT_SHA256, passed=True, source_hashes=hashes, logical_width=8240)
                 with patch.dict('sys.modules', {'gdn_conv_windows': module}):
                     try:
                         with scoped_window_writes(admission, directory) as audit:
                             self.assertEqual(module.build_windows(None, SimpleNamespace(shape=(1, 8, 8256)), []), 'native')
                             with self.assertRaisesRegex(ValueError, 'Unqualified T16 window geometry'):
-                                module.build_windows(None, SimpleNamespace(shape=(1, 16, 8240)), [])
+                                module.build_windows(None, SimpleNamespace(shape=(1, 16, 8256)), [])
                             with self.assertRaises(ValueError):
                                 with scoped_window_writes(admission, directory):
                                     self.fail('Nested override entered')
-                            self.assertEqual(module.build_windows(None, SimpleNamespace(shape=(1, 16, 8256)),
+                            self.assertEqual(module.build_windows(None, SimpleNamespace(shape=(1, 16, 8240)),
                                 [SimpleNamespace(shape=(1, 1, 5120))] * 4), 'candidate')
                     except RuntimeError:
                         self.assertTrue(failed)
@@ -44,7 +44,7 @@ class WindowScopeTests(unittest.TestCase):
                     self.assertTrue(audit['restored'])
                     self.assertEqual(audit['hits'], 0 if failed else 1)
                     self.assertEqual(audit['fallbacks'], 1)
-                    self.assertEqual(audit['shapes']['(1, 16, 8240)'], 1)
+                    self.assertEqual(audit['shapes']['(1, 16, 8256)'], 1)
                     (candidate / 'gdn_conv_windows.cpp').write_bytes(b'changed')
                     with self.assertRaises(ValueError):
                         with scoped_window_writes(admission, directory):

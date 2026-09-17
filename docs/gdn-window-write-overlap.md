@@ -2,6 +2,15 @@
 
 Status: simulator correctness passes. Combined hardware performance is untested.
 
+Logical-width qualification **35262735913**, `2310a2f`, passes in **48 seconds**
+at width **8240**. It repeats the 64 exact-window and 72 immutable-input matrix
+with unchanged reader/builder hashes. Admission now requires explicit width 8240
+and report SHA-256
+`92b90c94fefaf8171fc82acec8714e53ba97d709e797775b71574dd6bd377428`.
+The older width-8256 evidence remains recorded below; it is not the retry's
+admission report. This does not by itself prove the prior hardware failure's
+cause; the retained route diagnostics must confirm execution on the next run.
+
 Combined attempt **35261517322**, `c38a701`, failed in 5m14s at the route-coverage
 gate after the candidate audit, before timed ABBA requests. It was not a timeout.
 The control recorded 96 shared-Q/K builds. The adapter failed to retain the

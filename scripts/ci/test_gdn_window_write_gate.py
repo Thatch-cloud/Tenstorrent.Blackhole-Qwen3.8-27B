@@ -6,6 +6,7 @@ from gdn_window_write_gate import SOURCES, validate
 def fixture():
     modes = [('eager', 0), ('replay', 0), ('replay', 1), ('replay', 2)]
     return dict(passed=True, closed_cleanly=True, backend='simulator', stage='complete',
+        logical_width=8240,
         hardware_qualified=False, timing_qualified=False,
         sources=dict.fromkeys(SOURCES, 'a' * 64), sources_after=dict.fromkeys(SOURCES, 'a' * 64),
         checks=[dict(seed=seed, mode=mode, arm=arm, slot=slot, chip=chip, exact=True)
@@ -24,6 +25,7 @@ class WindowGateTests(unittest.TestCase):
                 lambda report: report['checks'][0].update(exact=False),
                 lambda report: report.update(closed_cleanly=False),
                 lambda report: report.update(backend='hardware'),
+                lambda report: report.update(logical_width=8256),
                 lambda report: report['sources_after'].update(extra='changed')):
             report = fixture()
             mutate(report)

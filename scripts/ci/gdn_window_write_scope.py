@@ -13,7 +13,8 @@ from gdn_window_write_gate import REPORT_SHA256
 def scoped_window_writes(admission, directory):
     import gdn_conv_windows
 
-    if admission.get('report_sha256') != REPORT_SHA256 or admission.get('passed') is not True:
+    if (admission.get('report_sha256') != REPORT_SHA256 or admission.get('passed') is not True
+            or admission.get('logical_width') != 8240):
         raise ValueError('Source-qualified simulator admission required')
     directory = Path(directory)
     for name in ('gdn_conv_windows.py', 'gdn_conv_windows.cpp',
@@ -33,9 +34,9 @@ def scoped_window_writes(admission, directory):
         shape = tuple(projected.shape)
         label = str(shape)
         audit['shapes'][label] = audit['shapes'].get(label, 0) + 1
-        if len(shape) == 3 and shape[1] == 16 and shape != (1, 16, 8256):
+        if len(shape) == 3 and shape[1] == 16 and shape != (1, 16, 8240):
             raise ValueError('Unqualified T16 window geometry: ' + label)
-        if shape != (1, 16, 8256):
+        if shape != (1, 16, 8240):
             audit['fallbacks'] += 1
             return original(mesh, projected, history)
         if len(history) != 4 or any(tuple(value.shape) != (1, 1, 5120) for value in history):
