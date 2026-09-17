@@ -10,6 +10,23 @@ from dspark_projection_precision_stage import PROJECTIONS
 
 RUNTIME = '9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9'
 CHECKPOINT = '9e98811de3c111aa93a4d2477e15ca2ac6d52609d062956f269255e3fa05b043'
+QUERY_REPORT = '361ace678704220f0ed138d2aa6878924187a92ef59d9b2dd4b0a6fd0d1e1e6c'
+QUERY_MANIFEST = 'b7f563038887922825f77e45920d63cc07da5c45fdbd886f8f9745fec2acf934'
+
+
+def candidate_manifest(folder, projection, report_sha256):
+    current = folder / 'precision-candidate.json'
+    if current.exists():
+        return json.loads(current.read_bytes())
+    if projection != 'self_attn.q_proj.weight' or report_sha256 != QUERY_REPORT:
+        raise ValueError('Only the reviewed initial query screen has a legacy manifest')
+    raw = (folder / 'weight-pipeline-candidate.json').read_bytes()
+    if hashlib.sha256(raw).hexdigest() != QUERY_MANIFEST:
+        raise ValueError('Legacy query manifest differs from reviewed artifact')
+    candidate = json.loads(raw)
+    if 'projection' in candidate:
+        raise ValueError('Unexpected legacy query manifest schema')
+    return dict(candidate, projection=projection)
 
 
 def qualify(directory, evidence, *, reviewed_reports):
@@ -32,7 +49,7 @@ def qualify(directory, evidence, *, reviewed_reports):
         if json.loads((folder / 'container-cleanup.json').read_bytes()) != dict(
                 stop_exit=0, logs_exit=0, copy_exit=0, remove_exit=0):
             raise ValueError('Clean simulator teardown required')
-        candidate = json.loads((folder / 'precision-candidate.json').read_bytes())
+        candidate = candidate_manifest(folder, projection, reviewed_reports[projection])
         if (candidate.get('projection') != projection or candidate.get('component_execution_only') is not True
                 or any(candidate.get('sources', {}).get(name) != sources[name] for name in (
                     'dspark-projection-precision-probe.py', 'dspark_projection_precision.py'))):

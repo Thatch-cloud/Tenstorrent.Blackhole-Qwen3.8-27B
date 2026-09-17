@@ -3,14 +3,29 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from dspark_precision_gate import CHECKPOINT, RUNTIME, qualify
+from dspark_precision_gate import CHECKPOINT, RUNTIME, QUERY_REPORT, candidate_manifest, qualify
 from dspark_projection_precision_report import SOURCE_NAMES
 from dspark_projection_precision_stage import PROJECTIONS
 from test_dspark_projection_precision_report import fixture
 
 
 class PrecisionGateTests(unittest.TestCase):
+    def test_legacy_manifest_is_bound_to_query_and_exact_artifact(self):
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            raw = json.dumps(dict(component_execution_only=True, sources={})).encode()
+            (folder / 'weight-pipeline-candidate.json').write_bytes(raw)
+            with self.assertRaises(ValueError):
+                candidate_manifest(folder, 'self_attn.q_proj.weight', QUERY_REPORT)
+            with patch('dspark_precision_gate.QUERY_MANIFEST', hashlib.sha256(raw).hexdigest()):
+                self.assertEqual(candidate_manifest(folder, 'self_attn.q_proj.weight', QUERY_REPORT)['projection'],
+                    'self_attn.q_proj.weight')
+                for projection, digest in (('mlp.up_proj.weight', QUERY_REPORT), ('self_attn.q_proj.weight', 'a' * 64)):
+                    with self.assertRaises(ValueError):
+                        candidate_manifest(folder, projection, digest)
+
     def setup_files(self, root):
         directory, evidence = root / 'sources', root / 'evidence'
         directory.mkdir()

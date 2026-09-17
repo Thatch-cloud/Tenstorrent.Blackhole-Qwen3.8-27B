@@ -133,3 +133,12 @@ anchors. A fresh checkout at `8c102b2` passes the actual adaptation anchors;
 all seven unchanged projection dependency hashes match the simulator report.
 The new local checkout is `D:\qwen-precision-combined-stage-20260918`; final
 candidate admission awaits the down-projection artifact.
+
+The hardware workflow `qwen-dspark-precision-combined.yml` restores the same
+frozen target, downloads query plus the six matrix artifacts, applies the
+precision wrapper, and retains exclusive card scheduling and the disk-pressure
+gate. It is not launched yet: the complete reviewed report manifest must exist
+first. The initial query artifact used `weight-pipeline-candidate.json`; its
+compatibility reader accepts only that exact reviewed manifest/report hash pair,
+not arbitrary legacy evidence. Four admission tests and the real query artifact
+check pass locally.
