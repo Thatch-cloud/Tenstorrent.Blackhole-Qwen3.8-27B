@@ -38,6 +38,15 @@ C0 tests use fake device operations and independent object graphs. They establis
 only the request publication protocol, **not physical KV/GDN isolation**, a
 scheduler, true batched execution or a concurrent throughput result.
 
+The first C1 candidate is `gdn_slot_copy.py` / `.cpp`: an explicit-slot version
+of the unchanged slot-zero state DMA. Recurrent state advances by 384 tiles per
+slot; convolution state selects each slot's 32-byte row in both tile faces.
+The candidate rejects hardware use until simulator qualification. The weight-free
+`gdn-slot-copy` TT-Sim suite checks all eight slots, both copy directions, eager
+execution and two changed-input replays on both chips, including whole logical
+destination state and source preservation. Kernel correctness remains unproven
+until its report passes; KV routing and combined multi-user integration remain separate gates.
+
 ## Measurement contract
 
 - Keep model/image/kernel pins, prompt token IDs, sampler, output policy and warmup

@@ -6,7 +6,7 @@ on:
       suite:
         description: Simulator correctness only; no hardware timing
         type: choice
-        options: [dspark-score-bitwise, markov-cache-control, fusion-t16, fusion-t16-target, stack, shortlist]
+        options: [gdn-slot-copy, dspark-score-bitwise, markov-cache-control, fusion-t16, fusion-t16-target, stack, shortlist]
         default: fusion-t16
 
 permissions:
@@ -32,7 +32,7 @@ jobs:
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: ${{ inputs.suite }}
         run: |
-          if [ "$QWEN_SIM_CASE" = dspark-score-bitwise ]; then
+          if [[ "$QWEN_SIM_CASE" = dspark-score-bitwise || "$QWEN_SIM_CASE" = gdn-slot-copy ]]; then
             timeout -k 15 465 bash scripts/ci/run-simulator.sh
           else
             bash scripts/ci/run-simulator.sh
