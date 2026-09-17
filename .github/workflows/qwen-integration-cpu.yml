@@ -81,6 +81,7 @@ jobs:
           python -B -m unittest test_mlp_weight_pipeline
           python -B -m unittest test_mlp_k_block
           python -B -m unittest test_speculative_latency_budget
+          python -B -m unittest test_compact_score_selection
           python -B -m unittest test_gdn_window_write_overlap
           python -B -m unittest test_gdn_window_write_gate
           python -B -m unittest test_gdn_window_write_scope
