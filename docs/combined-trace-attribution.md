@@ -1,5 +1,36 @@
 # Combined-runtime trace attribution
 
+## Winning-recipe refresh: awaiting hardware admission
+
+Run **35181419754**, revision `09cbc1e`, staged the unchanged winning T16
+recipe successfully but stopped before weight loading with exit **75**.
+Four 15-second host I/O observations measured full-stall fractions of **15.38%,
+3.16%, 2.55%, and 4.25%**, above the existing 1% admission limit. This was not a
+kernel failure or a throughput measurement. Do not rerun unchanged until host
+contention has subsided; do not stop unrelated jobs to make the gate pass.
+
+The prepared profile runs one complete audited 4K request with shared-Q/K,
+norm prefetch, incremental history, draft-tail assembly, target T16 fusion and
+captured publication. It changes host instrumentation, not device kernels.
+The launcher is capped at nine minutes and the whole job at twelve minutes.
+PP/TG remain null because instrumentation perturbs execution.
+
+The retained winning 4K run **35167726511** measures 118.2196 committed TG:
+67.249 ms verification/readback per block, including 65.803 ms in the blocking
+trace call and only 0.433 ms in output readback. A blocking host call includes
+device execution; it is not proof of host overhead. The historical profiles
+below suggest internal kernel work is important, but are not a substitute for
+attributing this exact recipe. Keep synchronization and correctness checks
+until dependency-safe alternatives have their own evidence.
+
+Next: collect both-chip trace attribution, rank current operation costs, then
+qualify the selected change in simulation before an uninstrumented combined
+control/candidate comparison. Do not convert summed or overlapping profiler
+durations into projected committed TG.
+
+Retained admission artifact SHA256:
+`04f65acdaf3ba110a244048dc2f1dadedc9206827a9f63c9ab51a27b5d2c8f08`.
+
 ## Current 32K shared-Q/K profile
 
 Run **35076649250**, revision `b93f337`, passes in **9m42s**. This profiles
