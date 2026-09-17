@@ -67,6 +67,8 @@ jobs:
           python -B -m unittest test_winning_interval_attribution
           python -B -m unittest test_gdn_dual_state_copy
           python -B -m unittest test_gdn_dual_state_gate test_gdn_dual_state_scope
+          python -B -m unittest test_gdn_dual_state_comparison test_gdn_dual_state_experiment
+          python -B -m unittest test_gdn_dual_state_combined_stage
           python -B -m unittest test_dspark_projection_precision_stage
           python -B -m unittest test_dspark_projection_precision_report
           python -B -m unittest test_mlp_weight_pipeline_gate test_mlp_weight_pipeline_experiment test_mlp_weight_pipeline_comparison test_mlp_weight_pipeline_report

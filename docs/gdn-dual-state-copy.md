@@ -35,6 +35,15 @@ its own reader and buffer changes. Nine host tests cover the transform, report
 matrix and successful/failing scope restoration, including norm-prefetch
 composition. Full combined comparison staging and hardware launch remain next.
 
+The combined wrapper and CI workflow are now staged. Both arms retain the
+winning T16/HiFi4 recipe and identical proposals; the candidate must construct
+the admitted recurrence exactly as many times as norm prefetch runs. Two fresh
+audits precede ABBA timing, and complete-cycle TG determines acceptance.
+Eight focused comparison/scope/staging tests pass. A fresh frozen checkout at
+`D:\qwen-dual-state-combined-stage-20260918` passes dependency admission, imports
+and shell syntax checks. Live native-source admission remains enforced on CI;
+this local result does not qualify hardware performance.
+
 ## Implementation and qualification history
 
 The shared-Q/K recurrence copies each new state twice for intermediate tokens:
