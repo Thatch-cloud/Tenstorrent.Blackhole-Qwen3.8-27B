@@ -21,6 +21,12 @@ class CumulativeReportTests(unittest.TestCase):
                 patch.object(validator, 'validate_compact'), patch.object(validator, 'validate_down') as down:
             validator.validate(report)
             self.assertEqual(down.call_count, 6)
+            report['cumulative_components'].append('norm_scatter')
+            down.reset_mock()
+            validator.validate(report)
+            self.assertEqual([call.kwargs['norm_policy'] for call in down.call_args_list],
+                ['prefetch', 'scatter', 'prefetch', 'scatter', 'scatter', 'prefetch'])
+            report['cumulative_components'].pop()
             mutations = (
                 lambda value: value['request_checks'][1]['mlp_down_grid'].update(wider_down=False),
                 lambda value: value['cumulative_route_diagnostics'][0].pop('down'),

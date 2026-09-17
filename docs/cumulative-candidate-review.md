@@ -149,6 +149,18 @@ measurement. The cumulative driver and staging still need the scatter binding;
 no current hardware recipe enables it. Precision remains unchanged, and further
 quantization is deferred unless needed and discussed with the user.
 
+The cumulative driver now supports an optional fourth component, `norm_scatter`,
+with `QWEN_CUMULATIVE_NORM=1`. Candidate requests select scatter inside the same
+direct-window/compact-score/wider-down scope; controls retain prefetch. The driver
+refuses the flag unless the normalization wrapper is already installed. Staging
+accepts `--norm-report` alongside pinned `--native-root`, checks both normalization
+admissions and changes the draft-tail import to the explicit runtime selector.
+The independent cumulative report validator checks each request's selected policy.
+Host tests cover selection, restoration, missing execution and optional staging.
+This integration is not hardware-qualified: the existing CI tag families still
+leave scatter disabled, and full real-source staging needs the retained GDN native
+kernel/API inventory (the model-only inventory is insufficient).
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

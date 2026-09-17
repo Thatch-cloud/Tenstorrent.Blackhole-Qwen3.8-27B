@@ -10,8 +10,8 @@ import cumulative_t16_stage as staging
 class CumulativeStageTests(unittest.TestCase):
     def test_both_component_sets_stage_with_explicit_down_admission(self):
         source = Path(staging.__file__).parent
-        for with_down in (False, True):
-            with self.subTest(with_down=with_down), TemporaryDirectory() as temporary:
+        for with_down, with_norm in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(with_down=with_down, with_norm=with_norm), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 scripts = root / 'scripts/ci'
                 scripts.mkdir(parents=True)
@@ -22,15 +22,25 @@ class CumulativeStageTests(unittest.TestCase):
                 (scripts / 'dspark-target-hardware.py').write_text(
                     'def run():\n            from gdn_direct_window_experiment import run_loaded_requests\n')
                 (scripts / 'run-dspark-hardware.sh').write_text('    -e "QWEN_DSPARK_MODE=$mode"\n')
+                (scripts / 'frozen_draft_tail_scope.py').write_text(
+                    'from frozen_gdn_norm_scope import runtime_scope as norm_scope\n')
                 evidence = root / 'evidence'
                 evidence.mkdir()
                 (evidence / 'fixture.json').write_text('{}')
                 with patch.object(staging, 'qualify', return_value={'compact': True}), \
+                        patch.object(staging, 'qualify_prefetch') as prefetch, \
+                        patch.object(staging, 'qualify_scatter', return_value={'scatter': True}) as scatter, \
                         patch.object(staging, 'qualify_down', return_value={'down': True}) as qualify_down:
                     result = staging.stage(root, evidence, root / 'manifest.json',
                         down_evidence=evidence if with_down else None,
-                        native_root=root if with_down else None)
+                        native_root=root if with_down or with_norm else None,
+                        norm_report=evidence / 'fixture.json' if with_norm else None)
                 self.assertEqual(qualify_down.call_count, 2 if with_down else 0)
+                self.assertEqual(prefetch.call_count, 2 if with_norm else 0)
+                self.assertEqual(scatter.call_count, 2 if with_norm else 0)
+                self.assertEqual('norm_scatter' in result['components'], with_norm)
+                self.assertEqual('selected_runtime_scope' in
+                    (scripts / 'frozen_draft_tail_scope.py').read_text(), with_norm)
                 self.assertEqual('wider_mlp_down' in result['components'], with_down)
                 self.assertFalse(result['hardware_qualified'])
                 self.assertEqual((scripts / 'mlp-down-grid-evidence').exists(), with_down)

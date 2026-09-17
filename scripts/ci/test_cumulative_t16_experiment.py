@@ -5,10 +5,13 @@ import unittest
 from unittest.mock import patch
 
 import cumulative_t16_experiment as experiment
+import cumulative_norm_runtime as normalization
+from test_cumulative_norm_validation import fixture as norm_fixture
 
 
 class CumulativeExperimentTests(unittest.TestCase):
-    def exercise(self, missing_calls=False, fail_request=False, with_down=False, missing_down=False):
+    def exercise(self, missing_calls=False, fail_request=False, with_down=False, missing_down=False,
+                 with_norm=False, wrong_norm=False):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name in experiment.FILES:
@@ -37,20 +40,32 @@ class CumulativeExperimentTests(unittest.TestCase):
             def run(*arguments, **options):
                 requests = report.setdefault('request_checks', [])
                 for enabled, audited in experiment.direct_experiment.SCHEDULE:
+                    policy = 'prefetch'
                     if enabled:
                         with experiment.direct_experiment.scoped_direct_windows({}, directory):
                             self.assertTrue(active)
+                            policy = normalization._selected.get() or 'prefetch'
+                            self.assertEqual(policy, 'scatter' if with_norm else 'prefetch')
                             if fail_request:
                                 raise RuntimeError('request failed')
                     self.assertFalse(active)
-                    requests.append(dict(gdn_direct_window=dict(direct=enabled), instrumented_timing=audited,
+                    request = dict(gdn_direct_window=dict(direct=enabled), instrumented_timing=audited,
                         gdn_shared_qk=dict(loads=[{}] * 96), score_layout=dict(calls=2),
-                        fused_t16_mlp=dict(hits=[2] * 64)))
+                        fused_t16_mlp=dict(hits=[2] * 64))
+                    if with_norm:
+                        request.update(norm_fixture('prefetch' if wrong_norm else policy))
+                        request['gdn_shared_qk']['loads'] = [{}] * 96
+                        request['norm_reader']['builds'] = 96
+                        if request['gdn_norm_prefetch']['enabled']:
+                            request['gdn_norm_prefetch']['builds'] = 96
+                    requests.append(request)
                 report['gdn_direct_window_comparison'] = dict(improvement_screen_passed=True,
                     pairs=[dict(unchanged_tg=120, direct_tg=130)] * 2)
 
             with patch.dict('os.environ', {'QWEN_CUMULATIVE_T16': '1', 'QWEN_COMPACT_SCORE_HARDWARE': '1',
-                    'QWEN_CUMULATIVE_MLP_DOWN': '1' if with_down else '0'}), \
+                    'QWEN_CUMULATIVE_MLP_DOWN': '1' if with_down else '0',
+                    'QWEN_CUMULATIVE_NORM': '1' if with_norm else '0'}), \
+                    patch.object(normalization, 'require_active'), \
                     patch.object(experiment, '__file__', str(directory / 'cumulative_t16_experiment.py')), \
                     patch.object(experiment, 'qualify', return_value={}), \
                     patch.object(experiment, 'qualify_down', return_value={'qualified': True}), \
@@ -90,3 +105,18 @@ class CumulativeExperimentTests(unittest.TestCase):
     def test_request_failure_restores_driver(self):
         with self.assertRaisesRegex(RuntimeError, 'request failed'):
             self.exercise(fail_request=True)
+
+    def test_scatter_joins_all_components_only_on_candidate_requests(self):
+        report = self.exercise(with_down=True, with_norm=True)
+        self.assertEqual(report['cumulative_components'],
+            ['direct_windows', 'compact_scores', 'wider_mlp_down', 'norm_scatter'])
+        self.assertEqual([request['norm_reader']['policy'] for request in report['request_checks']],
+            ['prefetch', 'scatter', 'prefetch', 'scatter', 'scatter', 'prefetch'])
+        self.assertIsNone(normalization._selected.get())
+
+    def test_unexecuted_scatter_and_failed_request_cannot_leak_selection(self):
+        with self.assertRaises(ValueError):
+            self.exercise(with_norm=True, wrong_norm=True)
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            self.exercise(with_norm=True, fail_request=True)
+        self.assertIsNone(normalization._selected.get())

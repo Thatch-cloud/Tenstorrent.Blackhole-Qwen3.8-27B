@@ -12,26 +12,32 @@ from mlp_down_grid_report import validate_route as validate_down
 
 
 def validate(report):
-    comparison = validate_direct(report)
+    components = report.get('cumulative_components')
+    allowed = [['direct_windows', 'compact_scores'],
+               ['direct_windows', 'compact_scores', 'wider_mlp_down']]
+    allowed += [value + ['norm_scatter'] for value in allowed]
+    if components not in allowed:
+        raise ValueError('Known ordered cumulative components required')
+    with_norm = 'norm_scatter' in components
+    comparison = validate_direct(report, norm_scatter=True) if with_norm else validate_direct(report)
     if (report.get('cumulative_t16') is not True
-            or report.get('cumulative_components') not in (['direct_windows', 'compact_scores'],
-                ['direct_windows', 'compact_scores', 'wider_mlp_down'])
             or not report.get('cumulative_sources')
             or report['cumulative_sources'] != report.get('cumulative_sources_after')
             or report.get('cumulative_measurement_quality') != comparison['measurement_quality']):
-        raise ValueError('Complete source-stable two-component cumulative report required')
+        raise ValueError('Complete source-stable cumulative report required')
     audits = report.get('cumulative_route_diagnostics', [])
     if len(audits) != 3:
         raise ValueError('Three cumulative candidate route audits required')
     pending = iter(audits)
     with_down = 'wider_mlp_down' in report['cumulative_components']
     for request in report['request_checks']:
-        validate_compact(request, 'publication')
         enabled = request['gdn_direct_window']['direct']
+        policy = 'scatter' if with_norm and enabled else 'prefetch'
+        validate_compact(request, 'publication', norm_policy=policy)
         if request['compact_score']['compact'] is not enabled:
             raise ValueError('Both components must be enabled on exactly the same requests')
         if with_down:
-            validate_down(request, 'publication')
+            validate_down(request, 'publication', norm_policy=policy)
             if request['mlp_down_grid']['wider_down'] is not enabled:
                 raise ValueError('Down-grid selection must match the cumulative arm')
         elif 'mlp_down_grid' in request:

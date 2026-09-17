@@ -15,6 +15,26 @@ from shared_qk_norm_scatter import build as scatter_build
 
 POLICIES = {'prefetch': PREFETCH_SHA256, 'scatter': SCATTER_SHA256}
 _selected = ContextVar('cumulative_norm_policy', default=None)
+_active = ContextVar('cumulative_norm_active', default=False)
+
+
+def require_active():
+    if not _active.get():
+        raise ValueError('Cumulative normalization wrapper must be installed before requests')
+
+
+@contextmanager
+def selected_runtime_scope(directory):
+    flag = os.environ.get('QWEN_CUMULATIVE_NORM', '0')
+    if flag not in ('0', '1'):
+        raise ValueError('Explicit zero/one cumulative normalization policy required')
+    if flag == '0':
+        from frozen_gdn_norm_scope import runtime_scope as original_scope
+        with original_scope(directory) as evidence:
+            yield evidence
+    else:
+        with runtime_scope(directory) as evidence:
+            yield evidence
 
 
 @contextmanager
@@ -102,10 +122,14 @@ def normalization_scope(directory):
         with patch.object(gdn_shared_qk_variants, 'REPORT_SHA256', expected):
             original_route(request, arm)
 
+    if _active.get():
+        raise ValueError('Nested cumulative normalization wrappers are unsupported')
+    token = _active.set(True)
     try:
         with patch.object(full_dspark_request, 'measure_dspark_request', measured), \
                 patch.object(gdn_shared_qk_variants, 'validate_route', route):
             yield evidence
     finally:
+        _active.reset(token)
         if qualify() != evidence:
             raise ValueError('Normalization source admission changed during cumulative requests')

@@ -1,6 +1,6 @@
 """Native versus direct-window plus compact-score complete T16 requests."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import os
 from pathlib import Path
@@ -18,7 +18,9 @@ COMPACT_FILES = ('compact_score_gate.py', 'compact_score_report.py', 'compact_sc
     'compact_score_hardware_device.py', 'compact_score_hardware_markov.py',
     'compact_score_io.cpp', 'compact_score_compute.cpp', 'compact_score_reduce.cpp')
 DOWN_FILES = ('mlp_down_grid_gate.py', 'mlp_down_grid_scope.py', 'mlp_down_grid.py', 'mlp-down-grid-probe.py')
-FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES + DOWN_FILES +
+NORM_FILES = ('cumulative_norm_runtime.py', 'cumulative_norm_validation.py',
+    'shared_qk_norm_scatter_gate.py', 'shared_qk_norm_scatter.py', 'gdn_norm_scatter.py')
+FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES + DOWN_FILES + NORM_FILES +
     ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py')))
 
 
@@ -32,7 +34,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if down_flag not in ('0', '1'):
         raise ValueError('Explicit zero/one cumulative MLP-down policy required')
     down = qualify_down(directory / 'mlp-down-grid-evidence', directory, '/opt/tt-metal') if down_flag == '1' else None
+    norm_flag = os.environ.get('QWEN_CUMULATIVE_NORM', '0')
+    if norm_flag not in ('0', '1'):
+        raise ValueError('Explicit zero/one cumulative normalization policy required')
+    if norm_flag == '1':
+        from cumulative_norm_runtime import require_active, select_norm
+        require_active()
     components = ['direct_windows', 'compact_scores'] + (['wider_mlp_down'] if down is not None else [])
+    if norm_flag == '1':
+        components.append('norm_scatter')
 
     def fingerprints():
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in FILES}
@@ -43,7 +53,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     def combined(direct_admission, source_directory):
         if Path(source_directory).resolve() != directory.resolve():
             raise ValueError('Both components must come from the same staged runtime')
-        with scoped_cumulative_t16(direct_admission, evidence, directory,
+        with (select_norm('scatter') if norm_flag == '1' else nullcontext()), \
+                scoped_cumulative_t16(direct_admission, evidence, directory,
                 **(dict(down_admission=down) if down is not None else {})) as audit:
             audits.append(audit)
             yield audit['direct']
@@ -63,6 +74,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             audit = next(pending) if enabled else None
             if enabled:
                 validate_request(request, audit)
+            if norm_flag == '1':
+                from cumulative_norm_validation import validate_norm_history
+                validate_norm_history(request, 'scatter' if enabled else 'prefetch')
             request['compact_score'] = dict(compact=enabled,
                 hits=audit['compact']['calls'] if enabled else 0,
                 report_sha256=REPORT_SHA256 if enabled else None, restored=True)
