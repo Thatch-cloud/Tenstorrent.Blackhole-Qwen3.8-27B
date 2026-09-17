@@ -177,13 +177,15 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, max_new_tokens=None, t32_attention_evidence=None):
+        history_profile=False, captured_publication=False, max_new_tokens=None, t32_attention_evidence=None, t32_timed=False):
     from dspark_request_limit import request_limit
     output_limit = request_limit(max_new_tokens,
         short_default=target_attention_variants or combined_variants or profile_drafter or profile_verifier)
     import torch
     from full_dspark_request import measure_dspark_request
     t32_audit = t32_attention_evidence is not None
+    if type(t32_timed) is not bool or (t32_timed and not t32_audit):
+        raise ValueError('T32 timing requires its explicit combined hardware route')
     if t32_audit:
         from t32_score_hardware import require_active
         from target_t32_attention_gate import qualify_request
@@ -391,7 +393,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         raise ValueError('Combined attribution requires the isolated publication runtime')
     schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants else tuple(('eager', audit) for audit in (True, False, False))
     if t32_audit:
-        schedule = (('eager', True),)
+        schedule = tuple(('eager', audit) for audit in ((True, False, False) if t32_timed else (True,)))
     if combined_profile:
         schedule = (('publication', True),)
     if profile_verifier or profile_drafter:
@@ -433,6 +435,12 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 if native:
                     result['native_attention_kernel'] = kernel_audit
             result['host_health'] = host_summary(host_before, host_snapshot())
+            if t32_audit:
+                from t32_timing import authorize, validate_timed
+                if audit:
+                    authorize(result)
+                else:
+                    validate_timed(result)
             if draft_observer is not None:
                 result['draft_profile'] = draft_observer.summary()
             if mlp_down:
@@ -449,12 +457,18 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
     if t32_audit:
-        if len(report['request_checks']) != 1 or any(report['request_checks'][0].get(key) is not True
+        if len(report['request_checks']) != (3 if t32_timed else 1) or any(report['request_checks'][0].get(key) is not True
                 for key in ('exact', 'state_exact', 'inactive_exact', 'instrumented_timing')):
             raise ValueError('Complete exact audited T32 hardware request required')
         report.update(instrumented_timing=True, correctness_only=True, ctx_tokens=len(prompt),
             drafter_history_rows=len(prompt), proposal_rows=31, pp=None, committed_tg=None,
             scope='Combined fused T32 hardware correctness screen; not throughput or serving qualification')
+        if t32_timed:
+            summary = summarize(report['request_checks'])
+            summary.update(verifier_rows=32, draft_queries=31)
+            report.update(request_summary=summary, instrumented_timing=False, correctness_only=False,
+                pp=summary['pp'], committed_tg=summary['committed_tg'],
+                scope='Combined fused T32 full-cycle timings after fresh exact audit; not serving or held-out quality qualification')
         return
     if profile_verifier or profile_drafter or combined_profile:
         report.update(instrumented_timing=True, correctness_only=True,

@@ -35,6 +35,7 @@ def main():
     for name in ('checkpoint', 'config', 'target', 'output', 'proposal-evidence', 'score-evidence', 'attention-evidence', 'commit-evidence'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--timed', action='store_true')
     options = parser.parse_args()
     environment()
     require_projection_environment(os.environ, True)
@@ -42,7 +43,7 @@ def main():
         raise ValueError('Fresh output and pinned draft configuration required')
     directory = Path(__file__).parent
     admission = dict(proposal=composition_audit(directory, options.proposal_evidence, options.score_evidence),
-        target_attention=qualify_request(options.attention_evidence, position=4096, remaining=64,
+        target_attention=qualify_request(options.attention_evidence, position=4096, remaining=224 if options.timed else 64,
             hardware_mask_compatibility=True))
     from fused_t16_admission import qualify_simulator
     admission['target_mlp'] = qualify_simulator()
@@ -136,7 +137,7 @@ def run_request(options, rotary, admission):
         run_loaded_requests(ttnn, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
             layer_weights, predecessor, successor, rotary, report, progress,
             prompt=prompt, context=context, proposal_evidence=options.proposal_evidence,
-            score_evidence=options.score_evidence, attention_evidence=options.attention_evidence)
+            score_evidence=options.score_evidence, attention_evidence=options.attention_evidence, timed=options.timed)
         progress('complete')
         report['passed'] = True
     except BaseException as error:

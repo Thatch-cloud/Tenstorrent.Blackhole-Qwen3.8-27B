@@ -14,7 +14,7 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
-    def t32_fusion_request(self, hits, *, hardware=False, **extra_options):
+    def t32_fusion_request(self, hits, *, hardware=False, timed=False, **extra_options):
         self.drafter.max_drafts = 31
         self.drafter.propose.return_value = tuple(range(31))
         events = []
@@ -38,7 +38,7 @@ class FullDSparkRequestTests(unittest.TestCase):
                 'QWEN_HARDWARE_TESTS': '1' if hardware else '0',
                 'QWEN_CARDS_ALLOCATED': '1' if hardware else '0',
                 'QWEN_T32_FUSED_SCORE_HARDWARE': '1' if hardware else '0'}), \
-                patch('t32_score_hardware.require_active', return_value={}), \
+                patch('t32_score_hardware.require_active', return_value=SimpleNamespace(timing_reference={} if timed else None)), \
                 patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': collective}), \
                 patch('t32_attention_admission.require_active', return_value={}), \
                 patch('target_t32_attention_gate.qualify_request', return_value={'component_fixture': True}), \
@@ -46,7 +46,7 @@ class FullDSparkRequestTests(unittest.TestCase):
                 patch('fused_t16_scope.FusedT32Arm', return_value=arm) as candidate, \
                 patch('fused_t16_scope.FusedT16Arm') as control:
             try:
-                result = self.measure(audit=True, proposal_trace=True, commit_only_gdn=True,
+                result = self.measure(audit=not timed, proposal_trace=True, commit_only_gdn=True,
                     native_attention=True, t32=True, fused_t32_mlp=True, **extra_options)
             finally:
                 self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
@@ -62,6 +62,12 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.assertFalse(lifecycle['hardware_qualified'])
         self.assertFalse(lifecycle['performance_qualified'])
         self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_t32_hardware_timing_requires_fresh_scope_reference(self):
+        result = self.t32_fusion_request([1] * 64, hardware=True, timed=True,
+            target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        self.assertFalse(result['instrumented_timing'])
+        self.assertEqual(result['committed_tokens_per_second'], 123.0)
 
     def test_t32_hardware_flag_cannot_replace_owned_scope(self):
         with patch.dict(os.environ, {'QWEN_T32_FUSED_SCORE_HARDWARE': '1'}):

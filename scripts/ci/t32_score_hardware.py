@@ -77,7 +77,7 @@ def hardware_scope(root, directory, proposal, score, mesh, installation):
     before, native = sources(directory), native_sources(root)
     record = dict(calls=0, native_proposal_checks=[], restored=False, sources=before, hardware_qualified=False,
         performance_qualified=False, full_request_qualified=False, serving_qualified=False)
-    state = SimpleNamespace(mesh=mesh, links=links, record=record)
+    state = SimpleNamespace(mesh=mesh, links=links, record=record, timing_reference=None)
     token = _ACTIVE.set(state)
     try:
         yield record
@@ -137,6 +137,8 @@ class HardwareTracedDSparkDevice(TracedDSparkDevice):
         from dspark_t32_prepared import execute as complete_proposal
 
         state = require_active(self.mesh)
+        if self.prepared is not None and self.prepared.audit is False and getattr(state, 'timing_reference', None) is not None:
+            return super().propose(anchor, count)
         if self.prepared is None or self.prepared.audit is not True:
             raise ValueError('Complete hardware proposal comparison requires an audited prepared trace')
         self.prepared.update(anchor)

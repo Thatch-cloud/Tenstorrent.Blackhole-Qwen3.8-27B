@@ -37,6 +37,7 @@ jobs:
         working-directory: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           QWEN_CARDS_ALLOCATED: '1'
+          QWEN_T32_TIMED: ${{ startsWith(github.ref_name, 'experiment/t32-combined-hardware-timed-') && '1' || '0' }}
         run: bash scripts/ci/run-t32-combined-hardware.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

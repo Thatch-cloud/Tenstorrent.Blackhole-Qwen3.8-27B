@@ -12,6 +12,11 @@ arguments=(--checkpoint /dspark/model.safetensors --config /dspark/config.json -
     --proposal-evidence /evidence/proposal/t32-combined.json
     --score-evidence /evidence/score/t32-markov.json
     --attention-evidence /evidence/attention/t32-attention.json --commit-evidence /evidence/commit)
+case "${QWEN_T32_TIMED:-0}" in
+    0) ;;
+    1) arguments+=(--timed) ;;
+    *) exit 2 ;;
+esac
 python3 -u /experiment-scripts/ci/t32-combined-hardware.py "${arguments[@]}" \
     --preflight --output /experiment/results/t32-preflight.json
 set +e

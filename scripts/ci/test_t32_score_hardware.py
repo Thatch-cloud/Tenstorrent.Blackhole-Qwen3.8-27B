@@ -62,6 +62,11 @@ class ScoreHardwareTests(unittest.TestCase):
             device.prepared.audit = False
             with self.assertRaisesRegex(ValueError, 'audited prepared'):
                 device.propose(19, 2)
+            state.timing_reference = {}
+            execute.reset_mock()
+            self.assertEqual(device.propose(19, 2), (17, 18))
+            execute.assert_not_called()
+            self.assertEqual(len(state.record['native_proposal_checks']), 1)
 
     def fixture(self, stack):
         mesh = SimpleNamespace(shape=[1, 2])

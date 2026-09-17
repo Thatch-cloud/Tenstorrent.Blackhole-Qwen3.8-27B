@@ -36,6 +36,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             or (not target_attention_t32 and target_attention_t32_evidence is not None)):
         raise ValueError('T32 target attention requires an explicit T32 lifecycle and component evidence')
     hardware_t32 = False
+    hardware_timing = False
     if t32:
         import os
 
@@ -43,13 +44,14 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         if hardware_t32:
             from t32_score_hardware import require_active
 
-            require_active(model.mesh_device)
+            state = require_active(model.mesh_device)
+            hardware_timing = audit_features is False and getattr(state, 'timing_reference', None) is not None
             if not (fused_t32_mlp and target_attention_t32):
                 raise ValueError('Hardware T32 requires combined target attention and MLP fusion')
         simulator_t32 = (os.environ.get('QWEN_SIM_ONLY') == '1'
             and not any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED')))
         if (not (hardware_t32 or simulator_t32)
-                or not (audit_features and proposal_trace and commit_only_gdn and native_attention)
+                or not ((audit_features or hardware_timing) and proposal_trace and commit_only_gdn and native_attention)
                 or any((target_attention_t16, score_layout, banked_proposal, native_slot_gdn, fused_t16_mlp,
                     history_profile, gdn_output_l1, gdn_output_grid, gdn_copy_pairs, gdn_outer_add,
                     combined_profile, gdn_shared_qk, bias_cache, profile_verifier))

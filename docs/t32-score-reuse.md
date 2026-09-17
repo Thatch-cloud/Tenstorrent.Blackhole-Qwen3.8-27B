@@ -244,3 +244,18 @@ the checker failed. Cleanup completed and no proposal/request correctness was
 measured. The fix normalizes the kernel directory to `Path`, adds a real-filesystem
 regression test, and executes that checker during preflight before weight loading.
 The unchanged runtime build inputs can reuse the newly populated cache on retry.
+
+Retry **35203488097** at `e93594f` passes in **3m00s**, with a runtime cache hit.
+At 4,096 context it commits 64 post-seed tokens matching the native control, with
+exact active/inactive state, 90 committed-feature checks, nine proposal replay
+checks and nine complete native-score comparisons. All 64 target MLP layers
+execute T32 fusion and restore their bindings; source fingerprints and cleanup
+pass. Report SHA-256: `c19923c9013eba42113ccff3a554be163a61edbea33baf67390bf4d9beb55f70`.
+This is instrumented correctness evidence, not TG or held-out coding quality.
+
+Tags `experiment/t32-combined-hardware-timed-*` opt into a fresh 225-token-limit
+audit followed by two identical timed requests in the same loaded model. The
+scoped timing gate requires every native-score/replay/feature/commit check before
+removing those expensive comparisons. Timed outputs and target state must still
+match the fresh audit; all drafting, verification and commit wall time remains
+in TG. Ordinary hardware tags remain audit-only; serving stays unchanged.

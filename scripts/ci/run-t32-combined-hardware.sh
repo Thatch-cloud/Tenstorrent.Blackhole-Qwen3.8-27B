@@ -44,6 +44,7 @@ container=$(docker create --network none --hostname qwen-experiment --add-host q
     --label "thatch.qwen.workflow-run=$GITHUB_RUN_ID" --label "thatch.qwen.source-revision=$GITHUB_SHA" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 -e QWEN_CCL_LAZY_BUILD=1 \
     -e QWEN_T32_FUSED_SCORE_HARDWARE=1 -e QWEN_DSPARK_REQUEST_CONTEXT=4096 \
+    -e "QWEN_T32_TIMED=${QWEN_T32_TIMED:-0}" \
     -e "QWEN_SOURCE_REVISION=$GITHUB_SHA" -e "QWEN_WORKFLOW_RUN=$GITHUB_RUN_ID" \
     -e MODEL_WEIGHTS_DIR=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
     -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e TT_METAL_HOME=/opt/tt-metal \
