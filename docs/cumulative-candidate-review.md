@@ -161,6 +161,17 @@ This integration is not hardware-qualified: the existing CI tag families still
 leave scatter disabled, and full real-source staging needs the retained GDN native
 kernel/API inventory (the model-only inventory is insufficient).
 
+Real-source four-component staging subsequently passed in
+`D:\qwen-cumulative-four-stage-20260918`. All seven native normalization dependencies
+match the retained simulator report; missing compute headers were retrieved from
+the pinned tt-metal revision and checked byte-for-byte by SHA-256. Both norm
+admissions, compact selection and wider-down admissions passed against staged
+files. `cumulative_native_sources.py` makes that small source restoration repeatable
+in CI, without loading weights or opening cards. The opt-in
+`experiment/cumulative-t16-stack-v*` tag family now stages all four components and
+runs independent combined-report validation. No tag has been dispatched; this
+remains preparation, not new hardware correctness or throughput evidence.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

@@ -1,7 +1,7 @@
 name: Qwen cumulative T16 windows and compact drafting
 on:
   push:
-    tags: ['experiment/cumulative-t16-v*', 'experiment/cumulative-t16-down-v*']
+    tags: ['experiment/cumulative-t16-v*', 'experiment/cumulative-t16-down-v*', 'experiment/cumulative-t16-stack-v*']
 permissions:
   contents: read
   actions: read
@@ -59,10 +59,18 @@ jobs:
           python3 -B read-orchestrator/scripts/ci/gdn_direct_window_combined_stage.py --checkout read-combined \
             --evidence "$evidence/direct-window" --native-root "$evidence/conv-native/sources" --manifest read-combined/experiment-results/read-combined-sources.json
           down_args=()
-          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-down-v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-down-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* ]]; then
             gh run download 35254182130 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35254182130-1 --dir "$evidence/mlp-down-grid"
             gh run download 35189721030 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35189721030 --dir "$evidence/model-native"
             down_args=(--down-evidence "$evidence/mlp-down-grid" --native-root "$evidence/model-native/sources")
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* ]]; then
+            gh run download 35214644611 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35214644611-1 --dir "$evidence/norm-scatter"
+            test "$(cat "$evidence/norm-scatter/gdn-shared-recurrence.exit-status")" = 0
+            python3 -B read-orchestrator/scripts/ci/cumulative_native_sources.py \
+              --report "$evidence/norm-scatter/gdn-shared-recurrence.json" \
+              --destination "$evidence/model-native/sources" > read-combined/experiment-results/cumulative-native-sources.json
+            down_args+=(--norm-report "$evidence/norm-scatter/gdn-shared-recurrence.json")
           fi
           python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
             --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json "${down_args[@]}"
@@ -80,7 +88,8 @@ jobs:
           QWEN_GDN_DIRECT_WINDOW: '1'
           QWEN_COMPACT_SCORE_HARDWARE: '1'
           QWEN_CUMULATIVE_T16: '1'
-          QWEN_CUMULATIVE_MLP_DOWN: ${{ startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-down-') && '1' || '0' }}
+          QWEN_CUMULATIVE_MLP_DOWN: ${{ (startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-down-') || startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-stack-')) && '1' || '0' }}
+          QWEN_CUMULATIVE_NORM: ${{ startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-stack-') && '1' || '0' }}
           QWEN_DSPARK_REQUEST_CONTEXT: '4096'
           QWEN_DSPARK_MODE: request-target-attention
           QWEN_DSPARK_CODING_TASK: merge_intervals
@@ -94,6 +103,11 @@ jobs:
           QWEN_DSPARK_DRAFT_PROFILE: '0'
           QWEN_DSPARK_HISTORY_PROFILE: '0'
         run: timeout -k 20 600 bash scripts/ci/run-dspark-hardware.sh
+      - name: Independently validate combined request evidence
+        run: |
+          python3 -B read-orchestrator/scripts/ci/cumulative_t16_report.py \
+            read-combined/experiment-results/dspark-captured-publication-request-hardware.json \
+            > read-combined/experiment-results/cumulative-validation.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
