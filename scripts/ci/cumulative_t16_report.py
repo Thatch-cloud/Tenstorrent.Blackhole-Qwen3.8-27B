@@ -9,6 +9,7 @@ from compact_score_combined_report import validate_route as validate_compact
 from cumulative_t16_scope import validate_request
 from gdn_direct_window_combined_report import validate as validate_direct
 from mlp_down_grid_report import validate_route as validate_down
+from cumulative_register_scope import validate_request as validate_register
 
 
 def validate(report):
@@ -16,10 +17,15 @@ def validate(report):
     allowed = [['direct_windows', 'compact_scores'],
                ['direct_windows', 'compact_scores', 'wider_mlp_down']]
     allowed += [value + ['norm_scatter'] for value in allowed]
+    allowed += [value + ['register_epilogue'] for value in allowed]
     if components not in allowed:
         raise ValueError('Known ordered cumulative components required')
     with_norm = 'norm_scatter' in components
-    comparison = validate_direct(report, norm_scatter=True) if with_norm else validate_direct(report)
+    with_register = 'register_epilogue' in components
+    options = dict(norm_scatter=True) if with_norm else {}
+    if with_register:
+        options['register_epilogue'] = True
+    comparison = validate_direct(report, **options)
     if (report.get('cumulative_t16') is not True
             or not report.get('cumulative_sources')
             or report['cumulative_sources'] != report.get('cumulative_sources_after')
@@ -33,19 +39,28 @@ def validate(report):
     for request in report['request_checks']:
         enabled = request['gdn_direct_window']['direct']
         policy = 'scatter' if with_norm and enabled else 'prefetch'
-        validate_compact(request, 'publication', norm_policy=policy)
+        fusion_policy = 'register' if with_register and enabled else 'baseline'
+        validate_compact(request, 'publication', norm_policy=policy, fusion_policy=fusion_policy)
         if request['compact_score']['compact'] is not enabled:
             raise ValueError('Both components must be enabled on exactly the same requests')
         if with_down:
-            validate_down(request, 'publication', norm_policy=policy)
+            validate_down(request, 'publication', norm_policy=policy, fusion_policy=fusion_policy)
             if request['mlp_down_grid']['wider_down'] is not enabled:
                 raise ValueError('Down-grid selection must match the cumulative arm')
         elif 'mlp_down_grid' in request:
             raise ValueError('Undeclared cumulative down-grid identity')
+        if not with_register and 'register_epilogue' in request:
+            raise ValueError('Undeclared cumulative register epilogue identity')
         if enabled:
             audit = next(pending)
             if ('down' in audit) != with_down:
                 raise ValueError('Down-grid route audit must match the declared components')
+            if ('register' in audit) != with_register:
+                raise ValueError('Register route audit must match the declared components')
+            if with_register:
+                validate_register(request, audit['register'])
+                if request['register_epilogue'] != dict(audit['register'], register_resident=True):
+                    raise ValueError('Register identity must match executed route diagnostics')
             validate_request(request, audit)
     return dict(comparison, components=report['cumulative_components'])
 

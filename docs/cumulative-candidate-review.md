@@ -182,6 +182,14 @@ enable this fifth candidate yet: cumulative runtime/report fusion identities mus
 first support the distinct epilogue admission. Its previous +1.81% result had
 mixed paired gains and remains unpromoted; this preparation is not a new speedup.
 
+Independent report composition now accepts an explicitly declared register
+epilogue only on candidate requests, with matching per-request and route-audit
+identities. All 256 packed-weight checks, 64 layer hit counts, restored bindings
+and zero extra weight allocations remain mandatory. Baseline validation rejects
+undeclared epilogue execution. The retained compact, wider-down and direct-window
+reports still validate unchanged. Runtime selection and staging of the fifth
+component remain to be connected; the prepared four-component CI path is unchanged.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

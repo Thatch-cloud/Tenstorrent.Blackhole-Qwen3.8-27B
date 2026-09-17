@@ -9,9 +9,10 @@ from compact_score_comparison import summarize
 from dspark_request_experiment import summarize as summarize_requests
 from mlp_weight_pipeline_report import validate_audit, validate_fusion, NORM_SHA256, HISTORY_SHA256
 from cumulative_norm_validation import validate_norm_history
+from cumulative_fusion_validation import validate_fusion_policy
 
 
-def validate_route(request, arm, *, norm_policy='prefetch'):
+def validate_route(request, arm, *, norm_policy='prefetch', fusion_policy='baseline'):
     from compact_score_gate import REPORT_SHA256
     identity = request.get('compact_score', {})
     enabled, hits = identity.get('compact'), identity.get('hits')
@@ -22,7 +23,7 @@ def validate_route(request, arm, *, norm_policy='prefetch'):
                 or hits != request.get('score_layout', {}).get('calls', 0)))
             or (not enabled and hits != 0)):
         raise ValueError('All T16 draft feedback calls must match the admitted write route')
-    validate_fusion(request)
+    validate_fusion_policy(request, fusion_policy)
     validate_norm_history(request, norm_policy)
 
 

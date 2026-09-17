@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import cumulative_t16_report as validator
+from cumulative_register_scope import REPORT_SHA256 as REGISTER_SHA256
 
 
 class CumulativeReportTests(unittest.TestCase):
@@ -26,6 +27,31 @@ class CumulativeReportTests(unittest.TestCase):
             validator.validate(report)
             self.assertEqual([call.kwargs['norm_policy'] for call in down.call_args_list],
                 ['prefetch', 'scatter', 'prefetch', 'scatter', 'scatter', 'prefetch'])
+            combined = copy.deepcopy(report)
+            combined['cumulative_components'].append('register_epilogue')
+            for audit in combined['cumulative_route_diagnostics']:
+                audit['register'] = dict(report_sha256=REGISTER_SHA256, constructions=64, calls=128, restored=True)
+            for request in combined['request_checks']:
+                enabled = request['gdn_direct_window']['direct']
+                request['register_epilogue'] = dict(register_resident=enabled,
+                    report_sha256=REGISTER_SHA256 if enabled else None,
+                    constructions=64 if enabled else 0, calls=128 if enabled else 0, restored=True)
+                if enabled:
+                    request['fused_t16_mlp']['passed_simulator'] = REGISTER_SHA256
+            down.reset_mock()
+            validator.validate(combined)
+            self.assertEqual([call.kwargs['fusion_policy'] for call in down.call_args_list],
+                ['baseline', 'register', 'baseline', 'register', 'register', 'baseline'])
+            for mutate in (
+                lambda value: value['cumulative_route_diagnostics'][0].pop('register'),
+                lambda value: value['cumulative_route_diagnostics'][0]['register'].update(calls=127),
+                lambda value: value['request_checks'][1]['register_epilogue'].update(calls=127),
+                lambda value: value['cumulative_components'].pop(),
+            ):
+                changed = copy.deepcopy(combined)
+                mutate(changed)
+                with self.assertRaises(ValueError):
+                    validator.validate(changed)
             report['cumulative_components'].pop()
             mutations = (
                 lambda value: value['request_checks'][1]['mlp_down_grid'].update(wider_down=False),

@@ -9,9 +9,10 @@ from gdn_direct_window_comparison import summarize, repeatability
 from dspark_request_experiment import summarize as summarize_requests
 from mlp_weight_pipeline_report import validate_audit, validate_fusion, NORM_SHA256, HISTORY_SHA256
 from cumulative_norm_validation import validate_norm_history
+from cumulative_fusion_validation import validate_fusion_policy
 
 
-def validate_route(request, arm, *, norm_policy='prefetch'):
+def validate_route(request, arm, *, norm_policy='prefetch', fusion_policy='baseline'):
     from gdn_direct_window_gate import REPORT_SHA256
     identity = request.get('gdn_direct_window', {})
     enabled, hits = identity.get('direct'), identity.get('hits')
@@ -22,12 +23,12 @@ def validate_route(request, arm, *, norm_policy='prefetch'):
                 or hits != len(request.get('gdn_shared_qk', {}).get('loads', []))))
             or (not enabled and hits != 0)):
         raise ValueError('All T16 GDN window calls must match the admitted write route')
-    validate_fusion(request)
+    validate_fusion_policy(request, fusion_policy)
     validate_norm_history(request, norm_policy)
 
 
-def validate(report, *, norm_scatter=False):
-    if type(norm_scatter) is not bool:
+def validate(report, *, norm_scatter=False, register_epilogue=False):
+    if type(norm_scatter) is not bool or type(register_epilogue) is not bool:
         raise ValueError('Explicit normalization composition policy required')
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('streams') != 1
@@ -40,7 +41,8 @@ def validate(report, *, norm_scatter=False):
             raise ValueError('Unchanged native, script and projection sources required')
     def route(request, arm):
         policy = 'scatter' if norm_scatter and request.get('gdn_direct_window', {}).get('direct') is True else 'prefetch'
-        validate_route(request, arm, norm_policy=policy)
+        fusion = 'register' if register_epilogue and request.get('gdn_direct_window', {}).get('direct') is True else 'baseline'
+        validate_route(request, arm, norm_policy=policy, fusion_policy=fusion)
 
     comparison = summarize(report.get('request_checks', []), summarize_requests, validate_audit, route)
     if comparison != report.get('gdn_direct_window_comparison'):
