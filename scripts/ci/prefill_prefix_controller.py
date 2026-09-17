@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dspark_prefill import FullHistoryCapture, validate_chunks
 from prefill_prefix_boundary import checkpoint_boundary
 from prefill_prefix_features import prefix_features
-from prefill_prefix_lookup import PrefixLookup
+from prefill_prefix_lookup import PrefixLookup, tokens_tuple
 from prefill_prefix_resume import native_resume_scope
 
 
@@ -95,3 +95,24 @@ class PrefixController:
             raise
         finally:
             self.busy = False
+
+
+def full_request_factory(controller, identity, pages, *, prefix_position, inactive_pages):
+    import torch
+
+    page_table = pages.clone()
+    inactive = tuple(inactive_pages)
+
+    @contextmanager
+    def factory(tokens, prefill, ordinal):
+        if type(ordinal) is not int or ordinal not in (0, 1):
+            raise ValueError('One cold control and one cached candidate required')
+        if ordinal == 0:
+            controller.invalidate()
+        host_tokens = torch.tensor([tokens_tuple(tokens)], dtype=torch.int32)
+        with controller.request(identity, host_tokens, page_table,
+                lambda values: prefill(values[0].tolist()), prefix_position=prefix_position,
+                inactive_pages=inactive) as result:
+            yield result
+
+    return factory

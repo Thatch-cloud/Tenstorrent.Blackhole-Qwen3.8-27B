@@ -22,9 +22,11 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         history_profile=False, captured_publication=False, gdn_output_l1=False, gdn_output_grid=False,
         gdn_copy_pairs=False, gdn_outer_add=False, combined_profile=False, gdn_shared_qk=False,
         bias_cache=False, bias_cache_build=None, t32=False, fused_t32_mlp=False,
-        target_attention_t32=False, target_attention_t32_evidence=None):
+        target_attention_t32=False, target_attention_t32_evidence=None, cached_prefill_factory=None):
     import torch
     from full_request import measure_request
+    if cached_prefill_factory is not None and (not callable(cached_prefill_factory) or t32):
+        raise ValueError('Explicit T16 cached-prefill factory required')
     if type(t32) is not bool:
         raise ValueError('Explicit boolean T32 lifecycle policy required')
     if type(fused_t32_mlp) is not bool or (fused_t32_mlp and not t32):
@@ -173,6 +175,7 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
     score_scope, score_arm = ExitStack(), None
     golden_features, prefill_hashes = {}, None
     prefill_records, feature_checks, history_checks, proposal_checks = [], [], [], []
+    cache_context, cache_records = ExitStack(), []
     seed = None
 
     def status(stage, **values):
@@ -180,12 +183,20 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
 
     def captured_prefill(tokens):
         nonlocal capture, seed, prefill_hashes
-        if capture is not None:
-            capture.close()
-        capture = FullHistoryCapture(operations, model, len(prompt))
         status('prefill', ordinal=len(prefill_records), context=len(prompt), audit=audit_features)
-        with capture.capture():
-            seed = prefill(tokens)
+        if cached_prefill_factory is None:
+            if capture is not None:
+                capture.close()
+            capture = FullHistoryCapture(operations, model, len(prompt))
+            with capture.capture():
+                seed = prefill(tokens)
+        else:
+            cache_context.close()
+            seed, capture, cache_record = cache_context.enter_context(
+                cached_prefill_factory(tokens, prefill, len(prefill_records)))
+            if cache_record.get('cache_hit') is not (len(prefill_records) == 1):
+                raise ValueError('Cold native control followed by one cached candidate prefill required')
+            cache_records.append(dict(cache_record))
         chunks = capture.outputs()
         records = [dict(start=chunk.start, rows=chunk.rows, bucket=chunk.features[0].shape[2]) for chunk in chunks]
         if audit_features:
@@ -422,6 +433,10 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
             proposal_trace=proposal_trace, proposal_checks=proposal_checks, native_attention=native_attention,
             packed_token_readbacks_per_proposal=2, checkpoint_trained_block_rows=16,
             published_serving_proposals=7, wider_proposal_acceptance_qualified=False)
+        if cached_prefill_factory is not None:
+            if len(cache_records) != 2:
+                raise ValueError('Both cold-control and cached-candidate prefill records required')
+            result['dspark']['prefix_cache'] = cache_records
         if t32:
             result['dspark']['t32_lifecycle'] = dict(fused_score_layout=True, hardware_qualified=False,
                 performance_qualified=False, target_attention='replay-t32' if target_attention_t32 else 'native',
@@ -471,5 +486,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
                 if drafter is not None:
                     drafter.close()
             finally:
-                if capture is not None:
+                if cached_prefill_factory is not None:
+                    import sys
+                    cache_context.__exit__(*sys.exc_info())
+                elif capture is not None:
                     capture.close()

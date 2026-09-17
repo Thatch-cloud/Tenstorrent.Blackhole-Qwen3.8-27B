@@ -361,6 +361,35 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.drafter.close.assert_called_once()
         self.assertTrue(all(capture.close.called for capture in self.captures))
 
+    def test_cached_prefill_keeps_existing_feature_audits_and_scope_lifetimes(self):
+        closed = []
+        @contextmanager
+        def cached(tokens, prefill, ordinal):
+            capture = self.capture(self.operations, None, len(tokens))
+            try:
+                yield prefill(tokens), capture, dict(cache_hit=ordinal == 1)
+            finally:
+                closed.append(ordinal)
+                capture.close()
+        result = self.measure(audit=True, cached_prefill_factory=cached)
+        self.assertEqual(closed, [0, 1])
+        self.assertEqual(result['dspark']['prefix_cache'], [dict(cache_hit=False), dict(cache_hit=True)])
+        self.assertEqual(len(result['dspark']['feature_checks']), 10)
+        self.assertEqual(len(result['dspark']['prefill_hashes']), 10)
+        self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_cached_prefill_rejects_warm_reference_and_unwinds_failure(self):
+        closed = []
+        @contextmanager
+        def invalid(tokens, prefill, ordinal):
+            try:
+                yield 17, self.capture(self.operations, None, len(tokens)), dict(cache_hit=True)
+            finally:
+                closed.append(ordinal)
+        with self.assertRaisesRegex(ValueError, 'Cold native control'):
+            self.measure(cached_prefill_factory=invalid)
+        self.assertEqual(closed, [0])
+
     def test_instrumented_request_checks_all_taps_both_chips_and_cannot_claim_tg(self):
         result = self.measure(audit=True)
         self.assertTrue(result['instrumented_timing'])

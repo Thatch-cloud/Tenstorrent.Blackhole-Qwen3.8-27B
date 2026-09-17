@@ -107,6 +107,15 @@ any additional verifier/proposal trace capture. Three host tests cover mixed
 types, pre-existing traces and partial allocation failure; device allocation and
 copy behavior still need qualification in the combined cache experiment.
 
+The combined request harness now accepts an explicit `cached_prefill_factory`.
+It requires a **cold native control followed by a cached candidate**, retains
+the existing feature/state/token audits, records each prefill's cache outcome,
+and unwinds cache ownership when the request fails. The controller's matching
+factory invalidates before the control and retains the checkpoint for the
+candidate. Host harness tests exercise both the audited path and rejection of
+an accidentally warmed reference. This optional hook is not yet staged into a
+hardware experiment or enabled in serving; the current 262K run remains unchanged.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
