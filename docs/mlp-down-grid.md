@@ -21,6 +21,14 @@ Host tests cover normal and exceptional restoration, untouched smaller buckets,
 source admission and rejection of incomplete numerical evidence. No hardware
 request has yet qualified this adapter or measured its performance.
 
+Combined staging now passes against the frozen winning recipe. The hardware
+workflow runs two fresh native-reference audits and then four complete requests
+in control/candidate/candidate/control order. Every candidate MLP call must match
+the per-layer fused-arm hit counters; all 64 layers must be covered. The report
+independently recomputes complete-cycle TG, rejects changed acceptance or output,
+and keeps the existing norm-prefetch/history/weight-integrity gates. It does not
+promote a candidate merely because its simulator or CI job passed.
+
 The retained combined trace attributes approximately 7.804 ms to 64 MLP-down
 calls per verifier replay. This experiment changes only native output-column
 distribution for the local 8,704 x 5,120 projection.
