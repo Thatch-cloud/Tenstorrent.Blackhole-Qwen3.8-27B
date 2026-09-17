@@ -224,7 +224,14 @@ original report and both source hashes, requires that branch disabled and retain
 all 8 replay, 24 mask and 4 KV checks. The normal strict gate remains unchanged.
 This is evidence compatibility, not a new simulator or hardware test result.
 
-Next: connect the outer CI loader to `t32_combined_experiment.run_loaded_requests`,
-stage the three retained evidence artifacts and run the complete hardware audit.
+The dedicated `qwen-t32-combined-hardware.yml` workflow now connects the historical
+T32 model loader to `t32_combined_experiment.run_loaded_requests`, fetching those
+three retained artifacts. It validates runtime installation, target source pins,
+attention and MLP evidence before loading weights. It uses the existing pinned
+image/cache, both allocated cards, explicit four-link configuration and the same
+exclusive runner group as the ladder. The audit has a 10-minute subprocess cap
+and a separate 20-minute whole-job cap; these do not change the context ladder's
+timeout policy. Stage logs stream live and cleanup retains failure artifacts.
+
 No new hardware result is claimed yet. T32 still needs the T16 optimization parity work
 listed above before it can be described as a matched winning-recipe comparison.
