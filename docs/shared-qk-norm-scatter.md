@@ -1,6 +1,41 @@
 # Shared-Q/K with direct-scatter normalization
 
-**Shared-Q/K composition passes simulation; combined performance is unqualified.**
+**Combined correctness passes; no whole-request TG gain. Not promoted.**
+
+## Matched combined outcome
+
+Run **35216035465**, source `d79f9de119c9d2ebaa44b23190fcb00b88e105a7`,
+finishes in **6m26s**, including loading, two audits and four ABBA timed requests.
+The independent validator checks the complete report and recomputes the summary.
+
+| Norm reader | CTX / streams | Cold PP | Complete-cycle TG |
+| --- | --- | ---: | ---: |
+| Winning prefetch | 4,096 / 1 | 3,348.80 | **122.3352** |
+| Direct scatter | 4,096 / 1 | 3,324.58 | **122.3076** |
+
+Aggregate TG changes **-0.0225%**. Paired changes are **+0.9818%** and
+**-1.0120%**, failing the repeatable-improvement screen. Both arms commit 242
+timed tokens and accept 224 of 300 proposals, with identical target responses.
+
+| Mean timed phase per block | Prefetch | Scatter |
+| --- | ---: | ---: |
+| Draft | 26.44 ms | 26.96 ms |
+| Verification/readback | 66.60 ms | 65.75 ms |
+| Blocking verifier replay (nested) | 65.78 ms | 64.96 ms |
+| Selection/commit | 5.04 ms | 5.25 ms |
+| Complete cycle | 98.86 ms | 98.88 ms |
+
+The approximately 0.82 ms verifier reduction appears in both repetitions, but
+does not establish a whole-request win: drafting/commit variation offsets it.
+Keep this as a correctness-qualified component candidate, not a new default or
+an added claimed speedup. Do not repeat norm-reader sweeps to chase the much
+larger 200-TG gap. Cold PP variation is not caused by a decode-only reader change.
+
+All token/state/inactive-slot, feature/proposal, packed-weight, executed shared-Q/K,
+draft-tail and incremental-publication checks pass. Sources remain unchanged,
+the report closes cleanly and process exit is zero. Report SHA-256:
+`28c49a453fd82a7cf093c55d844a71b272eac1a2cf8bb8bb3fcb0168ce1571db`.
+Held-out coding quality and serving remain unqualified.
 
 ## Simulator result
 
@@ -66,5 +101,5 @@ four complete ABBA requests at 4K. It retains the exclusive-card and disk-pressu
 gates, a 600-second launcher cap and 12-minute whole-job cap. The context ladder
 is unchanged. Both paired TG changes must exceed 2% for the improvement screen;
 neither a green job nor that screen automatically promotes the candidate.
-Combined hardware performance remains unqualified. Serving defaults and the
-accepted recipe remain unchanged.
+The completed combined result above supersedes the implementation gates.
+Serving defaults and the accepted recipe remain unchanged.
