@@ -62,7 +62,8 @@ def measure_dspark_request(operations, model, sampler, prompt, pages, helpers, *
         from target_t32_attention_gate import qualify_request
 
         t32_attention_audit = qualify_request(target_attention_t32_evidence,
-            position=len(prompt), remaining=max_new_tokens - 1)
+            position=len(prompt), remaining=max_new_tokens - 1,
+            **(dict(hardware_mask_compatibility=True) if hardware_t32 else {}))
     if type(bias_cache) is not bool or (bias_cache and not (
             proposal_trace and score_layout and captured_publication and gdn_shared_qk
             and fused_t16_mlp and target_attention_t16 and isinstance(bias_cache_build, dict))):

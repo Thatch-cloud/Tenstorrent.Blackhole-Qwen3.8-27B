@@ -75,7 +75,7 @@ def hardware_scope(root, directory, proposal, score, mesh, installation):
             or installation.get('links') != links or installation.get('full_request_qualified') is not False):
         raise ValueError('Matching installed arithmetic and source-bound composition required')
     before, native = sources(directory), native_sources(root)
-    record = dict(calls=0, restored=False, sources=before, hardware_qualified=False,
+    record = dict(calls=0, native_proposal_checks=[], restored=False, sources=before, hardware_qualified=False,
         performance_qualified=False, full_request_qualified=False, serving_qualified=False)
     state = SimpleNamespace(mesh=mesh, links=links, record=record)
     token = _ACTIVE.set(state)
@@ -130,3 +130,30 @@ class HardwareTracedDSparkDevice(TracedDSparkDevice):
         except BaseException:
             self.close()
             raise
+
+    def propose(self, anchor, count):
+        import torch
+        from dspark_t32_markov import execute as native_markov
+        from dspark_t32_prepared import execute as complete_proposal
+
+        state = require_active(self.mesh)
+        if self.prepared is None or self.prepared.audit is not True:
+            raise ValueError('Complete hardware proposal comparison requires an audited prepared trace')
+        self.prepared.update(anchor)
+        scope = self.prepared.output_owner()
+        candidate = self.proposal_markov
+        try:
+            self.proposal_markov = native_markov
+            reference = self.prepared.snapshot(complete_proposal(self, self.prepared.inputs,
+                self.prepared.history, scope.retain))
+        finally:
+            self.proposal_markov = candidate
+            scope.release()
+        tokens = super().propose(anchor, count)
+        actual = self.prepared.snapshot(self.prepared.outputs)
+        if len(reference) != 6 or len(actual) != 6 or any(
+                not torch.equal(expected, current) for expected, current in zip(reference, actual, strict=True)):
+            raise AssertionError('Complete fused-score proposal differs from native-score reference')
+        state.record['native_proposal_checks'].append(dict(position=self.position, anchor=anchor,
+            rows=31, tensors=6, exact=True))
+        return tokens

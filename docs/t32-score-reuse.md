@@ -211,8 +211,20 @@ Local tests cover selection, missing ownership, partial target recipes, denied
 timing, all 31 feedback positions and failure cleanup. These are orchestration
 tests, not physical-device acceptance.
 
-Next: connect the outer CI probe to the installer and owned scope, validate the
-target-attention evidence against current sources, then run the complete learned
-proposal/native-score comparison and target request audit on hardware. No new
-hardware result is claimed yet. T32 still needs the T16 optimization parity work
+The loaded-model entry point now owns installation, admission and mesh scope for
+one complete 4K request with a 65-token output limit. Each proposal compares six
+full tensors (normalized activations, logits and all 31 token IDs on both chips)
+against the native scorer, as well as the existing changed-input replay audit.
+It rejects timing and missing native comparisons, and unwinds scopes on failure.
+
+Retained target-attention run **34590151457** was downloaded and checked locally.
+Its only source mismatch is the added simulator-only context-ladder branch in
+`attention_mask_replay.py`. An explicit hardware compatibility policy pins the
+original report and both source hashes, requires that branch disabled and retains
+all 8 replay, 24 mask and 4 KV checks. The normal strict gate remains unchanged.
+This is evidence compatibility, not a new simulator or hardware test result.
+
+Next: connect the outer CI loader to `t32_combined_experiment.run_loaded_requests`,
+stage the three retained evidence artifacts and run the complete hardware audit.
+No new hardware result is claimed yet. T32 still needs the T16 optimization parity work
 listed above before it can be described as a matched winning-recipe comparison.

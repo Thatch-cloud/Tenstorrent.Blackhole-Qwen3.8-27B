@@ -2,13 +2,48 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import torch
 
 import t32_score_hardware as hardware
 from test_dspark_markov_device import operands, tensor
 
 
 class ScoreHardwareTests(unittest.TestCase):
+    def test_complete_proposal_compares_native_backend_and_restores_on_failure(self):
+        device = hardware.HardwareTracedDSparkDevice.__new__(hardware.HardwareTracedDSparkDevice)
+        device.mesh, device.proposal_markov = object(), object()
+        device.history = SimpleNamespace(position=4096)
+        owner = SimpleNamespace(retain=Mock(), release=Mock())
+        reference = tuple(torch.tensor([index]) for index in range(6))
+        device.prepared = SimpleNamespace(audit=True, update=Mock(), output_owner=lambda: owner,
+            snapshot=Mock(side_effect=[reference, tuple(value.clone() for value in reference)]),
+            inputs={}, history=(), outputs={})
+        state = SimpleNamespace(record=dict(native_proposal_checks=[]))
+        backend = device.proposal_markov
+        with patch.object(hardware, 'require_active', return_value=state), \
+                patch('dspark_t32_prepared.execute', return_value={}) as execute, \
+                patch.object(hardware.TracedDSparkDevice, 'propose', return_value=(17, 18)):
+            self.assertEqual(device.propose(17, 2), (17, 18))
+            execute.assert_called_once()
+            self.assertIs(device.proposal_markov, backend)
+            self.assertEqual(state.record['native_proposal_checks'][0]['tensors'], 6)
+            changed = list(reference)
+            changed[-1] = torch.tensor([-1])
+            device.prepared.snapshot.side_effect = [reference, tuple(changed)]
+            with self.assertRaisesRegex(AssertionError, 'native-score reference'):
+                device.propose(18, 2)
+            self.assertEqual(len(state.record['native_proposal_checks']), 1)
+            execute.side_effect = RuntimeError('native failure')
+            with self.assertRaisesRegex(RuntimeError, 'native failure'):
+                device.propose(19, 2)
+            self.assertIs(device.proposal_markov, backend)
+            self.assertEqual(owner.release.call_count, 3)
+            device.prepared.audit = False
+            with self.assertRaisesRegex(ValueError, 'audited prepared'):
+                device.propose(19, 2)
+
     def fixture(self, stack):
         mesh = SimpleNamespace(shape=[1, 2])
         links, composition = {'backend': 'hardware'}, {'component_composition_audited': True}

@@ -1,14 +1,39 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from target_t32_attention_gate import SOURCES, validate, qualify_request
+from target_t32_attention_gate import MASK_DELTA, SOURCES, validate, qualify_request
 
 
 class GateTests(unittest.TestCase):
+    def test_exact_inactive_mask_delta_requires_pinned_artifact_and_hardware(self):
+        report = copy.deepcopy(self.report)
+        report['sources']['attention_mask_replay.py'] = MASK_DELTA[0]
+        report['sources_after'] = dict(report['sources'])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'attention.json'
+            path.write_text(json.dumps(report))
+            path.with_suffix('.exit-status').write_text('0')
+            env = dict(QWEN_T32_FUSED_SCORE_HARDWARE='1', QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(ValueError, 'Pinned mask'):
+                    qualify_request(path, position=4096, remaining=64, hardware_mask_compatibility=True)
+                with patch('target_t32_attention_gate.RETAINED_REPORT', hashlib.sha256(path.read_bytes()).hexdigest()):
+                    result = qualify_request(path, position=4096, remaining=64, hardware_mask_compatibility=True)
+                    self.assertEqual(result['reviewed_inactive_source_delta']['current'], MASK_DELTA[1])
+                    self.assertFalse(result['full_request_qualified'])
+                    with self.assertRaisesRegex(ValueError, 'source changed'):
+                        qualify_request(path, position=4096, remaining=64)
+                    for key, value in (('QWEN_CONTEXT_LADDER_SIM', '1'), ('QWEN_SIM_ONLY', '1'),
+                            ('QWEN_CARDS_ALLOCATED', '0'), ('TT_METAL_SIMULATOR', '/sim')):
+                        with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(ValueError, 'Pinned mask'):
+                            qualify_request(path, position=4096, remaining=64, hardware_mask_compatibility=True)
+
     def test_request_requires_clean_exit_and_bounded_geometry(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'attention.json'

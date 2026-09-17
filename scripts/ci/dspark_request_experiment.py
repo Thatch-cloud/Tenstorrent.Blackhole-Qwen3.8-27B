@@ -177,12 +177,25 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, max_new_tokens=None):
+        history_profile=False, captured_publication=False, max_new_tokens=None, t32_attention_evidence=None):
     from dspark_request_limit import request_limit
     output_limit = request_limit(max_new_tokens,
         short_default=target_attention_variants or combined_variants or profile_drafter or profile_verifier)
     import torch
     from full_dspark_request import measure_dspark_request
+    t32_audit = t32_attention_evidence is not None
+    if t32_audit:
+        from t32_score_hardware import require_active
+        from target_t32_attention_gate import qualify_request
+
+        require_active(model.mesh_device)
+        if any((variants, native_attention_variants, profile_verifier, norm_scatter_variants,
+                target_attention_variants, combined_variants, mlp_down, mlp_equal_footprint,
+                profile_drafter, score_layout, banked_proposal, native_slot_gdn, fused_t16_mlp,
+                history_profile, captured_publication)):
+            raise ValueError('T32 combined audit cannot mix T16 experiment routes')
+        report['t32_attention_component'] = qualify_request(t32_attention_evidence,
+            position=len(prompt), remaining=output_limit - 1, hardware_mask_compatibility=True)
     request_64k = len(prompt) == 65536
     if request_64k:
         from dspark_64k_scope import require_scope
@@ -377,6 +390,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if combined_profile and (not captured_publication or profile_verifier or profile_drafter or history_profile):
         raise ValueError('Combined attribution requires the isolated publication runtime')
     schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants else tuple(('eager', audit) for audit in (True, False, False))
+    if t32_audit:
+        schedule = (('eager', True),)
     if combined_profile:
         schedule = (('publication', True),)
     if profile_verifier or profile_drafter:
@@ -387,7 +402,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     control_warmed = False
     with sampler_links(sampler.tt_sampling, 4):
         for ordinal, (arm, audit) in enumerate(schedule):
-            if (request_64k or not audit) and not control_warmed:
+            if (t32_audit or request_64k or not audit) and not control_warmed:
                 warm_native_control(generator, kv_cache, report, progress,
                     num_blocks=1040 if request_64k else 1024)
                 control_warmed = True
@@ -405,7 +420,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=output_limit, **POLICIES[arm],
+                    eos_ids=eos, audit_features=audit, max_new_tokens=output_limit,
+                    **(dict(t32=True, proposal_trace=True, commit_only_gdn=True, native_attention=True,
+                        fused_t32_mlp=True, target_attention_t32=True,
+                        target_attention_t32_evidence=t32_attention_evidence) if t32_audit else POLICIES[arm]),
                     **(dict(profile_verifier=True) if profile_verifier else {}),
                     **(dict(combined_profile=True) if combined_profile else {}),
                     **(dict(history_profile=True) if history_profile else {}),
@@ -430,6 +448,14 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
+    if t32_audit:
+        if len(report['request_checks']) != 1 or any(report['request_checks'][0].get(key) is not True
+                for key in ('exact', 'state_exact', 'inactive_exact', 'instrumented_timing')):
+            raise ValueError('Complete exact audited T32 hardware request required')
+        report.update(instrumented_timing=True, correctness_only=True, ctx_tokens=len(prompt),
+            drafter_history_rows=len(prompt), proposal_rows=31, pp=None, committed_tg=None,
+            scope='Combined fused T32 hardware correctness screen; not throughput or serving qualification')
+        return
     if profile_verifier or profile_drafter or combined_profile:
         report.update(instrumented_timing=True, correctness_only=True,
             combined_runtime_profile=combined_profile,
