@@ -101,7 +101,7 @@ printf 'preflight_complete\n' | tee "$results/preflight-stage.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
-if [[ "${QWEN_SIM_CASE:-stack}" = history-append || "${QWEN_SIM_CASE:-stack}" = draft-tail ]]; then kinds=''; fi
+if [[ "${QWEN_SIM_CASE:-stack}" = history-append || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = ladder-cache ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then kinds=''; fi
