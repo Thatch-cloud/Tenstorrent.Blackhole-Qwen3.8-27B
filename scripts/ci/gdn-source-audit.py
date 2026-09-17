@@ -28,8 +28,6 @@ def ownership_sources(source):
     if len(paths) > 200 or sum(path.stat().st_size for path in paths) > 4 * 1024 * 1024:
         raise RuntimeError('Ownership source export exceeds bounded budget')
     return paths, missing
-
-
 def main():
     source = Path('/opt/tt-metal')
     destination = Path('/results')

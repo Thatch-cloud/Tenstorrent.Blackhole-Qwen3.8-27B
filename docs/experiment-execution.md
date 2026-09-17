@@ -1060,7 +1060,6 @@ container, then compares four-row versus eight-row groups with the same compact
 allocation in both arms. It does not overwrite the serving image or host runtime.
 Full-model DMA gate `34064443450` (`21aa767`) is running separately on the
 unchanged hardware runtime.
-
 - Image: `sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`.
 - TT-Metal: `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` with recorded graft changes.
 - Plugin: `bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c`; vLLM `0.25.1+empty`.
@@ -3044,7 +3043,6 @@ KV writes; reset and host validation are excluded from both arms. Positions are
 establishes serving throughput. Next combine this attention path with the exact
 GDN batching/rollback path in a full-model verifier, then measure verification and
 commit cost at realistic contexts before introducing a drafter.
-
 | Track | Current status | Required next evidence |
 | --- | --- | --- |
 | Hardware prerequisite | Correctness-passed, run 33941853075 | Repeat for changed native kernels |

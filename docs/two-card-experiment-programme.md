@@ -1800,7 +1800,6 @@ Keep E5 end-to-end deployment gated on verifier economics; do not label host dra
 tests or oracle verification as real coding throughput.
 
 ## Initial execution context
-
 Status: execution started, 2026-09-05. Hardware operator prerequisites passed in
 [run 33941853075](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/33941853075):
 80 fused-kernel reference cases, 224 recurrent/KV-state checks and 8 eager/traced
@@ -1859,7 +1858,6 @@ rows. Do not bypass these guards or present 8K component proof as 32K/64K proof.
 | Establish the 1024-output throughput mode | Verify ignore-EOS capability or clearly report natural-stop output counts; the current 121-token fixture does not satisfy this duration |
 | Publish single-stream PP/CTX/TG and latency | Immutable revision, paired raw timings, setup/TTFT and generation accounting; mark unsupported rows explicitly rather than silently skipping them |
 | Separate serving and concurrency checks | Container/gateway and batch 2/8 evidence remain distinct from offline batch-1 speed |
-
 Start with concurrency 1 and prompt lengths 128, 4096, 32768 and 65536 tokens, reserving
 space for generation inside the configured context limit. Count the final templated
 prompt with the pinned tokenizer; reduce input length where necessary. Generate 1024
@@ -1892,7 +1890,6 @@ After per-size correctness and combined batch-1 measurements, sweep active users
 1/2/4/8/16 where safe. Publish per-user latency/TG and aggregate throughput
 separately, with actual scheduler batch size and memory per card. Largest-window
 runtime admission and sustainable user counts remain unqualified.
-
 ### E0: reproduce the current baseline
 
 Inspect the running container and its actual imported model/plugin files, not merely the
@@ -2036,7 +2033,6 @@ baseline comparisons and both stale-GDN/wrong-page controls in six configuration
 execution or safe concurrent writes to shared KV pages. Keep the old multi-token
 harness diagnostic-only; its composed operations
 are not the current native fused control. See the execution ledger for run IDs.
-
 Use the existing multi-token GDN harness and latest fused control. Define T as target
 verification rows, including the seed row; K=T-1 draft proposals. Sweep T=1/2/4/8/16.
 Existing code already batches projections across rows; investigate remaining serial
@@ -2196,7 +2192,6 @@ and total committed tok/s. Include zero-acceptance cycles and neural catch-up.
 Test every rejection position, EOS, cancellation, stale request IDs, slot reuse,
 lookup-to-neural transitions and a forced state-corruption negative control before
 hardware promotion. Host routing tests do not satisfy these E3 device-state gates.
-
 After E3 correctness, repair MTP trace/buffer integration and its documented eager/trace
 stall interaction. Compare speculation off, MTP, and exact token-sequence lookup proposals
 from the current request's supplied source/prompt and generated history. No other user's

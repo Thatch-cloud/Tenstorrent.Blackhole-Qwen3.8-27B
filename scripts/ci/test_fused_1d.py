@@ -44,7 +44,6 @@ class Fused1DTests(unittest.TestCase):
         for rows in (0, 3, 33, True, 8.0):
             with self.assertRaisesRegex(ValueError, 'single-tile'):
                 FusedProjection(None, None, token_rows=rows)
-
     def test_pair_mapping_matches_39_worker_control(self):
         workers = mapping()
         self.assertEqual(len(workers), 39)

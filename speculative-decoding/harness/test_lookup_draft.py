@@ -15,7 +15,6 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(draft.propose_with_match('request', 3), ([], 0))
         with self.assertRaises(ValueError):
             draft.propose_with_match('other', 3)
-
     def test_longest_suffix_wins(self):
         draft = LookupDraft("request", [1, 2, 3, 4, 2, 9, 1, 2])
         self.assertEqual(draft.propose("request", 3), [3, 4, 2])
@@ -56,7 +55,6 @@ class LookupTests(unittest.TestCase):
             candidate = LookupDraft('request', history, match_limit=8, prefer_full_suffix=True)
             self.assertEqual(candidate.propose('request', 7), expected)
             self.assertEqual(candidate.propose_with_match('request', 7)[1], max(candidates)[0] if candidates else 0)
-
     def test_no_match_falls_back(self):
         self.assertEqual(LookupDraft("request", [1, 2, 3]).propose("request", 7), [])
 

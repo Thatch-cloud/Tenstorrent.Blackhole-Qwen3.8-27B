@@ -85,7 +85,6 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   and stale convolution negative controls must fail exact state/output checks.
   Uses unchanged K-image BF16 state/decode flags. Snapshot-heavy diagnostic layer
   timing is not the full-model verifier cost curve or speculative throughput.
-
 - `baseline`: frozen model/tokenizer snapshot, unchanged K-image control, warmed
   context/concurrency matrix and passive 250 ms metrics capture. Client estimates
   are not engine-commit throughput. Weights are read-only; experimental caches are
@@ -180,7 +179,6 @@ Hardware entry-point guard tests require Python 3.10 or newer:
   unfenced captured trace control. Fences change overlap and include dispatch costs;
   these intervals are not a traced device critical-path decomposition. Export no
   raw profiler CSVs or tensors. Profiling is off by default in all other suites.
-
 Run card-backed suites serially under an explicit operator allocation. See the
 [execution ledger](../../docs/experiment-execution.md) for dependencies and results.
 The planned research tracks are not all implemented tests; a passed prerequisite
