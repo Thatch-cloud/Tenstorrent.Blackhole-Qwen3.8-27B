@@ -189,6 +189,7 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_CENTER_TILE_FILL=$center_tile_fill" \
     -e "QWEN_SPLITK_ATTENTION=$splitk_attention" \
     -e "QWEN_SPLITK_MAXIMA=${QWEN_SPLITK_MAXIMA:-0}" \
+    -e "QWEN_LADDER_CONTEXT=${QWEN_LADDER_CONTEXT:-}" \
     -e "QWEN_SPLITK_WORKERS=${QWEN_SPLITK_WORKERS:-8}" \
     -e "QWEN_SPLITK_ROW_DIAGNOSTIC=${QWEN_SPLITK_ROW_DIAGNOSTIC:-0}" \
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \

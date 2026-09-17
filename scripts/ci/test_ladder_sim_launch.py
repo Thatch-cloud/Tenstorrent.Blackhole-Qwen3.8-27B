@@ -48,6 +48,23 @@ class LadderSimLaunchTests(unittest.TestCase):
         for name in ('run-native-fixed-attention.py', 'blackhole-packer-zero-flags.patch'):
             self.assertTrue((root / 'optimisation/sim' / name).is_file())
 
+    def test_context_reaches_probe_and_references_precede_capture(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-ladder-cache-sim.yml').read_text()
+        self.assertIn('context: [65536, 131072]', workflow)
+        self.assertIn("QWEN_LADDER_CONTEXT: '${{ matrix.context }}'", workflow)
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('-e "QWEN_LADDER_CONTEXT=${QWEN_LADDER_CONTEXT:-}"', runner)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('--context "${QWEN_LADDER_CONTEXT:?}"', suite)
+        probe = Path(__file__).with_name('ladder-cache-probe.py').read_text()
+        compile(probe, 'ladder-cache-probe.py', 'exec')
+        self.assertLess(probe.index('snapshot(serial)'), probe.index('with page_geometry(context)'))
+        candidate = probe.split('with page_geometry(context)', 1)[1]
+        self.assertNotIn('to_memory_config(', candidate)
+        self.assertNotIn('paged_update_cache(', candidate)
+        self.assertIn("len(report['checks']) != 10", candidate)
+
 
 if __name__ == '__main__':
     unittest.main()

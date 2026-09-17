@@ -15,6 +15,7 @@ from ordered_cache import HASHES, load_kernels, update
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--context', type=int, choices=(65536, 131072), required=True)
     options = parser.parse_args()
     if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or Path('/dev/tenstorrent').exists() or options.output.exists()):
@@ -27,7 +28,7 @@ def main():
     fingerprints = lambda: {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
         for name in names}
     kernels = load_kernels(os.environ['TT_METAL_HOME'])
-    report = dict(passed=False, closed_cleanly=False, backend='simulator', checks=[],
+    report = dict(passed=False, closed_cleanly=False, backend='simulator', checks=[], context=options.context,
         sources=fingerprints(), native_hashes=HASHES,
         generated_hashes={role: hashlib.sha256(source.encode()).hexdigest() for role, source in kernels.items()},
         performance_qualified=False, model_integrated=False, scope=__doc__)
@@ -57,17 +58,23 @@ def main():
                 mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
             ttnn.copy_host_to_device_tensor(host, destination)
 
-        def compare(left, right, context, seed, name):
-            left_parts, right_parts = ttnn.get_device_tensors(left), ttnn.get_device_tensors(right)
-            if len(left_parts) != 2 or len(right_parts) != 2:
+        def snapshot(value):
+            parts = ttnn.get_device_tensors(value)
+            if len(parts) != 2:
                 raise AssertionError('Both simulated chips required')
-            for chip, (actual, expected) in enumerate(zip(left_parts, right_parts, strict=True)):
-                exact = torch.equal(ttnn.to_torch(actual), ttnn.to_torch(expected))
+            return [ttnn.to_torch(part).clone() for part in parts]
+
+        def compare(left, expected_parts, context, seed, name):
+            left_parts = ttnn.get_device_tensors(left)
+            if len(left_parts) != 2 or len(expected_parts) != 2:
+                raise AssertionError('Both simulated chips required')
+            for chip, (actual, expected) in enumerate(zip(left_parts, expected_parts, strict=True)):
+                exact = torch.equal(ttnn.to_torch(actual), expected)
                 report['checks'].append(dict(context=context, seed=seed, chip=chip, name=name, exact=exact))
                 if not exact:
                     raise AssertionError('Wide page-table cache mismatch: ' + name)
 
-        for context in (65536, 131072):
+        for context in (options.context,):
             pages_count = geometry(context)['target_page_count']
             stage('allocate', context=context, page_columns=pages_count)
             initial = torch.zeros(pages_count + 8, 2, 64, 256, dtype=torch.bfloat16)
@@ -81,29 +88,33 @@ def main():
             singleton_input = upload(torch.zeros(1, 1, 32, 256, dtype=torch.bfloat16), ttnn.bfloat16)
             sharding = ttnn.create_sharded_memory_config([32, 256], ttnn.CoreGrid(y=1, x=1),
                 ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR, use_height_and_width_as_shard_shape=True)
+            references = []
+            for seed in (0, 1):
+                stage('native-reference', context=context, seed=seed)
+                torch.manual_seed(seed)
+                inputs = torch.randn(1, 16, 32, 256).bfloat16()
+                indexes = torch.arange(context - 1 + seed * 2, context + 15 + seed * 2, dtype=torch.int32)
+                for index in range(16):
+                    replace(inputs[:, index:index + 1].contiguous(), singleton_input, ttnn.bfloat16)
+                    replace(indexes[index:index + 1], singleton_position, ttnn.int32)
+                    sharded = ttnn.to_memory_config(singleton_input, sharding)
+                    ttnn.experimental.paged_update_cache(serial, sharded,
+                        update_idxs_tensor=singleton_position, page_table=singleton_pages)
+                    ttnn.deallocate(sharded)
+                references.append((inputs, indexes, snapshot(serial)))
             with page_geometry(context) as evidence:
-                for seed in (0, 1):
-                    stage('native-reference', context=context, seed=seed)
-                    torch.manual_seed(seed)
-                    inputs = torch.randn(1, 16, 32, 256).bfloat16()
-                    indexes = torch.arange(context - 1 + seed * 2, context + 15 + seed * 2, dtype=torch.int32)
+                for seed, (inputs, indexes, expected) in enumerate(references):
+                    stage('candidate', context=context, seed=seed)
                     replace(inputs, packed, ttnn.bfloat16)
                     replace(indexes, positions, ttnn.int32)
-                    for index in range(16):
-                        replace(inputs[:, index:index + 1].contiguous(), singleton_input, ttnn.bfloat16)
-                        replace(indexes[index:index + 1], singleton_position, ttnn.int32)
-                        sharded = ttnn.to_memory_config(singleton_input, sharding)
-                        ttnn.experimental.paged_update_cache(serial, sharded,
-                            update_idxs_tensor=singleton_position, page_table=singleton_pages)
-                        ttnn.deallocate(sharded)
                     operation = lambda: update(mesh, candidate, packed, positions, pages, kernels)
                     if seed == 0:
                         operation()
-                        compare(candidate, serial, context, seed, 'eager')
+                        compare(candidate, expected, context, seed, 'eager')
                         trace, unused = capture_operation(ttnn, mesh, operation)
                     stage('replay', context=context, seed=seed)
                     ttnn.execute_trace(mesh, trace, blocking=True)
-                    compare(candidate, serial, context, seed, 'replay')
+                    compare(candidate, expected, context, seed, 'replay')
                     for chip, shard in enumerate(ttnn.get_device_tensors(packed)):
                         exact = torch.equal(ttnn.to_torch(shard), inputs)
                         report['checks'].append(dict(context=context, seed=seed, chip=chip, name='input_unchanged', exact=exact))
@@ -117,7 +128,7 @@ def main():
             for value in reversed(owned):
                 ttnn.deallocate(value)
             owned.clear()
-        if len(report['checks']) != 20 or not all(check['exact'] for check in report['checks']):
+        if len(report['checks']) != 10 or not all(check['exact'] for check in report['checks']):
             raise AssertionError('Complete eager/replay and input matrix required')
         report['passed'] = True
         stage('complete')

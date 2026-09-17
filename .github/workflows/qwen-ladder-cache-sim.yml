@@ -1,7 +1,7 @@
 name: Qwen wide page-table replay qualification
 on:
   push:
-    tags: ['experiment/ladder-cache-sim-v1', 'experiment/ladder-cache-sim-v2', 'experiment/ladder-cache-sim-v3']
+    tags: ['experiment/ladder-cache-sim-v1', 'experiment/ladder-cache-sim-v2', 'experiment/ladder-cache-sim-v3', 'experiment/ladder-cache-sim-v4']
 permissions:
   contents: read
 concurrency:
@@ -9,6 +9,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   simulator:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        context: [65536, 131072]
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 9
     steps:
@@ -32,9 +37,10 @@ jobs:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: ladder-cache
+          QWEN_LADDER_CONTEXT: '${{ matrix.context }}'
         run: timeout -k 15 450 bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: qwen-ladder-cache-sim-${{ github.run_id }}
+          name: qwen-ladder-cache-sim-${{ matrix.context }}-${{ github.run_id }}
           path: ladder-cache-source/experiment-results/
