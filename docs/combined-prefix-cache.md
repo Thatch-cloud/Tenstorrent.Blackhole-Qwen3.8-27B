@@ -56,6 +56,13 @@ the runtime must still reserve these pages, invalidate before any cold overwrite
 and publish metadata only after all checkpoint components succeed. Six host
 tests cover changed suffixes, misses, identity changes and ownership conflicts.
 
+`prefill_prefix_boundary.py` hooks the completed native cold-prefill chunk to
+capture preallocated GDN state **before** the suffix advances recurrence and
+convolution carry. Missing, skipped or crossed boundaries cannot be published;
+copy failure releases the otherwise orphaned hidden output. Four host tests
+check callback ordering and failure restoration. Publication must require the
+whole scope to complete, not merely observe the intermediate `captured` flag.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
