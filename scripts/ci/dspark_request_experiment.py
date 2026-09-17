@@ -69,12 +69,39 @@ def request_preflight(directory, *, prepared_proposals=False):
     return dict(request_prerequisites=prerequisites, sources=sources, simulator_metadata_only_sources=metadata_only)
 
 
-def summarize(requests):
+def summarize(requests, *, prefix_cached=False):
+    if type(prefix_cached) is not bool:
+        raise ValueError('Explicit cached-prefill summary selection required')
     if (len(requests) != 3 or [value.get('instrumented_timing') for value in requests] != [True, False, False]
             or any(value.get('exact') is not True or value.get('state_exact') is not True
                 or value.get('inactive_exact') is not True for value in requests)):
         raise ValueError('One feature-audited and two exact timed full requests required')
     first = requests[0]
+    cached_prefixes = []
+    for request in requests:
+        records = request.get('dspark', {}).get('prefix_cache')
+        if not prefix_cached:
+            if records is not None:
+                raise ValueError('Cached-prefill requests cannot be summarized as cold PP')
+            continue
+        if not isinstance(records, list) or len(records) != 2:
+            raise ValueError('Cold-control and cached-candidate records required')
+        cold, hit = records
+        prefix = hit.get('prefix_tokens')
+        boundary, route = cold.get('checkpoint_boundary', {}), hit.get('native_route', {})
+        if (cold.get('cache_hit') is not False or hit.get('cache_hit') is not True
+                or cold.get('prefix_tokens') != 0 or cold.get('suffix_tokens') != request['length']
+                or type(prefix) is not int or not 0 < prefix < request['length'] or prefix % 2048
+                or hit.get('suffix_tokens') != request['length'] - prefix
+                or boundary.get('position') != prefix
+                or any(boundary.get(key) is not True for key in ('captured', 'complete', 'restored'))
+                or any(route.get(key) is not True for key in ('completed', 'restored'))
+                or type(route.get('calls')) is not int or route['calls'] != 1
+                or route.get('prefix_tokens') != prefix):
+            raise ValueError('Complete exact cached-prefix accounting and restored scopes required')
+        cached_prefixes.append(prefix)
+    if cached_prefixes and len(set(cached_prefixes)) != 1:
+        raise ValueError('One matched prefix reuse policy across audit and timed requests required')
     policies = [(value.get('dspark', {}).get('proposal_trace', False), value.get('commit_only_gdn', False))
         for value in requests]
     if any(any(type(flag) is not bool for flag in policy) or policy != policies[0] for policy in policies):
@@ -95,7 +122,7 @@ def summarize(requests):
         raise ValueError('Positive committed-token, complete decode-cycle and prefill measurements required')
     proposed = sum(value['proposed'] for value in timed)
     accepted = sum(value['accepted'] for value in timed)
-    return dict(pp=1000 * sum(value['length'] for value in timed) / prefill_ms, ctx=first['length'],
+    result = dict(pp=1000 * sum(value['length'] for value in timed) / prefill_ms, ctx=first['length'],
         committed_tg=1000 * tokens / milliseconds, streams=1, verifier_rows=16, draft_queries=15,
         committed_tokens=tokens, proposed=proposed, accepted=accepted,
         acceptance=accepted / proposed if proposed else None,
@@ -104,6 +131,12 @@ def summarize(requests):
         mean_verifier_setup_ms=sum(value['engine_setup_ms'] for value in timed) / 2,
         proposal_trace=policies[0][0], commit_only_gdn=policies[0][1],
         held_out_coding_quality=False, serving_qualified=False)
+    if prefix_cached:
+        result.update(pp=None, prefix_cached=True, cached_prefix_tokens=cached_prefixes[0],
+            effective_cached_pp=1000 * sum(value['length'] for value in timed) / prefill_ms,
+            suffix_request_pp=1000 * sum(value['length'] - cached_prefixes[0] for value in timed) / prefill_ms,
+            cached_prefill_measurement='Complete candidate prefill including restore and native setup; not cold PP')
+    return result
 
 
 def warm_native_control(generator, kv_cache, report, progress, *, num_blocks=1024):

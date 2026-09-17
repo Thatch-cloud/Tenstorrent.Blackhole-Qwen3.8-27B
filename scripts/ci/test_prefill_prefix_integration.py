@@ -11,7 +11,7 @@ from prefill_prefix_boundary import checkpoint_boundary
 from prefill_prefix_features import prefix_features
 from prefill_prefix_lookup import PrefixIdentity, PrefixLookup
 from prefill_prefix_resume import native_resume_scope
-from prefill_prefix_controller import PrefixController
+from prefill_prefix_controller import PrefixController, full_request_factory
 from prefill_prefix_residency import OfflinePrefixResidency
 
 
@@ -108,6 +108,32 @@ def feature_values(capture):
 
 
 class PrefixIntegrationTests(unittest.TestCase):
+    def test_full_request_factory_unwinds_cached_consumer_failure(self):
+        operations = HostOperations()
+        model = HostModel(operations)
+        checkpoint = PrefillGDNCheckpoint(operations, model.device, model.gdn,
+            [operations.tensor() for unused in model.states])
+        identity = PrefixIdentity('a' * 64, 'b' * 64, 'c' * 64, 'session', 0)
+        pages = torch.arange(96, dtype=torch.int32).reshape(1, -1)
+        controller = PrefixController(operations, model, checkpoint,
+            OfflinePrefixResidency(operations, model, identity, list(range(96))))
+        factory = full_request_factory(controller, identity, pages, prefix_position=4096, inactive_pages=[100])
+        tokens = list(range(6144))
+        def prefill(values):
+            return model._prefill_chunked_eager_tp(torch.tensor([values]), pages, 6144, 3, 2048, 0)
+        with factory(tokens, prefill, 0) as (unused, capture, evidence):
+            self.assertFalse(evidence['cache_hit'])
+            self.assertEqual(len(capture.outputs()), 3)
+        model.starts.clear()
+        with self.assertRaisesRegex(RuntimeError, 'consumer'):
+            with factory(tokens, prefill, 1) as (unused, capture, evidence):
+                self.assertTrue(evidence['cache_hit'])
+                self.assertEqual(model.starts, [4096])
+                raise RuntimeError('consumer')
+        self.assertIsNone(controller.owner)
+        self.assertIsNone(controller.lookup.identity)
+        self.assertFalse(controller.busy)
+
     def test_controller_cold_hit_miss_and_failed_residency(self):
         operations = HostOperations()
         model = HostModel(operations)

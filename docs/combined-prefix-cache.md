@@ -116,6 +116,15 @@ candidate. Host harness tests exercise both the audited path and rejection of
 an accidentally warmed reference. This optional hook is not yet staged into a
 hardware experiment or enabled in serving; the current 262K run remains unchanged.
 
+Cached summaries require explicit `prefix_cached=True`, two complete prefill
+records per request and restored capture/resume scopes. They report `pp: null`,
+`effective_cached_pp` (whole prompt divided by cached-request prefill time) and
+`suffix_request_pp` (new tokens divided by that same complete time, including
+restore/setup). Cold PP cannot silently include reused tokens. Committed TG
+continues to use the complete decode cycle. Seven focused accounting/integration
+tests pass. Older unrelated preflight/workflow assertions in the broader request
+test module still fail against historical source pins; they were not relaxed.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
