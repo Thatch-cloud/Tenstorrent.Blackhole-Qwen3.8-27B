@@ -119,8 +119,14 @@ capture begins, so a constructor failure cannot accidentally authorize freeing
 buffers still referenced by a partially captured trace. Failed execution does
 not retry or publish partial samples. Scoped methods restore on exit.
 
-Remaining integration: instantiate the bank in the winning frozen request
-runner, bind the hardware-qualified candidate source, retain the native feature/
-state checks, and collect a complete two-replay/64-layer report. No combined
-CI job has been dispatched for this adapter yet; fixture acceptance above does
-not qualify this new host integration or establish a speedup.
+`mlp_clock_experiment.py` now wires the bank into the winning frozen request
+runner. It allocates before request warm-up, binds source-matched qualified
+diagnostic kernels, retains native feature/state checks and executes one audited
+4K request. PP and TG remain null. Normal teardown requires verifier traces to
+be closed; failed construction pins owned pages on the model until mesh shutdown.
+
+Fresh local staging from the frozen revision passes, including runtime component
+evidence and exact diagnostic source matching. The dedicated combined workflow
+has a 600-second launcher cap and 12-minute whole-job cap. It samples only two
+full verifier replays, does not enable the global profiler, and leaves the ladder
+workflow untouched. Combined hardware acceptance is still pending.
