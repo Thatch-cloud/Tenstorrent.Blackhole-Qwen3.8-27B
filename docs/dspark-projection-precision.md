@@ -1,6 +1,35 @@
 # Drafter-only projection precision
 
-**Query-projection simulator execution passes; combined correctness/performance unqualified.**
+**All seven simulator screens pass. Combined 4K correctness passes; HiFi2 fails the performance screen. Keep HiFi4.**
+
+## Combined hardware outcome
+
+[Run 35229622229](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35229622229)
+at `856e1f29bfa69a40b67569a0e249b00936343047` completes in **6m35s**.
+Independent artifact validation passes; the container exits cleanly with status
+zero. Each precision arm has one native-token/state/feature audit and two timed
+requests; target fusion, packed weights and incremental history remain unchanged.
+
+| Combined measurement | HiFi4 control | HiFi2 candidate |
+| --- | ---: | ---: |
+| Context / streams | 4,096 / 1 | 4,096 / 1 |
+| Cold PP (tok/s) | 3,343.50 | 3,349.80 |
+| Committed TG (tok/s) | **123.60** | **121.67** |
+| Accepted / proposed | 224 / 300 | 224 / 300 |
+| Committed tokens across timed requests | 242 | 242 |
+
+Aggregate TG changes **−1.56%**; matched pairs are **+0.68% / −3.77%**.
+There is no repeatable gain and no promotion. The unchanged target verifier's
+verification/readback takes approximately **66.5 ms/block** in both arms;
+drafting remains roughly **24–28 ms/block**, despite lower projection fidelity.
+At the observed 12.1 committed tokens/block, verification alone limits TG to
+approximately 182 even if every other cost vanished. Reaching 200 therefore
+requires reducing verifier time or increasing accepted tokens per cycle, not
+another unchanged drafter-precision retry. Held-out coding remains unqualified.
+
+Report SHA-256:
+`52364b05875d535a885b41ef3bb78463f0f3b6a3da792010c97694436244c591`.
+The notes below preserve the experiment's staging history, not its current status.
 
 ## First real-weight simulator screen
 
