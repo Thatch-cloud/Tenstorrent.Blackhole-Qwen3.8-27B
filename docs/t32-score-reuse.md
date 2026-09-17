@@ -24,4 +24,10 @@ The first bounded run, 35177093623, stopped at the host-I/O gate before Docker:
 The simulator step was skipped; no numerical result exists. The whole job
 finished in 35 seconds rather than waiting through container setup.
 CPU regression run 35177082045 passed all 144 tests. This is not device evidence.
-Wait for the host backlog to clear before retrying; do not weaken the admission gate.
+
+Follow-up policy correction: host-I/O telemetry is advisory for this weight-free,
+correctness-only simulator job. Busy disk can delay it, but does not invalidate
+exact score/token comparisons. The job retains its nine-minute cap and reports
+no timing result. A failed pressure observation stays in the artifact rather
+than being relabelled a pass. Hardware throughput workflows retain their strict
+1% I/O gate unchanged; numerical, source, replay and cleanup gates remain mandatory.

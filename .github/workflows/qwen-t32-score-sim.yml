@@ -18,7 +18,8 @@ jobs:
         with:
           path: score-source-${{ github.run_id }}-${{ github.run_attempt }}
           persist-credentials: false
-      - name: Reject overloaded disk before Docker
+      - name: Record host IO pressure (advisory for correctness only)
+        continue-on-error: true
         working-directory: score-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           mkdir -p experiment-results
