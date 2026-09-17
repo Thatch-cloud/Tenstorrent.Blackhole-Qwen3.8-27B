@@ -38,7 +38,7 @@ def validate(report):
     for before, after in (('sources', 'sources_after'), ('native_sources', 'native_sources_after'),
             ('mlp_down_grid_sources', 'mlp_down_grid_sources_after')):
         if not report.get(before) or report.get(before) != report.get(after):
-        raise ValueError('Unchanged native, script and projection sources required')
+            raise ValueError('Unchanged native, script and projection sources required')
     comparison = summarize(report.get('request_checks', []), summarize_requests, validate_audit, validate_route)
     if comparison != report.get('mlp_down_grid_comparison'):
         raise ValueError('Saved comparison differs from independently recomputed complete-cycle evidence')
