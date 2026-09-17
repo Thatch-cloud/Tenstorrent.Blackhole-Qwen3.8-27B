@@ -35,6 +35,7 @@ jobs:
           python -B -m unittest test_full_window_tail test_full_window_geometry_admission test_frozen_runtime_context test_frozen_recipe_context
           python -B -m unittest test_prefill_cache_inventory test_winning_device_attribution
           python -B -m unittest test_mlp_clock_samples test_mlp_clock_projection test_frozen_mlp_wait_zones
+          python -B -m unittest test_mlp_clock_capture test_mlp_clock_stage
           python -B -m unittest test_ladder_cache_reference
           python -B -m unittest test_prefill_gdn_checkpoint test_prefill_prefix_resume test_prefill_prefix_features
           python -B -m unittest test_prefill_prefix_lookup test_prefill_prefix_boundary

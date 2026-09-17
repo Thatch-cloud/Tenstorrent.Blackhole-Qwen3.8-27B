@@ -40,9 +40,11 @@ a small diagnostic cost; these samples cannot be treated as unperturbed timing.
 
 ## Remaining acceptance gates
 
-1. Add the simulator fixture owner: poison every output page before each replay,
-   synchronize, execute once, synchronize, then read all three pages on both
-   chips. Without poisoning, old valid records could masquerade as fresh data.
+1. Run the new simulator fixture owner: poison every output page before each
+   replay, synchronize, execute once, synchronize, then read all three pages on
+   both chips. A missing-execution negative control must reject poisoned pages.
+   `mlp_clock_capture.py` implements this sequence; host tests also reject stale
+   samples after a successful execution, missing-chip output and moved bindings.
 2. Compare eager and changed-input replay outputs against the unchanged kernel;
    require complete, fresh samples on both chips. No full-model weight loading.
 3. Qualify the same bounded fixture on hardware before using it in the combined
@@ -54,3 +56,10 @@ a small diagnostic cost; these samples cannot be treated as unperturbed timing.
 Host tests verify source restoration and buffer contracts, not compilation,
 device ordering, trace lifetime or numerical parity. Nothing here establishes
 200 TG, a faster MLP, or a production-ready profiler.
+
+The dedicated `qwen-mlp-clock-sim.yml` stages from the frozen runtime, restricts
+the fixture to T16, retains byte-exact packed-weight checks and all changing-input
+native comparisons, and requires five complete sample sets (one eager, four
+replays). Its process cap is 510 seconds and whole job cap 12 minutes, including
+setup and artifacts. It does not load the full target model or enable the global
+profiler. These caps do not alter the full context ladder workflow.
