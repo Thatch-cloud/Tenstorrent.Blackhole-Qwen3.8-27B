@@ -40,6 +40,7 @@ jobs:
           python -B -m unittest test_mlp_clock_hardware
           python -B -m unittest test_mlp_clock_combined
           python -B -m unittest test_mlp_clock_experiment
+          python -B -m unittest test_mlp_clock_combined_report
           python -B -m unittest test_ladder_cache_reference
           python -B -m unittest test_prefill_gdn_checkpoint test_prefill_prefix_resume test_prefill_prefix_features
           python -B -m unittest test_prefill_prefix_lookup test_prefill_prefix_boundary

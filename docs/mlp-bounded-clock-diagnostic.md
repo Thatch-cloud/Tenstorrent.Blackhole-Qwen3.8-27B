@@ -1,6 +1,6 @@
 # Bounded MLP wait diagnostic
 
-**Status: simulator and hardware fixture qualified; combined attribution pending.**
+**Status: simulator, hardware fixture and combined attribution pass. No speedup claimed.**
 This does not change the winning T16 recipe or serving defaults.
 
 ## Why this experiment
@@ -129,4 +129,42 @@ Fresh local staging from the frozen revision passes, including runtime component
 evidence and exact diagnostic source matching. The dedicated combined workflow
 has a 600-second launcher cap and 12-minute whole-job cap. It samples only two
 full verifier replays, does not enable the global profiler, and leaves the ladder
-workflow untouched. Combined hardware acceptance is still pending.
+workflow untouched.
+
+## Combined hardware result
+
+Run **35210079674**, source `285f1b55d01258db1c55cdb0311cfc318064dff0`,
+passes in **4m03s** including staging, the disk-pressure gate, weight loading and
+artifacts. The actual winning 4K runtime produces **2,560 complete samples**:
+64 layers, two verifier replays at positions 4,096/4,109, ten observations per
+layer on each chip. Native output, state and inactive slots match; all 100
+feature checks and 11 proposal checks remain. All 867 script, 1,520 native and
+12 diagnostic fingerprints are unchanged. The report closes cleanly at `complete`.
+
+| Sampled median, cycles | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Weight-buffer space wait, worker 0 | 35 | 34 |
+| Weight-read completion, worker 0 | 8,796 | 2,521.5 |
+| Input-read completion, worker 0 | 322.5 | 314 |
+| Receiver-ready wait, worker 0 | 34 | 40.5 |
+| Input multicast completion, worker 0 | 1,033 | 1,032 |
+| First output-ready wait, worker 0 | 8,157.5 | 8,889.5 |
+| First output write, worker 0 | 168 | 168 |
+
+Each cell contains 128 observations. These are selected waits, not total kernel
+durations; they must not be added or extrapolated across all K blocks. In
+particular, output-ready wait is not a direct compute-utilization measurement.
+The weight-read median is substantially above the isolated fixture's 1,486.5 /
+926 cycles. This supports investigating weight delivery in the *combined*
+runtime, but does not establish DRAM saturation, PCIe bottlenecks or an expected
+speedup. Extra buffer capacity is not justified by the near-empty producer-side
+buffer waits, and the previous larger-buffer/whole-input-prefetch regressions
+remain rejected. Do not reintroduce the slower spare-core streaming path.
+
+Report SHA-256:
+`f84c126de95b318d289f27b3cf8064c99f02d5dd2de5fc88d32d0cfd7bdd8e6c`.
+
+`mlp_clock_combined_report.py` independently checks all layer/sample identities,
+actual request positions, cycle ordering, native correctness, restored bindings
+and the winning norm/publication paths before summarizing by chip and worker.
+PP and TG are deliberately null; the 200 committed-TG target is not achieved.
