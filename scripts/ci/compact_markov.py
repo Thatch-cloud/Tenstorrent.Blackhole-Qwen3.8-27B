@@ -34,8 +34,8 @@ def execute(operations, mesh, anchor, base_logits, predecessor, successor, owned
             program_config=program, compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         winners = execute_local_winners(operations, mesh, base_logits, bias, step, retain)
         diagnostic = reduce_winners(operations, mesh, winners, vocabulary, retain)
-        token = retain(operations.slice(diagnostic, (0, 0, 0, 3), (1, 1, 1, 4)))
-        previous = token
+        token = retain(operations.slice(diagnostic, (0, 0, 0, 0), (1, 1, 1, 1)))
+        previous = retain(operations.slice(diagnostic, (0, 0, 0, 3), (1, 1, 1, 4)))
         records.append(dict(token=token, diagnostic=diagnostic))
         if on_step_enqueued is not None:
             on_step_enqueued(step)

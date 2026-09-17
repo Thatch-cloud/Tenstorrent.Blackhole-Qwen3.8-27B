@@ -37,6 +37,8 @@ def validate(report, source_directory):
         raise ValueError('Complete fifteen-step feedback evidence required')
     if report.get('invalid_checks') != [dict(chip=chip, rejected=True, safe_feedback=True) for chip in (0, 1)]:
         raise ValueError('Nonfinite device rejection evidence required')
+    if report.get('invalid_feedback_chain_rejected') is not True:
+        raise ValueError('Invalid feedback chain rejection required')
     sources = report.get('sources', {})
     if set(sources) != set(names) or sources != report.get('sources_after'):
         raise ValueError('Complete unchanged source closure required')

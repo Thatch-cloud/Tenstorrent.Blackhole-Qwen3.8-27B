@@ -24,7 +24,8 @@ class ReportTests(unittest.TestCase):
                     immutable_checks=[dict(record, operand=operand) for record in checks for operand in (0, 1)],
                     feedback_checks=[dict(mode=mode, step=step, chip=chip, exact=True)
                                      for mode in ('eager', 'replay') for step in range(15) for chip in (0, 1)],
-                    invalid_checks=[dict(chip=chip, rejected=True, safe_feedback=True) for chip in (0, 1)])
+                    invalid_checks=[dict(chip=chip, rejected=True, safe_feedback=True) for chip in (0, 1)],
+                    invalid_feedback_chain_rejected=True)
 
     def test_complete_matrix_and_fail_closed_mutations(self):
         fixture = self.fixture()
@@ -36,6 +37,7 @@ class ReportTests(unittest.TestCase):
             lambda report: report['checks'].pop(),
             lambda report: report['feedback_checks'].pop(),
             lambda report: report['invalid_checks'][0].update(rejected=False),
+            lambda report: report.update(invalid_feedback_chain_rejected=False),
             lambda report: report['checks'].__setitem__(0, report['checks'][1]),
             lambda report: report['immutable_checks'][0].update(exact=False),
             lambda report: report['sources_after'].update(extra='0' * 64),

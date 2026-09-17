@@ -177,6 +177,23 @@ def main():
         for trace in reversed(traces):
             ttnn.release_trace(mesh, trace)
         traces.clear()
+        save('invalid_feedback_chain')
+        invalid_feedback_base = base_host.clone()
+        invalid_feedback_base[:, :, 4, :] = float('nan')
+        ttnn.copy_host_to_device_tensor(ttnn.from_torch(invalid_feedback_base, dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper), feedback_inputs[1])
+        invalid_records = feedback_run()
+        invalid_tokens = [[int(value.item()) for value in read(record['token'])] for record in invalid_records]
+        invalid_diagnostics = [[value.reshape(-1).tolist() for value in read(record['diagnostic'])]
+                               for record in invalid_records]
+        if invalid_tokens[4] != [0xffffffff, 0xffffffff]:
+            raise AssertionError('Invalid proposal IDs must remain visible to the native proposal reader')
+        try:
+            validate_readback(invalid_diagnostics, invalid_tokens, feedback_width)
+        except ValueError:
+            report['invalid_feedback_chain_rejected'] = True
+        else:
+            raise AssertionError('Invalid feedback chain was accepted')
         save('nonfinite_feedback_safety')
         invalid_base = patterns[0][0].clone()
         invalid_base[..., 0] = float('nan')

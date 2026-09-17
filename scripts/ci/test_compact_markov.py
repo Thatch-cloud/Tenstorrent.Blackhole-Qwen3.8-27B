@@ -7,6 +7,21 @@ import compact_markov as candidate
 
 
 class CompactMarkovTests(unittest.TestCase):
+    def test_native_proposal_reader_rejects_any_exported_sentinel(self):
+        import torch
+        from dspark_prepared_proposal import PreparedDSparkProposal
+
+        tokens = torch.arange(15).reshape(1, 1, 15, 1)
+        operations = SimpleNamespace(synchronize_device=Mock(),
+            get_device_tensors=lambda value: [value, value], to_torch=lambda value: value)
+        proposal = SimpleNamespace(operations=operations, mesh=object(), device=SimpleNamespace(max_drafts=15))
+        self.assertEqual(PreparedDSparkProposal.read_tokens(proposal, tokens), tuple(range(15)))
+        for step in range(15):
+            invalid = tokens.clone()
+            invalid[0, 0, step, 0] = 0xffffffff
+            with self.assertRaisesRegex(AssertionError, 'invalid'):
+                PreparedDSparkProposal.read_tokens(proposal, invalid)
+
     def test_simulator_only_before_enqueue(self):
         operations = Mock()
         with patch.dict('os.environ', {}, clear=True), self.assertRaisesRegex(ValueError, 'simulator-only'):
@@ -16,8 +31,9 @@ class CompactMarkovTests(unittest.TestCase):
     def test_native_matmul_and_device_feedback(self):
         operations = Mock()
         tokens = [object() for _ in range(3)]
+        feedback = [object() for _ in range(3)]
         diagnostics = [object() for _ in range(3)]
-        operations.slice.side_effect = tokens
+        operations.slice.side_effect = [value for pair in zip(tokens, feedback) for value in pair]
         anchor = object()
         observed = []
         with patch.dict('os.environ', {'QWEN_SIM_ONLY': '1', 'TT_METAL_SIMULATOR': 'test'}), \
@@ -27,10 +43,13 @@ class CompactMarkovTests(unittest.TestCase):
             records = candidate.execute(operations, SimpleNamespace(shape=[1, 2]), anchor,
                 object(), object(), object(), [], on_step_enqueued=observed.append)
         self.assertEqual(observed, [0, 1, 2])
-        for step, previous in enumerate([anchor, *tokens[:-1]]):
+        for step, previous in enumerate([anchor, *feedback[:-1]]):
             self.assertIs(operations.embedding.call_args_list[step].args[0], previous)
-            self.assertEqual(operations.slice.call_args_list[step].args,
+            self.assertEqual(operations.slice.call_args_list[2 * step].args,
+                             (diagnostics[step], (0, 0, 0, 0), (1, 1, 1, 1)))
+            self.assertEqual(operations.slice.call_args_list[2 * step + 1].args,
                              (diagnostics[step], (0, 0, 0, 3), (1, 1, 1, 4)))
+            self.assertIs(records[step]['token'], tokens[step])
             self.assertIs(records[step]['diagnostic'], diagnostics[step])
         operations.argmax.assert_not_called()
         self.assertEqual(operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.call_args.kwargs[

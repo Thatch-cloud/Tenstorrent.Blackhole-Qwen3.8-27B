@@ -88,6 +88,12 @@ sentinel in the diagnostic fields. Every step's diagnostics must pass host
 validation before any proposal is usable; safe zero is not an accepted fallback.
 There is no serving or hardware route for this simulator-only implementation.
 
+Returned proposal tokens now preserve the reducer's invalid sentinel, separately
+from safe internal feedback IDs. Thus `PreparedDSparkProposal.read_tokens` can
+reject an invalid chain at its existing range check, without fifteen additional
+diagnostic readbacks per proposal. The probe also injects NaNs at feedback step
+four and requires the whole chain to be rejected after safe device execution.
+
 The extended probe keeps full-vocabulary selection checks, adds a two-chip
 15-step rank-256 feedback chain at vocabulary 64 (eager and changed-input
 replay), and tests device NaN rejection. This does not qualify full-vocabulary
