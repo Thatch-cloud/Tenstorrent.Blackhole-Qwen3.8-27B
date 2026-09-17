@@ -32,3 +32,12 @@ pack/CB semantics remain unproven. Next gates:
 Do not claim a speedup from saved instructions. The retained recurrence-like
 group occupies about 9.53 ms per verifier replay, including waits; the fraction
 spent on these copies has not been measured. Serving defaults remain unchanged.
+
+The candidate now has an isolated program-construction wrapper and frozen
+simulator staging. It retains the existing 24 full output/prefix-state/bridge
+comparisons and 48 input-integrity checks across eager and three changed-input
+replays. Generated control/candidate kernel hashes are recorded, and construction
+must occur exactly once. Five host tests pass, including construction failure
+restoration; fresh `8c102b2` staging imports successfully and passes shell syntax
+checks. CI performs native-source transformation and compilation before the
+device correctness checks, without model weights or physical-card execution.

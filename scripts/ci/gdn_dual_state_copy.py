@@ -2,6 +2,11 @@
 
 from gdn_multitoken import replace_once
 from gdn_copy_pairs import ORIGINAL
+import hashlib
+from unittest.mock import patch
+
+
+BUILD_RECORDS = []
 
 
 FEEDBACK = '''        copy_tiles(cb_snew, cb_sout, kv);
@@ -32,3 +37,24 @@ def transform(source):
         } else {
             copy_tiles(cb_snew, cb_sout, kv);
         }''')
+
+
+def build(operations, mesh, tensors, *, root):
+    import gdn_shared_qk_pipeline as pipeline
+    original = pipeline.load_kernels
+    io, fp32 = pipeline.cb_plan('recurrence', prefetch_inputs=False)
+    if io.get(18) != 4 or io.get(30) != 4 or 18 in fp32 or 30 in fp32:
+        raise ValueError('Both state destinations must retain four native BF16 tiles')
+
+    def kernels(requested_root):
+        result = {stage: dict(parts) for stage, parts in original(requested_root).items()}
+        before = result['recurrence']['compute']
+        after = transform(before)
+        result['recurrence']['compute'] = after
+        BUILD_RECORDS.append(dict(control_sha256=hashlib.sha256(before.encode()).hexdigest(),
+            candidate_sha256=hashlib.sha256(after.encode()).hexdigest(),
+            state_tiles=4, output_cb=18, feedback_cb=30))
+        return result
+
+    with patch.object(pipeline, 'load_kernels', kernels):
+        return pipeline.build(operations, mesh, tensors, root=root)

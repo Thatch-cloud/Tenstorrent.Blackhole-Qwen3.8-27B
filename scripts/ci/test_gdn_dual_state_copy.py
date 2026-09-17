@@ -1,8 +1,13 @@
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+import gdn_dual_state_copy as candidate
 
 from gdn_copy_pairs import ORIGINAL
 from gdn_dual_state_copy import FEEDBACK, transform
 from gdn_vsplit import cb_plan
+from gdn_dual_state_stage import adapt
 
 
 def fixture():
@@ -12,6 +17,43 @@ def fixture():
 
 
 class DualStateCopyTests(unittest.TestCase):
+    def test_program_construction_changes_only_recurrence_compute_and_restores(self):
+        for failed in (False, True):
+            native = {'recurrence': {'compute': fixture(), 'reader': 'reader', 'writer': 'writer'},
+                'norm_gate': {'compute': 'norm'}}
+            original = lambda root: native
+            pipeline = SimpleNamespace(load_kernels=original, cb_plan=cb_plan)
+            def construct(*args, **kwargs):
+                kernels = pipeline.load_kernels(kwargs['root'])
+                self.assertEqual(kernels['norm_gate'], native['norm_gate'])
+                self.assertEqual(kernels['recurrence']['reader'], 'reader')
+                self.assertEqual(kernels['recurrence']['writer'], 'writer')
+                self.assertIn('copy_state_twice', kernels['recurrence']['compute'])
+                if failed:
+                    raise RuntimeError('construction failed')
+                return 'program'
+            pipeline.build = construct
+            with patch.dict('sys.modules', {'gdn_shared_qk_pipeline': pipeline}), \
+                    patch.object(candidate, 'BUILD_RECORDS', []):
+                if failed:
+                    with self.assertRaises(RuntimeError):
+                        candidate.build(None, None, [], root='root')
+                else:
+                    self.assertEqual(candidate.build(None, None, [], root='root'), 'program')
+                self.assertEqual(len(candidate.BUILD_RECORDS), 1)
+            self.assertIs(pipeline.load_kernels, original)
+            self.assertEqual(native['recurrence']['compute'], fixture())
+
+    def test_real_probe_keeps_complete_state_and_input_matrix(self):
+        source = Path(__file__).with_name('gdn-shared-recurrence-probe.py').read_text()
+        changed = adapt(source)
+        self.assertIn("len(report['checks']) != 24", changed)
+        self.assertIn("len(report['immutable_checks']) != 48", changed)
+        self.assertIn('for seed in (1, 2, 0)', changed)
+        self.assertIn('generated_kernels=BUILD_RECORDS', changed)
+        with self.assertRaises(ValueError):
+            adapt(changed)
+
     def test_one_unpack_two_packs_and_original_final_token(self):
         source = fixture()
         changed = transform(source)
