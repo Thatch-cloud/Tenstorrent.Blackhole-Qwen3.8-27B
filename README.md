@@ -40,11 +40,11 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 
 | Runtime | PP tok/s | Committed TG tok/s | Decision |
 | --- | ---: | ---: | --- |
-| Unchanged T16 control | 3,340.87 | 123.98 | Retained |
-| K32 MLP reduction blocks | 3,299.23 | 122.41 | Correct; 1.26% slower |
+| Unchanged T16 control | 3,358.90 | 124.71 | Retained |
+| Overlapped GDN window writes | 3,311.84 | 124.60 | Correct; no full-cycle gain |
 
 Verifier/readback falls by 0.30 ms on average; paired TG changes are +1.05% / -1.83%.
-The candidate is not promoted. [Combined evidence](docs/mlp-k-block.md).
+The candidate is not promoted. [Combined evidence](docs/gdn-window-write-overlap.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an
