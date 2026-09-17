@@ -43,6 +43,7 @@ class ProfileTests(unittest.TestCase):
         rows[-1]['CORE COUNT'] = '39'
         with self.assertRaisesRegex(AssertionError, 'core-count coverage'):
             checker.analyze(rows, 7, 3)
+
     def test_drop_warning_scope_requires_explicit_boundaries(self):
         clean = "QWEN_PROFILE_MEASURE_BEGIN\nstep\nQWEN_PROFILE_MEASURE_END"
         self.assertEqual(checker.measured_log("markers were dropped\n" + clean), 1)

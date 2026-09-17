@@ -31,7 +31,7 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 1 | 2,564.54 | **50.45** | Passed after exact-prompt and page-table fixes |
-| 131,072 | 1 | — | — | Verifier cache-writer page-table guard failed |
+| 131,072 | 1 | — | — | Cache guard repaired; eager audit OOM fix awaits hardware after host-I/O rejections |
 | 262,144 | 1 | — | — | Prompt plus output exceeds target positional limit |
 
 ### 16K evidence and next bottleneck

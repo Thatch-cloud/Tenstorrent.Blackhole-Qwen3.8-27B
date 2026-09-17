@@ -20,6 +20,8 @@ def native_gate_up_control(operations, inputs, gate, up, kernel, owned):
     result = operations.multiply(*projections)
     owned.append(result)
     return result
+
+
 BF16_PRODUCT = """MATH((SFPU_BINARY_CALL(
             DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul,
             (APPROX, ckernel::BinaryOp::MUL, 8, false), 0, 1, 0, VectorMode::RC)));"""
