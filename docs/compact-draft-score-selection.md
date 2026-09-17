@@ -77,3 +77,20 @@ device handling, combined hardware throughput or coding quality. The next gate
 must validate token-only feedback into the existing Markov loop without feeding
 an invalid sentinel into embedding. Then measure the combined matched runtime;
 retain native selection unless complete-cycle TG improves with correctness intact.
+
+### Feedback extension awaiting qualification
+
+`compact_markov.py` preserves the native embedding, BF16 weights and HiFi4
+FP32 bias matmul. It replaces only score materialization/argmax with compact
+selection and a one-token slice. The reducer adds an explicit safe-feedback
+field: token zero on invalid input, while retaining the invalid flag and
+sentinel in the diagnostic fields. Every step's diagnostics must pass host
+validation before any proposal is usable; safe zero is not an accepted fallback.
+There is no serving or hardware route for this simulator-only implementation.
+
+The extended probe keeps full-vocabulary selection checks, adds a two-chip
+15-step rank-256 feedback chain at vocabulary 64 (eager and changed-input
+replay), and tests device NaN rejection. This does not qualify full-vocabulary
+learned feedback. Twelve host tests pass. The extended source/report schema
+supersedes the earlier finite-selection-only gate, so run 35265936552 does not
+qualify the changed reducer or new feedback loop.

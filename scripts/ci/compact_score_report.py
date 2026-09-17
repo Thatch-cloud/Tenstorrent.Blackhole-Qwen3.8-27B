@@ -26,7 +26,17 @@ def validate(report, source_directory):
     names = ('gdn-output-grid-probe.py', 'compact_score_device.py', 'compact_score_io.cpp',
              'compact_score_compute.cpp', 'compact_score_reduce.cpp', 'dspark_score_layout.py',
              'dspark_score_layout_io.cpp', 'dspark_score_layout_compute.cpp', 'attention_batch.py',
-             'gdn_multitoken_conv.py')
+             'gdn_multitoken_conv.py', 'compact_markov.py', 'dspark_markov_device.py',
+             'dspark_markov_score_layout.py')
+    feedback = report.get('feedback_checks', [])
+    expected_feedback = {(mode, step, chip) for mode in ('eager', 'replay')
+                         for step in range(15) for chip in (0, 1)}
+    if (len(feedback) != 60 or any(record.get('exact') is not True for record in feedback)
+            or {(record.get('mode'), record.get('step'), record.get('chip')) for record in feedback}
+            != expected_feedback):
+        raise ValueError('Complete fifteen-step feedback evidence required')
+    if report.get('invalid_checks') != [dict(chip=chip, rejected=True, safe_feedback=True) for chip in (0, 1)]:
+        raise ValueError('Nonfinite device rejection evidence required')
     sources = report.get('sources', {})
     if set(sources) != set(names) or sources != report.get('sources_after'):
         raise ValueError('Complete unchanged source closure required')
@@ -36,7 +46,7 @@ def validate(report, source_directory):
         if sources[name] != digest:
             raise ValueError('Simulator source differs from candidate: ' + name)
     return dict(simulator_qualified=True, hardware_qualified=False, checks=len(expected),
-                immutable_checks=len(expected) * 2, sources=sources)
+                immutable_checks=len(expected) * 2, feedback_checks=60, sources=sources)
 
 
 if __name__ == '__main__':

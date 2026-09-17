@@ -38,7 +38,8 @@ void kernel_main() {
     result[0] = invalid ? 0xffffffff : best_token;
     result[1] = invalid;
     result[2] = best_bits;
-    for (uint32_t word = 3; word < 8; ++word) { result[word] = 0; }
+    result[3] = invalid ? 0 : best_token;
+    for (uint32_t word = 4; word < 8; ++word) { result[word] = 0; }
     asm volatile("" ::: "memory");
     noc_async_write(scratch + workers * 64, output.get_noc_addr(0), 32);
     noc_async_write_barrier();

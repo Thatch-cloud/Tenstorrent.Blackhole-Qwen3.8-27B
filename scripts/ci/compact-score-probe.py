@@ -8,6 +8,8 @@ from pathlib import Path
 
 from attention_batch import capture_operation
 from compact_score_device import execute_local_winners, reduce_winners
+from compact_markov import execute as compact_feedback, validate_readback
+from dspark_markov_score_layout import execute as native_feedback
 from dspark_score_layout import execute as native_scores
 from gdn_multitoken_conv import addresses, release_owned
 
@@ -27,11 +29,12 @@ def main():
     names = (Path(__file__).name, 'compact_score_device.py', 'compact_score_io.cpp',
         'compact_score_compute.cpp', 'compact_score_reduce.cpp', 'dspark_score_layout.py',
         'dspark_score_layout_io.cpp', 'dspark_score_layout_compute.cpp', 'attention_batch.py',
-        'gdn_multitoken_conv.py')
+        'gdn_multitoken_conv.py', 'compact_markov.py', 'dspark_markov_device.py',
+        'dspark_markov_score_layout.py')
     def hashes():
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in names}
     report = dict(passed=False, closed_cleanly=False, backend='simulator', vocabulary=options.vocabulary,
-        checks=[], immutable_checks=[], sources=hashes(), performance_qualified=False)
+        checks=[], immutable_checks=[], feedback_checks=[], sources=hashes(), performance_qualified=False)
     mesh, owned, traces = None, [], []
     def retain(value):
         owned.append(value)
@@ -84,7 +87,8 @@ def main():
                 row = scores[chip].reshape(-1)
                 reference = int(tokens[chip].reshape(-1)[0])
                 result = results[chip].reshape(-1).tolist()
-                if result[1] != 0 or result[0] != reference or reference != int(torch.argmax(row)):
+                if (result[1] != 0 or result[0] != reference or result[3] != reference
+                        or any(result[4:]) or reference != int(torch.argmax(row))):
                     raise AssertionError(f'Compact/native/CPU argmax mismatch {pattern=} {step=} {chip=} {result=} {reference=}')
                 records = winners[chip].reshape(-1, 8)
                 tiles, workers = vocabulary // 32, records.shape[0]
@@ -128,6 +132,64 @@ def main():
                     raise AssertionError('Input bindings changed')
         if len(report['checks']) != 20 or len(report['immutable_checks']) != 40:
             raise AssertionError('Complete two-step eager/replay matrix required')
+        for trace in reversed(traces):
+            ttnn.release_trace(mesh, trace)
+        traces.clear()
+        save('feedback_setup')
+        feedback_width = 64
+        predecessor_host = torch.randn((2, 1, feedback_width, 256), generator=generator).bfloat16() / 16
+        successor_host = torch.randn((2, 1, 256, feedback_width), generator=generator).bfloat16() / 16
+        base_host = torch.randn((2, 1, 15, feedback_width), generator=generator) / 8
+        anchor_host = torch.tensor([1, 63], dtype=torch.int64).reshape(2, 1, 1, 1)
+        feedback_inputs = [retain(ttnn.from_torch(value, device=mesh, dtype=dtype, layout=layout,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper))
+            for value, dtype, layout in ((anchor_host, ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT),
+                (base_host, ttnn.float32, ttnn.TILE_LAYOUT),
+                (predecessor_host, ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT),
+                (successor_host, ttnn.bfloat16, ttnn.TILE_LAYOUT))]
+        def feedback_run():
+            return compact_feedback(ttnn, mesh, *feedback_inputs, owned)
+        def feedback_verify(records, mode):
+            native = native_feedback(ttnn, mesh, *feedback_inputs, owned)
+            tokens = [[int(value.item()) for value in read(record['token'])] for record in records]
+            diagnostics = [[value.reshape(-1).tolist() for value in read(record['diagnostic'])] for record in records]
+            validate_readback(diagnostics, tokens, feedback_width)
+            for step, record in enumerate(native):
+                for chip, value in enumerate(read(record['token'])):
+                    if tokens[step][chip] != int(value.item()):
+                        raise AssertionError('Compact Markov feedback differs from native')
+                    report['feedback_checks'].append(dict(mode=mode, step=step, chip=chip, exact=True))
+        save('feedback_eager')
+        feedback_verify(feedback_run(), 'eager')
+        save('feedback_capture')
+        trace, feedback_records = capture_operation(ttnn, mesh, feedback_run)
+        traces.append(trace)
+        changed_anchor = ttnn.from_torch(torch.tensor([63, 2], dtype=torch.int64).reshape(2, 1, 1, 1),
+            dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=mapper)
+        changed_base = ttnn.from_torch(-base_host, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper)
+        ttnn.copy_host_to_device_tensor(changed_anchor, feedback_inputs[0])
+        ttnn.copy_host_to_device_tensor(changed_base, feedback_inputs[1])
+        save('feedback_replay')
+        ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
+        feedback_verify(feedback_records, 'replay')
+        if len(report['feedback_checks']) != 60:
+            raise AssertionError('Complete two-chip fifteen-step feedback matrix required')
+        for trace in reversed(traces):
+            ttnn.release_trace(mesh, trace)
+        traces.clear()
+        save('nonfinite_feedback_safety')
+        invalid_base = patterns[0][0].clone()
+        invalid_base[..., 0] = float('nan')
+        ttnn.copy_host_to_device_tensor(ttnn.from_torch(invalid_base, dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT, mesh_mapper=mapper), inputs[0])
+        invalid_winners = execute_local_winners(ttnn, mesh, *inputs, 0, retain)
+        invalid_result = reduce_winners(ttnn, mesh, invalid_winners, vocabulary, retain)
+        report['invalid_checks'] = []
+        for chip, value in enumerate(read(invalid_result)):
+            result = value.reshape(-1).tolist()
+            if result[0] != 0xffffffff or result[1] != 1 or result[3] != 0:
+                raise AssertionError('Nonfinite score must signal invalid while keeping feedback in bounds')
+            report['invalid_checks'].append(dict(chip=chip, rejected=True, safe_feedback=True))
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'

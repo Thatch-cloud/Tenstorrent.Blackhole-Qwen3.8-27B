@@ -13,7 +13,8 @@ def stage(checkout):
     sources = {}
     for name in ('compact_score_device.py', 'compact_score_io.cpp', 'compact_score_compute.cpp',
             'compact_score_reduce.cpp', 'dspark_score_layout.py', 'dspark_score_layout_io.cpp',
-            'dspark_score_layout_compute.cpp'):
+            'dspark_score_layout_compute.cpp', 'compact_markov.py', 'dspark_markov_device.py',
+            'dspark_markov_score_layout.py'):
         payload = Path(__file__).with_name(name).read_bytes()
         if name.startswith('dspark_') and (scripts / name).read_bytes() != payload:
             raise ValueError('Frozen control source differs: ' + name)
