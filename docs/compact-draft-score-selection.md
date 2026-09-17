@@ -112,5 +112,11 @@ The hardware adapter preparation changes only execution guards and the Python
 import binding; AST tests enforce unchanged function bodies after those guards.
 The request-scoped hook validates admitted sources and exact generated adapters,
 requires full fifteen-step vocabulary, counts calls, and restores on failure.
-Combined staging and measured hardware admission remain outstanding. No hardware
-run or serving path uses this candidate yet.
+Combined staging now passes locally against the frozen winning recipe and the
+downloaded simulator evidence. The hardware workflow runs two fresh feature/state
+audits, then control/candidate/candidate/control complete requests at 4K. Both
+arms retain HiFi4 drafting, norm prefetch, shared QK, fused T16 MLP, native target
+attention and incremental publication. Candidate calls must match the prepared
+score-layout calls exactly. Output and acceptance must match; TG includes the
+entire decode loop, not isolated selection timing. No serving default changes.
+Twenty-one focused host tests pass; measured hardware acceptance remains pending.
