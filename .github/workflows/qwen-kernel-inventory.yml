@@ -1,7 +1,7 @@
 name: Qwen pinned kernel capability inventory
 on:
   push:
-    tags: ['experiment/frozen-kernel-inventory-v1', 'experiment/frozen-profiler-export-inventory-v1', 'experiment/prefill-cache-inventory-*']
+    tags: ['experiment/frozen-kernel-inventory-v1', 'experiment/frozen-profiler-export-inventory-v1', 'experiment/prefill-cache-inventory-*', 'experiment/gdn-conv-inventory-*']
 permissions:
   contents: read
 concurrency:
@@ -26,6 +26,9 @@ jobs:
           inventory_script=frozen_kernel_inventory.py
           if [[ "$GITHUB_REF_NAME" = experiment/prefill-cache-inventory-* ]]; then
             inventory_script=prefill_cache_inventory.py
+          fi
+          if [[ "$GITHUB_REF_NAME" = experiment/gdn-conv-inventory-* ]]; then
+            inventory_script=gdn_conv_inventory.py
           fi
           timeout -k 10 90 docker run --rm --pull never --network none --read-only \
             --cpus 2 --memory 2g --user "$(id -u):$(id -g)" \
