@@ -1,6 +1,25 @@
 # Shared-Q/K with direct-scatter normalization
 
-**Composition candidate only; no new device qualification or speed result.**
+**Shared-Q/K composition passes simulation; combined performance is unqualified.**
+
+## Simulator result
+
+Run **35214644611**, source `1b91e469e8ae92fba888446b1c8b09d02a5bac41`,
+passes in **3m02s**; the actual probe takes 165.66 seconds. All 24 exact
+output/bridge/state comparisons and 48 input-integrity checks pass across eager
+execution and three changed-input replays on both chips. Exit status and all
+four container-cleanup statuses are zero; sources remain unchanged.
+
+The independent validator checks the full matrix, retained report digest,
+staged probe identity and current numerical Python dependencies. Runtime
+admission additionally requires the native source files to match that report.
+Report SHA-256:
+`33f2a5dc51918aa34dbda412e07d7595105ef1edd5010e4de20a4ede1dfe9602`.
+
+This is a correctness result, not a throughput measurement. The next gate is
+the matched combined comparison against today's prefetched reader.
+
+## Candidate
 
 The earlier direct-scatter norm reader passed exact simulator and combined
 hardware checks in run 34451473973. It reduced verification/readback by 1.92 ms
@@ -34,6 +53,6 @@ or infer this candidate reaches 200 TG.
    loaded model, with native token/state/feature checks and complete-cycle TG.
    Keep incremental publication and every other winning option in both arms.
 
-Only the host composition/layout tests have run so far. Hardware integration
-and admission remain outstanding. Serving defaults and the accepted recipe
-remain unchanged.
+The source-bound simulator admission helper is now implemented. Hardware
+integration and combined performance remain outstanding. Serving defaults and
+the accepted recipe remain unchanged.
