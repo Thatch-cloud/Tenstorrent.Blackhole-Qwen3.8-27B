@@ -219,6 +219,22 @@ card ownership and independent report validation. No inference precision or
 serving default changes. The host suite has 36 cumulative tests; neither that
 count nor successful source staging establishes a throughput improvement.
 
+The five-component host composition test now enters the actual normalization and
+register wrappers together around the cumulative driver. Across the six-request
+schedule it checks 288 prefetch and 288 scatter builder calls, matching fusion and
+normalization admissions before route validation, unchanged controls and cleanup
+after a failed candidate request. Device work and component kernels are mocked:
+this catches wrapper/selection conflicts, not device numerical errors. All 38
+cumulative host tests pass locally.
+
+**Measurement checkpoint:** keep this candidate fixed until the user lifts the
+hardware pause. Do not add more speculative components to this stack before its
+complete-request correctness and timing are measured. On resumption, require
+green CPU CI at the exact commit, grant only the immutable workflow/tag, and retain
+the disk-pressure gate. Compare full-cycle committed TG and each phase against
+the same-run controls; do not add historic percentages or promote a noisy pair.
+The 200-TG objective and held-out coding-quality acceptance remain open.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.
