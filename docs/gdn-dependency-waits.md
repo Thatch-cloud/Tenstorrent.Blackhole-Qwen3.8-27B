@@ -1,6 +1,43 @@
 # Distinguish GDN input waits from state feedback
 
-**Simulator qualification passes; combined hardware attribution is pending.**
+**Simulator and combined hardware attribution pass. No throughput improvement is claimed.**
+
+## Combined hardware result
+
+[Run 35249838905](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35249838905)
+at `c8845ba6464bf4abaa5ecf3271c0cbfbf8a7b951` passes in about four minutes.
+Independent report validation passes all 4,032 samples across 48 layers, two
+verifier replays and both cards, with native-reference output, state, inactive-slot
+and feature audits. Runtime fingerprints remain unchanged and cleanup completes.
+Report SHA-256: `14894e276067fddae13fdd34ad415e99b54df2d3dc1d007afe07bdb36823cad6`.
+
+Median UNPACK wait intervals, in cycles:
+
+| Dependency | Card 0 | Card 1 |
+| --- | ---: | ---: |
+| Query | 978 | 978 |
+| Key | 1,666 | 1,666 |
+| Value | 867.5 | 863.5 |
+| Gate | 1,371 | 1,357.5 |
+| Beta | 54 | 54 |
+| Previous-token state | 77 | 77 |
+| Ones | 47 | 47 |
+
+This rules against previous-token state feedback as the dominant **sampled
+input-wait** dependency. It does not prove DRAM bandwidth saturation: query/key
+gather from local cached tiles, and each interval includes synchronization and
+instrumentation. Sequential waits cannot reveal independent producer-ready times.
+MATH/PACK wait medians are only 14–21.5 cycles; do not sum processors or convert
+these diagnostic clocks into TG.
+
+Next reader candidate should reduce actual local gather/publication work or
+overlap it using qualified buffering, not repeat the rejected read-order swap.
+Any candidate still needs changed-input simulator replay followed by a matched
+complete-runtime comparison. This GDN scope alone is insufficient for 200 TG:
+the earlier full verifier profile places the entire recurrence group near 9.53 ms,
+whereas the current approximately 97 ms cycle needs to reach approximately
+60.5 ms at 12.1 committed tokens per block. Projection/MLP and drafting remain
+part of the combined performance work; prefix-cache PP is a separate measurement.
 
 ## Simulator acceptance
 
