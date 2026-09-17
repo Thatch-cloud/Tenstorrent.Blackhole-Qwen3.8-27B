@@ -17,6 +17,13 @@ def fixture():
 
 
 class PrecisionReportTests(unittest.TestCase):
+    def test_projection_identity_cannot_be_substituted(self):
+        report = fixture()
+        report['projection'] = 'mlp.down_proj.weight'
+        with self.assertRaises(ValueError):
+            validate(report)
+        self.assertTrue(validate(report, projection='mlp.down_proj.weight')['component_execution_passed'])
+
     def test_execution_pass_does_not_qualify_target_quality(self):
         result = validate(fixture())
         self.assertTrue(result['component_execution_passed'])

@@ -3,11 +3,21 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from dspark_projection_precision_stage import BRANCH, MOUNT, adapt
+from dspark_projection_precision_stage import BRANCH, MOUNT, PROJECTIONS, adapt
 from frozen_recipe_context import REVISION
 
 
 class PrecisionStageTests(unittest.TestCase):
+    def test_every_projection_selects_one_literal_argument(self):
+        original = [subprocess.check_output(['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True)
+            for name in ('run-simulator.sh', 'simulator-suite.sh')]
+        for projection in PROJECTIONS:
+            runner, suite = adapt(*original, projection=projection)
+            self.assertIn('--projection ' + projection + ' ', suite)
+            self.assertEqual(suite.count('--projection '), original[1].count('--projection ') + 1)
+        with self.assertRaises(ValueError):
+            adapt(*original, projection='unknown; command')
+
     def test_frozen_runner_admits_only_explicit_new_case_and_mount(self):
         original = [subprocess.check_output(['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True)
             for name in ('run-simulator.sh', 'simulator-suite.sh')]

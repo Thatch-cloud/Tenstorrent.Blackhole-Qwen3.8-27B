@@ -5,12 +5,15 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from dspark_projection_precision_stage import PROJECTIONS
 
 
-def validate(report):
+def validate(report, *, projection='self_attn.q_proj.weight'):
+    if projection not in PROJECTIONS:
+        raise ValueError('Supported expected projection required')
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('backend') != 'simulator'
-            or report.get('projection') != 'self_attn.q_proj.weight'
+            or report.get('projection') != projection
             or report.get('component_execution_only') is not True
             or report.get('target_correctness_qualified') is not False or report.get('committed_tg') is not None):
         raise ValueError('Complete query-projection execution-only simulator report required')
@@ -43,6 +46,8 @@ def validate(report):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
+    parser.add_argument('--projection', choices=PROJECTIONS, default='self_attn.q_proj.weight')
     options = parser.parse_args()
     raw = options.report.read_bytes()
-    print(json.dumps(dict(validate(json.loads(raw)), report_sha256=hashlib.sha256(raw).hexdigest()), indent=2))
+    print(json.dumps(dict(validate(json.loads(raw), projection=options.projection),
+        report_sha256=hashlib.sha256(raw).hexdigest()), indent=2))
