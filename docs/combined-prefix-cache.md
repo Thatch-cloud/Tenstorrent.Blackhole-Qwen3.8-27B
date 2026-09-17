@@ -99,6 +99,14 @@ out-of-band writes to unchanged addresses. Integration must invalidate before
 such writes. GDN checkpoint tests now explicitly preserve native mixed FP32
 recurrence and BF16 convolution/carry types.
 
+`prefill_checkpoint_allocation.py` allocates the 288 checkpoint buffers while
+native B=1 scratch is bound, then restores decode bindings. It rejects existing
+native decode, bucket or chunk traces, preserves each tensor's precision and
+memory placement, and owns explicit teardown. The experiment must call it before
+any additional verifier/proposal trace capture. Three host tests cover mixed
+types, pre-existing traces and partial allocation failure; device allocation and
+copy behavior still need qualification in the combined cache experiment.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
