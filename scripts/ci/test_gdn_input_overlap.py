@@ -8,6 +8,17 @@ from gdn_shared_qk_recurrence import INPUTS
 
 
 class InputOverlapTests(unittest.TestCase):
+    def test_probe_retains_every_output_state_and_input_check(self):
+        from gdn_input_overlap_stage import adapt
+
+        source = Path(__file__).with_name('gdn-shared-recurrence-probe.py').read_text(encoding='utf-8')
+        changed = adapt(source)
+        for statement in ("len(report['checks']) != 24", "len(report['immutable_checks']) != 48",
+                'for seed in (1, 2, 0)', 'input_overlap=True', 'generated_kernels=BUILD_RECORDS'):
+            self.assertIn(statement, changed)
+        with self.assertRaises(ValueError):
+            adapt(changed)
+
     def test_only_gather_order_changes(self):
         source = 'before\n' + INPUTS + 'after\n'
         changed = candidate.reader(source)
