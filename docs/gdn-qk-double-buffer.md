@@ -15,6 +15,15 @@ Candidate reader SHA-256: `3adef6c2b0a46d5ee6ba5172ab279e00b0f37d4a8ffa6aae1b293
 There is no hardware speed claim. Next is a matched complete-runtime comparison,
 not another isolated performance test.
 
+The combined adapter changes both the admitted reader and its two ring sizes,
+and verifies one buffer construction per transformed recurrence. Norm prefetch
+remains composed independently; both bindings restore between requests. The
+hardware schedule is two fresh native-reference audits followed by control,
+candidate, candidate, control timed requests. Acceptance, tokens and target
+state must match, and TG includes the entire draft/verify/commit loop. Both
+paired improvements must exceed 2% for the initial speed screen; that screen
+alone is not held-out coding quality or 200 TG acceptance.
+
 The combined dependency diagnostic measures roughly 978 query-wait cycles and
 1,666 key-wait cycles, versus 77 for previous-token state. Moving reads earlier
 failed to improve TG. This candidate instead allows the next normalized Q/K rows
