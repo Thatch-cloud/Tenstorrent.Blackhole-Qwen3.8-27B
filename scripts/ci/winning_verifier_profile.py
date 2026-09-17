@@ -20,6 +20,15 @@ def adapt(sources):
     if set(sources) != set(SOURCE_FILES):
         raise ValueError('Exact winning-recipe host instrumentation source set required')
     result = drain_setup(adapt_sources(sources))
+    name = 'full_dspark_request.py'
+    result[name] = replace_once(result[name],
+        '    import torch\n    from full_request import measure_request',
+        "    if len(prompt) != 4096 or max_new_tokens != 64 or not combined_profile:\n"
+        "        raise ValueError('Bounded 4K attribution request required')\n"
+        '    import torch\n    from full_request import measure_request')
+    result[name] = replace_once(result[name],
+        'history_capacity=((len(prompt) + max_new_tokens + 31) // 32) * 32)',
+        'history_capacity=4352)')
     name = 'dspark_request_experiment.py'
     result[name] = replace_once(result[name],
         "    if profile_verifier or profile_drafter or combined_profile:\n"
@@ -38,6 +47,7 @@ def adapt(sources):
     result[name] = replace_once(result[name], 'Unprofiled matched combined requests required',
         'Explicit winning-recipe profiling required')
     name = 'dspark-combined-profile.sh'
+    result[name] = replace_once(result[name], '--max-new-tokens 256', '--max-new-tokens 64')
     result[name] = replace_once(result[name],
         'python3 /experiment-scripts/ci/request_verifier_profile_report.py "$output" dspark',
         'test -s "$output/metadata/tracy_ops_data.csv"\n'
@@ -52,7 +62,7 @@ def finish_profile(report):
     from frozen_ladder_requests import validate_audit
 
     requests = report.get('request_checks', [])
-    if len(requests) != 1:
+    if len(requests) != 1 or report.get('request_output_limit') != 64:
         raise ValueError('Exactly one complete audited profiling request required')
     request = requests[0]
     validate_audit(request)
@@ -63,6 +73,7 @@ def finish_profile(report):
             or request.get('fused_t16_mlp', {}).get('restored') is not True):
         raise ValueError('Executed winning recipe and verifier attribution required')
     report.update(pp=None, committed_tg=None, performance_qualified=False,
+        profile_output_limit=64, profile_history_capacity=4352,
         eligible_for_serving=False, combined_runtime_profile=True, fresh_context_audit=True,
         scope='One complete winning-recipe request under profiling; not throughput evidence')
 

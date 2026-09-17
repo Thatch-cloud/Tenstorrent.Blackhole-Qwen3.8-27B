@@ -2,6 +2,18 @@
 
 ## Winning-recipe refresh: awaiting hardware admission
 
+Attempt three passed disk admission (0.53% full I/O stall), entered the audited
+request after about 148 seconds and completed five speculative blocks before
+the nine-minute launcher timeout. It did not finish correctness validation or
+profiler export; it supplies no accepted throughput or complete attribution.
+
+The next profiling-only revision caps output at 64 tokens, while explicitly
+retaining 4096 prompt rows and the winning 4352-row draft history allocation.
+The full-request token/state/feature audits and minimum replay-count checks
+remain enabled. This reduces diagnostic work, not the performance target;
+unprofiled throughput acceptance still requires the normal combined workload.
+Five host tests and adaptation against the staged frozen recipe pass locally.
+
 Run **35181419754**, revision `09cbc1e`, staged the unchanged winning T16
 recipe successfully but stopped before weight loading with exit **75**.
 Four 15-second host I/O observations measured full-stall fractions of **15.38%,

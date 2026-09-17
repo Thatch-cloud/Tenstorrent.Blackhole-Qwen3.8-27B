@@ -7,7 +7,7 @@ import winning_verifier_profile as profile
 
 class WinningProfileTests(unittest.TestCase):
     def report(self):
-        return dict(pp=100, committed_tg=200, request_checks=[dict(arm='publication', length=4096,
+        return dict(pp=100, committed_tg=200, request_output_limit=64, request_checks=[dict(arm='publication', length=4096,
             verifier_profile={'records': [1]}, incremental_history={'enabled': True},
             gdn_norm_prefetch={'enabled': True}, draft_tail={'enabled': True},
             fused_t16_mlp={'restored': True})])
@@ -40,6 +40,12 @@ class WinningProfileTests(unittest.TestCase):
     def test_unexpected_source_set_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'source set'):
             profile.adapt({'kernel.cpp': 'unchanged'})
+
+    def test_profile_budget_is_explicit(self):
+        report = self.report()
+        report['request_output_limit'] = 256
+        with patch('frozen_ladder_requests.validate_audit'), self.assertRaises(ValueError):
+            profile.finish_profile(report)
 
 
 if __name__ == '__main__':
