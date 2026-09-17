@@ -1,7 +1,21 @@
 # Direct causal windows inside GDN convolution
 
-Status: simulator descriptor and replay probe staged locally. **No simulator or
-hardware qualification yet; not installed into the combined runtime.**
+Status: DRAM-projection simulator pass; exact L1 runtime placement awaiting
+qualification. **No hardware measurement; not installed into combined runtime.**
+
+Run **35271222958** at `16cae4e643f69ace42e9925d85be973de4723291`
+passes in **57 seconds**. Independently checked: all 56 output/checkpoint
+comparisons and 88 immutable-input checks, source hashes, clean closure, exit
+zero and successful container cleanup. Report SHA-256:
+`be5e28018639768781ed15ac5321ebb117aed64adf4272a4ebbb413f06f8588f`.
+Generated reader SHA-256:
+`83b7404e3d95291bb7f7b622dc4776800f6f3321559af3ad0b179f5f5f984098`.
+
+`DeviceLoopState` projects into L1, whereas that first probe used DRAM. The
+probe now explicitly records placement and defaults to L1; the strict report
+validator requires this placement for runtime admission. Kernel code, arithmetic,
+work partition and source pins are unchanged. This avoids adding a DRAM copy
+to the runtime merely to fit the first test.
 
 The retained combined trace assigns about 3.49 ms per T16 verifier block to
 48 source-consistent window-builder calls. Overlapping the old builder's writes

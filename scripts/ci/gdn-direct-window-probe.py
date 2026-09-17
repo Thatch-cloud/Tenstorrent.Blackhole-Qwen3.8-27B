@@ -15,6 +15,7 @@ from gdn_multitoken_conv import addresses, release_owned
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--projection-memory', choices=('DRAM', 'L1'), default='L1')
     options = parser.parse_args()
     if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or os.environ.get('QWEN_CARDS_ALLOCATED') == '1' or options.output.exists()):
@@ -30,7 +31,8 @@ def main():
     native = sources('/opt/tt-metal')
     report = dict(passed=False, closed_cleanly=False, backend='simulator', sources=hashes(),
         native_sources=HASHES, generated_reader_sha256=hashlib.sha256(native['reader'].encode()).hexdigest(),
-        checks=[], immutable_checks=[], performance_qualified=False, scope=__doc__)
+        checks=[], immutable_checks=[], performance_qualified=False, scope=__doc__,
+        projection_memory=options.projection_memory)
     mesh, trace, owned = None, None, []
     def retain(value):
         owned.append(value)
@@ -53,7 +55,9 @@ def main():
         mesh.enable_program_cache()
         mapper = ttnn.ShardTensorToMesh(mesh, dim=0)
         inputs = [retain(ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-            device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=mapper)) for value in fixture(0)]
+            device=mesh, memory_config=(ttnn.L1_MEMORY_CONFIG if index == 0 and options.projection_memory == 'L1'
+                                        else ttnn.DRAM_MEMORY_CONFIG), mesh_mapper=mapper))
+            for index, value in enumerate(fixture(0))]
         bindings = [addresses(ttnn, value) for value in inputs]
         def update(seed):
             host = fixture(seed)
