@@ -1,5 +1,73 @@
 # Captured gate/up fusion: hardware result
 
+## Combined T16 runtime
+
+[Run 34585332201](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34585332201)
+passed at `f301272`, after guarded fabric recovery. Independent validation checks
+743 source files, complete request recomputation and correctness/weight gates.
+
+| One coding stream, merge intervals | PP tok/s | CTX | Committed TG tok/s |
+| --- | ---: | ---: | ---: |
+| Combined control | 3344.93 | 4096 | 100.45 |
+| T16 gate/up fusion | 3302.00 | 4096 | 102.44 |
+
+Both arms commit 242 timed tokens, accepting 222/330 drafts. The measured TG
+gain is 1.98%, not a route to 200 TG by itself. Mean complete cycle decreases
+109.459 to 107.340 ms, but verifier/readback only decreases 69.157 to 68.512 ms;
+draft and commit variation contributes to the overall result. Setup-inclusive
+mean increases 5988.16 to 6274.35 ms. No serving or held-out quality qualification.
+
+A same-revision repeat is [34586017906](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34586017906).
+It passed independent validation of 743 source files and complete request
+recomputation. Control PP/CTX/TG is 3325.70 / 4096 / 100.47; fusion is
+3354.98 / 4096 / 101.88 (+1.40% TG). Acceptance remains 222/330, with 242
+timed committed tokens per arm. Verifier/readback falls 69.211 to 68.441 ms;
+complete cycle falls 109.441 to 107.926 ms. Setup-inclusive mean is 6020.81
+versus 6074.33 ms.
+
+The two paired runs support a small repeatable improvement on this prompt.
+Keep it as an opt-in combined-runtime candidate, not a serving default or a
+broad coding-quality claim. At 11 committed tokens per block, 200 TG requires
+a 55 ms cycle; the observed roughly 108 ms cycle still needs a major reduction.
+Further work must target larger verifier/drafter costs rather than repeat this
+same small projection experiment.
+
+Repeat report SHA256: `2fc8ce17545ba1aa6defb5c323428c54b7d662c921a0667a758c07643ce55d32`.
+
+Report SHA256: `74696c102735f26f9191a955dc5c3df7287afd5ff0f1309b31b10b4b2469b7d1`.
+
+## Earlier component timing
+
+### Untuned coding screen
+
+[Stable-unique run 34586808967](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34586808967)
+passes independent source/request validation and four isolated functional cases,
+including unchanged inputs. At CTX4096 / one stream, control PP/TG is
+3298.23 / 118.02; fusion PP/TG is 3298.34 / 119.57. Both accept 98/120 drafts
+and commit 104 timed tokens. This task-specific result does not replace the
+merge-intervals baseline or establish broad held-out coding quality.
+
+Report SHA256: `fd93f1c3c9fb01ace53a3551f528976907190f5f7a52b7dca00da9c170dd20ae`.
+
+[Run-length encoding 34587483522](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34587483522)
+also passes independent source/request validation and four isolated functional
+cases. At CTX4096 / one stream, control PP/TG is 3332.30 / 117.72; fusion is
+3311.14 / 121.68. Both accept 196/240 drafts and commit 210 timed tokens.
+Setup-inclusive mean is 5571.42 versus 5843.45 ms. This is a different coding
+task, not a higher result for the merge-intervals benchmark.
+
+Report SHA256: `a47e3e80ccd7836f177a0577e4cf2a359d442847deab623b73d63a7ac1350988`.
+
+[Rotate-right 34588114930](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34588114930)
+passes independent validation of 743 sources, complete request recomputation and
+five isolated functional cases. Control PP/CTX/TG is 3341.64 / 4096 / 82.58;
+fusion is 3369.42 / 4096 / 84.71. Each arm commits 128 timed tokens and accepts
+116/210 drafts (55.24%). Setup-inclusive mean is 5645.17 versus 5649.14 ms.
+The three-task screen now passes all 13 functional cases, but its task-dependent
+84.71–121.68 TG does not qualify the 200-TG objective or broad coding quality.
+
+Report SHA256: `a13d5b6f73246506095a27bed405fd32b0114ce432964c0b227b733a70f1d99d`.
+
 [Run 34553944965](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/34553944965)
 completed the previously blocked captured-fusion test on revision
 `f4db588c85d3a99d08c8d141c6bb50ec52f11c67`.

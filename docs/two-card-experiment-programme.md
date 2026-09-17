@@ -253,6 +253,136 @@ Report SHA256:
 
 ## Combined-runtime tuning priorities - 2026-09-11
 
+### T32 integration work in progress
+
+The next candidate amortizes target verification over up to 31 draft queries /
+32 verifier rows. It is not yet enabled in the full-request benchmark.
+
+| Prerequisite | Current evidence |
+| --- | --- |
+| Synthetic 31-query Markov feedback | Simulator pass, independently verified, run 34589904935 |
+| T32 folded target attention | Simulator pass, independently verified, run 34590151457 |
+| Learned full-vocabulary feedback | Simulator pass, independently verified, run 34590621276; synthetic base logits |
+| 31-query drafter attention | SFPU denominator reduction passes eager/replay, run 34653659471; 46 source hashes verified |
+| T32 commit-only GDN state | Run 34654732582: all 33 prefixes, continuations and pre-commit invariants pass; 20 source hashes verified |
+| Complete captured T32 proposal | Simulator run 34660555430 passes learned layers, target embedding/head and changed-anchor replay; synthetic cached history |
+| T32 history publication in a complete request | Not device-qualified |
+| T32 target gate/up fusion | Exact retained T32 simulator manifest reused; scope host-tested |
+| Complete T32 request and coding screen | Not run; device-state and combined PP/CTX/TG admission still required |
+
+The assembled T32 host regression passes 49 tests (33 drafter tests plus 16
+attention/runtime/fusion/CI tests). This does not establish device numerical
+correctness. Keep the validated T16 baseline and serving defaults unchanged.
+Do not assume acceptance or cycle time scales linearly with block width.
+Runtime pins and simulator results: [T32 admission](t32-runtime-admission.md).
+
+The complete captured proposal simulator gate passes at CTX4096 with 31 queries,
+five learned layers and the real target embedding/head. Two changed-anchor
+replays match eager execution. Report SHA256:
+`e90aa5715fe105a3722f75b17d933db8be89e79de6c79c9f994d761671566559`.
+Cached history is synthetic: this is neither an independent full numerical
+oracle nor a complete request or hardware throughput qualification.
+
+Next integration gate: complete target-bound T32 request correctness and matched
+hardware measurement. The current `full_dspark_request.py` still constructs the T16
+drafter with 15 proposals. Its runtime, feature publication and verifier width
+must move together in an explicit experimental path before a matched hardware
+request comparison. Do not treat the isolated attention pass as full-request
+admission. Captured T32 construction now requires the validated attention kernel.
+
+### Next acceptance, context ladder and history-preserving merge
+
+The separate T16 attention ladder prerequisite passes CTX2048 in simulator run
+34680471500 (revision `29b4322`, capacity2304): eight native/replay comparisons,
+16 mask checks, four KV preservation checks, two stale controls and eight mask
+poison controls. Exit0 and clean close; recorded source hashes match the revision
+and remain unchanged. Report SHA256:
+`d2aa3060240ca1125eb79922d0e56994486046c1b66f854ee0b14b76d5d6b8a6`.
+This is attention-component evidence only. The full request's CTX4096 guard
+remains unchanged until explicit context-specific admission is integrated;
+there is no CTX2048 PP/TG measurement yet.
+
+After the next combined-runtime candidate passes correctness and coding checks,
+compare the accepted candidate against its matched baseline on both P150A cards.
+Use one stream first; report batch/concurrent-stream results separately.
+
+| Context ladder | Report for each supported point |
+| --- | --- |
+| 2K, 4K, 8K, 16K, 32K, 64K, 128K, 262K | PP tok/s, actual CTX tokens, committed TG tok/s, TTFT, intertoken latency, memory and draft acceptance |
+
+Keep prompts, output budgets, timing boundaries and runtime pins matched. Include
+repeats and correctness results; do not count rejected draft tokens as TG.
+The experimental drafter currently caps history capacity at 8192 tokens, including
+generation headroom. Larger ladder points need implementation and validation,
+not just a context flag; report unsupported points explicitly rather than
+silently truncating prompts or extrapolating throughput.
+
+After acceptance and the supported ladder, merge into `main` with a merge commit,
+not squash or rebase. Preserve the training pathway, all experiment commits and
+evidence records, tag the accepted runtime, then create a new optimisation branch
+from merged `main`. Serving defaults remain unchanged unless authorized.
+
+### Latest combined fusion result
+
+T16 gate/up fusion now passes simulator target-math replay, all-layer packed
+weight checks and two complete paired hardware comparisons. It remains opt-in.
+
+| Merge intervals, one stream | Control TG | Fusion PP | CTX | Fusion TG |
+| --- | ---: | ---: | ---: | ---: |
+| Run 34585332201 | 100.45 | 3302.00 | 4096 | 102.44 |
+| Repeat 34586017906 | 100.47 | 3354.98 | 4096 | 101.88 |
+
+Both runs preserve the same outputs, target state and draft acceptance. The
+1.40-1.98% gain is modest: verifier/readback saves only 0.65-0.77 ms/block.
+The current roughly 108 ms whole cycle still needs to reach 55 ms at 11 committed
+tokens/block. Do not present this fusion as resolving the 200-TG target.
+
+The unchanged combined fusion runtime passes independent validation on
+stable-unique (34586808967, PP3298.34 / CTX4096 / TG119.57, four functional
+cases) and run-length encoding (34587483522, PP3311.14 / CTX4096 / TG121.68,
+four functional cases). Rotate-right run 34588114930 also passes independent
+validation: PP3369.42 / CTX4096 / TG84.71 versus 82.58 control, five functional
+cases. All 13 small functional cases pass; draft acceptance ranges from 55.24%
+on rotate-right to 81.67% on the other two tasks.
+These are task-specific correctness and performance screens, not broad held-out
+quality certification. Subsequent
+performance work must address the larger projection/recurrence costs; preserve
+the already rejected no-copy, small-tile and DRAM-conversion findings below.
+Details and artifact hashes: [combined fusion evidence](captured-gate-up-2026-09-11.md).
+
+### Prior combined-runtime evidence
+
+### Post-screen cycle budget
+
+Recomputed from the two uninstrumented fusion requests in each retained report;
+audited requests are excluded. Cycle is total decode time divided by block count,
+so it includes between-block overhead rather than only the block timer.
+
+| Task / run | Cycle ms | Verify/readback ms | Draft ms | Select/commit ms | Required cycle for 200 TG ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Merge repeat / 34586017906 | 107.97 | 68.44 | 27.00 | 11.44 | 55.00 |
+| Stable unique / 34586808967 | 108.73 | 68.38 | 26.65 | 12.32 | 65.00 |
+| Run-length / 34587483522 | 107.86 | 68.49 | 26.81 | 11.45 | 65.63 |
+| Rotate right / 34588114930 | 107.93 | 68.54 | 26.50 | 11.75 | 45.71 |
+
+The required cycle retains each task's observed committed tokens per block.
+An arithmetic zero-draft counterfactual, holding everything else fixed, reaches
+only 135.86, 158.39, 161.93 and 112.29 TG respectively. These are budget bounds,
+not achievable measurements. Even perfect 16-token acceptance at the current
+roughly 108 ms cycle would yield only about 148 TG. Acceptance-only or
+drafter-only tuning cannot meet the objective at this cycle cost.
+
+Next design decision: reduce target verification materially or increase useful
+tokens per verification beyond T16, with measured amortization. A T32 extension
+is not a configuration flip: `PreparedDSparkProposal` currently admits only
+7/15 drafts, and folded target attention/fusion integration is T16-qualified.
+It requires new proposal/layout and every-prefix state simulator gates before
+the same combined hardware comparison. Do not dispatch an unchanged small
+projection benchmark or claim the generic 96-core profile group is an exact
+kernel attribution.
+
+### Historical combined-runtime evidence
+
 Primary objective remains **200 committed TG tok/s, one coding stream, TP2**.
 Do not optimize aggregate request throughput instead, or promote isolated kernel
 timings. Serving defaults stay unchanged. The older dated results below are history.

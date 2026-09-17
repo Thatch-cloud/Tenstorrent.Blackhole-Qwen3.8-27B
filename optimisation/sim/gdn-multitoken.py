@@ -66,7 +66,9 @@ def main():
         parser.error('--value-split first pass requires --norm-gate without convolution')
     if args.retain_histories and not args.packed_checkpoints:
         parser.error('--retain-histories requires packed checkpoints')
-    if args.rows == 32 and args.model_adapter:
+    if args.rows == 32 and args.model_adapter and not (
+            args.commit_only_gdn and args.batch_conv and args.dma_windows
+            and args.packed_checkpoints and args.compact_prologue and args.norm_batch_layer):
         parser.error('T32 model integration requires the wider packed-history prerequisites')
     if args.packed_checkpoints and (not args.dma_windows or args.rows == 1):
         parser.error('--packed-checkpoints requires --dma-windows with T>1')

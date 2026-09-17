@@ -19,6 +19,31 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
+    ln -s /experiment-scripts /scripts
+    export TT_METAL_SLOW_DISPATCH_MODE=1
+    export QWEN_SIM_REPORT=/experiment/results/t32-commit.json
+    python3 -B -m unittest test_gdn_device_loop_state
+    status=0
+    timeout -k 15 9000 python3 -u /optimisation/sim/gdn-multitoken.py \
+        --source-root /opt/tt-metal --rows 32 --norm-gate --conv --batch-conv \
+        --dma-windows --packed-checkpoints --model-adapter --continuation \
+        --compact-prologue --norm-batch-layer --defer-conv-publication --commit-only-gdn || status=$?
+    printf '%s\n' "$status" > /experiment/results/t32-commit.exit-status
+    exit "$status"
+fi
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov* ]]; then
+    weight_flags=()
+    if [ "$QWEN_SIM_CASE" = t32-markov-learned ]; then
+        weight_flags=(--checkpoint /dspark-model.safetensors)
+    fi
+    python3 -B -m unittest test_dspark_t32_weights test_dspark_t32_reference
+    status=0
+    timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-markov-probe.py \
+        --native-reference "${weight_flags[@]}" --output /experiment/results/t32-markov.json || status=$?
+    printf '%s\n' "$status" > /experiment/results/t32-markov.exit-status
+    exit "$status"
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = history-append ]; then
     status=0
     timeout -k 10 180 python3 -u /experiment-scripts/ci/history-append-probe.py \
@@ -33,7 +58,11 @@ if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then
     printf '%s\n' "$status" > /experiment/results/markov-cache-control.exit-status
     exit "$status"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
+    if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then
+        mkdir -p /optimisation
+        ln -s /simulator-support /optimisation/sim
+    fi
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path
@@ -45,6 +74,42 @@ patch = Path('/simulator-support/blackhole-packer-zero-flags.patch').read_bytes(
 packer.write_bytes(compatibility.patched_bytes(packer.read_bytes(), patch))
 PY
     export QWEN_SIM_PACKER_ZERO_GRAFT=1
+    if [[ "$QWEN_SIM_CASE" = t32-combined || "$QWEN_SIM_CASE" = t32-publication ]]; then
+        python3 -B -m unittest test_dspark_t32_prepared test_t32_sim_target test_t32_target_weights test_t32_combined_upload test_dspark_publication_trace
+        publication_args=()
+        if [ "$QWEN_SIM_CASE" = t32-publication ]; then publication_args+=(--publication-only); fi
+        status=0
+        QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/t32-combined-proposal-probe.py \
+            --checkpoint /dspark-model.safetensors --config /dspark-config.json \
+            --target /target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+            "${publication_args[@]}" --output "/experiment/results/$QWEN_SIM_CASE.json" || status=$?
+        printf '%s\n' "$status" > "/experiment/results/$QWEN_SIM_CASE.exit-status"
+        exit "$status"
+    fi
+    if [ "$QWEN_SIM_CASE" = t32-draft-attention ]; then
+        python3 -B -m unittest test_t32_ci_runtime test_dspark_t32_draft_probe test_dspark_t32_attention
+        status=0
+        QWEN_T32_SFPU_SUM=1 timeout -k 15 9000 python3 -u /experiment-scripts/ci/dspark-t32-draft-attention-probe.py \
+            --key-chunk-size 64 --output /experiment/results/t32-draft-attention.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t32-draft-attention.exit-status
+        exit "$status"
+    fi
+    if [ "$QWEN_SIM_CASE" = t32-context-attention ]; then
+        python3 -B -m unittest test_target_t16_context_cli
+        status=0
+        timeout -k 15 9000 python3 -u /experiment-scripts/ci/target-t16-context-probe.py \
+            --context "${QWEN_SIM_CONTEXT:-2048}" --output /experiment/results/t16-context-attention.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t16-context-attention.exit-status
+        exit "$status"
+    fi
+    if [ "$QWEN_SIM_CASE" = t32-attention ]; then
+        python3 -B -m unittest test_target_t32_attention_gate test_target_t16_attention_gate
+        status=0
+        timeout -k 15 9000 python3 -u /experiment-scripts/ci/target-t32-attention-probe.py \
+            --output /experiment/results/t32-attention.json || status=$?
+        printf '%s\n' "$status" > /experiment/results/t32-attention.exit-status
+        exit "$status"
+    fi
     if [ "${QWEN_SIM_CASE:-stack}" = ladder-cache ]; then
         status=0
         timeout -k 10 360 python3 -u /experiment-scripts/ci/ladder-cache-probe.py \

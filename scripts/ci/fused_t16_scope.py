@@ -10,7 +10,11 @@ from model_batch import instance_overrides
 
 
 class FusedT16Arm:
+    token_rows = 16
+
     def __init__(self, operations, model, collective):
+        if type(self.token_rows) is not int or self.token_rows not in (16, 32):
+            raise ValueError('Explicit simulator-covered fusion width required')
         self.operations, self.model, self.collective = operations, model, collective
         self.active = False
         self.hits, self.fallbacks = [0] * 64, [0] * 64
@@ -20,16 +24,16 @@ class FusedT16Arm:
         self.originals = [(layer.feed_forward, layer.feed_forward.forward) for layer in model.layers]
         if len({id(mlp) for mlp, original in self.originals}) != 64:
             raise ValueError('Distinct target MLP instances required')
-        expected = next(kernel for kernel in self.evidence['kernels'] if kernel['token_rows'] == 16)
+        expected = next(kernel for kernel in self.evidence['kernels'] if kernel['token_rows'] == self.token_rows)
         self.projections = []
         for mlp, original in self.originals:
             projection = FusedProjection(mlp.device, mlp.weights.w_gate_up,
-                pairs_per_worker=3, token_rows=16, math_approx_mode=True)
+                pairs_per_worker=3, token_rows=self.token_rows, math_approx_mode=True)
             if projection.manifest != expected:
                 raise ValueError('Target fusion manifest differs from qualified simulator')
             self.projections.append(projection)
         self.bindings = self.weight_bindings()
-        self.audit = dict(rows=16, layers=64, restored=False, passed_simulator=self.evidence['report_sha256'],
+        self.audit = dict(rows=self.token_rows, layers=64, restored=False, passed_simulator=self.evidence['report_sha256'],
             weight_audit=self.weight_audit, setup_ms=(time.perf_counter() - started) * 1000,
             extra_weight_allocations=0, serving_defaults_changed=False)
 
@@ -42,7 +46,7 @@ class FusedT16Arm:
         if not self.active:
             raise RuntimeError('Fusion requires an active instance scope')
         mlp, original = self.originals[index]
-        if tuple(value.shape) != (1, 1, 16, 5120):
+        if tuple(value.shape) != (1, 1, self.token_rows, 5120):
             self.fallbacks[index] += 1
             return original(value)
         operations = self.operations
@@ -87,3 +91,7 @@ class FusedT16Arm:
                 native_bindings_unchanged=self.weight_bindings() == self.bindings)
             if not self.audit['restored'] or not self.audit['native_bindings_unchanged']:
                 raise AssertionError('Native target bindings changed during fusion scope')
+
+
+class FusedT32Arm(FusedT16Arm):
+    token_rows = 32

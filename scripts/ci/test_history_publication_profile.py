@@ -32,7 +32,6 @@ class HistoryProfileTests(unittest.TestCase):
         self.assertGreaterEqual(record['process_cpu_ms'], 0)
         self.assertEqual(gc.callbacks, callbacks)
         self.assertEqual(gc.isenabled(), enabled)
-
     def test_split_records_preserve_results_and_restore_methods(self):
         module = SimpleNamespace(project_chunks=lambda value: value + 1)
 

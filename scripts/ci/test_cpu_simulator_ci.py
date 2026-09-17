@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -6,6 +7,28 @@ import unittest
 
 
 class CpuSimulatorCiTests(unittest.TestCase):
+    def test_t32_routes_without_expanding_dispatch_inputs(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        inputs = workflow.split('    inputs:', 1)[1].split('\npermissions:', 1)[0]
+        names = re.findall(r'^      ([a-z_][a-z0-9_]*):$', inputs, re.MULTILINE)
+        self.assertLessEqual(len(names), 25)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertNotIn('simulator_t32', names)
+        self.assertIn("startsWith(inputs.suite, 't32-') && inputs.suite", workflow)
+        guard = workflow.split('if [[ "${{ inputs.suite }}" = t32-* ]]; then', 1)[1].split('fi', 1)[0]
+        self.assertIn('test "${{ inputs.simulator_only }}" = true', guard)
+        self.assertIn('test "${{ inputs.cards_allocated }}" = false', guard)
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        for case in ('t32-markov', 't32-markov-learned', 't32-attention',
+                't32-draft-attention', 't32-commit', 't32-combined',
+                't32-publication', 't32-context-attention'):
+            self.assertIn(case, inputs)
+            self.assertIn(case, runner)
+        self.assertIn('t32-combined-proposal-probe.py', suite)
+        self.assertIn('--rows 32', suite)
+
     def test_results_are_persisted_before_cleanup(self):
         runner = Path(__file__).with_name('run-simulator.sh').read_text()
         self.assertIn('type=bind,src=$results,dst=/experiment/results', runner)
@@ -17,7 +40,8 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertIn('results_gid=$(stat -c %g "$results")', runner)
         self.assertEqual(runner.count('--group-add "$results_gid"'), 2)
         self.assertNotIn('chown -R', runner)
-        self.assertLess(runner.index('result-write-preflight.txt'), runner.index('docker create'))
+        self.assertLess(runner.index('test -r "$results/result-write-preflight.txt"'),
+            runner.index('container=$(docker create'))
 
     def test_ladder_runs_explicit_contexts_without_weights(self):
         root = Path(__file__).resolve().parents[2]
@@ -65,6 +89,14 @@ class CpuSimulatorCiTests(unittest.TestCase):
         self.assertIn('--stack-layers 5', source)
         self.assertIn('--captured-stack', source)
         self.assertNotIn('--hardware', source)
+
+    def test_attention_fingerprints_keep_repository_relative_support_path(self):
+        source = Path(__file__).with_name('simulator-suite.sh').read_text()
+        link = 'ln -s /simulator-support /optimisation/sim'
+        self.assertIn(link, source)
+        self.assertLess(source.index(link), source.index('python3 -B -m unittest test_t32_ci_runtime'))
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('docker cp optimisation/sim "$container:/simulator-support"', runner)
 
     def test_shortlist_gate_uses_same_exclusive_cpu_container(self):
         root = Path(__file__).resolve().parents[2]

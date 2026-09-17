@@ -19,7 +19,6 @@ class FullDSparkRequestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Combined attribution'):
                 self.measure(**options)
         self.base_prefill.assert_not_called()
-
     def test_captured_publication_installs_before_proposal_and_closes_before_drafter(self):
         events = []
 

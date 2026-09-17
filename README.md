@@ -210,6 +210,25 @@ batch result is claimed. [Details and hashes](docs/two-card-experiment-programme
 
 ### Earlier combined-runtime coding screen
 
+The latest candidate adds **T16 gate/up fusion** to the combined runtime below.
+All results use **CTX 4096, one stream / batch 1**; TG counts committed tokens.
+
+| Task | Candidate PP tok/s | Control TG tok/s | Candidate TG tok/s | Validation |
+| --- | ---: | ---: | ---: | --- |
+| Merge intervals | 3302.00 | 100.45 | **102.44** | Exact tokens/state |
+| Merge intervals, repeat | 3354.98 | 100.47 | **101.88** | Exact tokens/state |
+| Stable unique | 3298.34 | 118.02 | **119.57** | 4/4 functional cases |
+| Run-length encoding | 3311.14 | 117.72 | **121.68** | 4/4 functional cases |
+| Rotate right | 3369.42 | 82.58 | **84.71** | 5/5 functional cases |
+
+These are matched, independently validated full-request comparisons, not kernel
+estimates. The merge-intervals gain repeats at **1.4–2.0%**. Setup-inclusive latency
+is worse in these comparisons; 121.68 TG is task-specific, not a general coding
+rate. All 13 small functional cases pass. Neither 200 TG nor long-context scaling
+is established. [Run evidence and limitations](docs/captured-gate-up-2026-09-11.md).
+
+#### Previous screen (without gate/up fusion)
+
 Same composed path: native DSpark attention, captured proposals, commit-only GDN,
 folded T16 target attention and fused score layout. All rows are **one stream /
 batch 1, CTX 4096, 15 draft queries / 16 verifier rows**.
