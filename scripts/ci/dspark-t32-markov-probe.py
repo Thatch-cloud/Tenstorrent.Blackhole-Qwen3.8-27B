@@ -16,7 +16,9 @@ from gdn_multitoken_conv import addresses, release_owned
 
 SOURCES = ('dspark-t32-markov-probe.py', 'dspark_t32_markov.py', 'dspark_projection.py', 'dspark_markov_device.py', 'dspark_markov.py', 'dspark_intake.py',
     'dspark_markov_fixture.py', 'attention_batch.py', 'gdn_multitoken_conv.py',
-    'dspark_native_reference.py', 'dspark_t32_reference.py', 'dspark_t32_weights.py', 'projection_rounding.py')
+    'dspark_native_reference.py', 'dspark_t32_reference.py', 'dspark_t32_weights.py', 'projection_rounding.py',
+    'dspark_t32_score_layout.py', 'dspark_markov_score_layout.py', 'dspark_score_layout.py',
+    'dspark_score_layout_io.cpp', 'dspark_score_layout_compute.cpp')
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 ORIGINAL_PACKER = '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181'
 BINARY_SHA256 = {
@@ -53,6 +55,7 @@ def source_hashes():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--fused-score-layout', action='store_true')
     weights = parser.add_mutually_exclusive_group()
     weights.add_argument('--fixture', type=Path)
     weights.add_argument('--checkpoint', type=Path)
@@ -87,6 +90,7 @@ def main():
     root = Path(os.environ['TT_METAL_HOME'])
     report = dict(passed=False, closed_cleanly=False, backend='simulator', vocabulary=vocabulary, proposals=steps,
         fixture=fixture, sources=source_hashes(), native_sources=fingerprints(root), scope=__doc__,
+        score_layout='fused' if options.fused_score_layout else 'native',
         target_integrated=False, eligible_for_hardware=False, accuracy_policy='FP32 bias and sum; no SGLang BF16 bitwise claim',
         eager_checks=[], replay_checks=[], input_checks=[], weight_checks=[], stale_controls=[])
     if options.native_reference:
@@ -137,7 +141,11 @@ def main():
             ttnn.synchronize_device(mesh)
 
         def run():
-            return execute(ttnn, persistent[2], persistent[3], persistent[0], persistent[1], transient,
+            backend, keywords = execute, {}
+            if options.fused_score_layout:
+                from dspark_t32_score_layout import execute as backend
+                keywords['mesh'] = mesh
+            return backend(ttnn, persistent[2], persistent[3], persistent[0], persistent[1], transient, **keywords,
                 on_step_enqueued=lambda step: print(json.dumps(dict(event='step_enqueued', step=step,
                     stage=report['stage'])), flush=True))
 
