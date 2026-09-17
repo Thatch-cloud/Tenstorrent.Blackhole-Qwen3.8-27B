@@ -116,3 +116,13 @@ The `combined-ladder-window-concat-*` trigger stages only this source-bound
 candidate into the combined 261,888-token request. Runtime admission rechecks
 the report and source fingerprints before and after the scoped change. Simulator
 acceptance is not proof that the full model now fits or reaches the TG target.
+
+Combined retry **35194271521** still fails during history concatenation, after
+both full prefills. The failing allocation is now 133,955,584 bytes (16,744,448
+per bank). The allocator reports 95,472,192 bytes free per bank, but its largest
+free block is only 12,320,768 bytes: total free space is sufficient, contiguous
+space is not. The next candidate must avoid constructing large outputs after
+the history-piece allocation pattern fragments memory, for example by reserving
+outputs before projection and filling them directly. Do not repeat the unchanged
+run or infer 262K TG from these failed requests. Lifetime-only changes have not
+yet made the complete model fit.
