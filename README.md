@@ -40,11 +40,11 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 
 | Runtime | PP tok/s | Committed TG tok/s | Decision |
 | --- | ---: | ---: | --- |
-| Unchanged T16 control | 3,358.90 | 124.71 | Retained |
-| Overlapped GDN window writes | 3,311.84 | 124.60 | Correct; no full-cycle gain |
+| Unchanged T16 control | 3,322.37 | 124.72 | Retained |
+| Compact draft selection | 3,314.59 | 125.99 | Correct; gain below promotion threshold |
 
-Verifier/readback falls by 0.30 ms on average; paired TG changes are +1.05% / -1.83%.
-The candidate is not promoted. [Combined evidence](docs/gdn-window-write-overlap.md).
+Paired TG changes are +0.56% / +1.48%; aggregate gain is 1.02%.
+The candidate is not promoted. [Combined evidence](docs/compact-draft-score-selection.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an

@@ -1,5 +1,26 @@
 # Combined-runtime trace attribution
 
+## Split the 48-core generic group
+
+Reinspection of the same hash-validated CSV for run 35185624322, four steady
+T16 replays per chip, separates the 112 generic/48-core calls by immediate
+neighbors. Median summed kernel durations:
+
+| Previous -> generic/48 -> next | Calls/replay | Card 0 ms | Card 1 ms |
+| --- | ---: | ---: | ---: |
+| LayerNorm/32 -> generic -> sharded-to-interleaved/32 | 48 | 0.869 | 0.866 |
+| Matmul/43 -> generic -> GDN conv gates/81 | 48 | 3.493 | 3.492 |
+| Generic/16 -> generic -> generic/16 | 16 | 0.247 | 0.247 |
+
+The middle sequence is consistent with the convolution-window builder in
+`gdn_batched_conv.py`, not a profiler source label. Its cost is **3.49 ms**,
+not the full group's 4.61 ms. Removing window materialization requires preserving
+all speculative convolution prefixes: the same windows currently provide
+rollback/publication state. Faster window writes already failed the combined
+promotion screen; structural fusion is a different experiment, not permission to
+drop those checkpoints. Even eliminating 3.49 ms cannot by itself close the
+roughly 36 ms whole-cycle gap to 200 TG.
+
 ## Separate the 32-core projections
 
 `winning_projection_attribution.py` reuses the hash-pinned combined request and

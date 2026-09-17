@@ -1,8 +1,36 @@
 # Compact draft score selection
 
-Status: host specification and simulator-only two-stage reduction kernel source.
-No device compilation, simulator qualification, hardware measurement or runtime
-integration yet. Neither kernel has been compiled or executed on device.
+Status: simulator and combined hardware correctness pass. **Not promoted:**
+complete-cycle gain is only 1.02%, below the predeclared paired threshold.
+
+## Combined hardware result
+
+Run **35268945497**, commit `8a86be5617dd4bb229b24b0f78cf21dc5d63af5c`,
+finishes in **6m29s** on both P150A cards. Fresh control/candidate audits and
+four ABBA requests pass at 4,096 context tokens, one stream.
+
+| Arm | PP tok/s | Committed TG tok/s | Accepted / proposed |
+| --- | ---: | ---: | ---: |
+| Unchanged T16 | 3,322.37 | 124.72 | 224 / 300 |
+| Compact selection | 3,314.59 | 125.99 | 224 / 300 |
+
+Both arms commit 242 timed tokens with identical output, acceptance and target
+state. Paired TG changes are **+0.56% / +1.48%**; neither exceeds 2%.
+Mean T16 draft time changes 24.585 -> 24.154 ms, verification/readback
+66.529 -> 66.312 ms, selection/commit 5.047 -> 4.829 ms, and whole cycle
+96.972 -> 95.997 ms. These observed differences do not isolate causality;
+the unchanged verifier also varies. Logical score-byte savings are not a
+proportional end-to-end gain. Do not repeat this unchanged candidate as a
+qualified speedup or promote it into serving.
+
+The independent combined report checker passes. All 873 script, 1,520 native
+and 14 adapter-source hashes are unchanged; scopes restore and candidate calls
+match the prepared feedback route. Process exit is zero and device closure is
+clean. Report SHA-256:
+`f8d81e5a6ed8f289fd5d8acf8c07948434f4796d9daee63d61e340c185cbf058`.
+Held-out coding quality and sustained serving remain unqualified.
+
+## Design and qualification history
 
 The current fused score-layout kernel adds one FP32 base row to the unchanged
 FP32 Markov bias, then writes all 248,320 scores to DRAM for native argmax.
