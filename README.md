@@ -39,6 +39,17 @@ are not yet qualified. Historical B8 serving results use a different runtime.
 At 64K, mean drafting costs 55.50 ms/block and verification/readback 81.12 ms;
 both need improvement. T32 is not automatically faster and is not the default.
 
+## Cached prefill: separate from the cold ladder
+
+| CTX | Reused / new tokens | Cached prefill | Effective cached PP | Committed TG |
+| --- | --- | --- | --- | --- |
+| 4,096 | 2,048 / 2,048 | 0.684 s | 5,988.86 tok/s | **123.93 tok/s** |
+
+The same-run cold control takes 1.239 s: **1.81x faster prefill**, not a
+decode-speedup claim. Changed-suffix output/state/feature checks pass in the
+offline combined runtime. Serving caching remains disabled.
+[Cache evidence and limits](docs/combined-prefix-cache.md).
+
 ## Reproduce and contribute
 
 - [Exact recipe, image pins and CI replay](docs/runtime-reproduction.md)

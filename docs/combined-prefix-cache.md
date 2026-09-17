@@ -1,8 +1,42 @@
 # Combined T16/DSpark prefix caching
 
 User-approved order: combined runtime first, serving afterward.
-**Not enabled or hardware-qualified yet.** Do not flip the vLLM prefix-cache
-flag: this work is a separate hybrid-state implementation.
+**4K offline combined screen passes; serving remains disabled.** Do not flip
+the vLLM prefix-cache flag: this is a separate hybrid-state implementation.
+
+## Verified 4K hardware result
+
+[Run 35198371713](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35198371713)
+at `14db1e57e94bf626fd3d4d5451eea76969c97b35` finishes in 4m33s on both P150A
+cards. One changed-suffix feature audit and two timed combined requests pass.
+
+| Measurement | Result |
+| --- | ---: |
+| Actual context / reused prefix / new suffix | 4,096 / 2,048 / 2,048 tokens |
+| Mean cold-control prefill, including cache population | 1,239.17 ms |
+| Mean cached prefill, including restore and native setup | 683.94 ms |
+| Same-run prefill speedup | 1.81x |
+| Effective cached PP / new-suffix request PP | 5,988.86 / 2,994.43 tok/s |
+| Complete-cycle committed TG, one stream | **123.93 tok/s** |
+| Timed committed tokens / accepted proposals | 242 / 224 of 300 |
+
+This is not a cold-PP result or a matched decode-speedup claim. All three
+requests match native tokens, target state and inactive slots. The audit has
+100 feature checks and 11 proposal checks, including reuse after priming with
+a different suffix. Exit status is zero and cleanup succeeds. Independently
+recomputed summaries match the artifact; all 869 script, 1,520 native and 12
+cache-source fingerprints are unchanged, and the cache sources match the
+staging manifest. Report SHA-256:
+`d95a7f07b2152c711491a3e683669053fde14a2b0f6547abd17a47724cec0d09`.
+
+Mean timed block: draft **25.42 ms**, verification/readback **66.39 ms**,
+selection/commit **5.00 ms**, whole cycle **97.60 ms**. At 12.1 committed tokens
+per block, 200 TG needs a 60.5 ms whole cycle. Prefix caching does not remove
+that verifier bottleneck. DSpark feature setup still averages 959.92 ms and
+verifier setup 2,689.68 ms per request; neither is hidden in the cached-PP figure.
+Longer-context caching, concurrent users, serving ownership and held-out coding
+quality remain unqualified. The implementation notes below record the earlier
+host-only stages and do not supersede this bounded hardware result.
 
 ## Required reusable state
 
@@ -125,7 +159,7 @@ continues to use the complete decode cycle. Seven focused accounting/integration
 tests pass. Older unrelated preflight/workflow assertions in the broader request
 test module still fail against historical source pins; they were not relaxed.
 
-## Remaining integration gates
+## Integration history and remaining gates
 
 `prefill_prefix_session.py` now composes checkpoint allocation, native KV
 residency checks and the combined request factory into one explicit offline
@@ -135,9 +169,8 @@ host tests cover cold/hit execution and cleanup on failure. The caller must
 still hold an exclusive page lease; this helper does not create a serving lease
 or enable hardware caching by itself.
 
-Priority: qualify the combined T16/DSpark runtime first, then integrate serving.
-The host controller, bounded lookup, checkpoint allocation and request hook exist;
-65 focused host tests pass. This is not device acceptance or an enabled cache.
+Priority: combined T16/DSpark first, then serving. The initial host-only gate
+had 65 passing focused tests; the accepted hardware scope is recorded above.
 
 The opt-in `prefill_prefix_stage.py` now applies only the cache hook and cached
 accounting to a freshly staged frozen T16 ladder. It does not copy the current
@@ -152,8 +185,7 @@ the untimed audit; both timed requests use ordinary cache hits. Changed-prefix
 and failure paths remain host-tested, not device-qualified.
 The experiment requires explicit `QWEN_PREFIX_CACHE_EXPERIMENT=1` and a
 `experiment/combined-ladder-prefix-*` tag. That CI route selects only 4K and keeps
-the cold ladder unchanged. Four host staging/routing tests pass; hardware
-acceptance is still pending.
+the cold ladder unchanged. The 4K hardware acceptance above covers this route.
 
 First hardware attempt `35197029809` stopped before loading weights: the added
 261,888 context option changed the historical geometry fingerprint even for 4K.
@@ -169,14 +201,11 @@ checkpoint allocation because the frozen report lacks the newer
 K/V pairs and the actual page table, rejecting inconsistent shapes or conflicting
 metadata. There was no cached-prefill or TG measurement in this attempt.
 
-1. Stage the optional request hook into the frozen winning T16 runtime without
-   importing unrelated T32 changes. Allocate checkpoints before trace capture;
-   connect explicit exclusive KV-page ownership and loaded-model identity.
-2. Run a small combined cold-versus-cached changed-suffix qualification before
-   spending time on long contexts. Require exact emitted tokens, GDN, valid KV,
-   inactive slots and DSpark features; exercise misses and failure cleanup.
-3. Measure hit tokens, suffix tokens, restore cost, suffix PP, setup and complete
-   TG separately. Keep cached effective PP out of the cold context ladder.
-4. Expand accepted combined tests to larger contexts, then connect serving's
-   allocator and request lifecycle. Serving prefix caching remains disabled
-   until that separate ownership and correctness gate passes.
+1. Extend the same combined changed-suffix screen to longer prefixes/contexts;
+   retain the cold control, exact state/feature checks and complete-cycle TG.
+2. Add device checks for changed-prefix misses, eviction and failure cleanup;
+   those paths are currently host-tested only.
+3. Separate restore cost from suffix execution and outer native setup. Current
+   cached-prefill timing includes all three; do not relabel it kernel-only PP.
+4. Connect serving's allocator, ownership and request lifecycle only after its
+   separate correctness gate. Serving prefix caching remains disabled.
