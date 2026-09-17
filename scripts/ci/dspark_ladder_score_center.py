@@ -1,0 +1,95 @@
+"""Diagnostic FP32 masking and centering before native exponential reload."""
+
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import native_draft_sdpa
+
+
+HELPER_ANCHOR = 'void recip_block_inplace(uint32_t in_cb, uint32_t num_tiles) {'
+HELPER = '''
+void qwen_scalar_score_transform(uint32_t scores_cb, uint32_t operand_cb, uint32_t tiles, uint32_t columns, bool mask) {
+#if defined(COMPILE_FOR_TRISC) && COMPILE_FOR_TRISC == 0
+    CircularBuffer(scores_cb).wait_front(tiles);
+    CircularBuffer(operand_cb).wait_front(mask ? tiles : tiles / columns);
+    const auto scores_interface = get_local_cb_interface(scores_cb);
+    const auto operand_interface = get_local_cb_interface(operand_cb);
+    for (uint32_t tile = 0; tile < tiles; ++tile) {
+        volatile float* scores = reinterpret_cast<volatile float*>(
+            (scores_interface.fifo_rd_ptr + tile * scores_interface.fifo_page_size) << cb_addr_shift);
+        const uint32_t operand_address = (operand_interface.fifo_rd_ptr +
+            (mask ? tile : tile / columns) * operand_interface.fifo_page_size) << cb_addr_shift;
+        for (uint32_t row = 0; row < 32; ++row) {
+            const uint32_t first = row < 16 ? row * 16 : 512 + (row - 16) * 16;
+            for (uint32_t column = 0; column < 32; ++column) {
+                const uint32_t offset = first + (column < 16 ? column : 256 + column - 16);
+                if (mask) {
+                    const volatile uint16_t* masks = reinterpret_cast<const volatile uint16_t*>(operand_address);
+                    const uint32_t mask_bits = static_cast<uint32_t>(masks[offset]) << 16;
+                    if ((mask_bits & 0x7fffffffU) == 0) continue;
+                    union { uint32_t bits; float value; } converted;
+                    converted.bits = mask_bits;
+                    scores[offset] = scores[offset] + converted.value;
+                } else {
+                    const volatile float* maxima = reinterpret_cast<const volatile float*>(operand_address);
+                    if (scores[offset] == -__builtin_inff() && maxima[first] == -__builtin_inff()) continue;
+                    scores[offset] = scores[offset] - maxima[first];
+                }
+            }
+        }
+    }
+    if (mask) CircularBuffer(operand_cb).pop_front(tiles);
+#endif
+}
+'''
+MASK = '                    add_block_inplace(cb_qk_im, cb_mask_in, qk_chunk_tiles);'
+MASK_AFTER = '''                    if constexpr (!QWEN_DRAFT_EXP_APPROX && get_compile_time_arg_val(3) == 2112) {
+                        qwen_scalar_score_transform(cb_qk_im, cb_mask_in, qk_chunk_tiles, Sk_chunk_t, true);
+                    } else {
+''' + MASK + '''
+                    }'''
+INIT = '    sub_bcast_cols_init(in0_cb, in1_cb);'
+INIT_AFTER = '''    if constexpr (!QWEN_DRAFT_EXP_APPROX && get_compile_time_arg_val(3) == 2112) {
+        qwen_scalar_score_transform(in0_cb, in1_cb, rows * cols, cols, false);
+        copy_tile_to_dst_init_short(in0_cb);
+    } else {
+''' + INIT + '''
+    }'''
+SUBTRACT = '                sub_tiles_bcast_cols(in0_cb, in1_cb, j, i, j);'
+SUBTRACT_AFTER = '''                if constexpr (!QWEN_DRAFT_EXP_APPROX && get_compile_time_arg_val(3) == 2112) {
+                    copy_tile(in0_cb, j, j);
+                } else {
+''' + SUBTRACT + '''
+                }'''
+
+
+@contextmanager
+def scalar_score_center(key_tiles=2112):
+    if key_tiles not in (40, 2112):
+        raise ValueError('Only the 128-token smoke or 64K ladder geometry is supported')
+    original = native_draft_sdpa.replacements
+
+    def replacements():
+        substitutions = original()
+        helper = HELPER
+        if key_tiles in (40, 2112):
+            substitutions['compute_common.hpp'] += (('#include <cstdint>',
+                '#include <cstdint>\n#include "api/debug/dprint.h"'),)
+            helper = helper.replace('    CircularBuffer(scores_cb).wait_front(tiles);', '''    static uint32_t progress_calls = 0;
+    const uint32_t progress_call = progress_calls++;
+    const bool report_progress = progress_call < 2 || progress_call % 16 == 0;
+    if (report_progress) DEVICE_PRINT("QWEN_SCORE_ENTER call={} mask={} tiles={}\\n", progress_call, mask, tiles);
+    CircularBuffer(scores_cb).wait_front(tiles);
+    if (report_progress) DEVICE_PRINT("QWEN_SCORE_SCORES_READY mask={}\\n", mask);''').replace(
+                '    const auto scores_interface',
+                '    if (report_progress) DEVICE_PRINT("QWEN_SCORE_OPERAND_READY mask={}\\n", mask);\n    const auto scores_interface').replace(
+                '    if (mask) CircularBuffer(operand_cb).pop_front(tiles);',
+                '    if (mask) CircularBuffer(operand_cb).pop_front(tiles);\n'
+                '    if (report_progress) DEVICE_PRINT("QWEN_SCORE_DONE mask={}\\n", mask);')
+        substitutions['compute_common.hpp'] += ((HELPER_ANCHOR, helper + HELPER_ANCHOR),) + tuple(
+            (before, after.replace('== 2112', f'== {key_tiles}'))
+            for before, after in ((MASK, MASK_AFTER), (INIT, INIT_AFTER), (SUBTRACT, SUBTRACT_AFTER)))
+        return substitutions
+
+    with patch.object(native_draft_sdpa, 'replacements', replacements):
+        yield

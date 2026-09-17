@@ -1,0 +1,23 @@
+diff --git a/tt_metal/llrt/core_descriptor.cpp b/tt_metal/llrt/core_descriptor.cpp
+--- a/tt_metal/llrt/core_descriptor.cpp
++++ b/tt_metal/llrt/core_descriptor.cpp
+@@ -297,3 +297,19 @@
+ 
++    if (ethernet_dispatch) {
++        for (const auto peer_id : get_cluster().user_exposed_chip_ids()) {
++            std::unordered_set<tt::tt_metal::CoreCoord> peer_available;
++            for (const auto& core : get_cluster().get_soc_desc(peer_id).get_cores(CoreType::ETH, CoordSystem::LOGICAL)) {
++                peer_available.insert({core.x, core.y});
++            }
++            std::erase_if(logical_available_eth_cores, [&peer_available](const auto& core) {
++                return !peer_available.contains(core);
++            });
++            if (!get_cluster().is_mock_or_emulated()) {
++                const auto peer_active = get_control_plane().get_active_ethernet_cores(peer_id);
++                logical_active_eth_cores.insert(peer_active.begin(), peer_active.end());
++            }
++        }
++    }
++
+     dispatch_cores.reserve(desc_yaml[dispatch_cores_string].size());
+     for (const auto& core_node : desc_yaml[dispatch_cores_string]) {

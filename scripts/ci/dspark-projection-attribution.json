@@ -1,0 +1,486 @@
+{
+  "scope": "Offline attribution of captured learned FC/norm errors; never a device qualification.",
+  "report_sha256": "f5b73a158c94bf1c81c8370aed9e6cfc8c8e31668229f0088c1cff57a5ee80f7",
+  "operands_sha256": "896140c440c4a84552a1ef303ee79d7ae970ba354a4ef14ae036da6a0528b3bd",
+  "sources": {
+    "dspark_projection_diagnostic.py": "f7261955789cf8be5acb8e0ddd8b59ea25cc95800243a659662ad787b7d5dd02",
+    "dspark_projection.py": "a6229693dd80e85a8bfc78815ff99047d98d923b10684044ed8bebf397a20d3c",
+    "dspark_backbone_reference.py": "a62f5e108c3bbcf4df8428eb85afe6218d42e3687fdf167100819f219366fe71",
+    "dspark_weights.py": "10593cc2d2e6f55283dac0924debbb0f310e875e10896c591a552ae19f4573bf",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  },
+  "checkpoint_sha256": "2aff025f45823b40ebe726b9dfa40302f3512bd9a11c3a7347de32a567acd9a7",
+  "policy": "BF16 learned weights; HiFi4 FP32 partials; FP32 sum; BF16 projection; unweighted BF16 RMSNorm; BF16 gamma product",
+  "tolerance": {
+    "rtol": 0.01,
+    "atol": 0.01
+  },
+  "reference": {
+    "cpu_report_sha256": "2dcaf7f4e5d1052da206dcead5ccc54b15b0a5d9d81dc3f8605e2a5fd349b912",
+    "upstream_report_sha256": "eb79532aeee5121b184f24121b9d2012aa9905f0a202100c98093b3657f9ed16",
+    "outputs_sha256": "ede89f463be2df136298444e092c9bffaa272bb1968e2cc8336cf0ae0aef02fc",
+    "tensor_sha256": {
+      "confidence_head.proj.bias": "15f140ecfc7c93ed979d499e4295d54667fbfa852baed09eaa224ac7fa63d01d",
+      "confidence_head.proj.weight": "6162560ea0ae067ed6fcb0c46d0850682651196018134fa1a89dc44719b5a44f",
+      "fc.weight": "35785552a2ff0954be429e0daa767713a0c95e1d97ab231226bf2fb3eb37ef40",
+      "hidden_norm.weight": "b0b3737fcabb5542a9d222660aaef7dc99dc35fe30ca5d0b2f659cb095fc86b2",
+      "layers.0.input_layernorm.weight": "2d704464691366cd26837bdc8a7dbaeb22dccf7065c91262678472d7615c0032",
+      "layers.0.mlp.down_proj.weight": "d9eee90bff8d04e7bcebcf0b9b9fe580d1628680b48025c898eab6e6318cb746",
+      "layers.0.mlp.gate_proj.weight": "aa832838a0dbd01249295bb60b651c4d119dac910aa2d788c997ff10ed915ee2",
+      "layers.0.mlp.up_proj.weight": "cf0f815c5bc3e1ca64e3a16918d1aebe586a7b6d540ceda887b42b7c642d70b5",
+      "layers.0.post_attention_layernorm.weight": "4c9e5cf2dfcae502b91ad9b46cc42080a7b823b4e22f507acc22df4866de880e",
+      "layers.0.self_attn.k_norm.weight": "8f714039b19308d16424d9e9985b6298f88982ee282e78469f1bb97d81623fc8",
+      "layers.0.self_attn.k_proj.weight": "8797b20921e603dc2aa25fbfdef10a9ed1b00c17857bd22b381744cf247034d3",
+      "layers.0.self_attn.o_proj.weight": "620b4bba6611c6c7944aa9bea8d6748004647ffdbef44075b9080deefdfbcd33",
+      "layers.0.self_attn.q_norm.weight": "08a58e6c0b332eedf9edb7079895c82a981fa9665878e0379c7621b8190325f1",
+      "layers.0.self_attn.q_proj.weight": "1f5b77ee27b80ddec91a8599d27868d8b4ed7052b202be35db013f989fcb9be5",
+      "layers.0.self_attn.v_proj.weight": "9e98811de3c111aa93a4d2477e15ca2ac6d52609d062956f269255e3fa05b043",
+      "layers.1.input_layernorm.weight": "7e37dd192a397fc0b6cbe84ec3a98bde9b178ceafff9ad56dc07903a1cccc3c1",
+      "layers.1.mlp.down_proj.weight": "1bdde62665bdceaf02275b9478417c58c90dff2c8d0b85410fae4b5009772132",
+      "layers.1.mlp.gate_proj.weight": "c03531cd23c2176addd62a1a23048e89ce6f9e0aa3ca869f5a7161e273b77d2e",
+      "layers.1.mlp.up_proj.weight": "a6f48aa2ae2464437562671715d9c363a2308d5c4f911e3de1813fee95527e0c",
+      "layers.1.post_attention_layernorm.weight": "d09296ba56dba89af33c27b7d8ddb9e0c96bbd2b05ade4e98e6d6262e3fe7a19",
+      "layers.1.self_attn.k_norm.weight": "b9718d5207b455f5088fe0fe2cfe6f58463f5a0255d90abde441439544e374fd",
+      "layers.1.self_attn.k_proj.weight": "8804c6b2653414b3548b802d4d360617cba5db6270c50e80d65d0c96a4629086",
+      "layers.1.self_attn.o_proj.weight": "673c0135fdb16ec6ebe026a6d9da07816fa385a750186cb2c16b5e46c3c6f487",
+      "layers.1.self_attn.q_norm.weight": "35ce08dcb3118bc3d5dd6de97a4cd613bdf9d42b42140e444aacbb7ee9c9f697",
+      "layers.1.self_attn.q_proj.weight": "a1491e91a35a2710bc0c1c41c99c0004181b930cf094464ae77219e316e3dd69",
+      "layers.1.self_attn.v_proj.weight": "dba6ef249a1ab74bca9a5bd721f3ceed3211c3130d1858259ae2ba6e1d45076d",
+      "layers.2.input_layernorm.weight": "dfab648f620370ab4048918aa24b33e65100a7f272e036025da31db5dc74543d",
+      "layers.2.mlp.down_proj.weight": "786a660ed7e4a865dfa4892381fbf2caf9ded0d7e308032c4b1a43e346bc3a58",
+      "layers.2.mlp.gate_proj.weight": "63022d333370445f823ee8c01885087608b353d05bad30d4c3c9487fe5732880",
+      "layers.2.mlp.up_proj.weight": "7fcb04e7a21673e4e59f8860a5d2aec5fbd5c7cf0fb32ef1a2553d0b3e4e98fd",
+      "layers.2.post_attention_layernorm.weight": "a2b0fb582fc486bc80367c717de3dec94ae92f8dbe22b01cf04ab8ae0e459f31",
+      "layers.2.self_attn.k_norm.weight": "13b7d00d13624bd4bd919852a9810d2bbea47a1b4a89ee91c7104606a585ab97",
+      "layers.2.self_attn.k_proj.weight": "bcfe0b4b606a701a2bc4fcebffbbeacd9dabe88d28c8023740b597da4e07c4bd",
+      "layers.2.self_attn.o_proj.weight": "665da51ec4628ab83600a1dc0e4a0fbe4aa834ce14a36a59e633254a33a29e8e",
+      "layers.2.self_attn.q_norm.weight": "3dce4ab5bef24415fde095099ecd8d303ff61ed01b0947d8aebcfc0de63c464c",
+      "layers.2.self_attn.q_proj.weight": "bc58744bf7b1f5901b8a3177a189af37099b46dc7877e34db7b6f939d2925e3d",
+      "layers.2.self_attn.v_proj.weight": "7f9f5aafa807d0f9d22aa16b9cb7e3c5087cb83427bf6b736f91dbf74faa4f6e",
+      "layers.3.input_layernorm.weight": "6800e41dd460a8bc44581b2d646c989b701816a00d5866508626b3fcf46b5c10",
+      "layers.3.mlp.down_proj.weight": "5cbc1fc3ce3610fe82715138c0e546837a6ba2cc37dcb90fc361212c5178e05b",
+      "layers.3.mlp.gate_proj.weight": "6a6e718cad4cd5a8215be9b125344c09bbc53327550f9ef6a5bed132e8ccd3f2",
+      "layers.3.mlp.up_proj.weight": "0dbc5c08ce69792e6b2c89389b0c886ab8de325e9bb9d132a50104e43a5be28c",
+      "layers.3.post_attention_layernorm.weight": "5b3016cdab4131c18fdb7043765d618482b505a643892468b6ef5c8b68418bd8",
+      "layers.3.self_attn.k_norm.weight": "8bf53eb7b04b0ebce823d12bbc575c1a394e1baacb53d0a348c9da9967176e7d",
+      "layers.3.self_attn.k_proj.weight": "61f9e6a4c847e2d15d5946fce75cebd231ec3b08f7e1c62044a84b68a6a46154",
+      "layers.3.self_attn.o_proj.weight": "a0694dbc35e50b84dc1b214b75aa8f9647b0240b33138a71e356dee0cb5c5bc3",
+      "layers.3.self_attn.q_norm.weight": "e5f6ea39f2c89fcc0d902d525dd2272ee99a52c60b0d6ade96eb3e8b3932a1d4",
+      "layers.3.self_attn.q_proj.weight": "90cd28d10373687d79ff16eee47f25862911205b95391e1a48ce6db3e9f0bd53",
+      "layers.3.self_attn.v_proj.weight": "2c470a6930f23679ffd8ebdfb57895bf4dbc7e2091f07386d749f7d168d4963a",
+      "layers.4.input_layernorm.weight": "a11c23d61965b221856341d9d89d5b5120afd8defafb0ec6fffb101e91c63745",
+      "layers.4.mlp.down_proj.weight": "c23d5c017ec55ce1a3f1d9f24354f80519037c59ee1f3b9b31bc30af0d4122ad",
+      "layers.4.mlp.gate_proj.weight": "d75036737a53cacd61aab986f7b77d9d923e1c161925a67c72d6b2aa25322b14",
+      "layers.4.mlp.up_proj.weight": "e70b79ef6e4e7c9316f463c1db1d924065b742da5b9148676f4f8cfba67c0cc1",
+      "layers.4.post_attention_layernorm.weight": "f34f362282d03d4d8a120cbf2e2dac8990f6f7fd9ff4816ceb405efcf440b936",
+      "layers.4.self_attn.k_norm.weight": "3ef425c72b8c38aa185d342b752a49064a00e6e6047cebee056c69d1c0399874",
+      "layers.4.self_attn.k_proj.weight": "bf7920bb5e6777b5f0a3b9699004a8dcb78853d4ef7c8bc219d28ca4382912d3",
+      "layers.4.self_attn.o_proj.weight": "1a3fbc3890fd97d452276a972ab7ecea7593eac62346ada78bae80478118908a",
+      "layers.4.self_attn.q_norm.weight": "7ff3943dbbf87cc40394437571dc73a1e051e2c23ccf06f5c8f6a3e7b11f0f32",
+      "layers.4.self_attn.q_proj.weight": "d037351da49d77a3e6d1a81975c3067a5abd832e88bc18a3588cf4fe38264894",
+      "layers.4.self_attn.v_proj.weight": "0996c64feb4839279b8afdb591aa15bb5dd87135fb441a6f8f578b8d9d2111c6",
+      "markov_head.markov_w1.weight": "80cdfb6122576b2cf02a3df40e83209fd5514aed82ef381d6c551d6c925d3c57",
+      "markov_head.markov_w2.weight": "39ba4adba9d613e61ba2ff4ef4151fdfda7ac898dab12e4603d3cff6a5e4d2e2",
+      "norm.weight": "e9a28d7e9b76ee060d594e694484919471130717ddf8815ee4224683a2fec8ed"
+    }
+  },
+  "eligible_for_hardware": false,
+  "target_integrated": false,
+  "cases": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "comparisons": {
+        "split_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0
+        },
+        "native_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.125,
+          "failed_elements": 0
+        },
+        "split_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0
+        },
+        "native_projection_cpu_norm_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_norm_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        }
+      },
+      "failures": []
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "comparisons": {
+        "split_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0
+        },
+        "native_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.125,
+          "failed_elements": 0
+        },
+        "split_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0
+        },
+        "native_projection_cpu_norm_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_norm_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        }
+      },
+      "failures": []
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "comparisons": {
+        "split_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.125,
+          "failed_elements": 0
+        },
+        "split_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.00390625,
+          "failed_elements": 0
+        },
+        "native_projection_cpu_norm_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_norm_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0
+        },
+        "native_context_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_backbone": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 4
+        }
+      },
+      "failures": [
+        {
+          "coordinate": [
+            0,
+            0,
+            5,
+            1268
+          ],
+          "gamma": 1.0625,
+          "limit": 0.022734373807907104,
+          "cpu_projection": 9.8125,
+          "split_projection": 9.8125,
+          "native_projection": 9.75,
+          "native_sum": 9.779702186584473,
+          "cpu_norm_of_native_projection": 1.1875,
+          "native_norm": 1.1796875,
+          "cpu_context_of_native_projection": 1.265625,
+          "native_context": 1.25,
+          "backbone_context": 1.2734375,
+          "native_projection_bits": 16668,
+          "cpu_projection_bits": 16669
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            14,
+            4682
+          ],
+          "gamma": 1.0390625,
+          "limit": 0.021484375,
+          "cpu_projection": 8.875,
+          "split_projection": 8.875,
+          "native_projection": 8.8125,
+          "native_sum": 8.842352867126465,
+          "cpu_norm_of_native_projection": 1.09375,
+          "native_norm": 1.0859375,
+          "cpu_context_of_native_projection": 1.1328125,
+          "native_context": 1.125,
+          "backbone_context": 1.1484375,
+          "native_projection_bits": 16653,
+          "cpu_projection_bits": 16654
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            17,
+            2451
+          ],
+          "gamma": 1.140625,
+          "limit": 0.05218750238418579,
+          "cpu_projection": -30.5,
+          "split_projection": -30.5,
+          "native_projection": -30.375,
+          "native_sum": -30.437049865722656,
+          "cpu_norm_of_native_projection": -3.671875,
+          "native_norm": -3.65625,
+          "cpu_context_of_native_projection": -4.1875,
+          "native_context": -4.15625,
+          "backbone_context": -4.21875,
+          "native_projection_bits": -15885,
+          "cpu_projection_bits": -15884
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            24,
+            1969
+          ],
+          "gamma": 1.1875,
+          "limit": 0.03750000149011612,
+          "cpu_projection": 18.875,
+          "split_projection": 18.875,
+          "native_projection": 18.75,
+          "native_sum": 18.80861473083496,
+          "cpu_norm_of_native_projection": 2.296875,
+          "native_norm": 2.28125,
+          "cpu_context_of_native_projection": 2.734375,
+          "native_context": 2.703125,
+          "backbone_context": 2.75,
+          "native_projection_bits": 16790,
+          "cpu_projection_bits": 16791
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "comparisons": {
+        "split_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_projection_vs_cpu": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.125,
+          "failed_elements": 0
+        },
+        "split_context_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.00390625,
+          "failed_elements": 0
+        },
+        "native_projection_cpu_norm_vs_backbone": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_norm_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0
+        },
+        "native_context_vs_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0
+        },
+        "native_context_vs_backbone": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 4
+        }
+      },
+      "failures": [
+        {
+          "coordinate": [
+            0,
+            0,
+            5,
+            1268
+          ],
+          "gamma": 1.0625,
+          "limit": 0.022734373807907104,
+          "cpu_projection": 9.8125,
+          "split_projection": 9.8125,
+          "native_projection": 9.75,
+          "native_sum": 9.779702186584473,
+          "cpu_norm_of_native_projection": 1.1875,
+          "native_norm": 1.1796875,
+          "cpu_context_of_native_projection": 1.265625,
+          "native_context": 1.25,
+          "backbone_context": 1.2734375,
+          "native_projection_bits": 16668,
+          "cpu_projection_bits": 16669
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            14,
+            4682
+          ],
+          "gamma": 1.0390625,
+          "limit": 0.021484375,
+          "cpu_projection": 8.875,
+          "split_projection": 8.875,
+          "native_projection": 8.8125,
+          "native_sum": 8.842352867126465,
+          "cpu_norm_of_native_projection": 1.09375,
+          "native_norm": 1.0859375,
+          "cpu_context_of_native_projection": 1.1328125,
+          "native_context": 1.125,
+          "backbone_context": 1.1484375,
+          "native_projection_bits": 16653,
+          "cpu_projection_bits": 16654
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            17,
+            2451
+          ],
+          "gamma": 1.140625,
+          "limit": 0.05218750238418579,
+          "cpu_projection": -30.5,
+          "split_projection": -30.5,
+          "native_projection": -30.375,
+          "native_sum": -30.437049865722656,
+          "cpu_norm_of_native_projection": -3.671875,
+          "native_norm": -3.65625,
+          "cpu_context_of_native_projection": -4.1875,
+          "native_context": -4.15625,
+          "backbone_context": -4.21875,
+          "native_projection_bits": -15885,
+          "cpu_projection_bits": -15884
+        },
+        {
+          "coordinate": [
+            0,
+            0,
+            24,
+            1969
+          ],
+          "gamma": 1.1875,
+          "limit": 0.03750000149011612,
+          "cpu_projection": 18.875,
+          "split_projection": 18.875,
+          "native_projection": 18.75,
+          "native_sum": 18.80861473083496,
+          "cpu_norm_of_native_projection": 2.296875,
+          "native_norm": 2.28125,
+          "cpu_context_of_native_projection": 2.734375,
+          "native_context": 2.703125,
+          "backbone_context": 2.75,
+          "native_projection_bits": 16790,
+          "cpu_projection_bits": 16791
+        }
+      ]
+    }
+  ],
+  "checkpoint_closed": true
+}

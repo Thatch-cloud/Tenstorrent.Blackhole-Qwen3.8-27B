@@ -1,0 +1,508 @@
+{
+  "backend": "simulator",
+  "passed": true,
+  "closed_cleanly": true,
+  "checks": [
+    {
+      "weight": "gate",
+      "chip": 0,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    },
+    {
+      "weight": "gate",
+      "chip": 1,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    },
+    {
+      "weight": "up",
+      "chip": 0,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    },
+    {
+      "weight": "up",
+      "chip": 1,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    },
+    {
+      "weight": "down",
+      "chip": 0,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    },
+    {
+      "weight": "down",
+      "chip": 1,
+      "contents_exact": true,
+      "canonical_identity": true,
+      "native_unchanged_after_view_release": true,
+      "distinct_shards": true
+    }
+  ],
+  "shard_axes": {
+    "gate": 1,
+    "up": 1,
+    "down": 0
+  },
+  "sources": {
+    "tensix_mlp_weight_views.py": "d59956d1aa1948a5190df9af274cdb562d2a0ea849b9e3d6c5067bfbd9b6e893",
+    "tensix-mlp-view-probe.py": "385c2568030d2aeae69be622d4ad375db4dc7f6ad0503d53b9b72e3dc59530bd",
+    "tensix_mlp_view_gate.py": "6a829435a3f1c9a75bae14efcc621fa91ef2ee9bb84e6a2a92c4e272109411c9"
+  },
+  "native_sources": {
+    "ttnn/cpp/ttnn/operations/experimental/reshape/view.cpp": "849995c8d16235e176266cf678ad618ea279bc5edd62d418ce456900ca252eee",
+    "ttnn/cpp/ttnn/operations/experimental/reshape/view_nanobind.cpp": "7b162e832a0370805556e78f982408c47bbbba88a15d866951ba059387f33c14",
+    "ttnn/core/tensor/tensor_ops.cpp": "8fc326c22555a2a67909ec80d20fa583c7938f97ea1951a81f73d6de1679b39b",
+    "ttnn/api/ttnn/tensor/tensor_ops.hpp": "fadab5265114bcd0e86baec0fc38f979469ea42e4979d400da770934be2daf25",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181"
+  },
+  "stage": "complete",
+  "weight_views": {
+    "gate": {
+      "native": {
+        "shape": [
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          },
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          }
+        ]
+      },
+      "candidate": {
+        "shape": [
+          1,
+          1,
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          1,
+          1,
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          },
+          {
+            "shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          }
+        ]
+      },
+      "native_after": {
+        "shape": [
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          },
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 1048704
+          }
+        ]
+      }
+    },
+    "up": {
+      "native": {
+        "shape": [
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          },
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          }
+        ]
+      },
+      "candidate": {
+        "shape": [
+          1,
+          1,
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          1,
+          1,
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          },
+          {
+            "shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              1,
+              1,
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          }
+        ]
+      },
+      "native_after": {
+        "shape": [
+          5120,
+          8704
+        ],
+        "padded_shape": [
+          5120,
+          8704
+        ],
+        "dtype": "bfloat4_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          },
+          {
+            "shape": [
+              5120,
+              8704
+            ],
+            "padded_shape": [
+              5120,
+              8704
+            ],
+            "dtype": "bfloat4_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 4182144
+          }
+        ]
+      }
+    },
+    "down": {
+      "native": {
+        "shape": [
+          8704,
+          5120
+        ],
+        "padded_shape": [
+          8704,
+          5120
+        ],
+        "dtype": "bfloat8_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          },
+          {
+            "shape": [
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          }
+        ]
+      },
+      "candidate": {
+        "shape": [
+          1,
+          1,
+          8704,
+          5120
+        ],
+        "padded_shape": [
+          1,
+          1,
+          8704,
+          5120
+        ],
+        "dtype": "bfloat8_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              1,
+              1,
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              1,
+              1,
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          },
+          {
+            "shape": [
+              1,
+              1,
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              1,
+              1,
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          }
+        ]
+      },
+      "native_after": {
+        "shape": [
+          8704,
+          5120
+        ],
+        "padded_shape": [
+          8704,
+          5120
+        ],
+        "dtype": "bfloat8_b",
+        "layout": "tile",
+        "memory": "interleaved_dram",
+        "shards": [
+          {
+            "shape": [
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          },
+          {
+            "shape": [
+              8704,
+              5120
+            ],
+            "padded_shape": [
+              8704,
+              5120
+            ],
+            "dtype": "bfloat8_b",
+            "layout": "tile",
+            "memory": "interleaved_dram",
+            "address": 7315584
+          }
+        ]
+      }
+    }
+  },
+  "program_cache": [
+    0,
+    0
+  ]
+}

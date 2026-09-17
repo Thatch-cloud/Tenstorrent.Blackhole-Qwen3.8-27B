@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /experiment/results
+test "${QWEN_HARDWARE_TESTS:-0}" = 1
+test "${QWEN_CARDS_ALLOCATED:-0}" = 1
+test "${QWEN_PROJECTION_LINKS:-0}" = 4
+test -z "${TT_METAL_SIMULATOR:-}"
+test -z "${TT_METAL_MOCK_CLUSTER_DESC_PATH:-}"
+test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
+export PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal${PYTHONPATH:+:$PYTHONPATH}
+python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
+python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json
+python3 /experiment-scripts/ci/dspark_native_restore.py
+mode=${QWEN_DSPARK_MODE:-backbone}
+[[ "$mode" = backbone || "$mode" = target || "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]
+if [[ "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
+    test -f /experiment-optimisation/sim/gdn-multitoken.py
+    ln -s /experiment-optimisation /optimisation
+    test -f /experiment-scripts/ci/../../optimisation/sim/gdn-multitoken.py
+fi
+probe=dspark-pipeline-hardware
+request_options=()
+if [ "$mode" != backbone ]; then
+    probe=dspark-target-hardware
+    export MODEL_WEIGHTS_DIR=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    export HF_MODEL="$MODEL_WEIGHTS_DIR"
+fi
+report_name=$probe
+if [[ "$mode" = request || "$mode" = request-variants || "$mode" = request-native-attention || "$mode" = request-combined || "$mode" = request-target-attention || "$mode" = request-norm-scatter || "$mode" = request-verifier-profile ]]; then
+    report_name=dspark-request-hardware
+    request_options=(--request)
+fi
+if [ "$mode" = request-variants ]; then
+    report_name=dspark-request-variants-hardware
+    request_options+=(--request-variants)
+fi
+if [ "$mode" = request-native-attention ]; then
+    report_name=dspark-native-attention-request-hardware
+    request_options+=(--native-attention-variants)
+fi
+if [ "$mode" = request-target-attention ]; then
+    report_name=dspark-target-attention-request-hardware
+    request_options+=(--target-attention-variants)
+    if [ "${QWEN_DSPARK_SCORE_LAYOUT:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_MLP_DOWN:-0}" = 0
+        report_name=dspark-score-layout-request-hardware
+        request_options+=(--score-layout)
+        if [ "${QWEN_DSPARK_FUSION_T16:-0}" = 1 ]; then
+            report_name=dspark-fusion-request-hardware
+            request_options+=(--fused-t16-mlp)
+            if [ "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1 ]; then
+                report_name=dspark-captured-publication-request-hardware
+                request_options+=(--captured-publication --max-new-tokens 256)
+                export QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1
+                export QWEN_GDN_OUTPUT_L1_EXPERIMENT=0
+                export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
+                export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
+                export QWEN_GDN_OUTER_ADD_EXPERIMENT=0
+                export QWEN_GDN_SHARED_QK_EXPERIMENT=1
+                export QWEN_DSPARK_REQUEST_CONTEXT=8192
+                export QWEN_COMBINED_TRACE_PROFILE=0
+            fi
+        fi
+        if [ "${QWEN_DSPARK_NATIVE_SLOT:-0}" = 1 ]; then
+            report_name=dspark-native-slot-request-hardware
+            request_options+=(--native-slot-gdn)
+        fi
+        if [ "${QWEN_DSPARK_BANKED_PROPOSAL:-0}" = 1 ]; then
+            report_name=dspark-banked-request-hardware
+            request_options+=(--banked-proposal)
+        fi
+    fi
+    if [ "${QWEN_DSPARK_MLP_DOWN:-0}" = 1 ]; then
+        report_name=dspark-mlp-down-request-hardware
+        request_options+=(--mlp-down)
+        if [ "${QWEN_DSPARK_MLP_FOOTPRINT:-0}" = 1 ]; then
+            report_name=dspark-mlp-footprint-request-hardware
+            request_options+=(--mlp-equal-footprint)
+        fi
+    fi
+fi
+if [ "$mode" = request-combined ]; then
+    report_name=dspark-combined-request-hardware
+    request_options+=(--combined-variants)
+fi
+if [ "$mode" = request-norm-scatter ]; then
+    report_name=dspark-norm-scatter-request-hardware
+    request_options+=(--norm-scatter-variants)
+    if [ "${QWEN_DSPARK_64K_TRIAL:-0}" = 1 ]; then
+        test "${QWEN_DSPARK_CAPTURED_PUBLICATION:-0}" = 1
+        report_name=dspark-64k-request-hardware
+        request_options+=(--captured-publication --max-new-tokens 256)
+        export QWEN_DSPARK_REQUEST_CONTEXT=65536
+        export QWEN_LADDER_BACKEND=hardware
+        export QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1
+        export QWEN_GDN_OUTPUT_L1_EXPERIMENT=0
+        export QWEN_GDN_OUTPUT_GRID_EXPERIMENT=0
+        export QWEN_GDN_COPY_PAIRS_EXPERIMENT=0
+        export QWEN_GDN_OUTER_ADD_EXPERIMENT=0
+        export QWEN_GDN_SHARED_QK_EXPERIMENT=0
+        export QWEN_COMBINED_TRACE_PROFILE=0
+    fi
+fi
+if [ "$mode" = request-verifier-profile ]; then
+    report_name=dspark-verifier-profile-hardware
+    request_options+=(--profile-verifier)
+    if [ "${QWEN_DSPARK_DRAFT_PROFILE:-0}" = 1 ]; then
+        report_name=dspark-draft-profile-hardware
+        request_options=(--request --profile-drafter)
+    fi
+fi
+if [ "${QWEN_DSPARK_HISTORY_PROFILE:-0}" = 1 ]; then
+    test "$mode" = request-target-attention
+    request_options+=(--history-profile)
+    report_name=dspark-history-profile-hardware
+fi
+python3 "/experiment-scripts/ci/$probe.py" --preflight "${request_options[@]}" \
+    --checkpoint /dspark/model.safetensors --config /dspark/config.json \
+    --output /experiment/results/dspark-python-preflight.json
+build_started=$SECONDS
+if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
+    combined_builder=dspark_splitk_combined_build.py
+    if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then combined_builder=matched_cached_build.py; fi
+    timeout -k 10 360 python3 "/experiment-scripts/ci/$combined_builder"
+elif [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then
+    python3 /experiment-scripts/ci/dspark_sum_sfpu_hardware.py
+elif [ "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 ]; then
+    python3 /experiment-scripts/ci/dspark_score_sfpu_hardware.py
+else
+    python3 /experiment-scripts/ci/dspark_runtime_cache.py
+fi
+printf '{"build_seconds":%s,"scope":"isolated runtime build; excluded from kernel timing"}\n' "$((SECONDS-build_started))" \
+    > /experiment/results/dspark-build-time.json
+set +e
+if [ "${QWEN_DSPARK_SFPU_NUMERICAL:-0}" = 1 ]; then
+    test "${QWEN_DSPARK_SCORE_SFPU:-0}" = 1 || exit 1
+    export QWEN_LADDER_CONTEXT=65536
+    export QWEN_DRAFT_FP32_INTERMEDIATES=1
+    numerical_name=dspark-score-sfpu-hardware
+    if [ "${QWEN_DSPARK_SUM_SFPU:-0}" = 1 ]; then numerical_name=dspark-sum-sfpu-hardware; fi
+    if [ "${QWEN_DSPARK_MASK_BITS:-0}" = 1 ]; then numerical_name=dspark-mask-bits-hardware; fi
+    if [ "${QWEN_TARGET_T16_64K:-0}" = 1 ]; then numerical_name=target-t16-attention-64k; fi
+    if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then numerical_name=dspark-direct-fp32-stage-hardware; fi
+    if [ "${QWEN_DSPARK_NORMALIZATION_DIRECT_STAGE:-0}" = 1 ]; then numerical_name=dspark-normalization-direct-stage-hardware; fi
+    if [ "${QWEN_DSPARK_CENTER_TILE_FILL:-0}" = 1 ]; then numerical_name=dspark-center-tile-fill-hardware; fi
+    timeout -k 15 180 python3 -u "/experiment-scripts/ci/$numerical_name-probe.py" \
+        --hardware --output "/experiment/results/$numerical_name.json"
+    exit "$?"
+fi
+if [ "${QWEN_DSPARK_DIRECT_FP32_STAGE:-0}" = 1 ]; then
+    if [[ "${QWEN_SPLITK_COMBINED:-0}" = 1 && "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
+        source_entry=dspark-splitk-timed-request.py
+        if [ "${QWEN_64K_MLP_TIMED:-0}" = 1 ]; then source_entry=dspark-64k-mlp-timed-request.py; fi
+        if [ "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1 ]; then source_entry=dspark-64k-shared-timed-request.py; fi
+        if [ "${QWEN_64K_SCORE_TIMED:-0}" = 1 ]; then source_entry=dspark-64k-score-timed-request.py; fi
+        if [ "${QWEN_SCORE_PAIRED:-0}" = 1 ]; then source_entry=dspark-64k-score-paired-request.py; fi
+        if [ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 ]; then source_entry=dspark-64k-lazy-timed-request.py; fi
+        if [ "${QWEN_PUBLICATION_PROFILE:-0}" = 1 ]; then source_entry=dspark-64k-publication-profile-request.py; fi
+        if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then source_entry=dspark-64k-history-paired-request.py; fi
+        if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then source_entry=matched_combined_timed_request.py; fi
+        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then source_entry=workers_combined_timed_request.py; fi
+        if [ "${QWEN_HISTORY_WAIT_PROFILE:-0}" = 1 ]; then source_entry=history_wait_request.py; fi
+        if [ "${QWEN_MATCHED_SCORE_LAYOUT:-0}" = 1 ]; then source_entry=matched_score_request.py; fi
+        timeout -k 5 30 python3 -u "/experiment-scripts/ci/$source_entry" --source-preflight || exit "$?"
+    else
+        timeout -k 5 30 python3 -u /experiment-scripts/ci/dspark_direct_fp32_preflight.py || exit "$?"
+    fi
+fi
+runner=(timeout -k 20 3000 python3 -u "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
+    --checkpoint /dspark/model.safetensors --config /dspark/config.json
+    --output "/experiment/results/$report_name.json")
+if [ "${QWEN_SPLITK_COMBINED:-0}" = 1 ]; then
+    splitk_entry=dspark-splitk-combined-request.py
+    if [ "${QWEN_64K_MLP_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-mlp-request.py; fi
+    if [ "${QWEN_64K_SHARED_QK_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-qk-request.py; fi
+    if [ "${QWEN_64K_SCORE_AUDIT:-0}" = 1 ]; then splitk_entry=dspark-64k-score-request.py; fi
+    if [ "${QWEN_TEXT_ONLY_LOAD:-0}" = 1 ]; then splitk_entry=dspark-64k-text-only-request.py; fi
+    if [ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 ]; then splitk_entry=dspark-64k-lazy-load-request.py; fi
+    if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=dspark-splitk-timed-request.py; fi
+    if [ "${QWEN_64K_MLP_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-mlp-timed-request.py; fi
+    if [ "${QWEN_64K_SHARED_QK_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-shared-timed-request.py; fi
+    if [ "${QWEN_64K_SCORE_TIMED:-0}" = 1 ]; then splitk_entry=dspark-64k-score-timed-request.py; fi
+    if [ "${QWEN_SCORE_PAIRED:-0}" = 1 ]; then splitk_entry=dspark-64k-score-paired-request.py; fi
+    if [[ "${QWEN_LAZY_WEIGHT_LOAD:-0}" = 1 && "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]]; then
+        splitk_entry=dspark-64k-lazy-timed-request.py
+    fi
+    process_limit=420
+    if [ "${QWEN_PUBLICATION_PROFILE:-0}" = 1 ]; then
+        splitk_entry=dspark-64k-publication-profile-request.py
+        process_limit=300
+    fi
+    if [ "${QWEN_HISTORY_APPEND_PAIR:-0}" = 1 ]; then
+        splitk_entry=dspark-64k-history-paired-request.py
+        process_limit=480
+    fi
+    if [ "${QWEN_MATCHED_COMBINED:-0}" = 1 ]; then
+        splitk_entry=matched_combined_request.py
+        if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=matched_combined_timed_request.py; fi
+        if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then
+            splitk_entry=workers_combined_request.py
+            if [ "${QWEN_DSPARK_SFPU_TIMED:-0}" = 1 ]; then splitk_entry=workers_combined_timed_request.py; fi
+        fi
+    fi
+    if [ "${QWEN_HISTORY_WAIT_PROFILE:-0}" = 1 ]; then splitk_entry=history_wait_request.py; fi
+    if [ "${QWEN_MATCHED_SCORE_LAYOUT:-0}" = 1 ]; then splitk_entry=matched_score_request.py; fi
+    runner=(timeout -k 10 "$process_limit" python3 -u "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
+        --checkpoint /dspark/model.safetensors --config /dspark/config.json
+        --output "/experiment/results/$report_name.json")
+    if [ "${QWEN_LOAD_SAMPLE:-0}" = 1 ]; then
+        runner=(timeout -k 10 120 python3 -u /experiment-scripts/ci/qwen_load_sample.py
+            "/experiment-scripts/ci/$splitk_entry" "${request_options[@]}"
+            --checkpoint /dspark/model.safetensors --config /dspark/config.json
+            --output "/experiment/results/$report_name.json")
+    fi
+fi
+if [ "$mode" = request-verifier-profile ]; then
+    runner=(bash /experiment-scripts/ci/dspark-request-profile.sh)
+fi
+if [ "${QWEN_COMBINED_TRACE_PROFILE:-0}" = 1 ]; then
+    runner=(bash /experiment-scripts/ci/dspark-combined-profile.sh)
+fi
+if [ "${QWEN_DSPARK_COMBINED_DEVICE_PROFILE:-0}" = 1 ]; then
+    runner=(timeout -k 15 390 bash /experiment-scripts/ci/dspark-combined-device-profile.sh
+        "/experiment-scripts/ci/$probe.py" "${request_options[@]}"
+        --checkpoint /dspark/model.safetensors --config /dspark/config.json
+        --output "/experiment/results/$report_name.json")
+fi
+"${runner[@]}" 2>&1 | tee "/experiment/results/$report_name.log"
+status=${PIPESTATUS[0]}
+set -e
+printf '%s\n' "$status" > "/experiment/results/$report_name.exit-status"
+test "$status" = 0
+if grep -q 'Failed to discover available ethernet links' "/experiment/results/$report_name.log"; then
+    echo 'Explicit four-link integration unexpectedly invoked fallback discovery' >&2
+    exit 1
+fi

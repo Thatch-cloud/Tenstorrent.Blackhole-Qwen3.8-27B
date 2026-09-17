@@ -1,0 +1,78 @@
+name: Qwen read-only loading diagnostic
+on:
+  push:
+    tags: ['experiment/qwen-load-diagnostic-v1', 'experiment/qwen-load-diagnostic-v2', 'experiment/qwen-load-diagnostic-v3', 'experiment/qwen-load-diagnostic-v4']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - name: Verify host and restore prior result ownership
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Read host pressure and pinned loader sources without devices
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p load-diagnostic
+          for name in meminfo pressure/cpu pressure/memory pressure/io; do
+            if [ -r "/proc/$name" ]; then
+              printf '\n=== %s ===\n' "$name"
+              cat "/proc/$name"
+            fi
+          done > load-diagnostic/host.txt
+          for target in /home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B /var/lib/docker; do
+            findmnt -T "$target" >> load-diagnostic/host.txt || true
+            df -h "$target" >> load-diagnostic/host.txt || true
+          done
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          volume=qwen-experiments-f1e9b1a64b4f
+          docker image inspect "$image" --format '{{.Id}}' > load-diagnostic/image-id.txt
+          test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$volume")" = true
+          name="qwen-load-diag-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 5 60 docker run --rm --name "$name" --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --cpus 1 --memory 256m \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --mount "type=volume,src=$volume,dst=/experiment-cache,readonly" \
+            --mount type=bind,src=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B,dst=/target,readonly \
+            --entrypoint python3 "$image" -B /source/scripts/ci/qwen_load_diagnostic.py \
+            --source-root /opt/tt-metal/models/demos/blackhole/qwen36/tt \
+            --extra-source /opt/tt-metal/ttnn/ttnn/core.py \
+            --extra-source /opt/tt-metal/ttnn/ttnn/operations/core.py \
+            --cache /experiment-cache --cache /experiment-cache/weights --cache /target \
+            > load-diagnostic/image.json
+          timeout -k 5 45 docker run --rm --name "$name" --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --cpus 2 --memory 2g \
+            -e OMP_NUM_THREADS=2 -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=64m \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --mount "type=volume,src=$volume,dst=/experiment-cache,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/qwen_cache_read_probe.py \
+            --deserialize \
+            --root /experiment-cache/weights/P300/tensor_cache_bfp8_mesh1x2 \
+            --file layers.0.input_layernorm.weight_dtype_BFLOAT16_layout_ROW_MAJOR.tensorbin \
+            --file layers.0/tp/qkvzab.il_dtype_BFLOAT8_B_layout_TILE.tensorbin \
+            > load-diagnostic/cache-read.jsonl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-load-diagnostic-${{ github.run_id }}
+          path: load-diagnostic/

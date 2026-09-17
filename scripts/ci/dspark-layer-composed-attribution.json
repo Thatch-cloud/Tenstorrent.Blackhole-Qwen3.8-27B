@@ -1,0 +1,764 @@
+{
+  "scope": "Attribute captured layer errors to individual native operations without changing qualification limits.",
+  "report_sha256": "59ab89b185696643ce7422975128a16069fe05093ad09349c1a56258e1c171a6",
+  "operands_sha256": "f064c5ba2edaacbd23d6bb11beba10da5d0bf2e409e4add6ad0e14157cbccb0a",
+  "composed_layer": true,
+  "sources": {
+    "dspark_layer_diagnostic.py": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649",
+    "dspark_layer_reference.py": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8",
+    "dspark_layer.py": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d",
+    "dspark_projection.py": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+    "dspark_backbone_reference.py": "a62f5e108c3bbcf4df8428eb85afe6218d42e3687fdf167100819f219366fe71",
+    "dspark_weights.py": "10593cc2d2e6f55283dac0924debbb0f310e875e10896c591a552ae19f4573bf",
+    "dspark_checkpoint.py": "7606b99c083e4997c5e1de78f4332f89c0a4e476178f1642b10933925d2aff98",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5"
+  },
+  "sources_after": {
+    "dspark_layer_diagnostic.py": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649",
+    "dspark_layer_reference.py": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8",
+    "dspark_layer.py": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d",
+    "dspark_projection.py": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+    "dspark_backbone_reference.py": "a62f5e108c3bbcf4df8428eb85afe6218d42e3687fdf167100819f219366fe71",
+    "dspark_weights.py": "10593cc2d2e6f55283dac0924debbb0f310e875e10896c591a552ae19f4573bf",
+    "dspark_checkpoint.py": "7606b99c083e4997c5e1de78f4332f89c0a4e476178f1642b10933925d2aff98",
+    "dspark_intake.py": "9b5d15b6e949798170a41c9893115dd8905b9ab71da3b4d321ea1224ae23171f",
+    "dspark_markov_fixture.py": "a571a75f496b26e52ca1185e22071aced807fdc1ea7b933c97f4db1afa0bcfb5"
+  },
+  "checkpoint_sha256": "2aff025f45823b40ebe726b9dfa40302f3512bd9a11c3a7347de32a567acd9a7",
+  "checkpoint_closed": true,
+  "tolerance": {
+    "rtol": 0.01,
+    "atol": 0.01
+  },
+  "cases": [
+    {
+      "case": 0,
+      "chip": 0,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 116,
+          "relative_l2": 0.0005521190592274018
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 154,
+          "relative_l2": 0.0005956098501619619
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 3.0517578125e-05,
+          "failed_elements": 0,
+          "different_bits": 5,
+          "relative_l2": 5.721215409211233e-08
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.025617599487304688,
+          "failed_elements": 0,
+          "relative_l2": 0.00031153175048043673
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 428,
+          "relative_l2": 0.0007379702371200287
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6151,
+          "relative_l2": 0.0008891545296730775
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6289,
+          "relative_l2": 0.0008988932051002806
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.08746337890625,
+          "failed_elements": 188,
+          "relative_l2": 0.0003068863724579115
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 32.0,
+          "failed_elements": 22217,
+          "different_bits": 31466,
+          "relative_l2": 0.012918664347552058
+        }
+      }
+    },
+    {
+      "case": 0,
+      "chip": 1,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 83,
+          "relative_l2": 0.0004415891898929579
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 188,
+          "relative_l2": 0.000673725238730889
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.00390625,
+          "failed_elements": 0,
+          "different_bits": 7,
+          "relative_l2": 1.1099342167395415e-05
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03564453125,
+          "failed_elements": 0,
+          "relative_l2": 0.00030729913799341533
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 428,
+          "relative_l2": 0.0007379702371200287
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 5975,
+          "relative_l2": 0.0008367172945120628
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6303,
+          "relative_l2": 0.0008867935064263439
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.1524658203125,
+          "failed_elements": 195,
+          "relative_l2": 0.00030109583979163866
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 32.0,
+          "failed_elements": 22217,
+          "different_bits": 31466,
+          "relative_l2": 0.012918664347552058
+        }
+      }
+    },
+    {
+      "case": 1,
+      "chip": 0,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 116,
+          "relative_l2": 0.0005521190592274018
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 154,
+          "relative_l2": 0.0005956098501619619
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 6,
+          "relative_l2": 2.9058750359937964e-05
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.030111312866210938,
+          "failed_elements": 0,
+          "relative_l2": 0.00031181788441265947
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 193,
+          "relative_l2": 0.0004734351760838793
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 5893,
+          "relative_l2": 0.000849288888105628
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6139,
+          "relative_l2": 0.0008467977465173657
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.07452392578125,
+          "failed_elements": 213,
+          "relative_l2": 0.000305747480614892
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 16.0,
+          "failed_elements": 21730,
+          "different_bits": 31260,
+          "relative_l2": 0.012149696520020995
+        }
+      }
+    },
+    {
+      "case": 1,
+      "chip": 1,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 83,
+          "relative_l2": 0.0004415891898929579
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 188,
+          "relative_l2": 0.000673725238730889
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.000244140625,
+          "failed_elements": 0,
+          "different_bits": 6,
+          "relative_l2": 4.440838903280924e-07
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0247650146484375,
+          "failed_elements": 0,
+          "relative_l2": 0.00030102633598509394
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 193,
+          "relative_l2": 0.0004734351760838793
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6061,
+          "relative_l2": 0.0008530001194634459
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6282,
+          "relative_l2": 0.000886008993599633
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.1055908203125,
+          "failed_elements": 190,
+          "relative_l2": 0.00030283285655927674
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 16.0,
+          "failed_elements": 21730,
+          "different_bits": 31260,
+          "relative_l2": 0.012149696520020995
+        }
+      }
+    },
+    {
+      "case": 2,
+      "chip": 0,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 102,
+          "relative_l2": 0.0004611712804570789
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 147,
+          "relative_l2": 0.0005681072600165265
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0078125,
+          "failed_elements": 0,
+          "different_bits": 6,
+          "relative_l2": 1.4809427207097522e-05
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.02087688446044922,
+          "failed_elements": 0,
+          "relative_l2": 0.000310516435239944
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0078125,
+          "failed_elements": 0,
+          "different_bits": 118,
+          "relative_l2": 0.0003646077601264357
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6109,
+          "relative_l2": 0.0008544004015776814
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6511,
+          "relative_l2": 0.0008722457638140854
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.061855316162109375,
+          "failed_elements": 161,
+          "relative_l2": 0.0003083161659179673
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 16.0,
+          "failed_elements": 23769,
+          "different_bits": 32025,
+          "relative_l2": 0.015209422326898
+        }
+      }
+    },
+    {
+      "case": 2,
+      "chip": 1,
+      "comparisons": {
+        "q_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.015625,
+          "failed_elements": 0,
+          "different_bits": 114,
+          "relative_l2": 0.0005024591264326143
+        },
+        "q_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "k_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.03125,
+          "failed_elements": 0,
+          "different_bits": 151,
+          "relative_l2": 0.0005845442273950122
+        },
+        "k_rotary_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "attention_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.001953125,
+          "failed_elements": 0,
+          "different_bits": 8,
+          "relative_l2": 4.442239549308399e-06
+        },
+        "output_projection_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.02666473388671875,
+          "failed_elements": 0,
+          "relative_l2": 0.0003083274241481392
+        },
+        "attention_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "post_norm_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0078125,
+          "failed_elements": 0,
+          "different_bits": 118,
+          "relative_l2": 0.0003646077601264357
+        },
+        "gate_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6217,
+          "relative_l2": 0.0008640547179906438
+        },
+        "up_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.0625,
+          "failed_elements": 0,
+          "different_bits": 6270,
+          "relative_l2": 0.0008709117973686446
+        },
+        "down_own_input": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 0.1121826171875,
+          "failed_elements": 183,
+          "relative_l2": 0.0003230186298439157
+        },
+        "final_residual_own_input": {
+          "passed": true,
+          "exact_required": false,
+          "bitwise_exact": true,
+          "max_abs": 0.0,
+          "failed_elements": 0,
+          "different_bits": 0,
+          "relative_l2": 0.0
+        },
+        "upstream_output": {
+          "passed": false,
+          "exact_required": false,
+          "bitwise_exact": false,
+          "max_abs": 16.0,
+          "failed_elements": 23769,
+          "different_bits": 32025,
+          "relative_l2": 0.015209422326898
+        }
+      }
+    }
+  ],
+  "eligible_for_hardware": false,
+  "target_integrated": false
+}

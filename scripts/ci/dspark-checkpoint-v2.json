@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "model": "RadixArk/Qwen3.8-27B-DSpark",
+  "revision": "b9a5dbdf03bc999c6c73c426b19c2d9041cea393",
+  "checkpoint_bytes": 3714723322,
+  "checkpoint_sha256": "2aff025f45823b40ebe726b9dfa40302f3512bd9a11c3a7347de32a567acd9a7",
+  "header_sha256": "992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1",
+  "inventory": {
+    "tensors": 62,
+    "parameters": 1857358337,
+    "dtype": "BF16",
+    "payload_bytes": 3714716674,
+    "weight_payload_fetched": true,
+    "weight_payload_hash_verified": true
+  },
+  "markov_subranges_sha256": {
+    "markov_head.markov_w1.weight": "80cdfb6122576b2cf02a3df40e83209fd5514aed82ef381d6c551d6c925d3c57",
+    "markov_head.markov_w2.weight": "39ba4adba9d613e61ba2ff4ef4151fdfda7ac898dab12e4603d3cff6a5e4d2e2"
+  },
+  "remote_code_executed": false,
+  "learned_backbone_executed": false,
+  "eligible_for_hardware": false,
+  "eligible_for_serving": false,
+  "scope": "Whole-object and previously staged matrix integrity only; not learned arithmetic or performance"
+}

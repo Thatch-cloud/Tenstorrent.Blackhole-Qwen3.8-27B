@@ -1,0 +1,189 @@
+{
+  "passed": true,
+  "backend": "simulator",
+  "scope": "Simulator-only BF16 GQA-to-FP32 attention integration; all32 rows, not PP/CTX/TG.",
+  "context": 31,
+  "sources": {
+    "draft-live-qk-probe.py": "83680c119aa3ffa635cae06a7e3bc4c19aef779bccd28211405d08b7c584c37d",
+    "draft_live_qk.py": "2f145d0320ca58a4b7c0ec3f143720c3f105a560d20ff1576a9c872601dd9774",
+    "draft_live_qk_compute.cpp": "6ce1636fa00e746f86a7c37cdfe271788383a6dc2a77e26a9c4c89bcbe1c0afb",
+    "draft_live_qk_io.cpp": "f210a24f50795f05df9a72c0d1227b1cea62fa6930a72581f832eb0c0340a671",
+    "draft_dot.py": "d456c0d3eef435e25bf0dee4d1cdd4e85ead7acae8df5ba5e7ed783726e24708",
+    "draft_dot_compute.cpp": "e52badb2f61f1958a6d8050e3a4490232bdce26625f319da02b1019619f99a55",
+    "draft_dot_io.cpp": "ebc2dfca5395c5d47b13a09a5ea75521684a979e09cdd51cb6ae743a7858c4d1",
+    "draft_attention.py": "a6684d962b9c5aece726ad555962805e2283fed5db54efd3652efc92ae3f443d",
+    "draft_row_sum.py": "72f9ae0d42ae1dd4312e9312305b3158cc110c62e8966372acbce2c8812674ec",
+    "draft_row_sum_compute.cpp": "d9f06391e32a4869577975c308158739adfb4657ddef609b9b54db023b1c13b7",
+    "draft_row_sum_io.cpp": "8d5d1539388a6945227b52ef939c29ebaf96581f1999a81eccc71e5db9e7752a",
+    "live_qk_gate.py": "1e64ab6bbdc4936b6fb94d1291375aea31648639830fc64e0ce6f009105a7c78",
+    "draft_live_attention.py": "c65d4a71f131523dc51f5e11c1cba62ab62ad358581007beb244c7077307b4ec",
+    "draft_attention_branch.py": "fca2af03b3a64b943b67b84adc22bdd3089ffc734fb032e835c06ba1a2810461",
+    "dflash_device.py": "8eb4411360526484da0c3ef5fc2223032863251f6a607f39072309f9d111b425",
+    "dflash_proposal_inputs.py": "726f9b62503d09dae4d0bbc3377d3c9c693f87490f804dc89a922a90929a6397",
+    "dflash_proposal_trace.py": "38303085d6b97bdec2f0d8ced1773b7f404ffc4a50925c133ea339a85ca58a99",
+    "draft-live-attention-probe.py": "7df21136b72bbe25ac54ca730fd090fe162f519c1322acd1390be4c2e5525258",
+    "live_attention_gate.py": "00bf0c215cc96f81f7beae70fa48371d38630e80988a631721bdcf23b894d6e1"
+  },
+  "native_sources": {
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/sfpu/ckernel_sfpu_binary_bcast.h": "c13057cec1049c950e22573620fa06c914c03215da9b939a946553f39c5b418a",
+    "tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/ckernel_sfpu_reduce.h": "d0840b0a3a620c740d370116434bc0b59fbbf953ccabc6550faf9fe59b5fbc01",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181"
+  },
+  "fixture_sha256": "0974cf572f0db9291f56b4ee322829d60f61484e2521b4b69c8393035b541e49",
+  "operand_scope": "Saved layer0 rank0 replicated on both chips plus changed synthetic inputs",
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact_all_rows": true
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "exact_all_rows": true
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "exact_all_rows": true
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "exact_all_rows": true
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 0,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "arm": 1,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 0,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 0,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "arm": 1,
+      "chip": 1,
+      "exact_all_rows": true,
+      "inputs_unchanged": true,
+      "bindings_stable": true
+    }
+  ],
+  "negative_controls": [
+    {
+      "arm": 0,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 0,
+      "chip": 1,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "arm": 1,
+      "chip": 1,
+      "stale_detected": true
+    }
+  ],
+  "closed_cleanly": true
+}

@@ -1,0 +1,15 @@
+{
+  "run_id": 34412639592,
+  "source_revision": "d1bd01191ff236994bf1bbc63ceeec1e819b828b",
+  "artifact_id": 10127846994,
+  "conclusion": "failure",
+  "container_exit_status": 1,
+  "container_log_sha256": "5b3b0f8a1e09c8eca212bf0c592364633b81f2d2502085ef14a159e5b770a536",
+  "failed_stage": "pre-build library-alignment check",
+  "slice_restored_to_simulator_source": true,
+  "native_numerical_source_comparison_passed": true,
+  "runtime_build_started": false,
+  "backbone_executed": false,
+  "committed_tg": null,
+  "scope": "Pre-build installed/staged library mismatch; alignment remains mandatory after build/cache restore"
+}

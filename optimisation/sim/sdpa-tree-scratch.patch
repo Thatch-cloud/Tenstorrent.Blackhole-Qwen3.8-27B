@@ -1,0 +1,19 @@
+diff --git a/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp b/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
+--- a/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
+@@ -11,2 +11,3 @@
+ #include <cstdint>
++#include <cstdlib>
+ #include <map>
+@@ -424,7 +425,10 @@
+     const uint32_t out_tiles = PNHt * vDHt;
+     const uint32_t scale_tiles = 1;
+     const uint32_t statistics_tiles = PNHt;
+-    const uint32_t intermed_output_tiles = (out_tiles + 2 * PNHt) * (num_cores_per_head - 1);
++    const char* scratch_rounds_override = std::getenv("QWEN_SDPA_TREE_SCRATCH_ROUNDS");
++    const bool compact_tree_scratch = scratch_rounds_override && std::string(scratch_rounds_override) == "1";
++    const uint32_t intermed_output_tiles =
++        (out_tiles + 2 * PNHt) * (compact_tree_scratch ? num_tree_reduction_rounds : num_cores_per_head - 1);
+ 
+     // ========== Data Formats ==========
+     const tt::DataFormat q_df = tt_metal::datatype_to_dataformat_converter(input_tensor_q.dtype());

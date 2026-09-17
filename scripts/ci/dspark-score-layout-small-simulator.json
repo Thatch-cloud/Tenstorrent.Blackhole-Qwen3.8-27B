@@ -1,0 +1,393 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Exact fused FP32 score-row layout gate; no learned dot-product change or TG claim.",
+  "sources": {
+    "dspark-score-layout-probe.py": "a5cd4025901950990c6493f50add1715bffb313cbf9769eba3a5151d180fdad7",
+    "dspark_score_layout.py": "4031a09249e2ca06a383022062a7f4d26dea6e1b1f26d6158f8be4843eeb36a9",
+    "dspark_score_layout_io.cpp": "a34e6599caedca7575e95aa7292f47b0b4cee1c0cf3c13b1425d8918059b9672",
+    "dspark_score_layout_compute.cpp": "d7b17789b081ccc2ed506879b35d5962408bedc4d6a4a6cb099dcc32d9b672bb",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "vocabulary": 64,
+  "rows": [
+    0,
+    6,
+    14
+  ],
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "step": 0,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 0,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 0,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 0,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 6,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 6,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 6,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 6,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 14,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 14,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 14,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 0,
+      "step": 14,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 0,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 6,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 6,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 6,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 6,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 14,
+      "workers": 1,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 14,
+      "workers": 1,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 14,
+      "workers": 110,
+      "chip": 0,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    },
+    {
+      "pattern": 1,
+      "step": 14,
+      "workers": 110,
+      "chip": 1,
+      "exact": true,
+      "native_token_exact": true,
+      "cpu_exact": true
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 0,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 0,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 6,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 6,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 14,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "step": 14,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 0,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 0,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 6,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 6,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 14,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "step": 14,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 0,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 0,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 6,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 6,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 14,
+      "chip": 0,
+      "exact": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "step": 14,
+      "chip": 1,
+      "exact": true,
+      "output_poison_replaced": true
+    }
+  ],
+  "stage": "complete",
+  "sources_after": {
+    "dspark-score-layout-probe.py": "a5cd4025901950990c6493f50add1715bffb313cbf9769eba3a5151d180fdad7",
+    "dspark_score_layout.py": "4031a09249e2ca06a383022062a7f4d26dea6e1b1f26d6158f8be4843eeb36a9",
+    "dspark_score_layout_io.cpp": "a34e6599caedca7575e95aa7292f47b0b4cee1c0cf3c13b1425d8918059b9672",
+    "dspark_score_layout_compute.cpp": "d7b17789b081ccc2ed506879b35d5962408bedc4d6a4a6cb099dcc32d9b672bb",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  }
+}

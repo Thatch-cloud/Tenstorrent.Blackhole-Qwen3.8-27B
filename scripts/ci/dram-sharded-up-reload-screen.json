@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator-only native DRAM-sharded T16 projection screen; no speed claim.",
+  "sources": {
+    "dram-sharded-projection-probe.py": "48fac0fe85cfcef9f6bd547bd45172497fe0f837233947fe66075219c56033cf",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887"
+  },
+  "checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "exact": true,
+      "failed_elements": 0,
+      "max_abs": 0
+    }
+  ],
+  "timing_qualified": false,
+  "replay_qualified": false,
+  "stage": "complete",
+  "projection": "up",
+  "geometry": {
+    "inner": 5120,
+    "width": 8704,
+    "banks": 8,
+    "workers": 4,
+    "weight_shard": [
+      5120,
+      1088
+    ],
+    "input_shard": [
+      32,
+      1280
+    ],
+    "output_shard": [
+      32,
+      2176
+    ],
+    "in0_block_w": 8,
+    "per_core_M": 1,
+    "per_core_N": 68,
+    "dtype": "bfloat4_b",
+    "activation": false
+  },
+  "weight_roundtrip_exact": true,
+  "sources_after": {
+    "dram-sharded-projection-probe.py": "48fac0fe85cfcef9f6bd547bd45172497fe0f837233947fe66075219c56033cf",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887"
+  }
+}

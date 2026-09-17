@@ -1,0 +1,1640 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Synthetic complete projected T16 GDN direct-state versus compact control; no throughput claim.",
+  "sources": {
+    "gdn-native-projected-probe.py": "e60f943a5a4119a41069e6facb4b1367f8ca8c6ac539b01a0096fc04dec63aaa",
+    "gdn_native_slot_projected.py": "309a62ee2e7be880b9cca78cb3c6abcef1f841ecee718ea31b0b55d911d413a9",
+    "gdn_native_slot_recurrence.py": "9eea877ef1d65e6cc5d9570bf9ec3a3f435a63fdf6532dd9df11652d33af1cfc",
+    "gdn_native_slot_windows.py": "148a9ec954efbd411635930bb42acd474050ac16d92a761a93b58743bc00a541",
+    "gdn_conv_windows.py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+    "gdn_conv_windows.cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4",
+    "gdn_batched_conv.py": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+    "gdn_vsplit.py": "e70bc1be39953d316cb24785a7f4f435d9f8ccb807168e3e4f886f0c7d5a57a5",
+    "gdn_vsplit_norm_batch.py": "1c451370058f19e011490c458015e00b3ee0f47abff19ac4d35503b4732bfe9e",
+    "gdn_vsplit_prefetch.py": "4e818cee01f0d2667a590d533c14fe5a761cb8b33ab474a71b687d56cfaeb509",
+    "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  },
+  "checks": [
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "control_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "native_replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "immutable_checks": [
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 10,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 10,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 11,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 11,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 12,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 12,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 13,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 13,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 14,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 14,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 15,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 15,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 16,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 16,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 17,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "eager",
+      "operand": 17,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 0,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 1,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 5,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 6,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 7,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 9,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 10,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 11,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 12,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 13,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 14,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 15,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 16,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "seed": 2,
+      "mode": "replay",
+      "operand": 17,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "hardware_qualified": false,
+  "stage": "complete",
+  "sources_after": {
+    "gdn-native-projected-probe.py": "e60f943a5a4119a41069e6facb4b1367f8ca8c6ac539b01a0096fc04dec63aaa",
+    "gdn_native_slot_projected.py": "309a62ee2e7be880b9cca78cb3c6abcef1f841ecee718ea31b0b55d911d413a9",
+    "gdn_native_slot_recurrence.py": "9eea877ef1d65e6cc5d9570bf9ec3a3f435a63fdf6532dd9df11652d33af1cfc",
+    "gdn_native_slot_windows.py": "148a9ec954efbd411635930bb42acd474050ac16d92a761a93b58743bc00a541",
+    "gdn_conv_windows.py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+    "gdn_conv_windows.cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4",
+    "gdn_batched_conv.py": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+    "gdn_vsplit.py": "e70bc1be39953d316cb24785a7f4f435d9f8ccb807168e3e4f886f0c7d5a57a5",
+    "gdn_vsplit_norm_batch.py": "1c451370058f19e011490c458015e00b3ee0f47abff19ac4d35503b4732bfe9e",
+    "gdn_vsplit_prefetch.py": "4e818cee01f0d2667a590d533c14fe5a761cb8b33ab474a71b687d56cfaeb509",
+    "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  }
+}

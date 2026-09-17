@@ -1,0 +1,335 @@
+{
+  "passed": false,
+  "closed_cleanly": false,
+  "backend": "simulator",
+  "scope": "Exact 15-step native-versus-fused Markov feedback and replay; no speed or coding-quality claim.",
+  "vocabulary": 248320,
+  "proposals": 15,
+  "sources": {
+    "dspark-markov-score-layout-probe.py": "26f49ac9de0319bdaa70cc77100ff39412d5cce7c6d58d63950da0202c2832f3",
+    "dspark_markov_device.py": "026fb41b4ed38bc82db72c1505ae13b7d789be4ce3e9b0d14d0b16231a046f25",
+    "dspark_markov_score_layout.py": "0eb459eac7ccf0c2d617f747f7a5cc7ce2ccf2f7f0dc66cf855fe260197208fc",
+    "dspark_score_layout.py": "4031a09249e2ca06a383022062a7f4d26dea6e1b1f26d6158f8be4843eeb36a9",
+    "dspark_score_layout_io.cpp": "a34e6599caedca7575e95aa7292f47b0b4cee1c0cf3c13b1425d8918059b9672",
+    "dspark_score_layout_compute.cpp": "d7b17789b081ccc2ed506879b35d5962408bedc4d6a4a6cb099dcc32d9b672bb",
+    "dspark_score_layout_gate.py": "70a87848825b381e64e7799ef74bf37e0d5dfe3fc71bcc77d2867b78425a48f7",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "score_layout_gate": {
+    "scope": "score-layout only; complete feedback chain and hardware remain unqualified",
+    "results": [
+      {
+        "vocabulary": 64,
+        "eager_checks": 24,
+        "replay_checks": 18
+      },
+      {
+        "vocabulary": 248320,
+        "eager_checks": 12,
+        "replay_checks": 18
+      }
+    ]
+  },
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 0,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 0,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 1,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 1,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 2,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 2,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 3,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 3,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 4,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 4,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 5,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 5,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 6,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 6,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 7,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 7,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 8,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 8,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 9,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 9,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 10,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 10,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 11,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 11,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 12,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 12,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 13,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 13,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 14,
+      "chip": 0,
+      "token_exact": true,
+      "scores_exact": true
+    },
+    {
+      "pattern": 0,
+      "repetition": null,
+      "step": 14,
+      "chip": 1,
+      "token_exact": true,
+      "scores_exact": true
+    }
+  ],
+  "replay_checks": [],
+  "input_checks": [
+    {
+      "stage": "eager",
+      "pattern": 0,
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "stage": "eager",
+      "pattern": 0,
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "stage": "eager",
+      "pattern": 0,
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "stage": "eager",
+      "pattern": 0,
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "weight_checks": [
+    {
+      "stage": "before",
+      "operand": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "stage": "before",
+      "operand": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "stage": "before",
+      "operand": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "stage": "before",
+      "operand": 1,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "stage": "native_1"
+}

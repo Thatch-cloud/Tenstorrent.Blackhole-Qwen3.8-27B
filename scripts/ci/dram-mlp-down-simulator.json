@@ -1,0 +1,125 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "scope": "Simulator T16 complete local MLP; synthetic weights, no collective or speed claim.",
+  "sources": {
+    "dram-mlp-down-probe.py": "14e5d20f252f69f0a878494642a67f097435d46a05d1d9ce7ee1d2196dd661e5",
+    "dram_mlp_down.py": "9ac073cac7d927f6dfcf0648c11de177f14dc20e38ffe48e34bb5a92589849c5",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9"
+  },
+  "native_sources": {
+    "models/demos/blackhole/qwen36/tt/tp_common.py": "bb43f0cde336c3f84725d47a64ed2b506b5287bdd0e910cd24b13feed0a0826a",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7"
+  },
+  "rows": 16,
+  "compared_rows": 32,
+  "streams": 1,
+  "full_local_mlp": true,
+  "collective_qualified": false,
+  "timing_qualified": false,
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "exact": true,
+      "input_unchanged": true
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "exact": true,
+      "input_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "exact": true,
+      "input_unchanged": true
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "exact": true,
+      "input_unchanged": true
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "chip": 0,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "chip": 1,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "chip": 0,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "chip": 1,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "chip": 0,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 0,
+      "chip": 1,
+      "exact": true,
+      "input_unchanged": true,
+      "output_poison_replaced": true
+    }
+  ],
+  "stage": "complete",
+  "sources_after": {
+    "dram-mlp-down-probe.py": "14e5d20f252f69f0a878494642a67f097435d46a05d1d9ce7ee1d2196dd661e5",
+    "dram_mlp_down.py": "9ac073cac7d927f6dfcf0648c11de177f14dc20e38ffe48e34bb5a92589849c5",
+    "dram_sharded_projection.py": "b42ee88f1a7f2bfd3ff26c68f02393c005ac52f06989ff1565a3ca53c4785c8a",
+    "dram_projection_reload.py": "3c976f2abf46f717e80c352b5018d1f54dcbac9c4a9df5f24bce297d38225887",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "tensix_projection_raw.py": "ff55d739b11ce695ad57c989af799c88cb76ee8d3a7c498bfe9f0b40337765d9",
+    "tensix_projection_raw.cpp": "df84644389ea6544eff488fb15fa819477303810126df403820453a8e4238bf7",
+    "tiny_tile_matmul.py": "3c7ef3b34cd82b20395aade0c704dd4399b651e186606c2b4ac13154f6367ae9"
+  },
+  "native_sources_after": {
+    "models/demos/blackhole/qwen36/tt/tp_common.py": "bb43f0cde336c3f84725d47a64ed2b506b5287bdd0e910cd24b13feed0a0826a",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_1d_program_factory.cpp": "2cb6ec59e79fb40f307486d16bddb66797ed68c0cb80de7e9b09a61ee5c59c3c",
+    "ttnn/cpp/ttnn/operations/matmul/device/factory/matmul_multicore_reuse_mcast_dram_sharded_program_factory.cpp": "43f2010c9710e04ff351f0544b85c4cd1341f674828aac64ea1e8226c84bce08",
+    "ttnn/cpp/ttnn/operations/matmul/device/kernels/compute/bmm_large_block_zm_fused_bias_activation.cpp": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7"
+  }
+}

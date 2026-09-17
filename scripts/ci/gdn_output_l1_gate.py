@@ -1,0 +1,34 @@
+"""Admit only the retained local simulator comparison, not hardware performance."""
+
+import hashlib
+import json
+from pathlib import Path
+
+
+REPORT_SHA256 = '7b874af8e9f092cca0a84c134cb19da560c41aa8524bd76a2de539f3c9fae52e'
+LOCAL_SOURCES = ('gdn-output-l1-probe.py', 'gdn_output_l1_scope.py', 'model_batch.py', 'attention_batch.py')
+NATIVE_SOURCE = 'models/demos/blackhole/qwen36/tt/tp_common.py'
+
+
+def qualify(report_path, directory, runtime):
+    payload = Path(report_path).read_bytes()
+    if hashlib.sha256(payload).hexdigest() != REPORT_SHA256:
+        raise ValueError('Exact retained GDN output-placement report required')
+    report = json.loads(payload)
+    expected = [dict(label=label, chip=chip, exact=True)
+        for label in ('eager_0', 'eager_1', 'eager_2', 'replay_1', 'replay_2', 'replay_0')
+        for chip in (0, 1)]
+    if (report.get('passed') is not True or report.get('closed_cleanly') is not True
+            or report.get('scope_restored') is not True or report.get('backend') != 'simulator'
+            or report.get('checks') != expected or report.get('sources') != report.get('sources_after')
+            or report.get('hardware_qualified') is not False or report.get('timing_qualified') is not False):
+        raise ValueError('Complete stable simulator evidence required')
+    paths = {f'/experiment-scripts/ci/{name}': Path(directory) / name for name in LOCAL_SOURCES}
+    paths['/opt/tt-metal/' + NATIVE_SOURCE] = Path(runtime) / NATIVE_SOURCE
+    if set(paths) != set(report['sources']):
+        raise ValueError('Exact source closure required')
+    for name, path in paths.items():
+        if hashlib.sha256(path.read_bytes()).hexdigest() != report['sources'][name]:
+            raise ValueError('Simulator-qualified source changed: ' + name)
+    return dict(report_sha256=REPORT_SHA256, checked_sources=list(paths),
+        hardware_qualified=False, scope='Synthetic local GDN partial output only; no collective or full-model qualification')

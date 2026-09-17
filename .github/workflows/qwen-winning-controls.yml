@@ -1,0 +1,97 @@
+name: Qwen original winning runtime controls
+on:
+  push:
+    tags: ['experiment/winning-controls-v1', 'experiment/winning-controls-v2', 'experiment/winning-controls-v3']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  control:
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - context: 4096
+            revision: 4b3f90b001c8c91011666194e04f74b1157c70a6
+            original_run: 34702526963
+          - context: 8192
+            revision: 8c102b20df22329106955b4006bf4d650bb94e40
+            original_run: 34730226400
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - name: Verify host and restore result ownership
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control-orchestrator
+          persist-credentials: false
+      - name: Record pressure for frozen diagnostic replay
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p experiment-results
+          status=0
+          timeout -k 5 25 python3 -B control-orchestrator/scripts/ci/runner_io_gate.py \
+            --output experiment-results/runner-io-admission.json || status=$?
+          if [ "$status" != 0 ]; then
+            test "$GITHUB_REF_NAME" = experiment/winning-controls-v3
+            test "$status" = 75
+            python3 -c 'import json; report=json.load(open("experiment-results/runner-io-admission.json")); assert isinstance(report.get("full_io_stall_fraction"), (int, float)); assert report["elapsed_seconds"] > 0'
+            echo '::warning::Contended host: frozen replay is diagnostic, not performance qualification.'
+          fi
+          printf '{"diagnostic_only":true,"performance_qualified":false,"reason":"Frozen historical replay; host pressure and repeatability require separate assessment"}\n' \
+            > experiment-results/replay-qualification.json
+      - name: Replay original complete combined experiment
+        timeout-minutes: 10
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_REVISION: ${{ matrix.revision }}
+          ORIGINAL_RUN: ${{ matrix.original_run }}
+          CONTROL_CONTEXT: ${{ matrix.context }}
+          QWEN_CARDS_ALLOCATED: '1'
+          QWEN_DSPARK_MODE: request-target-attention
+          QWEN_DSPARK_CODING_TASK: merge_intervals
+          QWEN_DSPARK_MLP_DOWN: '0'
+          QWEN_DSPARK_SCORE_LAYOUT: '1'
+          QWEN_DSPARK_BANKED_PROPOSAL: '0'
+          QWEN_DSPARK_NATIVE_SLOT: '0'
+          QWEN_DSPARK_FUSION_T16: '1'
+          QWEN_DSPARK_CAPTURED_PUBLICATION: '1'
+          QWEN_DSPARK_MLP_FOOTPRINT: '0'
+          QWEN_DSPARK_DRAFT_PROFILE: '0'
+          QWEN_DSPARK_HISTORY_PROFILE: '0'
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROL_REVISION"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          printf '{"revision":"%s","original_run":%s,"context":%s,"orchestrator_revision":"%s"}\n' \
+            "$CONTROL_REVISION" "$ORIGINAL_RUN" "$CONTROL_CONTEXT" "$GITHUB_SHA" \
+            > experiment-results/winning-control.json
+          export GITHUB_SHA="$CONTROL_REVISION"
+          timeout -k 10 590 bash scripts/ci/run-dspark-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-winning-control-${{ matrix.context }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: experiment-results/

@@ -1,0 +1,55 @@
+{
+  "passed": true,
+  "model": "RadixArk/Qwen3.8-27B-DSpark",
+  "revision": "b9a5dbdf03bc999c6c73c426b19c2d9041cea393",
+  "checkpoint_bytes": 3714723322,
+  "header_sha256": "992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1",
+  "files": {
+    "config.json": {
+      "bytes": 2448,
+      "sha256": "dd65fb1b01c2adea69512ff2990a79d58eb7fe2c7ea97375aa66f657a29a5bfd"
+    },
+    "dspark.py": {
+      "bytes": 7016,
+      "sha256": "75bba7c469166bd2d6a6877b9964d035b0cec9a83190ab9f3de8c6175883a114"
+    },
+    "dflash.py": {
+      "bytes": 20651,
+      "sha256": "9825996703de73bd436a6aaf57ae203ef92d599249d9cf49078576d52f4e56a4"
+    },
+    "model.header.json": {
+      "bytes": 6640,
+      "sha256": "992cdd260cf8761176cb7d6e94a64339189819e74609e7f0c2989ec33ee182f1"
+    }
+  },
+  "fetched_bytes": 36763,
+  "contract": {
+    "serving_proposals": 7,
+    "target_verify_rows": 8,
+    "training_future_positions": 16,
+    "wider_serving_qualified": false,
+    "attention": "full",
+    "rotary": "yarn",
+    "target_feature_layers": [
+      5,
+      19,
+      33,
+      47,
+      61
+    ],
+    "selector": "Sequential full-vocabulary vanilla Markov bias; not DFlash2 top-16 selection"
+  },
+  "inventory": {
+    "tensors": 62,
+    "parameters": 1857358337,
+    "dtype": "BF16",
+    "payload_bytes": 3714716674,
+    "weight_payload_fetched": false,
+    "weight_payload_hash_verified": false
+  },
+  "remote_code_executed": false,
+  "eligible_for_simulator": false,
+  "eligible_for_hardware": false,
+  "eligible_for_serving": false,
+  "scope": "Metadata compatibility only; no learned arithmetic, acceptance, quality or speed qualification"
+}

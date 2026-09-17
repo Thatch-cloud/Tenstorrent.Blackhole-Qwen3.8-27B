@@ -1,0 +1,110 @@
+name: Qwen winning recipe larger-context simulator
+on:
+  push:
+    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 13
+    steps:
+      - name: Restore prior build artifact ownership
+        run: |
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/frozen-build/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: frozen-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: frozen-build
+          persist-credentials: false
+      - name: Prepare one shared factory without running numerical probes
+        timeout-minutes: 11
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: dspark-native-8k-attention
+          QWEN_DSPARK_REQUEST_CONTEXT: '8192'
+          QWEN_FROZEN_BUILD_ONLY: '1'
+          QWEN_FROZEN_TARGET_SCRATCH: ${{ endsWith(github.ref, 'target-scratch-build-v1') && '1' || '0' }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p frozen-build/experiment-results
+          python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout frozen-build --context 8192 \
+            --manifest frozen-build/experiment-results/frozen-geometry.json
+          cd frozen-build
+          timeout -k 45 600 bash scripts/ci/run-simulator.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-factory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-build/experiment-results/
+  geometry:
+    if: ${{ !contains(github.ref, '-build-') }}
+    needs: prepare
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        context: [32768, 65536]
+        part: [numerical, diagnostics]
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 16
+    steps:
+      - name: Restore ownership of prior simulator artifacts
+        run: |
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/frozen-recipe/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: frozen-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: frozen-recipe
+          persist-credentials: false
+      - name: Apply geometry-only adaptation
+        env:
+          CONTEXT: ${{ matrix.context }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p frozen-recipe/experiment-results
+          python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout frozen-recipe --context "$CONTEXT" \
+            --manifest frozen-recipe/experiment-results/frozen-geometry.json
+          git -C frozen-recipe diff --check
+          git -C frozen-recipe diff > frozen-recipe/experiment-results/geometry.patch
+      - name: Separate preparation and probe budgets without model weights
+        timeout-minutes: 14
+        working-directory: frozen-recipe
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: dspark-native-8k-attention
+          QWEN_DSPARK_REQUEST_CONTEXT: ${{ matrix.context }}
+          QWEN_FROZEN_PROBE_PART: ${{ matrix.part }}
+        run: timeout -k 45 780 bash scripts/ci/run-simulator.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-context-sim-${{ matrix.context }}-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-recipe/experiment-results/

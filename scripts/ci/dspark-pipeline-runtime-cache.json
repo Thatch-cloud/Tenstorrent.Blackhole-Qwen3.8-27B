@@ -1,0 +1,17 @@
+{
+  "cache_hit": false,
+  "cache_key": "5d58fe7c7b6fe801dcc30509a200b346a81de8b2132a137685376c053a0dd26b",
+  "inputs": {
+    "image": "sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465",
+    "builders": {
+      "ccl-links-build.sh": "0c032d450580e3f16acfa1336d9c93b68b56734f30ab7dce98d1063a4f14653f",
+      "sdpa_graft_build.py": "cd7c454b9411b0bcae60db57e4ff6ceeca76534e731d66a79e1a4fb131511739",
+      "lazy_ccl_links.py": "8ff14f094cff98c837ecfd46871e9ffc3c70f5fd054db91f6b4ed8523cd423e0",
+      "dspark_runtime_cache.py": "b4031a1483474f73230d7e4c4bb0a366a1316355eb194385c93dedee0dba402c",
+      "dspark_hardware_gate.py": "6a897bcd898512b91254ee1129832553067242dd5d1682eb140e4c22fac28470",
+      "dspark_native_restore.py": "4baeee4d5c7264ddbe7889ecaeefa9cf5d5f25227baa3e47a314bd75d5bdd263"
+    },
+    "registration_patch": "7099e20ad5717b08ed29c73320dc353cd62814c329af47b03450be803f5788ae"
+  },
+  "binary_sha256": "31374d9163054482273092050fce7400635264db5d8beaa8d92180176fbb8089"
+}

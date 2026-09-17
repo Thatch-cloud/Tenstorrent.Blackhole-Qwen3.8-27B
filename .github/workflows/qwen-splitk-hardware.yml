@@ -1,0 +1,52 @@
+name: Qwen bounded split-K hardware
+on:
+  push:
+    tags: ['experiment/dspark-splitk-hardware-v1', 'experiment/dspark-splitk-hardware-v2', 'experiment/dspark-splitk-hardware-v3', 'experiment/dspark-splitk-hardware-v4', 'experiment/dspark-splitk-hardware-v5', 'experiment/dspark-splitk-hardware-v6', 'experiment/dspark-splitk-hardware-v7', 'experiment/dspark-splitk-hardware-v8']
+  workflow_dispatch:
+    inputs:
+      cards_allocated:
+        description: Both P150A cards exclusively allocated; serving stopped
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  splitk:
+    if: github.event_name == 'push' || inputs.cards_allocated
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - name: Verify host and restore result ownership
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build and test full-history 64K without model weights
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QWEN_CARDS_ALLOCATED: '1'
+        run: |
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          bash scripts/ci/run-dspark-splitk-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-splitk-hardware-${{ github.run_id }}
+          path: experiment-results/
+          if-no-files-found: warn

@@ -1,0 +1,106 @@
+# 64K combined score-layout audit: timeout diagnosis
+
+Run `34927938233`, commit `6c831fc`, failed with request exit **124** at the
+unchanged **420-second watchdog**. Container evidence reports `OOMKilled=false`.
+The signature fix worked: execution reached proposal capture and replay.
+This is neither a correctness pass nor a measured throughput result.
+
+Completed log intervals before termination:
+
+| Host interval | Count | Total | Mean |
+|---|---:|---:|---:|
+| Full target-state snapshot | 11 | 144.71 s | 13.16 s |
+| Full history snapshot | 12 | 21.06 s | 1.76 s |
+| Blocking proposal replay | 3 | 0.204 s | 67.86 ms |
+
+These intervals can nest; do not sum them into device time. Termination interrupted
+another history snapshot. No clean shutdown or complete request acceptance exists.
+
+## Fix the test cost before rerunning
+
+`dspark_request_experiment.py:196` implements target KV hashing with serial
+device slices, two-shard readback, host layout conversion, and SHA256. Each slice
+contains at most 64 pages of 64 tokens: at a 65,536-token frontier there are
+16 slice/readback groups per cache. This is a concrete audit-cost candidate;
+the aggregate snapshot also includes GDN and inactive-state hashing, so the log
+does not yet isolate how much time belongs to KV alone.
+
+Next experiment: compare a bounded bulk-readback audit against the existing
+digest on identical allocations, preserving every page, shard, valid-prefix
+boundary and digest ordering. Check partial pages and mutation detection before
+admitting it to the combined request. Record peak host memory and readback count.
+Do not remove boundary checks, increase the watchdog, or launch an identical
+retry. Keep the old audit as the reference until equivalence is demonstrated.
+
+The score-layout candidate remains unqualified. After complete correctness
+acceptance, measure clean combined PP / CTX / committed TG separately. The
+200 committed tok/s objective remains open; audit replay time is not TG.
+
+Evidence: `runner-evidence.local/34927938233/qwen-splitk-combined-34927938233/`
+contains the request log, exit status, partial report and container state.
+
+## V3 candidate
+
+The audit-only callback now reads up to 256 pages at a time, then produces the
+same 64-page, cache-major, page-group-major, shard-major SHA256 stream on the host.
+CPU tests cover partial pages, full 64K, a changed frontier, both-shard mutations,
+invalid input, borrowed allocations and release on readback failure. Fake-device
+read counts fall from 32 to 8 per cache at 64K; this is not hardware speed evidence.
+
+Before selecting the new callback, V3 compares every digest with the original
+on the loaded hardware at both 65,536 and 65,535 tokens. Any mismatch fails closed.
+It keeps the old callback if the candidate is not faster across those checks.
+Every subsequent boundary is still checked. Neither timeout nor request coverage
+changes. Logged host tensor bytes exclude conversion scratch and are not peak RSS.
+No new kernel math is introduced; these local tests run Python/Torch in the
+TT-Sim environment, not a simulator kernel validation.
+
+V3 run `34928953853` failed before admission with a Python frontier guard, not a
+timeout or digest mismatch. `full_request.py:112` first hashes KV after the gold
+decode (65,552 here), before the experimental prefill/capture. V4 admits this
+ordering, compares 65,536, 65,535 and the actual first frontier against the oracle,
+and returns the digest for the requested frontier. A regression covers the gold
+check followed by the experimental request's return to the 65,536 frontier.
+
+## V4 hardware result
+
+Run **34929473486** (`0af9f60`) passes the complete combined correctness screen
+and clean device shutdown in a 7m42s CI job, within the unchanged watchdog.
+Score-layout fusion records five construction-time calls and restores its hook.
+The full-vocabulary learned-weight audit is exact. This is not clean TG timing.
+
+Bulk KV digests match at all three frontiers, but the candidate loses:
+
+| Valid tokens | Original audit | Bulk audit |
+|---:|---:|---:|
+| 65,536 | 8.40 s | 12.86 s |
+| 65,535 | 8.43 s | 9.14 s |
+| 65,552 | 8.35 s | 12.28 s |
+
+The selector retained the original callback for every subsequent snapshot.
+**Do not attribute the pass to faster bulk readback or adopt it for speed.**
+The next clean timing excludes this admission experiment and per-block audits;
+it retains the score-layout, split-K, fused MLP and shared-Q/K runtime together.
+
+Report SHA256: `c027988a232f47f7a27bc7382aa09c02f6b9117af9e3c754e782f0d75ee23288`.
+
+## First clean timing attempt
+
+Run `34930384229` (`a8b51d4`) reaches a complete first request, then exits 124
+while starting request two. The first request commits 135 tokens in 17.767 s;
+output, final state and inactive slots match. The overall run is incomplete,
+has no clean shutdown, and is **not a qualified combined throughput result**.
+
+Relative to the earlier shared-Q/K timing, first-request engine setup grows from
+3.44 to 33.50 s, feature setup from 19.70 to 48.73 s, and decode from 4.49 to
+17.77 s. Loading/warmup already consumes 203.72 s before request one. The request
+health record shows no cgroup CPU throttling, swap or OOM event. Whole-request
+I/O pressure increases; this does not isolate the cause of decode stalls.
+
+The retry removes a redundant *second* learned-weight score audit only when the
+operations, mesh and both retained weight objects are identical. Each score arm
+still validates the admitted hardware evidence and current allocation bindings.
+Any owner change causes a fresh audit. The first loaded-weight audit remains
+mandatory and now logs its own setup duration. Both complete requests, native
+gold runs, final-state checks and the 420-second watchdog remain unchanged.
+This setup change alone is not evidence that the decode slowdown is fixed.

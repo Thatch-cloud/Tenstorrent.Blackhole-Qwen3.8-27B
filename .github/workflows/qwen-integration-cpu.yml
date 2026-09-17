@@ -1,0 +1,34 @@
+name: Qwen T16 T32 integration CPU
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: qwen-integration-cpu-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      PYTHONPATH: scripts/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.4.6
+      - name: T32 and unchanged T16 regression gates
+        run: |
+          python -B -m unittest discover -s scripts/ci -p 'test_*t32*.py'
+          python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli
+          python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
+          bash -n scripts/ci/run-simulator.sh
+          bash -n scripts/ci/simulator-suite.sh
+          git diff --check

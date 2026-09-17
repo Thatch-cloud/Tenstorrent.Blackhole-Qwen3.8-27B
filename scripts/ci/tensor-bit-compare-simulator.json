@@ -1,0 +1,304 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "checks": [
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 1,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 1,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 2,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 2,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 1,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 1,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 2,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 2,
+      "mode": "eager",
+      "repetition": null,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 0,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 0,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 1,
+      "mode": "replay",
+      "repetition": 1,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 1,
+      "mode": "replay",
+      "repetition": 1,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 2,
+      "mode": "replay",
+      "repetition": 2,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 2,
+      "mode": "replay",
+      "repetition": 2,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 3,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 32,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 3,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 0,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 0,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 1,
+      "mode": "replay",
+      "repetition": 1,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 1,
+      "mode": "replay",
+      "repetition": 1,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 2,
+      "mode": "replay",
+      "repetition": 2,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 2,
+      "mode": "replay",
+      "repetition": 2,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 3,
+      "chip": 0,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    },
+    {
+      "width": 2048,
+      "case": 0,
+      "mode": "replay",
+      "repetition": 3,
+      "chip": 1,
+      "exact": true,
+      "inputs_unchanged": true,
+      "poisoned_counters_replaced": true
+    }
+  ],
+  "sources": {
+    "tensor-bit-compare-probe.py": "f0c67e78670583d9adc1d6ecb1ad12d4896106875549467f7840ce9400603927",
+    "tensor_bit_compare.py": "3d8a405a4ffbfec7886cb60f58c6147b474870cbe292b525ed3c0e0588e1d31b",
+    "tensor_bit_compare.cpp": "86bf64c80540006ac3d66e60c89d7741062d6b98dc92f2159a562e60d80b0949",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "stage": "complete",
+  "sources_after": {
+    "tensor-bit-compare-probe.py": "f0c67e78670583d9adc1d6ecb1ad12d4896106875549467f7840ce9400603927",
+    "tensor_bit_compare.py": "3d8a405a4ffbfec7886cb60f58c6147b474870cbe292b525ed3c0e0588e1d31b",
+    "tensor_bit_compare.cpp": "86bf64c80540006ac3d66e60c89d7741062d6b98dc92f2159a562e60d80b0949",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  }
+}

@@ -1,0 +1,56 @@
+name: Qwen sampled marker hardware qualification
+on:
+  push:
+    tags: ['experiment/frozen-mlp-wait-zones-hardware-v1']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  markers:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: marker-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: marker-candidate
+          persist-credentials: false
+      - name: Stage simulator-admitted diagnostic
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p marker-candidate/experiment-results
+          chmod 2775 marker-candidate/experiment-results
+          gh run download 35148936342 -R Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            -n qwen-frozen-mlp-buffer-35148936342-1 -D marker-candidate/experiment-results/simulator
+          python3 -B marker-orchestrator/scripts/ci/frozen_recipe_context.py --checkout marker-candidate \
+            --context 8192 --manifest marker-candidate/experiment-results/geometry.json
+          python3 -B marker-orchestrator/scripts/ci/frozen_mlp_wait_zones.py --checkout marker-candidate \
+            --mid-run-dump --manifest marker-candidate/experiment-results/marker-candidate.json
+          for name in frozen_recipe_context.py frozen_mlp_wait_zones.py frozen_wait_zone_report.py frozen_wait_zone_hardware.py wait-zone-hardware-suite.sh run-wait-zone-hardware.sh; do
+            cp "marker-orchestrator/scripts/ci/$name" marker-candidate/scripts/ci/
+          done
+          python3 -B marker-orchestrator/scripts/ci/frozen_wait_zone_hardware.py stage \
+            --directory marker-candidate/scripts/ci --evidence marker-candidate/experiment-results/simulator
+          cp marker-candidate/scripts/ci/hardware-marker-sources.json marker-candidate/experiment-results/
+          git -C marker-candidate diff --check
+      - name: Exact T16 replay and complete markers on both cards
+        timeout-minutes: 5
+        working-directory: marker-candidate
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+        run: timeout -k 15 280 bash scripts/ci/run-wait-zone-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-wait-zone-hardware-${{ github.run_id }}
+          path: marker-candidate/experiment-results/

@@ -1,0 +1,741 @@
+{
+  "passed": true,
+  "scope": "Multi-row fusion check using pinned draft MLP weights as geometry-matched operands, not target quality.",
+  "fixture": {
+    "model": "incoai/Qwen3.8-27B-DFlash2",
+    "revision": "dedf8df68adfb1afeaf7b7480c0a0243108177b4",
+    "header_sha256": "0c2c70601b30f8d1ca7d5794b817779ba2dcf1956cfc7d4f83e87091e1ab7c8c",
+    "checkpoint_bytes": 3848817896,
+    "tensors": {
+      "layers.0.mlp.down_proj.weight": {
+        "file": "down-projection.bf16",
+        "bytes": 178257920,
+        "sha256": "5cad30340445d399e3f6a12d0b83a8e40aff31cc42c4535ba34ab53d474f8242",
+        "shape": [
+          5120,
+          17408
+        ],
+        "dtype": "BF16"
+      },
+      "layers.0.mlp.gate_proj.weight": {
+        "file": "gate-projection.bf16",
+        "bytes": 178257920,
+        "sha256": "a5555f4d8de040e7cc8141b8b41dfc4f3a9476ddecc95879a7d3f7c6f3545bbd",
+        "shape": [
+          17408,
+          5120
+        ],
+        "dtype": "BF16"
+      },
+      "layers.0.mlp.up_proj.weight": {
+        "file": "up-projection.bf16",
+        "bytes": 178257920,
+        "sha256": "c9c75bdf71b82f6e7e72b84248a26dbac237f02894dc5e19463dcaf88e781f02",
+        "shape": [
+          17408,
+          5120
+        ],
+        "dtype": "BF16"
+      }
+    },
+    "scope": "Fetch only pinned layer-zero DFlash2 SwiGLU projection weights."
+  },
+  "checks": [
+    {
+      "rows": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "rows": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "rows": 4,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 4,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "rows": 8,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 8,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "rows": 16,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 16,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "rows": 32,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "rows": 32,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "math_approx_mode": true,
+  "backend": "simulator",
+  "timings": [],
+  "timing_scope": "Blocking captured projection ABBA; excludes capture, allocation, uploads and validation; not full-model or committed throughput",
+  "precision": "BF4 gate/up, native LoFi FP32 destination accumulation and BF16 epilogue; not target-model quality",
+  "packer_header_sha256": "8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7",
+  "packer_zero_graft": true,
+  "weight_checks": [
+    {
+      "chip": 0,
+      "pages": 43520,
+      "mismatched_words": 0,
+      "exact": true,
+      "workers": 64,
+      "source_exact": true,
+      "projection": "gate"
+    },
+    {
+      "chip": 1,
+      "pages": 43520,
+      "mismatched_words": 0,
+      "exact": true,
+      "workers": 64,
+      "source_exact": true,
+      "projection": "gate"
+    },
+    {
+      "chip": 0,
+      "pages": 43520,
+      "mismatched_words": 0,
+      "exact": true,
+      "workers": 64,
+      "source_exact": true,
+      "projection": "up"
+    },
+    {
+      "chip": 1,
+      "pages": 43520,
+      "mismatched_words": 0,
+      "exact": true,
+      "workers": 64,
+      "source_exact": true,
+      "projection": "up"
+    }
+  ],
+  "weight_check_backend": "Byte-exact device comparison with coverage and complementary counter validation",
+  "weight_check_sources": {
+    "packed_weight_check.py": "b34e5fbc0bc8a209af6d69813b46ade4cdf6daf9d0e5fb3542c310771d6c8c2a",
+    "packed_weight_check.cpp": "2fe2db316882c7c2efaa59babc73fb786e9766cade65fc4701ff9b734bdda10f"
+  },
+  "phase": "trace_replay",
+  "control_epilogue": "Native gate linear fused SILU before BF16 pack; separate BF16 up; BF16 multiply",
+  "active_rows": 32,
+  "kernels": [
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 1,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    },
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 2,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    },
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 4,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    },
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 8,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    },
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 16,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    },
+    {
+      "native_compute_sha256": "ef0d62e39d6d72d95eb023dc74000b1b501f46aeb9c6bfeb9d8952333c2bef88",
+      "fused_compute_sha256": "97268b7be1054c24edd392263d2d666728e6da3659125903f02d0eba4951c258",
+      "reader_sha256": {
+        "fused_1d_input.cpp": "381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9",
+        "fused_1d_weights.cpp": "c283b6b347045ee3b59363e4e3aa6b0b796e226a5ccbf6df9aa8930a570f46eb"
+      },
+      "workers": 91,
+      "grid": [
+        11,
+        9
+      ],
+      "pairs_per_worker": 3,
+      "k_block": 8,
+      "intermediates": false,
+      "input_noc": 1,
+      "weight_noc": 0,
+      "token_rows": 32,
+      "math_approx_mode": true,
+      "epilogue": "BF16(silu(gate)), BF16(up), then BF16 multiply"
+    }
+  ],
+  "trace_replays": [
+    {
+      "rows": 1,
+      "passed": true,
+      "checks": [
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        }
+      ],
+      "negative_controls": [
+        {
+          "arm": "control",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "control",
+          "chip": 1,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 1,
+          "stale_input_detected": true
+        }
+      ],
+      "timings": []
+    },
+    {
+      "rows": 8,
+      "passed": true,
+      "checks": [
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        }
+      ],
+      "negative_controls": [
+        {
+          "arm": "control",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "control",
+          "chip": 1,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 1,
+          "stale_input_detected": true
+        }
+      ],
+      "timings": []
+    },
+    {
+      "rows": 16,
+      "passed": true,
+      "checks": [
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        }
+      ],
+      "negative_controls": [
+        {
+          "arm": "control",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "control",
+          "chip": 1,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 1,
+          "stale_input_detected": true
+        }
+      ],
+      "timings": []
+    },
+    {
+      "rows": 32,
+      "passed": true,
+      "checks": [
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 0,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 1,
+          "pattern": 1,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "control",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 0,
+          "exact": true
+        },
+        {
+          "arm": "fused",
+          "repetition": 2,
+          "pattern": 0,
+          "chip": 1,
+          "exact": true
+        }
+      ],
+      "negative_controls": [
+        {
+          "arm": "control",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "control",
+          "chip": 1,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 0,
+          "stale_input_detected": true
+        },
+        {
+          "arm": "fused",
+          "chip": 1,
+          "stale_input_detected": true
+        }
+      ],
+      "timings": []
+    }
+  ],
+  "trace_source_sha256": "9a7f06d83f919cefec2c81ffcaaccf4d71f2fe318b51a21a6a1c4eca9fd99490"
+}

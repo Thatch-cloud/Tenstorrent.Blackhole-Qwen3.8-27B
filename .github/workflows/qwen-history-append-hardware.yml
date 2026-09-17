@@ -1,0 +1,42 @@
+name: Qwen incremental history hardware
+on:
+  push:
+    tags: ['experiment/history-append-hardware-v1', 'experiment/history-append-hardware-v2']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  hardware:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 7
+    steps:
+      - name: Verify host and restore result ownership
+        shell: bash
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Simulator-admitted 64K bank and trace audit, no model weights
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          timeout -k 15 330 bash scripts/ci/run-history-append-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-history-append-hardware-${{ github.run_id }}
+          path: experiment-results/

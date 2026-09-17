@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+test "${RUNNER_NAME:-}" = thatch-build-amd64-02-cp-temp
+test "${QWEN_CARDS_ALLOCATED:-0}" = 1
+test -z "${TT_METAL_SIMULATOR:-}"
+case "${QWEN_MATCHED_CONTEXT:-0}" in 0|4096|8192|16384|32768|65536|131072|262144) ;; *) exit 2 ;; esac
+case "${QWEN_SPLITK_MAXIMA:-0}" in 0|1) ;; *) exit 2 ;; esac
+case "${QWEN_SPLITK_WORKERS:-8}" in 8|16) ;; *) exit 2 ;; esac
+if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then
+    test "${QWEN_SPLITK_MAXIMA:-0}" = 1
+    test "${QWEN_MATCHED_CONTEXT:-0}" = 65536
+    test "${QWEN_MATCHED_TARGET:-0}" = 0
+fi
+case "${QWEN_MATCHED_TARGET:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${QWEN_MATCHED_TARGET:-0}" = 1 ]; then test "${QWEN_SPLITK_MAXIMA:-0}" = 1; fi
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then test "${QWEN_MATCHED_CONTEXT:-0}" != 0; fi
+image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
+output=$(realpath -e experiment-results)
+evidence=$(mktemp -d "$RUNNER_TEMP/qwen-splitk-evidence.XXXXXX")
+artifact=10376559640
+report_name=dspark-splitk.json
+gate=dspark_splitk_sim_gate
+if [ "${QWEN_SPLITK_MAXIMA:-0}" = 1 ]; then
+    artifact=10422439077
+    report_name=dspark-splitk-maxima.json
+    gate=dspark_splitk_maxima_gate
+fi
+timeout -k 5 45 gh api "repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/$artifact/zip" > "$evidence/report.zip"
+python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-splitk-simulator.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$evidence/report.zip" "$report_name"
+PYTHONPATH=scripts/ci python3 -c 'import importlib,sys; importlib.import_module(sys.argv[1]).qualify("scripts/ci", "scripts/ci/dspark-splitk-simulator.json")' "$gate"
+if [ "${QWEN_SPLITK_WORKERS:-8}" = 16 ]; then
+    timeout -k 5 45 gh api repos/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/artifacts/10424378704/zip > "$evidence/workers.zip"
+    python3 -c 'import pathlib,sys,zipfile; pathlib.Path("scripts/ci/dspark-splitk-workers-simulator.json").write_bytes(zipfile.ZipFile(sys.argv[1]).read("dspark-splitk-workers.json"))' "$evidence/workers.zip"
+    PYTHONPATH=scripts/ci python3 -c 'from splitk_workers_gate import qualify; qualify("scripts/ci", "scripts/ci/dspark-splitk-workers-simulator.json")'
+fi
+volume=qwen-experiments-f1e9b1a64b4f
+if docker volume inspect "$volume" >/dev/null 2>&1; then
+    test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$volume")" = true
+else
+    docker volume create --label thatch.qwen.experiment-cache=true "$volume" >/dev/null
+fi
+container=''
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [ -n "$container" ]; then
+        timeout -k 1 5 docker kill "$container" >/dev/null 2>&1 || true
+        docker logs "$container" > "$output/splitk-container.log" 2>&1 || true
+        docker inspect --format '{{json .State}}' "$container" > "$output/splitk-container-state.json" || true
+        timeout -k 1 10 docker rm -f "$container" >/dev/null || true
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+container=$(docker create --network none --hostname qwen-experiment --add-host qwen-experiment:127.0.0.1 \
+    --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+    --pids-limit 4096 --memory 96g --cpus 24 --shm-size 8g \
+    --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \
+    --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+    --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+    --mount "type=bind,src=$output,dst=/experiment/results" --group-add "$(stat -c %g "$output")" \
+    --mount "type=volume,src=$volume,dst=/experiment-cache" \
+    --label thatch.qwen.baseline=true --label "thatch.qwen.workflow-run=$GITHUB_RUN_ID" \
+    --label "thatch.qwen.source-revision=$GITHUB_SHA" --workdir /opt/vllm-tt-plugin \
+    -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
+    -e QWEN_SPLITK_ATTENTION=1 -e QWEN_LADDER_BACKEND=hardware -e QWEN_LADDER_CONTEXT=65536 \
+    -e "QWEN_MATCHED_CONTEXT=${QWEN_MATCHED_CONTEXT:-0}" \
+    -e "QWEN_SPLITK_MAXIMA=${QWEN_SPLITK_MAXIMA:-0}" \
+    -e "QWEN_SPLITK_WORKERS=${QWEN_SPLITK_WORKERS:-8}" \
+    -e "QWEN_MATCHED_TARGET=${QWEN_MATCHED_TARGET:-0}" \
+    -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/experiment-cache/kernels -e MESH_DEVICE=P300 \
+    -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+    -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -e OMP_NUM_THREADS=8 \
+    --entrypoint /bin/bash "$image" /experiment-scripts/ci/dspark-splitk-hardware-suite.sh)
+docker cp scripts "$container:/experiment-scripts"
+docker cp optimisation "$container:/optimisation"
+docker cp speculative-decoding "$container:/speculative-decoding"
+timeout -k 10 510 docker start -a "$container"
+test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0

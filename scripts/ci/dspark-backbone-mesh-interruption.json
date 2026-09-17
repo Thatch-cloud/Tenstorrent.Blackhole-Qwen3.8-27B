@@ -1,0 +1,31 @@
+{
+  "run": "20260909T205211Z-403",
+  "code": "e83cbdb",
+  "classification": "incomplete_after_unclean_wsl_restart",
+  "report_sha256": "e7583993a0daa145d75f3691e0d4d0e7672603af46d7556d8d287c6a93bf7350",
+  "launch_session": 97507,
+  "launch_session_exit_code": 1,
+  "native_probe_exit_code": null,
+  "wrapper_exit_status_file_present": false,
+  "last_stage": "upload_and_audit_layers.4.input_layernorm.weight",
+  "recorded_parameter_checks": 88,
+  "recorded_device_stage_checks": 0,
+  "closed_cleanly": false,
+  "five_layer_result_available": false,
+  "observations": [
+    "Windows shell launch reported Thread failed to start.",
+    "The original simulator PID 415 was absent after the launch session ended.",
+    "The next WSL inspection showed a newly booted kernel and an unclean system journal.",
+    "All 1496 retained native runtime fingerprints remained unchanged.",
+    "The interrupted report source closure matched the worktree before recovery edits."
+  ],
+  "windows_memory_sample_after_interruption_kib": {
+    "free_physical": 3582428,
+    "total_physical": 33249392,
+    "free_virtual": 4962112,
+    "total_virtual": 51212764
+  },
+  "cause": "Unconfirmed; host memory pressure is a hypothesis, not a proven kernel failure.",
+  "recovery": "Enforce a per-run 3-GiB memory and 4-GiB swap cgroup budget; record boot identity and OOM counters. Do not change global WSL settings or the functional matrix.",
+  "eligible_for_hardware": false
+}

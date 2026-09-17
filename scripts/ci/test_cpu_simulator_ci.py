@@ -1,0 +1,124 @@
+import os
+import re
+from pathlib import Path
+import shutil
+import subprocess
+import unittest
+
+
+class CpuSimulatorCiTests(unittest.TestCase):
+    def test_t32_routes_without_expanding_dispatch_inputs(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        inputs = workflow.split('    inputs:', 1)[1].split('\npermissions:', 1)[0]
+        names = re.findall(r'^      ([a-z_][a-z0-9_]*):$', inputs, re.MULTILINE)
+        self.assertLessEqual(len(names), 25)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertNotIn('simulator_t32', names)
+        self.assertIn("startsWith(inputs.suite, 't32-') && inputs.suite", workflow)
+        guard = workflow.split('if [[ "${{ inputs.suite }}" = t32-* ]]; then', 1)[1].split('fi', 1)[0]
+        self.assertIn('test "${{ inputs.simulator_only }}" = true', guard)
+        self.assertIn('test "${{ inputs.cards_allocated }}" = false', guard)
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        for case in ('t32-markov', 't32-markov-learned', 't32-attention',
+                't32-draft-attention', 't32-commit', 't32-combined',
+                't32-publication', 't32-context-attention'):
+            self.assertIn(case, inputs)
+            self.assertIn(case, runner)
+        self.assertIn('t32-combined-proposal-probe.py', suite)
+        self.assertIn('--rows 32', suite)
+
+    def test_results_are_persisted_before_cleanup(self):
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('type=bind,src=$results,dst=/experiment/results', runner)
+        self.assertIn('docker start -a "$container" 2>&1 | tee experiment-results/simulator-container.log', runner)
+        self.assertIn('set -euo pipefail', runner)
+        self.assertNotIn('docker cp "$container:/experiment/results/."', runner)
+        self.assertIn('timeout -k 5 20 docker logs', runner)
+        self.assertIn('timeout -k 5 20 docker rm -f', runner)
+        self.assertIn('results_gid=$(stat -c %g "$results")', runner)
+        self.assertEqual(runner.count('--group-add "$results_gid"'), 2)
+        self.assertNotIn('chown -R', runner)
+        self.assertLess(runner.index('test -r "$results/result-write-preflight.txt"'),
+            runner.index('container=$(docker create'))
+
+    def test_ladder_runs_explicit_contexts_without_weights(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        self.assertEqual(workflow.count('dspark-ladder-attention-sim'), 5)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('for context in 65536 32768 128 4096 8192', suite)
+        self.assertIn('QWEN_LADDER_CONTEXT=128 QWEN_LADDER_SCORE_SMOKE=1 timeout -k 15 600', suite)
+        self.assertLess(suite.index('if [ "$smoke_status" != 0 ]; then exit "$smoke_status"; fi'),
+            suite.index('for context in 65536'))
+        self.assertIn('context.elapsed-seconds', suite)
+        self.assertIn('ladder build completed elapsed_seconds=', suite)
+        self.assertIn('unset TT_METAL_DPRINT_CORES TT_METAL_DPRINT_RISCVS', suite)
+        self.assertIn('export TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=60000', suite)
+        self.assertNotIn('TT_METAL_DPRINT_RISCVS=TRISC0', suite)
+        self.assertIn('dspark_ladder_build.py', suite)
+        self.assertIn('dspark-ladder-attention-$context.exit-status', suite)
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertTrue(any('dspark-ladder-attention' in line and "kinds=''" in line
+            for line in runner.splitlines()))
+
+    def test_dedicated_fusion_workflow_is_serialized_and_cpu_only(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-ttsim.yml').read_text()
+        self.assertIn('group: qwen-two-p150a-exclusive', workflow)
+        self.assertIn('timeout-minutes: 180', workflow)
+        self.assertIn('bash scripts/ci/run-simulator.sh', workflow)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('--device-weight-check --trace-replay --trace-t16', suite)
+        self.assertIn('compatibility.patched_bytes', suite)
+        self.assertIn('fused-batch.exit-status', suite)
+
+    def test_container_has_no_physical_device_permissions(self):
+        source = Path(__file__).with_name('run-simulator.sh').read_text()
+        for prohibited in ('--device', '--privileged', '--cap-add', 'src=/dev', 'src=/home,dst='):
+            self.assertNotIn(prohibited, source)
+        for required in ('--network none', '--cap-drop ALL', '--memory 64g', '--cpus 16', 'sha256sum -c -'):
+            self.assertIn(required, source)
+
+    def test_full_simulator_path_cannot_fall_back_to_hardware(self):
+        source = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('test ! -e /dev/tenstorrent', source)
+        self.assertIn('unset QWEN_HARDWARE_TESTS QWEN_CARDS_ALLOCATED', source)
+        self.assertIn('export TT_METAL_SIMULATOR=/tmp/ttsim/libttsim_bh_x2.so', source)
+        self.assertIn('--stack-layers 5', source)
+        self.assertIn('--captured-stack', source)
+        self.assertNotIn('--hardware', source)
+
+    def test_attention_fingerprints_keep_repository_relative_support_path(self):
+        source = Path(__file__).with_name('simulator-suite.sh').read_text()
+        link = 'ln -s /simulator-support /optimisation/sim'
+        self.assertIn(link, source)
+        self.assertLess(source.index(link), source.index('python3 -B -m unittest test_t32_ci_runtime'))
+        runner = Path(__file__).with_name('run-simulator.sh').read_text()
+        self.assertIn('docker cp optimisation/sim "$container:/simulator-support"', runner)
+
+    def test_shortlist_gate_uses_same_exclusive_cpu_container(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/qwen-experiments.yml').read_text()
+        self.assertIn('group: qwen-two-p150a-exclusive', workflow)
+        self.assertIn("inputs.learned_stack && 'stack' || 'shortlist'", workflow)
+        self.assertIn('bash scripts/ci/run-simulator.sh', workflow)
+        suite = Path(__file__).with_name('simulator-suite.sh').read_text()
+        self.assertIn('for width in 32768 65536', suite)
+        self.assertIn('draft-shortlist-probe.py', suite)
+        self.assertIn('test "${QWEN_SIM_CASE:-stack}" = stack', suite)
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'Linux CI shell required')
+    def test_missing_opt_ins_fail_before_docker(self):
+        script = Path(__file__).with_name('run-simulator.sh')
+        for enabled, stack in (('0', '0'), ('0', '1'), ('1', '0')):
+            result = subprocess.run(['bash', str(script)], env={**os.environ,
+                'QWEN_SIM_ONLY': enabled, 'QWEN_LEARNED_STACK': stack}, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b'')
+            self.assertEqual(result.stderr, b'')
+
+
+if __name__ == '__main__':
+    unittest.main()

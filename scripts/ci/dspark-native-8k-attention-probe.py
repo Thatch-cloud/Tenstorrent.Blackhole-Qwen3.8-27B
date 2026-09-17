@@ -1,0 +1,367 @@
+"""Precise native SDPA at fixed 8448 capacity and fifteen queries; simulator only, no TG qualification."""
+
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+
+from attention_batch import capture_operation
+from dspark_cached_layer import append_queries
+from dspark_fixed_inputs import fixed_mask, validate_fixed_mask
+from dspark_full_attention import geometry
+from dspark_full_attention import validate_inputs
+from draft_attention import draft_sdpa
+from native_draft_sdpa import run_precise_probe
+from dspark_hardware_gate import digest
+from dspark_projection import tensor_digest
+from dspark_ladder_backend import require_backend, require_packer_mode
+from gdn_multitoken_conv import addresses, release_owned
+from sim_memory_budget import require_clean, snapshot
+
+
+SPEC = importlib.util.spec_from_file_location('fixed_full_attention', Path(__file__).with_name('dspark-full-attention-probe.py'))
+FULL = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(FULL)
+NATIVE_SPEC = importlib.util.spec_from_file_location('native_attention_gate', Path(__file__).with_name('dspark-attention-probe.py'))
+NATIVE = importlib.util.module_from_spec(NATIVE_SPEC)
+NATIVE_SPEC.loader.exec_module(NATIVE)
+SOURCES = tuple(sorted(set(FULL.SOURCES + ('dspark_ladder_backend.py', 'dspark_attention_chunk_trial.py', 'dspark_attention_value_diagnostics.py', 'dspark_stats_pack.py', 'dspark-native-8k-attention-probe.py', 'dspark_fixed_inputs.py', 'dspark_cached_layer.py',
+    'dspark_native_full_attention.py', 'draft_attention.py', 'native_draft_sdpa.py', 'dspark-attention-probe.py'))))
+CAPACITY, PROPOSALS = 8448, 15
+POSITIONS = (8192, 8433)
+REPLAYS = (1, 0)
+NAMES = ('query', 'history_key', 'history_value', 'query_key', 'query_value', 'mask')
+COUNTS = dict(eager_checks=4, replay_checks=4, input_checks=48, layout_checks=16, fixture_controls=8, stale_controls=2)
+
+
+def execute(operations, mesh, query, key, value, mask, owned, *, context_rows,
+        proposals, mask_validated=False):
+    from dspark_attention_chunk_trial import execute as chunk_trial
+    return chunk_trial(operations, mesh, query, key, value, mask, owned,
+        context_rows=context_rows, proposals=proposals, mask_validated=mask_validated)
+
+
+def source_hashes():
+    return {name: digest(Path(__file__).parent / name) for name in SOURCES}
+
+
+def runner_fingerprints(root, *, packer_compat=False, precise_native=False):
+    from native_draft_sdpa import audit_active_kernel
+    hardware = os.environ.get('QWEN_LADDER_BACKEND') == 'hardware'
+    require_packer_mode(hardware=hardware, packer_compat=packer_compat, precise_native=precise_native)
+    audit_active_kernel(root)
+    binaries = {
+        'build_Release/lib/_ttnncpp.so': 'f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3',
+        'build_Release/ttnn/_ttnncpp.so': 'd6c53113a104719a442b4d4a9ec2b344cdd0e00daa1e4d907afb9c13d1e531d9',
+    }
+    if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') == '1':
+        from dspark_fp32_build import validate_manifest
+        build = validate_manifest(root, '/experiment/results/dspark-fp32-build.json')
+        if build.get('binaries_before') != binaries:
+            raise ValueError('Rebuild must start from the pinned CI image binaries')
+        binaries = build['binaries_after']
+    directory = root / 'ttnn/cpp/ttnn/operations/transformer/sdpa'
+    sources = [path.relative_to(root) for path in directory.rglob('*')
+        if path.is_file() and path.suffix in ('.cpp', '.hpp', '.h')]
+    sources.append(Path('tt_metal/hw/ckernels/blackhole/metal/llk_api/experimental/llk_sfpu/ckernel_sfpu_sdpa.h'))
+    sources.append(Path('tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/ckernel_sfpu_exp.h'))
+    sources.append(Path('tt_metal/hw/inc/api/compute/reduce.h'))
+    if not sources:
+        raise ValueError('Native SDPA sources required')
+    result = {str(path): digest(root / path) for path in sorted(
+        [Path(NATIVE.PACKER), *map(Path, binaries), *sources])}
+    expected_packer = NATIVE.ORIGINAL_PACKER if hardware else NATIVE.COMPAT_PACKER
+    if result[NATIVE.PACKER] != expected_packer or any(result[name] != value for name, value in binaries.items()):
+        raise ValueError('Pinned rebuilt binaries and backend-specific packer required')
+    return result
+
+
+def fixtures():
+    import torch
+
+    generator = torch.Generator().manual_seed(383928)
+    query = (.125 + .125 * torch.rand(2, 16, 32, 128, generator=generator)).bfloat16()
+    key = (.125 * torch.randn(2, 4, CAPACITY, 128, generator=generator)).bfloat16()
+    value = torch.randn(2, 4, CAPACITY, 128, generator=generator).bfloat16()
+    key[:, :, :2048] -= 3
+    key[:, :, 2048:4096] += 2
+    key[:, :, 0] = 6
+    value[:, :, 0] = 64
+    query_key = (.125 * torch.randn(2, 4, 32, 128, generator=generator) + 4).bfloat16()
+    query_value = torch.randn(2, 4, 32, 128, generator=generator).bfloat16()
+    query_key[:, :, PROPOSALS - 1] = 7
+    query_value[:, :, PROPOSALS - 1] = -64
+    result = []
+    for case, position in enumerate(POSITIONS):
+        values = dict(query=query.clone(), history_key=key.clone(), history_value=value.clone(),
+            query_key=query_key.clone(), query_value=query_value.clone(), mask=fixed_mask(position, CAPACITY, PROPOSALS))
+        if case:
+            values['history_key'][:, :, POSITIONS[0]:position] = 9
+            values['history_value'][:, :, POSITIONS[0]:position] = 128
+        for name in ('history_key', 'history_value'):
+            values[name][:, :, position:] = 8192
+        for name in ('query_key', 'query_value'):
+            values[name][:, :, PROPOSALS:] = -8192
+        result.append(values)
+    return result
+
+
+def joined(values, name):
+    import torch
+
+    complete = torch.cat((values['history_' + name], values['query_' + name][:, :, :PROPOSALS]), dim=2)
+    return torch.nn.functional.pad(complete, (0, 0, 0, geometry(CAPACITY, PROPOSALS)[-1][1] - complete.shape[2]))
+
+
+def reference(values, chip):
+    import torch
+
+    return torch.nn.functional.scaled_dot_product_attention(values['query'][chip:chip + 1].float(),
+        joined(values, 'key')[chip:chip + 1].float().repeat_interleave(4, dim=1),
+        joined(values, 'value')[chip:chip + 1].float().repeat_interleave(4, dim=1),
+        attn_mask=values['mask'].float(), is_causal=False)
+
+
+def controls(patterns, expected):
+    import torch
+
+    records = []
+    for name in ('oldest', 'last_proposal', 'gap_poison', 'frontier_update'):
+        case = int(name == 'frontier_update')
+        altered = {key: value.clone() for key, value in patterns[case].items()}
+        if name == 'gap_poison':
+            for key in ('history_key', 'history_value'):
+                altered[key][:, :, POSITIONS[case]:] = -8192
+        elif name == 'frontier_update':
+            altered['mask'] = patterns[0]['mask'].clone()
+        else:
+            altered['mask'][:, :, :PROPOSALS, 0 if name == 'oldest' else CAPACITY + PROPOSALS - 1] = float('-inf')
+        for chip in range(2):
+            value = reference(altered, chip)
+            detected = torch.equal(value, expected[case][chip]) if name == 'gap_poison' else not torch.allclose(
+                value, expected[case][chip], rtol=.01, atol=.01)
+            records.append(dict(name=name, case=case, chip=chip, detected=bool(detected)))
+            if not detected:
+                raise AssertionError('Fixed-storage fixture must detect missing history, proposal keys and frontier updates')
+    return records
+
+
+def run():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--hardware', action='store_true')
+    options = parser.parse_args()
+    backend = require_backend(os.environ, hardware=options.hardware,
+        device_present=Path('/dev/tenstorrent').exists())
+    if options.hardware and (CAPACITY != 66560 or POSITIONS != (65536, 66545)):
+        raise ValueError('Hardware requires the explicit 64K ladder fixture and output headroom')
+    kernel_audit = run_precise_probe(__file__)
+    if options.output.exists() or os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1':
+        raise ValueError('Fresh output and owned precise native runtime required')
+    import torch
+    import ttnn
+
+    root = Path(os.environ['TT_METAL_HOME'])
+    report = dict(passed=False, closed_cleanly=False, backend=backend, scope=__doc__,
+        positions=POSITIONS, capacity=CAPACITY, proposal_rows=PROPOSALS, chunks=geometry(CAPACITY, PROPOSALS),
+        sources=source_hashes(), native_sources=NATIVE.fingerprints(root,
+            packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True),
+        kernel_audit=kernel_audit, key_chunk_size=256, native_padded_keys=8704,
+        added_masked_poison_rows=192, resources_before=snapshot(bounded=not options.hardware),
+        numerical_tolerances=dict(rtol=.01, atol=.01), target_integrated=False, committed_tg=None,
+        **{name: [] for name in COUNTS})
+    owned, transient = [], []
+    if os.environ.get('QWEN_DRAFT_FP32_INTERMEDIATES') == '1':
+        from dspark_fp32_build import validate_manifest
+        report['factory_build'] = validate_manifest(root, '/experiment/results/dspark-fp32-build.json')
+    mesh = trace = None
+
+    def progress(stage):
+        report['stage'] = stage
+        options.output.write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(dict(stage=stage)), flush=True)
+
+    try:
+        patterns = fixtures()
+        for position, values in zip(POSITIONS, patterns, strict=True):
+            validate_fixed_mask(values['mask'], position, CAPACITY, PROPOSALS)
+        expected = [[reference(values, chip) for chip in range(2)] for values in patterns]
+        report['fixture_controls'] = controls(patterns, expected)
+        progress('open')
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576, trace_region_size=536870912)
+        mesh.enable_program_cache()
+
+        def upload(value, name, device=True):
+            tensor = ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(mesh) if name == 'mask' else ttnn.ShardTensorToMesh(mesh, dim=0),
+                **(dict(device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG) if device else {}))
+            if device:
+                owned.append(tensor)
+            return tensor
+
+        inputs = {name: upload(patterns[0][name], name) for name in NAMES}
+        payloads = [{name: upload(values[name], name, False) for name in NAMES} for values in patterns]
+        bindings = {name: addresses(ttnn, value) for name, value in inputs.items()}
+        eager = {}
+
+        def update(case):
+            for name in NAMES:
+                ttnn.copy_host_to_device_tensor(payloads[case][name], inputs[name])
+            ttnn.synchronize_device(mesh)
+
+        def retain(value):
+            transient.append(value)
+            return value
+
+        def run():
+            keys = append_queries(ttnn, inputs['history_key'], inputs['query_key'], retain,
+                position=CAPACITY, proposals=PROPOSALS)
+            values = append_queries(ttnn, inputs['history_value'], inputs['query_value'], retain,
+                position=CAPACITY, proposals=PROPOSALS)
+            attention = execute(ttnn, mesh, inputs['query'], keys, values, inputs['mask'], transient,
+                context_rows=CAPACITY, proposals=PROPOSALS, mask_validated=True)
+            return dict(attention=attention, key=keys, value=values)
+
+        def audit(output, mode, ordinal, case):
+            if {name: addresses(ttnn, value) for name, value in inputs.items()} != bindings:
+                raise AssertionError('Fixed-storage input addresses changed')
+            for chip in range(2):
+                actual = ttnn.to_torch(ttnn.get_device_tensors(output['attention'])[chip]).clone()
+                golden = expected[case][chip]
+                close = torch.isclose(actual.float(), golden, rtol=.01, atol=.01)
+                checksum = tensor_digest(actual)
+                if mode == 'eager':
+                    eager[case, chip] = checksum
+                exact = mode == 'eager' or checksum == eager[case, chip]
+                passed = (actual.shape == golden.shape and actual.dtype == torch.bfloat16
+                    and bool(torch.isfinite(actual).all()) and bool(close.all()) and exact)
+                report[mode + '_checks'].append(dict(ordinal=ordinal, case=case, chip=chip, passed=passed,
+                    replay_exact=exact if mode == 'replay' else None, numerical_close=bool(close.all()),
+                    sha256=checksum, expected_sha256=tensor_digest(golden), failed_elements=int((~close).sum()),
+                    max_abs=float((actual.float() - golden).abs().max())))
+                if not passed:
+                    difference = (actual.float() - golden).abs()
+                    indices = (~close).nonzero()[:16]
+                    report.setdefault('numerical_failures', []).append(dict(
+                        mode=mode, case=case, chip=chip, shape=list(actual.shape),
+                        failed_by_head_row=(~close).sum(dim=-1).tolist(),
+                        max_abs_by_head_row=difference.amax(dim=-1).tolist(),
+                        first_indices=indices.tolist(),
+                        actual=[float(actual[tuple(index)]) for index in indices.tolist()],
+                        expected=[float(golden[tuple(index)]) for index in indices.tolist()],
+                        finite=bool(torch.isfinite(actual).all())))
+                    raise AssertionError('Fixed-storage attention fails retained FP32 accuracy or exact replay')
+                for name in ('key', 'value'):
+                    actual_layout = ttnn.to_torch(ttnn.get_device_tensors(output[name])[chip])
+                    reference_layout = joined(patterns[case], name)[chip:chip + 1]
+                    identical = torch.equal(actual_layout, reference_layout)
+                    report['layout_checks'].append(dict(mode=mode, ordinal=ordinal, case=case, chip=chip, name=name,
+                        passed=identical, sha256=tensor_digest(actual_layout), expected_sha256=tensor_digest(reference_layout)))
+                    if not identical:
+                        raise AssertionError('Proposal keys must follow physical capacity without exposing the gap')
+                for name, value in inputs.items():
+                    original = patterns[case][name] if name == 'mask' else patterns[case][name][chip:chip + 1]
+                    exact_input = torch.equal(ttnn.to_torch(ttnn.get_device_tensors(value)[chip]), original)
+                    report['input_checks'].append(dict(mode=mode, ordinal=ordinal, case=case, chip=chip, name=name, exact=exact_input))
+                    if not exact_input:
+                        raise AssertionError('Fixed-storage attention mutates a borrowed input')
+
+        from dspark_attention_value_diagnostics import KINDS, diagnostic_fixture
+        report['value_diagnostics'] = []
+        for kind in KINDS:
+            progress('value_diagnostic_' + kind)
+            update(0)
+            fixture = diagnostic_fixture(patterns[0], kind, POSITIONS[0], PROPOSALS)
+            for name in ('history_value', 'query_value'):
+                payload = upload(fixture[name], name, False)
+                ttnn.copy_host_to_device_tensor(payload, inputs[name])
+            ttnn.synchronize_device(mesh)
+            output = run()
+            ttnn.synchronize_device(mesh)
+            for chip in range(2):
+                actual = ttnn.to_torch(ttnn.get_device_tensors(output['attention'])[chip]).float()[:, :, :PROPOSALS]
+                golden = reference(fixture, chip)[:, :, :PROPOSALS]
+                close = torch.isclose(actual, golden, rtol=.01, atol=.01)
+                report['value_diagnostics'].append(dict(kind=kind, chip=chip,
+                    qualification=False, finite=bool(torch.isfinite(actual).all()),
+                    failed_elements=int((~close).sum()), max_abs=float((actual - golden).abs().max()),
+                    actual_by_head_row=actual[0, :, :, 0].tolist(),
+                    expected_by_head_row=golden[0, :, :, 0].tolist(),
+                    channel_spread=float((actual.amax(-1) - actual.amin(-1)).max())))
+            release_owned(ttnn, transient)
+            transient.clear()
+
+        for case in range(2):
+            progress(f'eager_{case}')
+            update(case)
+            output = run()
+            ttnn.synchronize_device(mesh)
+            audit(output, 'eager', case, case)
+            release_owned(ttnn, transient)
+            transient.clear()
+        update(0)
+        progress('capture')
+        trace, output = capture_operation(ttnn, mesh, run)
+        output_bindings = {name: addresses(ttnn, value) for name, value in output.items()}
+        for ordinal, case in enumerate(REPLAYS):
+            progress(f'replay_{ordinal}')
+            update(case)
+            ttnn.execute_trace(mesh, trace, blocking=True)
+            if {name: addresses(ttnn, value) for name, value in output.items()} != output_bindings:
+                raise AssertionError('Captured fixed-storage output addresses changed')
+            audit(output, 'replay', ordinal, case)
+        for chip in range(2):
+            detected = eager[0, chip] != eager[1, chip]
+            report['stale_controls'].append(dict(chip=chip, detected=detected))
+            if not detected:
+                raise AssertionError('Changed committed frontier must change the full attention output')
+        if {name: len(report[name]) for name in COUNTS} != COUNTS:
+            raise AssertionError('Incomplete fixed-storage numerical and lifetime matrix')
+        report['passed'] = True
+    except BaseException as error:
+        report['error'] = f'{type(error).__name__}: {error}'
+        raise
+    finally:
+        try:
+            if mesh is not None:
+                ttnn.synchronize_device(mesh)
+                if trace is not None:
+                    ttnn.release_trace(mesh, trace)
+                release_owned(ttnn, transient)
+                release_owned(ttnn, owned)
+                ttnn.close_mesh_device(mesh)
+            report['sources_after'], report['native_sources_after'] = source_hashes(), NATIVE.fingerprints(root,
+                packer_compat=os.environ.get('QWEN_SIM_PACKER_ZERO_GRAFT') == '1', precise_native=True)
+            if report['sources'] != report['sources_after'] or report['native_sources'] != report['native_sources_after']:
+                raise ValueError('Fixed-storage source or native runtime changed')
+            report['resources_after'] = snapshot(bounded=not options.hardware)
+            require_clean(report['resources_before'], report['resources_after'])
+            report['closed_cleanly'] = True
+        except BaseException as error:
+            report['passed'] = False
+            report['cleanup_error'] = f'{type(error).__name__}: {error}'
+            raise
+        finally:
+            progress('complete' if report['passed'] and report['closed_cleanly'] else 'failed')
+
+
+def main():
+    from dspark_stats_pack import scoped_stats_pack
+    from unittest.mock import patch
+    import dspark_full_attention
+    import sim_memory_budget
+    root = Path(os.environ['TT_METAL_HOME'])
+    print(json.dumps(dict(stage='runtime_identity', binaries={name: digest(root / name)
+        for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so')})), flush=True)
+    with scoped_stats_pack(), patch.object(dspark_full_attention, 'MAX_CONTEXT', CAPACITY), \
+            patch.object(NATIVE, 'digest', digest), \
+            patch.object(NATIVE, 'fingerprints', runner_fingerprints), \
+            patch.object(sim_memory_budget, 'MEMORY_MAX', 64 * 1024 ** 3), \
+            patch.object(sim_memory_budget, 'SWAP_MAX', 0):
+        run()
+
+
+if __name__ == '__main__':
+    main()
