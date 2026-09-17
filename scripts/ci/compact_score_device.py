@@ -69,3 +69,39 @@ def execute_local_winners(operations, mesh, base, bias, step, retain, *, worker_
             kernels=[reader, compute], cbs=buffers)
     operations.generic_op([base, bias, output], program)
     return output
+
+
+def reduce_winners(operations, mesh, winners, vocabulary, retain):
+    if os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR'):
+        raise ValueError('Compact winner reduction is simulator-only')
+    shape = tuple(winners.shape)
+    if (list(mesh.shape) != [1, 2] or len(shape) != 4 or shape[:2] != (1, 1)
+            or shape[3] != 8 or not 1 <= shape[2] <= 110 or vocabulary not in (64, 248320)
+            or shape[2] > vocabulary // 32 or not callable(retain)
+            or winners.dtype != operations.uint32 or winners.layout != operations.ROW_MAJOR_LAYOUT
+            or winners.memory_config() != operations.DRAM_MEMORY_CONFIG):
+        raise ValueError('Two-chip compact uint32 worker records and full supported vocabulary required')
+    workers = shape[2]
+    output = retain(operations.empty((1, 1, 1, 8), dtype=operations.uint32,
+        layout=operations.ROW_MAJOR_LAYOUT, device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG))
+    cores = operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(0, 0), operations.CoreCoord(0, 0))])
+    buffer = operations.CBDescriptor(total_size=4096, core_ranges=cores,
+        format_descriptors=[operations.CBFormatDescriptor(buffer_index=0, data_format=operations.uint32,
+            page_size=4096, tile=operations.TileDescriptor(operations.Tile([32, 32])))])
+    shards = [operations.get_device_tensors(value) for value in (winners, output)]
+    if any(len(values) != 2 for values in shards):
+        raise ValueError('Both winner replicas required')
+    program = operations.MeshProgramDescriptor()
+    for chip, tensors in enumerate(zip(*shards, strict=True)):
+        runtime = operations.RuntimeArgs()
+        runtime[0][0] = [value.buffer_address() for value in tensors] + [workers, vocabulary // 32]
+        descriptor = operations.KernelDescriptor(kernel_source=str(Path(__file__).with_name('compact_score_reduce.cpp')),
+            core_ranges=cores, runtime_args=runtime,
+            compile_time_args=[item for value in tensors for item in operations.TensorAccessorArgs(value).get_compile_time_args()],
+            config=operations.DataMovementConfigDescriptor(processor=operations.DataMovementProcessor.RISCV_0,
+                noc=operations.NOC.RISCV_0_default))
+        coordinate = operations.MeshCoordinate(0, chip)
+        program[operations.MeshCoordinateRange(coordinate, coordinate)] = operations.ProgramDescriptor(
+            kernels=[descriptor], cbs=[buffer])
+    operations.generic_op([winners, output], program)
+    return output

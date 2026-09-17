@@ -43,3 +43,16 @@ def fp32_bits(values):
             raise ValueError('Finite FP32 values required')
         result.append(struct.unpack('<I', struct.pack('<f', value))[0])
     return result
+
+
+def reduce_records(records, vocabulary):
+    if type(vocabulary) is not int or vocabulary not in (64, 248320):
+        raise ValueError('Supported full vocabulary required')
+    ranges = partitions(vocabulary // 32, len(records))
+    winners = []
+    for record, (start, end) in zip(records, ranges, strict=True):
+        if (len(record) != 8 or any(type(word) is not int or not 0 <= word < 2 ** 32 for word in record)
+                or any(record[2:]) or not start * 32 <= record[1] < end * 32):
+            raise ValueError('Finite valid record with in-partition token and zero reserved words required')
+        winners.append((ordered_key(record[0]), record[1]))
+    return max(winners, key=lambda item: (item[0], -item[1]))[1]

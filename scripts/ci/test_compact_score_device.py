@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from compact_score_device import execute_local_winners, geometry
+from compact_score_device import execute_local_winners, geometry, reduce_winners
 
 
 class CompactDeviceTests(unittest.TestCase):
@@ -10,6 +10,11 @@ class CompactDeviceTests(unittest.TestCase):
         with patch.dict('os.environ', {}, clear=True):
             with self.assertRaisesRegex(ValueError, 'simulator-only'):
                 execute_local_winners(None, None, None, None, 0, None)
+            with self.assertRaisesRegex(ValueError, 'simulator-only'):
+                reduce_winners(None, None, None, 64, None)
+
+    def test_reducer_scratch_covers_records_and_result(self):
+        self.assertLessEqual((110 + 1) * 32, 4096)
 
     def test_full_vocabulary_tile_partitions_cover_once(self):
         for width in (64, 248320):

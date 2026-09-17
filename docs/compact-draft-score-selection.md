@@ -1,8 +1,8 @@
 # Compact draft score selection
 
-Status: host specification and simulator-only local-reduction kernel source.
+Status: host specification and simulator-only two-stage reduction kernel source.
 No device compilation, simulator qualification, hardware measurement or runtime
-integration yet. The final cross-worker reduction remains to be implemented.
+integration yet. Neither kernel has been compiled or executed on device.
 
 The current fused score-layout kernel adds one FP32 base row to the unchanged
 FP32 Markov bias, then writes all 248,320 scores to DRAM for native argmax.
@@ -23,6 +23,15 @@ nonfinite flag. Reserved words are zero. At 110 workers this actual record
 payload is 3,520 bytes, rather than the idealized 880-byte pair-only payload.
 Scratch reuse waits for the last compute consumer before overwriting its input
 buffer. No host argmax or production feedback route has been introduced.
+
+`reduce_winners` adds a one-core reducer on each chip. It reads the compact
+records, verifies token bounds and validity, and explicitly breaks ties using
+original token IDs. The result contains token ID, invalid flag and score bits.
+Any nonfinite/invalid worker record produces an invalid-token sentinel and an
+error flag, not a usable feedback token. Production integration must never feed
+that sentinel into embedding. The current simulator-only guard prevents serving
+or hardware use. Eight host tests cover semantic ordering, record validity,
+partition coverage, unchanged SFPU source and bounded scratch allocation.
 
 `compact_score_selection.py` specifies finite FP32 comparison via integer keys,
 canonicalizes signed zero, and resolves ties to the lowest original token ID.

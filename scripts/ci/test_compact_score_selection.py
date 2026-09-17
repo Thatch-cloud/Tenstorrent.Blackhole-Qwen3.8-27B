@@ -2,10 +2,21 @@ import random
 import struct
 import unittest
 
-from compact_score_selection import fp32_bits, ordered_key, partitions, select
+from compact_score_selection import fp32_bits, ordered_key, partitions, select, reduce_records
 
 
 class CompactSelectionTests(unittest.TestCase):
+    def test_record_reduction_and_invalid_records(self):
+        records = [[fp32_bits([1.0])[0], token, 0, 0, 0, 0, 0, 0] for token in (7, 38)]
+        self.assertEqual(reduce_records(records, 64), 7)
+        for index, value in ((0, 0x7f800000), (1, 64), (2, 1), (3, 1)):
+            changed = [list(record) for record in records]
+            changed[0][index] = value
+            with self.assertRaises(ValueError):
+                reduce_records(changed, 64)
+        records[0][0], records[1][0] = fp32_bits([-0.0, 0.0])
+        self.assertEqual(reduce_records(records, 64), 7)
+
     def test_random_finite_encodings_and_full_vocabulary(self):
         generator = random.Random(38527)
         bits = []
