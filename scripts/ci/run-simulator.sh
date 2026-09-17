@@ -63,7 +63,7 @@ if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-bitwise ]; then
     score_bitwise=1
     export QWEN_SIM_CASE=dspark-ladder-attention
 fi
-case "${QWEN_SIM_CASE:-stack}" in draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
 mkdir -p experiment-results
 results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")

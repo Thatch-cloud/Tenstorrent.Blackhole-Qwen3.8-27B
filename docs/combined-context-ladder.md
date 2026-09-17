@@ -27,7 +27,7 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 | CTX | Streams | PP tok/s | Committed TG tok/s | Status |
 | ---: | ---: | ---: | ---: | --- |
 | 4,096 | 1 | 3,249.81 | **118.22** | Retry passed; original attempt blocked by host pressure |
-| 8,192 | 1 | — | — | Pre-load host I/O gate failed: 6.07% full stall; model not run |
+| 8,192 | 1 | 3,293.61 | **106.50** | Retry passed; original attempt blocked by host pressure |
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 1 | — | — | Prompt length rejected before model execution; retry required |
@@ -76,4 +76,10 @@ Retry tag `experiment/combined-ladder-retry-v2` selects only 4K, 8K and 64K, car
 
 Report SHA-256: `833b09c6a975a53374fd558c24b8947f9e760c91972619def2bd38c362fbc209`.
 
-The wider page-table correctness/replay check is queued as [35168996959](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35168996959). It loads no model weights and does not measure TG.
+### 8K retry and long-context qualification
+
+The same retry run passes 8K: **PP 3,293.61 / CTX 8,192 / TG 106.50**. One fresh audit and two timed requests pass exact output/state, matching prompts and outputs, source immutability, clean close and exit 0. PP/TG independently recomputed. The timed requests commit 242 tokens, accepting 222/330 proposals (67.27%). Report SHA-256: `b3c0140d8ff282f034f1333f1f830dffe49f679fc5b262d3c4d690c146d2ec48`.
+
+Native build-cache reuse is confirmed: build setup takes **3 seconds**, versus 263 seconds on the preceding 4K cache miss. The entire 8K job completes in about 5m39s. Mean block: 28.76 ms drafting, 67.74 ms verification/readback, 5.73 ms selection/commit, 103.23 ms overall. With 11 committed tokens/block, 200 TG requires at most 55 ms/block before other request overhead; verification remains the main bottleneck.
+
+The remaining 64K retry was cancelled during job setup because it still carried the known 1,024-page guard; completed 4K/8K results are retained. The weight-free wider page-table check [35168996959](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35168996959) failed immediately: the shell launcher's allowed-case list omitted `ladder-cache`. No simulator or model ran. The launcher fix includes a local executable regression test for valid and invalid case selection; retry tag `experiment/ladder-cache-sim-v2`. This check loads no model weights and does not measure TG.

@@ -14,12 +14,13 @@ and [experiment record template](docs/tuning-experiment-template.md).
 | Streams | CTX | PP tok/s | Committed TG tok/s |
 | ---: | ---: | ---: | ---: |
 | 1 | 4,096 | 3,249.81 | **118.22** |
+| 1 | 8,192 | 3,293.61 | **106.50** |
 | 1 | 16,384 | 3,170.94 | **87.11** |
 | 1 | 32,768 | 2,968.87 | **89.96** |
 
 One fresh feature audit and two timed full requests; exact output/state checks
-and clean shutdown pass. The 4K retry passes; 8K is retrying after host I/O
-contention. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
+and clean shutdown pass. Both 4K/8K retries pass; 8K reuses the native build,
+reducing build setup from 263 to 3 seconds. [Seven-context ladder and evidence](docs/combined-context-ladder.md).
 This pinned workload is separate from the historical measurements below.
 
 **Earlier matched fixture result: 89.47 committed tokens/s at 32K context**,
