@@ -1,7 +1,7 @@
 # Direct causal windows inside GDN convolution
 
-Status: reader transformation and host indexing tests only. **No simulator or
-hardware qualification yet; not installed into the runtime.**
+Status: simulator descriptor and replay probe staged locally. **No simulator or
+hardware qualification yet; not installed into the combined runtime.**
 
 The retained combined trace assigns about 3.49 ms per T16 verifier block to
 48 source-consistent window-builder calls. Overlapping the old builder's writes
@@ -25,7 +25,12 @@ distinct checkpoint buffers as writer outputs. T16, 5,120 channels and the
 
 Host tests check every row and checkpoint against serial shift semantics and
 reject unsupported coordinates/source boundaries. The actual pinned reader
-passes the source transformation. Next: build the explicit descriptor, then
-compare outputs, all prefixes and changed-input trace replay in the simulator.
+passes the source transformation. The explicit descriptor retains native
+81-core work partitioning, CB formats/counts, HiFi4 FP32 arithmetic and writer;
+only an additional private 8 KiB scratch CB is introduced. Four native source
+hashes, including the original program factory, are pinned before construction.
+The simulator probe compares all seven outputs on both chips, poisons captured
+outputs before changed-input replay, and checks all eleven inputs remain intact.
+Fresh frozen staging and six host tests pass. Next: execute the simulator gate.
 Only after that gate may it enter the matched combined hardware test. This
 roughly 3.49-ms opportunity alone cannot close the full gap to 200 TG.
