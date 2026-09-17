@@ -4,7 +4,46 @@ The [combined-runtime reintegration checklist](combined-runtime-reintegration.md
 tracks which short-context optimisations remain absent at 64K and the gates for
 restoring one matched runtime across the context ladder.
 
-## Current experiment checkpoint - 2026-09-16
+## Current checkpoint - 2026-09-17
+
+The same-recipe combined ladder now passes through **131,072 prompt tokens**:
+PP **2,124.78**, committed TG **53.69**, one stream, two timed requests after
+a fresh feature/state audit. The strongest short-context result remains
+**118.22 TG at 4K**. See [current results](combined-context-ladder.md).
+The 200-TG objective and held-out coding-quality acceptance remain open.
+
+Immediate order:
+1. Complete the 262K total-window cache qualification, then the combined
+   hardware request: 261,888 prompt tokens plus 256 generation headroom.
+2. Rank drafting and verification costs in the combined runtime, retaining the
+   accepted recipe and rejecting previously regressed buffering candidates.
+3. Add a separate prefill track targeting 10x improvement, with cached and cold
+   workloads reported separately. Do not relabel prefix reuse as cold PP.
+4. Validate the winning changes together, then concurrent-user capacity and
+   held-out coding quality. Serving defaults remain unchanged.
+
+### Prefill track: explicit target, not an achieved speedup
+
+The accepted 131K requests take **61.69 seconds** on average for measured
+prefill. Tenfold cold PP would require about **21,248 tok/s**, or **6.17 seconds**.
+Drafter preparation adds **30.05 seconds** and verifier setup **2.93 seconds**
+on average; neither is included in PP. Keep these separate from audit time,
+model loading, committed TG and end-to-end first-token latency.
+
+| Experiment | Evidence needed before promotion |
+| --- | --- |
+| Persistent coding-prefix reuse | Exact KV, GDN, drafter-history and position restoration; changed suffix and invalidation tests; cache-hit fraction and suffix latency reported |
+| Prefill GDN chunk parallelism/fusion | Current pinned-source audit, simulator correctness/state continuity, then full-request cold PP and TG |
+| Prefill matmul/chunk configurations | Matched precision, context and output; useful core work and memory/communication costs; no decode regression |
+| Attention/collective overlap | Dependency-correct replay, exact state/output and measured complete-prefill reduction |
+| Persistent drafter/setup reuse | No stale request state, measured setup-inclusive latency, explicit warm/cold separation |
+
+Use the pinned coding corpus and report context, stream count, prefix-hit tokens,
+cold/warm state, precision, PP, setup and TG for every accepted comparison.
+Tenfold fresh-prompt throughput on two cards is a hypothesis requiring a
+measured compute/bandwidth feasibility check, not a promised outcome.
+
+## Historical checkpoint - 2026-09-16
 
 **Priority correction:** recover the exact 4K/8K winning combined controls before
 any further candidate work. [Frozen recipe and replay](winning-runtime-controls.md).
