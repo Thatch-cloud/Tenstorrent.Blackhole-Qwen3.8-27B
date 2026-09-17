@@ -59,3 +59,5 @@ Report SHA-256: `fac4e6663f001808fc183136e21edad99a8c740436cf032f7a5f3f6c63544e1
 The host-pressure check passed (0.097% full stall), but Python preflight rejected the generated prompt because its token count was not exactly 65,536. The builder previously allowed a 32-token shortfall while the runtime correctly required an exact context. No native build, target model execution, OOM or throughput result occurred; container exit was 1.
 
 The retry builder preserves already-exact prompts and searches adjacent excerpt boundaries when tokenization is non-monotonic. It never pads/truncates token IDs or weakens the exact-length runtime guard. Six local prompt tests pass; real-tokenizer and hardware retry remain necessary.
+
+Retry tag `experiment/combined-ladder-retry-v2` selects only 4K, 8K and 64K, carrying the prompt-boundary and build-cache fixes. It shares the hardware concurrency lock, so it waits for the original larger-context jobs rather than interrupting them. The validated 16K/32K rows are not rerun; model math and serving defaults remain unchanged.
