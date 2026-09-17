@@ -9,6 +9,7 @@ from pathlib import Path
 from frozen_context_geometry import selected_geometry
 from frozen_ladder_cache_gate import qualify
 from frozen_ladder_ordered_cache import page_geometry
+from frozen_ladder_reference_memory import audit_scope
 from ordered_cache import load_kernels
 
 
@@ -28,9 +29,9 @@ def runtime_scope(directory):
     generated = {role: hashlib.sha256(source.encode()).hexdigest() for role, source in kernels.items()}
     if report['generated_hashes'] != generated:
         raise ValueError('Exact simulator-qualified generated cache kernels required')
-    with page_geometry(context) as evidence:
+    with page_geometry(context) as evidence, audit_scope() as reference_audit:
         evidence.update(simulator_report_sha256=digest, simulator_qualified=True,
-            generated_hashes=generated, hardware_qualified=False)
+            generated_hashes=generated, hardware_qualified=False, reference_audit=reference_audit)
         try:
             yield evidence
         finally:

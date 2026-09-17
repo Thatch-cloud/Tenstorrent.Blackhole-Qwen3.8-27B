@@ -126,7 +126,7 @@ def wide_cache_payloads(scripts, evidence, request_source):
         raise ValueError('Both long-context simulator reports required')
     result = {}
     for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
-            'frozen_ladder_ordered_cache.py', 'ladder-cache-probe.py'):
+            'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py'):
         result[name] = Path(__file__).with_name(name).read_bytes()
     for context, digest in digests.items():
         report = qualify(Path(__file__).parent, evidence / context, digest, int(context))

@@ -1,7 +1,7 @@
 name: Qwen same-recipe combined context ladder
 on:
   push:
-    tags: ['experiment/combined-ladder-v1', 'experiment/combined-ladder-retry-v2', 'experiment/combined-ladder-wide-cache-v1', 'experiment/combined-ladder-wide-cache-v2']
+    tags: ['experiment/combined-ladder-v1', 'experiment/combined-ladder-retry-v2', 'experiment/combined-ladder-wide-cache-v1', 'experiment/combined-ladder-wide-cache-v2', 'experiment/combined-ladder-wide-cache-v3']
 permissions:
   contents: read
   actions: read
@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        context: ${{ fromJSON(github.ref_name == 'experiment/combined-ladder-wide-cache-v2' && '[65536]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v1' && '[65536,131072]' || github.ref_name == 'experiment/combined-ladder-retry-v2' && '[4096,8192,65536]' || '[4096,8192,16384,32768,65536,131072,262144]') }}
+        context: ${{ fromJSON(github.ref_name == 'experiment/combined-ladder-wide-cache-v3' && '[131072]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v2' && '[65536]' || github.ref_name == 'experiment/combined-ladder-wide-cache-v1' && '[65536,131072]' || github.ref_name == 'experiment/combined-ladder-retry-v2' && '[4096,8192,65536]' || '[4096,8192,16384,32768,65536,131072,262144]') }}
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     steps:
       - name: Verify host and restore artifact ownership
@@ -43,7 +43,7 @@ jobs:
         run: |
           evidence=$(mktemp -d "$RUNNER_TEMP/qwen-ladder-evidence.XXXXXX")
           cache_options=()
-          if [[ "$GITHUB_REF_NAME" = experiment/combined-ladder-wide-cache-v1 || "$GITHUB_REF_NAME" = experiment/combined-ladder-wide-cache-v2 ]]; then
+          if [[ "$GITHUB_REF_NAME" = experiment/combined-ladder-wide-cache-v1 || "$GITHUB_REF_NAME" = experiment/combined-ladder-wide-cache-v2 || "$GITHUB_REF_NAME" = experiment/combined-ladder-wide-cache-v3 ]]; then
             for context in 65536 131072; do
               gh run download 35170767742 --repo "$GITHUB_REPOSITORY" \
                 --name "qwen-ladder-cache-sim-$context-35170767742" --dir "$evidence/cache/$context"
