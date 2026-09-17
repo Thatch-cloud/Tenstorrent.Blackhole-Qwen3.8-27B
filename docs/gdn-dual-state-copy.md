@@ -1,6 +1,36 @@
 # GDN state-copy fan-out candidate
 
-**Simulator execution passes; combined hardware performance remains unqualified.**
+**Simulator and combined 4K correctness pass; the performance screen fails. Keep the original copies.**
+
+## Combined hardware result
+
+[Run 35233247736](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35233247736)
+at `a807865c3fd5521d34ffc7f962876710b91a60f8` completes in **6m30s**.
+Independent artifact validation passes, including exact target output/state,
+proposal/feature audits, packed weights, unchanged sources and clean exit.
+Each candidate request records 96 admitted recurrence constructions matching
+the norm-prefetch build count, with restored scopes.
+
+| CTX 4,096 / one stream | Original copies | Shared unpack |
+| --- | ---: | ---: |
+| Cold PP tok/s | 3,370.24 | 3,258.43 |
+| Committed TG tok/s | **125.73** | **120.15** |
+| Accepted / proposed | 224 / 300 | 224 / 300 |
+| Committed timed tokens | 242 | 242 |
+
+Aggregate TG changes **−4.44%**, with matched pairs **−0.15% / −8.44%**.
+The first pair has near-identical drafting and verification/readback times:
+24.924/24.919 ms drafting and 66.413/66.431 ms verification. The second candidate
+request is slower in drafting and commit as well as verification, so the whole
+regression cannot be attributed exclusively to this kernel. Neither pair shows
+the intended verifier improvement. Do not promote or rerun unchanged.
+
+Report SHA-256:
+`c6b1372099d46b9f536768475bdefb98e8c020b53f7f381fb20f24ce7062a72c`.
+This closes the shared-unpack hypothesis without a performance win. Saved
+unpack instructions did not translate into measured combined latency savings;
+further copy scheduling variants need new internal stall evidence, not another
+instruction-count argument. The historical notes below retain the test pathway.
 
 ## Simulator result
 
