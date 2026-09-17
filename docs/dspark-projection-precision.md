@@ -142,3 +142,13 @@ first. The initial query artifact used `weight-pipeline-candidate.json`; its
 compatibility reader accepts only that exact reviewed manifest/report hash pair,
 not arbitrary legacy evidence. Four admission tests and the real query artifact
 check pass locally.
+
+The matrix has now completed successfully. Down has RMS difference
+0.01585–0.01596, six exact poisoned replays and clean teardown; report hash
+`0de80d82c1f075013cb5b0b4d67a1b487fddb9a44fe37e2cb422d9b5d3c7312b`.
+All seven real reports pass source-bound admission against the staged frozen
+dependencies. `dspark-precision-reviewed.json` records the reviewed artifact set.
+The complete-set check also caught and fixed an admission bug: `weight_sha256`
+identifies each selected tensor, not the whole checkpoint. Each projection now
+has its own reviewed tensor digest; the pinned loader still verifies the whole
+checkpoint. Ten focused report/admission tests pass. Hardware TG remains unmeasured.

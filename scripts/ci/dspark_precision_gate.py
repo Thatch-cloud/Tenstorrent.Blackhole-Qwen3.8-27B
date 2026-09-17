@@ -9,7 +9,15 @@ from dspark_projection_precision_stage import PROJECTIONS
 
 
 RUNTIME = '9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9'
-CHECKPOINT = '9e98811de3c111aa93a4d2477e15ca2ac6d52609d062956f269255e3fa05b043'
+WEIGHTS = dict(zip(PROJECTIONS, (
+    '1f5b77ee27b80ddec91a8599d27868d8b4ed7052b202be35db013f989fcb9be5',
+    '8797b20921e603dc2aa25fbfdef10a9ed1b00c17857bd22b381744cf247034d3',
+    '9e98811de3c111aa93a4d2477e15ca2ac6d52609d062956f269255e3fa05b043',
+    '620b4bba6611c6c7944aa9bea8d6748004647ffdbef44075b9080deefdfbcd33',
+    'aa832838a0dbd01249295bb60b651c4d119dac910aa2d788c997ff10ed915ee2',
+    'cf0f815c5bc3e1ca64e3a16918d1aebe586a7b6d540ceda887b42b7c642d70b5',
+    'd9eee90bff8d04e7bcebcf0b9b9fe580d1628680b48025c898eab6e6318cb746',
+), strict=True))
 QUERY_REPORT = '361ace678704220f0ed138d2aa6878924187a92ef59d9b2dd4b0a6fd0d1e1e6c'
 QUERY_MANIFEST = 'b7f563038887922825f77e45920d63cc07da5c45fdbd886f8f9745fec2acf934'
 
@@ -55,6 +63,6 @@ def qualify(directory, evidence, *, reviewed_reports):
                     'dspark-projection-precision-probe.py', 'dspark_projection_precision.py'))):
             raise ValueError('Staged precision policy differs from reviewed simulator candidate')
         reports.append(json.loads(raw))
-    result = validate_set(reports, expected_sources=sources, checkpoint_sha256=CHECKPOINT)
+    result = validate_set(reports, expected_sources=sources, expected_weights=WEIGHTS)
     return dict(result, report_sha256=dict(reviewed_reports), runtime=RUNTIME,
         hardware_qualified=False, performance_qualified=False)

@@ -30,7 +30,7 @@ class PrecisionReportTests(unittest.TestCase):
 
     def test_complete_set_requires_exact_identity_without_quality_claim(self):
         reports, sources = self.complete_set()
-        result = validate_set(list(reversed(reports)), expected_sources=sources, checkpoint_sha256='b' * 64)
+        result = validate_set(list(reversed(reports)), expected_sources=sources, expected_weights={projection: 'b' * 64 for projection in PROJECTIONS})
         self.assertEqual(set(result['projections']), set(PROJECTIONS))
         self.assertFalse(result['target_correctness_qualified'])
         self.assertIsNone(result['committed_tg'])
@@ -45,16 +45,16 @@ class PrecisionReportTests(unittest.TestCase):
             reports, sources = self.complete_set()
             mutate(reports)
             with self.assertRaises(ValueError):
-                validate_set(reports, expected_sources=sources, checkpoint_sha256='b' * 64)
+                validate_set(reports, expected_sources=sources, expected_weights={projection: 'b' * 64 for projection in PROJECTIONS})
 
     def test_set_rejects_invalid_external_identities(self):
         reports, sources = self.complete_set()
         for invalid in ('', '0' * 64, 'g' * 64, None):
             with self.assertRaises(ValueError):
-                validate_set(reports, expected_sources=sources, checkpoint_sha256=invalid)
+                validate_set(reports, expected_sources=sources, expected_weights={projection: invalid for projection in PROJECTIONS})
         sources.pop(SOURCE_NAMES[0])
         with self.assertRaises(ValueError):
-            validate_set(reports, expected_sources=sources, checkpoint_sha256='b' * 64)
+            validate_set(reports, expected_sources=sources, expected_weights={projection: 'b' * 64 for projection in PROJECTIONS})
 
     def test_projection_identity_cannot_be_substituted(self):
         report = fixture()

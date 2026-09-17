@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from dspark_precision_gate import CHECKPOINT, RUNTIME, QUERY_REPORT, candidate_manifest, qualify
+from dspark_precision_gate import WEIGHTS, RUNTIME, QUERY_REPORT, candidate_manifest, qualify
 from dspark_projection_precision_report import SOURCE_NAMES
 from dspark_projection_precision_stage import PROJECTIONS
 from test_dspark_projection_precision_report import fixture
@@ -39,7 +39,7 @@ class PrecisionGateTests(unittest.TestCase):
             folder = evidence / projection
             folder.mkdir(parents=True)
             report = fixture()
-            report.update(projection=projection, sources=sources, sources_after=sources, weight_sha256=CHECKPOINT)
+            report.update(projection=projection, sources=sources, sources_after=sources, weight_sha256=WEIGHTS[projection])
             raw = json.dumps(report).encode()
             (folder / 'dspark-projection-hifi2.json').write_bytes(raw)
             hashes[projection] = hashlib.sha256(raw).hexdigest()
