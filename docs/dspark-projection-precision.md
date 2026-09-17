@@ -123,4 +123,13 @@ device for HiFi2, retains target admission unchanged, checks executed layer call
 and closed traces, restores routing after every request, and rechecks sources
 and evidence afterward. Two host integration tests cover all six requests and
 cleanup after candidate failure. No hardware result is implied: the immutable
-review manifest, frozen-recipe staging and CI launch remain pending.
+review manifest and CI launch remain pending.
+
+`dspark_precision_stage.py` now stages only the candidate helpers, explicit
+opt-in flag and six-request schedule onto the frozen ladder. It requires a
+complete reviewed artifact set before writing an admission manifest. Two host
+tests check the schedule, opt-in default and rejection of changed staging
+anchors. A fresh checkout at `8c102b2` passes the actual adaptation anchors;
+all seven unchanged projection dependency hashes match the simulator report.
+The new local checkout is `D:\qwen-precision-combined-stage-20260918`; final
+candidate admission awaits the down-projection artifact.
