@@ -259,3 +259,26 @@ scoped timing gate requires every native-score/replay/feature/commit check befor
 removing those expensive comparisons. Timed outputs and target state must still
 match the fresh audit; all drafting, verification and commit wall time remains
 in TG. Ordinary hardware tags remain audit-only; serving stays unchanged.
+
+## Timed combined outcome: do not promote
+
+Run **35204498094**, `3e52e74`, passes in **3m55s**. The independent artifact
+audit verifies unchanged sources, clean closure, the fresh 110-feature/12-proposal
+audit, and recomputes both complete timing repeats.
+
+| CTX / streams | PP | Committed TG | Accepted / proposed |
+| --- | ---: | ---: | ---: |
+| 4,096 / 1 | 3,352.45 tok/s | **74.68 tok/s** | 222 / 682 (32.55%) |
+
+Each timed request emits the same 121 post-seed tokens before natural EOS; the
+225-token cap is not the observed output length. Across 22 blocks the means are
+42.40 ms draft, 90.11 ms verification/readback, 13.31 ms selection/commit and
+147.25 ms whole cycle, with 11 committed tokens per block. The instrumented
+58-second audit is excluded from TG, not confused with timed decode.
+
+This is slower than the qualified T16 recipe, and still lacks its shared-Q/K,
+norm-prefetch and incremental-publication optimizations. It is not a width-only
+A/B. Wider drafting did not increase committed tokens per block on this fixture;
+do not promote it or keep expanding draft length on that assumption. Return
+performance work to the winning T16 runtime and its measured verifier costs.
+Report SHA-256: `092f61095c96bab39c520f516a2b9fb8cba74b7d99f6e0b3e23dd2833bfbdd89`.

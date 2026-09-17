@@ -23,6 +23,27 @@ overlap. This is attribution, not a new TG result or proof of internal stalls.
 No hardware rerun is needed just to recover this evidence. The 131K/262K
 combined context ladder takes priority over further short-context profiling.
 
+### Per-RISC check of the retained winning trace
+
+`winning_risc_attribution.py` reuses the exact request/device hash validation,
+excludes first replays, and requires every operation in every selected steady
+T16 replay. Missing RISC measurements stay missing, not zero. Chip 0 medians:
+
+| Operation/core group | BRISC ms | NCRISC ms | TRISC0 ms | TRISC1 ms | TRISC2 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Generic / 99 | 11.395 | 10.839 | 11.276 | 11.371 | 11.372 |
+| Matmul / 32 | 10.785 | 10.271 | 10.724 | 10.715 | 10.731 |
+| Generic / 96 | 9.534 | 9.217 | 9.484 | 9.477 | 9.484 |
+| Matmul / 43 | 5.738 | 5.508 | 5.698 | 5.698 | 5.715 |
+
+Reader/writer and compute envelopes are nearly coextensive in the dominant
+groups. **This does not distinguish memory stalls from compute saturation**:
+RISC durations include waits. It does not justify increasing cores or replacing
+SFPU math blindly. The next targeted diagnostic needs internal reader/compute
+sections or circular-buffer wait measurements in the winning verifier, retaining
+the full combined request as the correctness and performance acceptance test.
+No new hardware run or throughput result was needed for this re-analysis.
+
 ## Earlier admission attempts
 
 Attempt three passed disk admission (0.53% full I/O stall), entered the audited
