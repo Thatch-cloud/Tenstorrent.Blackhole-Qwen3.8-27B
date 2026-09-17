@@ -97,7 +97,12 @@ class RegisterEpilogueTests(unittest.TestCase):
         self.assertIn('import rounding_control as register_epilogue', rounding)
         self.assertIn('register_epilogue=False, activation_diagnostic=False', rounding)
         self.assertIn('rounding_diagnostic=True', rounding)
-        for options in ({'diagnose_activation': True, 'diagnose_rounding': True}, {'diagnose_rounding': 1}):
+        away = adapt_projection(source, nearest_away=True)
+        self.assertIn('from mlp_rounding_policy import transform as register_epilogue', away)
+        self.assertIn('rounding_runtime(source_root)', away)
+        self.assertIn('intermediate_rounding="sfpu-bf16-nearest-away"', away)
+        for options in ({'diagnose_activation': True, 'diagnose_rounding': True}, {'diagnose_rounding': 1},
+                {'nearest_away': True, 'diagnose_rounding': True}, {'nearest_away': 1}):
             with self.assertRaises(ValueError):
                 adapt_projection(source, **options)
         with self.assertRaises(ValueError):

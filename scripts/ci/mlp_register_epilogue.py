@@ -80,24 +80,34 @@ def rounding_control(source):
     return '#include "api/compute/eltwise_unary/typecast.h"\n' + result
 
 
-def adapt_projection(source, *, diagnose_activation=False, diagnose_rounding=False):
+def adapt_projection(source, *, diagnose_activation=False, diagnose_rounding=False, nearest_away=False):
     if (type(diagnose_activation) is not bool or type(diagnose_rounding) is not bool
-            or (diagnose_activation and diagnose_rounding)):
+            or type(nearest_away) is not bool or sum((diagnose_activation, diagnose_rounding, nearest_away)) > 1):
         raise ValueError('Choose at most one explicit diagnostic policy')
     if 'mlp_register_epilogue' in source:
         raise ValueError('Projection already contains the register epilogue')
     function = 'rounding_control' if diagnose_rounding else 'activation_control' if diagnose_activation else 'transform'
     result = replace_once(source, 'import hashlib\n',
         f'import hashlib\nfrom mlp_register_epilogue import {function} as register_epilogue\n')
+    if nearest_away:
+        result = replace_once(result, f'from mlp_register_epilogue import {function} as register_epilogue',
+            'from mlp_rounding_policy import transform as register_epilogue, runtime as rounding_runtime')
     anchor = '        self.compute = fused_compute(original, intermediates=intermediates, pairs_per_worker=pairs_per_worker)'
     result = replace_once(result, anchor, anchor + '''
         if intermediates or pairs_per_worker != 3 or token_rows != 16 or math_approx_mode is not True:
             raise ValueError('Register epilogue is restricted to the T16 target-math simulator candidate')
         self.compute = register_epilogue(self.compute)''')
+    if nearest_away:
+        result = replace_once(result, '        self.compute = register_epilogue(self.compute)',
+            '        self.rounding_runtime = rounding_runtime(source_root)\n'
+            '        self.compute = register_epilogue(self.compute)')
     result = replace_once(result, 'intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,',
         'intermediates=intermediates, input_noc=1, weight_noc=0, token_rows=token_rows,\n'
         f'                             register_epilogue={not (diagnose_activation or diagnose_rounding)}, activation_diagnostic={diagnose_activation},\n'
         f'                             rounding_diagnostic={diagnose_rounding},\n'
         f'                             intermediate_rounding="{"native-pack" if diagnose_activation else "sfpu-fp32-to-bf16"}",')
+    if nearest_away:
+        result = replace_once(result, 'intermediate_rounding="sfpu-fp32-to-bf16",',
+            'intermediate_rounding="sfpu-bf16-nearest-away", rounding_runtime=self.rounding_runtime,')
     compile(result, 'fused_1d.py', 'exec')
     return result

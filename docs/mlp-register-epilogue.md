@@ -40,7 +40,7 @@ diagnostic as a throughput improvement. Hardware and serving are unchanged.
 
 ## Rounding isolation
 
-The current workflow selects `--diagnose-rounding`: the exact activation-control
+The v3 workflow selects `--diagnose-rounding`: the exact activation-control
 source plus two explicit FP32-to-BF16 casts before its unchanged native packing.
 The post-loop unpack and BF16 product are byte-identical to the passing control.
 This asks whether the casts themselves change the observed numerical result;
@@ -71,6 +71,22 @@ tie handling before changing the register candidate. A rounding-policy
 hypothesis must pass exact simulation, not a PCC or tolerance waiver. The
 current cast is rejected; the register-resident candidate remains barred from
 hardware. There is no new committed-TG result.
+
+## Nearest-away hypothesis
+
+The current simulator route selects `--nearest-away` and returns to the complete
+register-resident epilogue, not the diagnostic retaining pack/reload. It changes
+only the explicit cast's two programmable constants: an unconditional `0x8000`
+integer bias replaces the ties-to-even `0x7fff + retained-LSB` bias. Both operands
+are still rounded before the same product. Native packing remains the oracle;
+nearest-away is a hypothesis, not a claimed packer specification.
+
+Before program construction the adapter checks the runtime's cast instruction
+chain and original constants, and records cast/packer header hashes. Changed
+implementations fail closed. Host tests enumerate every finite BF16 exponent/
+mantissa bin and both signs at five rounding boundaries, confirming that the
+two host policies differ only on even midpoints. This is not device validation.
+The unused CB, readers, K accumulation and serving defaults stay unchanged.
 
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
