@@ -24,8 +24,10 @@ class ClockExperimentTests(unittest.TestCase):
             events.append('audit')
             self.assertTrue(value['instrumented_timing'])
         original_finish = lambda *args: self.fail('Timed summary must not run')
+        fusion = SimpleNamespace(REPORT_SHA256='original')
         ladder = SimpleNamespace(finish=original_finish, validate_audit=audit)
         def run(*args, **kwargs):
+            self.assertEqual(fusion.REPORT_SHA256, experiment.SIMULATOR_SHA256)
             self.assertEqual(kwargs, options)
             result = full.measure_dspark_request(**required)
             result['arm'] = 'publication'
@@ -56,6 +58,7 @@ class ClockExperimentTests(unittest.TestCase):
             owned.append(value)
             return value
         modules = dict(dspark_request_experiment=SimpleNamespace(run_loaded_requests=run),
+            dspark_fusion_variants=fusion,
             frozen_ladder_requests=ladder, full_dspark_request=full, fused_t16_scope=SimpleNamespace(),
             verifier_engine=SimpleNamespace(VerifierEngine=object),
             gdn_multitoken_conv=SimpleNamespace(release_owned=lambda operations, owned: events.append(('release', len(owned)))))
@@ -73,6 +76,7 @@ class ClockExperimentTests(unittest.TestCase):
         self.assertEqual(events[-1], ('release', 64))
         self.assertIs(full.measure_dspark_request, original_measure)
         self.assertIs(ladder.finish, original_finish)
+        self.assertEqual(fusion.REPORT_SHA256, 'original')
         self.assertEqual(report['mlp_compute_clock_sources'], report['mlp_compute_clock_sources_after'])
 
     def test_staging_only_replaces_request_schedule_and_entrypoint(self):

@@ -46,6 +46,15 @@ diagnostic manifest. The per-layer manifest equality and native-weight checks
 remain intact. Host tests cover original-gate failure and scope restoration;
 the actual exported native source reproduces the admitted diagnostic manifest.
 
+Retry `35220994883` completed generation, then failed the final route validator's
+separate baseline report-identity check. The experiment now scopes that check
+to the same admitted diagnostic report; it does not relax token, state, feature,
+packed-weight or route requirements. A retained full-request regression confirms
+the unchanged fusion checks accept the diagnostic identity and restore afterward.
+Collected timing records are also retained before final route validation so a
+later admission failure does not discard diagnostic data; failed runs still
+cannot qualify through the independent report validator.
+
 The winning verifier's MLP group takes about 11.4 ms per replay. Reader samples
 and the rejected bank-order change do not identify whether matmul, packing or
 processor handoffs dominate. This diagnostic adds six bounded intervals on

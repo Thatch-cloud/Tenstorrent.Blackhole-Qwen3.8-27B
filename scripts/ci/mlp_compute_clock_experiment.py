@@ -52,6 +52,7 @@ def candidate_class(directory, evidence):
 def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
         layer_weights, predecessor, successor, rotary, report, progress, **options):
     import dspark_request_experiment
+    import dspark_fusion_variants
     import frozen_ladder_requests
     import full_dspark_request
     import fused_t16_scope
@@ -102,8 +103,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             if result.get('instrumented_timing') is not True or result.get('committed_tokens_per_second') is not None:
                 raise ValueError('Diagnostic must not publish throughput')
             result['mlp_compute_clock_combined'] = bank.summary()
+            report['mlp_compute_clock_combined'] = result['mlp_compute_clock_combined']
             return result
         with patch.object(full_dspark_request, 'measure_dspark_request', measure), \
+                patch.object(dspark_fusion_variants, 'REPORT_SHA256', SIMULATOR_SHA256), \
                 patch.object(frozen_ladder_requests, 'finish', finish):
             dspark_request_experiment.run_loaded_requests(operations, generator, model, collectives, tokenizer,
                 pages, kv_cache, parameters, layer_weights, predecessor, successor, rotary, report, progress, **options)
