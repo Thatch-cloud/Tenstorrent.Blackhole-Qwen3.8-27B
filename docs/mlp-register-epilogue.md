@@ -118,6 +118,23 @@ comparison, retaining all winning features, fresh native token/state/feature
 audits, all 64 target layers and complete-cycle TG. Do not benchmark the
 activation-only diagnostic or report simulated time as a speed improvement.
 
+## Combined comparison prepared
+
+`qwen-mlp-register-epilogue-combined.yml` stages the frozen winning runtime and
+the admitted candidate separately. One model load covers two fresh correctness
+audits followed by control/candidate/candidate/control timing at 4K, one stream.
+Only the scoped T16 gate/up projection changes. Shared Q/K, norm prefetch,
+incremental history, draft-tail assembly, native down projection and four-link
+collectives remain active in both arms. Serving is untouched.
+
+The adapter rechecks physical runtime admission before and after the request
+series. Its independent report validator checks all-layer packed weights,
+tokens, state, inactive slots, five feature taps and complete-loop TG. Both
+paired gains must exceed 2% to pass the preliminary improvement screen; passing
+does not qualify held-out coding quality or establish the 200-TG goal.
+Local full frozen staging, evidence admission and staged imports pass. The
+12-minute job cap and existing host-I/O pressure gate remain in place.
+
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
 pack/reload and separate post-loop product, not the already-tested weight reader.
