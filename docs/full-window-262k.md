@@ -91,3 +91,19 @@ removing the single context-list entry must reproduce the original report hash.
 All other component hashes remain mandatory. Local replay of actual historical
 component reports verifies all 42 component sources with this adapter; geometry
 math or unrelated edits still fail. This does not grant full-request acceptance.
+
+## Hardware memory failure
+
+Run **35192065473** passes admission and completes both 261,888-token prefills,
+then fails during `project_full_prefill_history`, inside `dspark_history.join_rows`.
+This is device DRAM exhaustion, not timeout: a 16 MiB concat allocation needs
+2 MiB per bank, with only 1,174,080 bytes free per bank and a largest free block
+of 293,056 bytes. No timed decode result is qualified.
+
+The existing concat tree retains original pieces and every intermediate level
+until all ten layer K/V outputs are complete. `history_concat_lifetime.py` is
+an uninstalled candidate that releases consumed owned inputs after each concat,
+preserving the same eight-way grouping and borrowed storage. Host tests check
+exact row order, lower peak live rows, aliases and failure cleanup. It still
+needs device lifetime validation before another full-window hardware run;
+no quantization, context truncation or relaxed numerical checks are proposed.
