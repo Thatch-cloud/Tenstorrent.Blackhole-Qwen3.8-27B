@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,11 +54,15 @@ def main():
         report.update(scope='Learned captured history projection with synthetic feature taps; no target request or TG',
             proposals=0, publication_only=True)
     owned, mesh, prepared, bank_audit = [], None, None, None
+    started = time.perf_counter()
+    report['stage_timings'] = []
 
     def progress(stage):
         report['stage'] = stage
+        event = dict(stage=stage, elapsed_seconds=time.perf_counter() - started)
+        report['stage_timings'].append(event)
         options.output.write_text(json.dumps(report, indent=2))
-        print(json.dumps(dict(stage=stage)), flush=True)
+        print(json.dumps(event), flush=True)
 
     try:
         progress('open_mesh')
@@ -76,7 +81,7 @@ def main():
 
         if not options.publication_only:
             progress('load_target_embedding_head')
-            target, report['target_weights'] = load_target(ttnn, mesh, options.target, owned)
+            target, report['target_weights'] = load_target(ttnn, mesh, options.target, owned, on_stage=progress)
         parameters = {}
         with VerifiedWeights(options.checkpoint) as reader:
             report['draft_weight_hashes'] = reader.fingerprints()

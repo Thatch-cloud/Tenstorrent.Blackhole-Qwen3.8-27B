@@ -44,6 +44,13 @@ six-minute probe, 450-second launcher and nine-minute whole-job cap. It preserve
 the full vocabulary and five learned layers and rejects missing native-reference
 checks. Weight loading is included in the cap; a setup timeout is not a numerical
 failure. The three-minute weight-free score result does not predict its cost.
+
+Run **35178536604** exited 124 at the six-minute probe cap (whole job 6m48s).
+It reached `load_target_embedding_head`, but never proposal execution. The artifact
+has `passed=false` and `closed_cleanly=false`; it cannot qualify the candidate.
+Added persisted elapsed-time stage markers for metadata, matrix read, finite check,
+hash, head transpose, combined TT-NN conversion/upload and synchronization. The
+previous log cannot distinguish these costs, and no longer timeout is justified yet.
 The first bounded run, 35177093623, stopped at the host-I/O gate before Docker:
 15.63% full I/O stall measured over 15 seconds, against the unchanged 1% limit.
 The simulator step was skipped; that run produced no numerical result. The whole job

@@ -7,26 +7,36 @@ from gdn_multitoken_conv import release_owned
 from t32_target_weights import HIDDEN_WIDTH, TargetWeights
 
 
-def load(operations, mesh, directory, owned):
+def load(operations, mesh, directory, owned, *, on_stage=None):
     if list(mesh.shape) != [1, 2] or not isinstance(owned, list):
         raise ValueError('Explicit TP2 mesh and caller-owned tensors required')
+    if on_stage is not None and not callable(on_stage):
+        raise ValueError('Callable loading observer required')
+    observe = on_stage if on_stage is not None else lambda stage: None
+    observe('target_metadata')
     reader = TargetWeights(directory)
     created = []
     try:
-        embedding = reader.tensor('embedding').reshape(1, 1, VOCABULARY, HIDDEN_WIDTH)
+        embedding = reader.tensor('embedding', on_stage=observe).reshape(1, 1, VOCABULARY, HIDDEN_WIDTH)
+        observe('target_embedding_convert_upload')
         embedding_weight = operations.from_torch(embedding, device=mesh, dtype=operations.bfloat16,
             layout=operations.ROW_MAJOR_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG,
             mesh_mapper=operations.ShardTensorToMesh(mesh, dim=3))
         created.append(embedding_weight)
         del embedding
-        head = reader.tensor('head').T.contiguous().reshape(1, 1, HIDDEN_WIDTH, VOCABULARY)
+        head = reader.tensor('head', on_stage=observe)
+        observe('target_head_transpose')
+        head = head.T.contiguous().reshape(1, 1, HIDDEN_WIDTH, VOCABULARY)
+        observe('target_head_convert_upload')
         head_weight = operations.from_torch(head, device=mesh, dtype=operations.bfloat16,
             layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG,
             mesh_mapper=operations.ShardTensorToMesh(mesh, dim=3))
         created.append(head_weight)
         del head
+        observe('target_upload_synchronize')
         operations.synchronize_device(mesh)
         reader.check_unchanged()
+        observe('target_loaded')
 
         def embed(identifiers, memory_config=None):
             return operations.embedding(identifiers, embedding_weight, layout=operations.TILE_LAYOUT,
