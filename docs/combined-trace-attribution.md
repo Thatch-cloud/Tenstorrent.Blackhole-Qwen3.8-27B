@@ -1,5 +1,46 @@
 # Combined-runtime trace attribution
 
+## Separate the 32-core projections
+
+`winning_projection_attribution.py` reuses the hash-pinned combined request and
+device CSV; no hardware rerun is needed. It requires every operation in four
+steady T16 replays on each chip, all 128 relevant matmuls, recognized ordered
+neighbors and the matching frozen `fused_t16_scope.py` source hash. Two host
+tests reject missing calls, unknown neighbors, overlapping intervals and NaNs.
+
+| Source-consistent sequence | Calls/replay | Card 0 ms | Card 1 ms |
+| --- | ---: | ---: | ---: |
+| Fused MLP -> down projection -> reduce-scatter | 64 | 7.804 | 7.805 |
+| GDN norm gate -> output projection -> reduce-scatter | 48 | 2.233 | 2.234 |
+| Attention output slice -> output projection -> reduce-scatter | 16 | 0.749 | 0.751 |
+
+These are medians of summed kernel intervals, including waits, not source-line
+labels from the profiler or throughput gains. Identities are inferred from
+operation order, layer counts and reviewed source. The MLP-down sequence matches
+the exact retained forward source (`f34bd6f26a8a40574dae1f3525b635c87c41a882ad117be45cd40a187ede0ce8`).
+The current development file also supports T32 and does not have that hash;
+the analyzer therefore requires the frozen staged source explicitly rather than
+silently treating the current checkout as the measured runtime.
+
+The 10.786-ms matmul group is **not** entirely GDN output or MLP down. MLP down
+is its largest component: about 121.9 microseconds per call in this instrumented
+trace. Combined with the separately measured 11.396-ms fused gate/up group, it
+makes MLP a higher-impact next target than another tiny GDN reader reorder.
+This is not a claim that all 19.2 ms can be removed.
+
+Source review confirms the current gate/up uses BF4 weights and LoFi already;
+simply suggesting those flags is not a new optimization. Prior streamed MLP and
+small-tile-with-conversion candidates failed and must not be retried unchanged.
+An MLP-down candidate must retain its compressed weights and numerical policy,
+charge layout/collective costs, and qualify in the complete winning runtime.
+
+Reproduce using the matching frozen stage (not the development scope file):
+
+```powershell
+$env:PYTHONPATH='scripts/ci'
+python -B scripts/ci/winning_projection_attribution.py D:/qwen-evidence/35185624322/combined-verifier-profile D:/qwen-qk-double-buffer-combined-stage-20260918/scripts/ci/fused_t16_scope.py
+```
+
 ## Exclusive-interval re-analysis
 
 `winning_interval_attribution.py` revalidates the retained request and CSV hashes,

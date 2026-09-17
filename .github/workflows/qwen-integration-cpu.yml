@@ -64,6 +64,7 @@ jobs:
           python -B -m unittest test_gdn_input_overlap
           python -B -m unittest test_gdn_qk_double_buffer
           python -B -m unittest test_gdn_qk_double_buffer_gate
+          python -B -m unittest test_winning_projection_attribution
           python -B -m unittest test_gdn_qk_double_buffer_scope test_gdn_qk_double_buffer_comparison
           python -B -m unittest test_gdn_qk_double_buffer_experiment test_gdn_qk_double_buffer_report
           python -B -m unittest test_gdn_wait_clock test_gdn_wait_clock_program test_gdn_wait_clock_capture test_gdn_wait_clock_report
