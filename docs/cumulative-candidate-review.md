@@ -139,6 +139,16 @@ selection mechanism, not hardware integration: staging must replace the imported
 understand the distinct norm identity before scatter can be enabled. The current
 two/three-component hardware recipes do not enable it.
 
+Independent component report validators now accept an explicitly selected scatter
+identity while retaining prefetch as their default. They reject mismatched
+admissions, false prefetch labels, incomplete build coverage and changed
+incremental-history identity. The retained compact-score (35268945497), wider-down
+(35255552263) and direct-window attempt-two (35273229698) hardware reports still
+pass independent validation. This is compatibility evidence, not a new speed
+measurement. The cumulative driver and staging still need the scatter binding;
+no current hardware recipe enables it. Precision remains unchanged, and further
+quantization is deferred unless needed and discussed with the user.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

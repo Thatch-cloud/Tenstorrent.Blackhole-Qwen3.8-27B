@@ -8,13 +8,13 @@ from pathlib import Path
 from compact_score_comparison import summarize
 from dspark_request_experiment import summarize as summarize_requests
 from mlp_weight_pipeline_report import validate_audit, validate_fusion, NORM_SHA256, HISTORY_SHA256
+from cumulative_norm_validation import validate_norm_history
 
 
-def validate_route(request, arm):
+def validate_route(request, arm, *, norm_policy='prefetch'):
     from compact_score_gate import REPORT_SHA256
     identity = request.get('compact_score', {})
     enabled, hits = identity.get('compact'), identity.get('hits')
-    norm, history = request.get('gdn_norm_prefetch', {}), request.get('incremental_history', {})
     if (arm != 'publication' or type(enabled) is not bool or type(hits) is not int
             or identity.get('restored') is not True
             or identity.get('report_sha256') != (REPORT_SHA256 if enabled else None)
@@ -23,10 +23,7 @@ def validate_route(request, arm):
             or (not enabled and hits != 0)):
         raise ValueError('All T16 draft feedback calls must match the admitted write route')
     validate_fusion(request)
-    if (norm.get('enabled') is not True or norm.get('report_sha256') != NORM_SHA256
-            or type(norm.get('builds')) is not int or norm['builds'] < 48 or norm['builds'] % 48
-            or history.get('enabled') is not True or history.get('report_sha256') != HISTORY_SHA256):
-        raise ValueError('Unchanged winning target norm and incremental history required')
+    validate_norm_history(request, norm_policy)
 
 
 def validate(report):

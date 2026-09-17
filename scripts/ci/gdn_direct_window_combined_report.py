@@ -8,13 +8,13 @@ from pathlib import Path
 from gdn_direct_window_comparison import summarize, repeatability
 from dspark_request_experiment import summarize as summarize_requests
 from mlp_weight_pipeline_report import validate_audit, validate_fusion, NORM_SHA256, HISTORY_SHA256
+from cumulative_norm_validation import validate_norm_history
 
 
-def validate_route(request, arm):
+def validate_route(request, arm, *, norm_policy='prefetch'):
     from gdn_direct_window_gate import REPORT_SHA256
     identity = request.get('gdn_direct_window', {})
     enabled, hits = identity.get('direct'), identity.get('hits')
-    norm, history = request.get('gdn_norm_prefetch', {}), request.get('incremental_history', {})
     if (arm != 'publication' or type(enabled) is not bool or type(hits) is not int
             or identity.get('restored') is not True
             or identity.get('report_sha256') != (REPORT_SHA256 if enabled else None)
@@ -23,13 +23,12 @@ def validate_route(request, arm):
             or (not enabled and hits != 0)):
         raise ValueError('All T16 GDN window calls must match the admitted write route')
     validate_fusion(request)
-    if (norm.get('enabled') is not True or norm.get('report_sha256') != NORM_SHA256
-            or type(norm.get('builds')) is not int or norm['builds'] < 48 or norm['builds'] % 48
-            or history.get('enabled') is not True or history.get('report_sha256') != HISTORY_SHA256):
-        raise ValueError('Unchanged winning target norm and incremental history required')
+    validate_norm_history(request, norm_policy)
 
 
-def validate(report):
+def validate(report, *, norm_scatter=False):
+    if type(norm_scatter) is not bool:
+        raise ValueError('Explicit normalization composition policy required')
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True
             or report.get('stage') != 'complete' or report.get('streams') != 1
             or report.get('ctx_tokens') != 4096 or report.get('sampler_links') != 4
@@ -39,7 +38,11 @@ def validate(report):
             ('gdn_direct_window_sources', 'gdn_direct_window_sources_after')):
         if not report.get(before) or report.get(before) != report.get(after):
             raise ValueError('Unchanged native, script and projection sources required')
-    comparison = summarize(report.get('request_checks', []), summarize_requests, validate_audit, validate_route)
+    def route(request, arm):
+        policy = 'scatter' if norm_scatter and request.get('gdn_direct_window', {}).get('direct') is True else 'prefetch'
+        validate_route(request, arm, norm_policy=policy)
+
+    comparison = summarize(report.get('request_checks', []), summarize_requests, validate_audit, route)
     if comparison != report.get('gdn_direct_window_comparison'):
         raise ValueError('Saved comparison differs from independently recomputed complete-cycle evidence')
     return dict(comparison, measurement_quality=repeatability(comparison))
