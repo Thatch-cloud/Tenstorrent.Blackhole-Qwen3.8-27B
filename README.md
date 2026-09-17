@@ -36,10 +36,15 @@ These are **offline complete-runtime tests**, not a streaming serving benchmark.
 Current-recipe concurrent users, sustained generation and held-out coding quality
 are not yet qualified. Historical B8 serving results use a different runtime.
 
-**Later matched 4K control:** cold PP **3,288.00**, committed TG **123.80**.
-The bank-staggered reader gives 123.82 TG, only +0.016%, so it is rejected.
-This is a separate rerun, not a replacement measurement for the whole ladder.
-[Matched evidence](docs/mlp-weight-read-order.md).
+**Latest matched 4K comparison** (one stream; separate from the cold ladder):
+
+| Runtime | PP tok/s | Committed TG tok/s | Decision |
+| --- | ---: | ---: | --- |
+| Unchanged T16 control | 3,371.07 | 121.67 | Retained |
+| Register-resident MLP epilogue | 3,303.60 | 123.87 | Correct, but no repeatable speed gain |
+
+Verifier time stays approximately 66.5 ms; paired TG gains are +3.56% / +0.11%.
+The candidate is not promoted. [Combined evidence](docs/mlp-register-epilogue.md).
 
 The 261,888-token prompt attempt failed during full-history allocation/concat;
 there is no accepted 262K-window result. It needs a memory-layout fix, not an

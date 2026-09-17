@@ -1,6 +1,37 @@
 # Register-resident rounded MLP epilogue
 
-**Nearest-away candidate passes simulator exactness; hardware speed is unqualified.**
+**Combined hardware correctness passes; performance screen fails. Keep the control.**
+
+## Combined hardware outcome
+
+[35240478989](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35240478989),
+source `f3f69186e025b80ea64b731e44c7bca3f349e0d9`, completes in **6m26s**.
+Independent report validation confirms both fresh native audits, complete ABBA
+timing, exact output/state/features, unchanged sources and all-layer packed
+weights. Devices close cleanly; the container exits zero without OOM.
+
+| 4K / one stream | Cold PP | Committed TG | Accepted / proposed |
+| --- | ---: | ---: | ---: |
+| Unchanged winning T16 | 3,371.07 | 121.67 | 224 / 300 |
+| Register-resident epilogue | 3,303.60 | 123.87 | 224 / 300 |
+
+The aggregate gain is **1.81%**, but matched pairs are **+3.56% / +0.11%**;
+the required repeatable improvement screen fails. Each arm commits 242 tokens.
+Report SHA-256: `c6708a01a05c2671ce11989001e2aa1c5234a6d9e505028c1d501137d23fbedf`.
+
+| Timed request order | Draft ms/block | Verify/readback ms/block | Commit ms/block | Whole cycle ms |
+| --- | ---: | ---: | ---: | ---: |
+| Control A | 27.80 | 66.56 | 4.94 | 100.08 |
+| Candidate B | 24.46 | 66.47 | 4.96 | 96.64 |
+| Candidate B | 26.39 | 66.53 | 4.98 | 98.63 |
+| Control A | 26.61 | 66.46 | 4.86 | 98.74 |
+
+Mean verifier/readback changes by only **0.009 ms**, not a meaningful target
+speedup. The larger first-pair gain accompanies faster drafting, which this
+target-only kernel does not directly optimize. Do not attribute that entire
+gain to epilogue fusion or rerun the unchanged candidate. The rounding fix is
+useful correctness knowledge, not an accepted performance optimization.
+Retain the original epilogue; no serving change or held-out quality claim.
 
 ## First simulator outcome
 
