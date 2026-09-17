@@ -87,6 +87,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--wide-cache-evidence', type=Path)
     options = parser.parse_args()
     if options.manifest.exists():
         raise ValueError('Fresh ladder staging required')
@@ -100,7 +101,11 @@ def main():
         result[name] = Path(__file__).with_name(name).read_text()
     payloads = {name: source.encode() for name, source in result.items()}
     payloads['frozen-ladder-corpus.json'] = Path(__file__).with_name('frozen-ladder-corpus.json').read_bytes()
+    if options.wide_cache_evidence:
+        payloads.update(wide_cache_payloads(scripts, options.wide_cache_evidence,
+            payloads['dspark_request_experiment.py']))
     for name, payload in payloads.items():
+        (scripts / name).parent.mkdir(parents=True, exist_ok=True)
         (scripts / name).write_bytes(payload)
     from frozen_draft_tail_gate import qualify_hardware
     qualify_hardware(scripts, scripts / 'frozen-draft-tail-hardware.json')
@@ -110,6 +115,38 @@ def main():
         component_reference_context=32768, geometry_qualified=False,
         requires_fresh_full_request_audit=True, performance_qualified=False,
         serving_defaults_changed=False), indent=2) + '\n')
+
+
+def wide_cache_payloads(scripts, evidence, request_source):
+    from frozen_ladder_cache_gate import qualify
+    evidence = Path(evidence)
+    raw = (evidence / 'reports.json').read_bytes()
+    digests = json.loads(raw)
+    if set(digests) != {'65536', '131072'}:
+        raise ValueError('Both long-context simulator reports required')
+    result = {}
+    for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
+            'frozen_ladder_ordered_cache.py', 'ladder-cache-probe.py'):
+        result[name] = Path(__file__).with_name(name).read_bytes()
+    for context, digest in digests.items():
+        report = qualify(Path(__file__).parent, evidence / context, digest, int(context))
+        for name in ('frozen_context_geometry.py', 'ordered_cache.py', 'attention_batch.py'):
+            if hashlib.sha256((scripts / name).read_bytes()).hexdigest() != report['sources'][name]:
+                raise ValueError('Staged cache source differs from simulator: ' + name)
+        for name in ('ladder-cache.json', 'ladder-cache.exit-status', 'simulator-runtime.txt'):
+            result[f'frozen-cache-evidence/{context}/{name}'] = (evidence / context / name).read_bytes()
+    result['frozen-cache-evidence/reports.json'] = raw
+    source = request_source.decode()
+    anchor = '    with sampler_links(sampler.tt_sampling, 4):\n'
+    if source.count(anchor) != 1:
+        raise ValueError('Unchanged combined request scope required')
+    source = source.replace(anchor,
+        '    from frozen_ladder_cache_scope import runtime_scope as cache_scope\n'
+        '    with cache_scope(Path(__file__).parent) as cache_evidence, sampler_links(sampler.tt_sampling, 4):\n'
+        "        report['wide_cache_geometry'] = cache_evidence\n")
+    compile(source, 'dspark_request_experiment.py', 'exec')
+    result['dspark_request_experiment.py'] = source.encode()
+    return result
 
 
 if __name__ == '__main__':
