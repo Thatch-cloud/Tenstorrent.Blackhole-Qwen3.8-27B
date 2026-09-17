@@ -47,6 +47,31 @@ This asks whether the casts themselves change the observed numerical result;
 it does not yet test removing native packing. Mode flags are mutually exclusive
 and recorded in both the staging manifest and executed kernel metadata.
 
+### Rounding isolation rejects the explicit casts
+
+[35237711938](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35237711938),
+source `48e4c459b08d1eaf2279628c7966064304590a27`, finishes in **2m03s**.
+It reproduces **216 / 139,264** eager mismatches on chip 0, with finite values
+and maximum absolute error 1.0. All four packed-weight checks pass. Exit is 1;
+container cleanup succeeds. Replay and chip-1 output acceptance are not reached.
+Generated and staged source fingerprints match local reconstruction.
+
+Report: `36777917414802c921fbc1f7ede24c191976d70da511f0bd1c35b28883eee148`.
+Generated compute: `f46ba4560d86034768d2707b5cea088edc8b698122d2945950757d3dc952c3cd`.
+
+All 32 retained mismatch examples have smaller candidate magnitude, across
+positive and negative outputs; failures occur in every token row. The matching
+mismatch count does not establish identical failed coordinates to v1, whose
+report did not retain them. The passing activation diagnostic and this failed
+diagnostic show that introducing the explicit casts is sufficient to break
+exactness with packing/product otherwise retained.
+
+Next investigate the pinned packer's rounding rule and the explicit cast's
+tie handling before changing the register candidate. A rounding-policy
+hypothesis must pass exact simulation, not a PCC or tolerance waiver. The
+current cast is rejected; the register-resident candidate remains barred from
+hardware. There is no new committed-TG result.
+
 The combined clock diagnostic identifies gate rounding/packing and the rounded
 product as measurable work. This candidate removes the intermediate BF16
 pack/reload and separate post-loop product, not the already-tested weight reader.
