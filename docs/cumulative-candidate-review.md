@@ -190,6 +190,16 @@ undeclared epilogue execution. The retained compact, wider-down and direct-windo
 reports still validate unchanged. Runtime selection and staging of the fifth
 component remain to be connected; the prepared four-component CI path is unchanged.
 
+The driver now has an opt-in `QWEN_CUMULATIVE_REGISTER=1` path. Its wrapper
+records the epilogue identity after projection bindings restore, but before the
+existing full-request comparison validates the request. Baseline controls remain
+on their original fusion admission; candidate validation temporarily selects only
+the matching fusion admission and retains the other route checks. Host tests cover
+control/candidate/control ordering, failed requests, missing or duplicate
+measurements, and composition with the wider-down request scope. Fifth-component
+candidate payload/evidence staging and CI activation remain pending. No hardware
+or precision change was made while the user requested the hardware pause.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

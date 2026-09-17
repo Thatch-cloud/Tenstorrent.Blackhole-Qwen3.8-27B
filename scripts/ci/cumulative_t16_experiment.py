@@ -1,6 +1,6 @@
 """Native versus direct-window plus compact-score complete T16 requests."""
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, ExitStack
 import hashlib
 import os
 from pathlib import Path
@@ -20,7 +20,13 @@ COMPACT_FILES = ('compact_score_gate.py', 'compact_score_report.py', 'compact_sc
 DOWN_FILES = ('mlp_down_grid_gate.py', 'mlp_down_grid_scope.py', 'mlp_down_grid.py', 'mlp-down-grid-probe.py')
 NORM_FILES = ('cumulative_norm_runtime.py', 'cumulative_norm_validation.py',
     'shared_qk_norm_scatter_gate.py', 'shared_qk_norm_scatter.py', 'gdn_norm_scatter.py')
-FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES + DOWN_FILES + NORM_FILES +
+REGISTER_FILES = ('cumulative_register_runtime.py', 'cumulative_register_scope.py',
+    'cumulative_fusion_validation.py', 'mlp_register_epilogue_gate.py', 'mlp_register_epilogue.py',
+    'mlp_rounding_policy.py', 'mlp_weight_pipeline_gate.py', 'mlp_weight_pipeline.py',
+    'mlp_weight_pipeline_report.py', 'mlp_weight_pipeline_comparison.py')
+REGISTER_PAYLOADS = tuple('mlp-register-epilogue-candidate/' + name
+    for name in ('fused_1d.py', 'fused_1d_input.cpp', 'fused_1d_weights.cpp'))
+FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES + DOWN_FILES + NORM_FILES + REGISTER_FILES +
     ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py')))
 
 
@@ -43,11 +49,18 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     components = ['direct_windows', 'compact_scores'] + (['wider_mlp_down'] if down is not None else [])
     if norm_flag == '1':
         components.append('norm_scatter')
+    register_flag = os.environ.get('QWEN_CUMULATIVE_REGISTER', '0')
+    if register_flag not in ('0', '1'):
+        raise ValueError('Explicit zero/one cumulative register policy required')
+    if register_flag == '1':
+        components.append('register_epilogue')
 
     def fingerprints():
-        return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in FILES}
+        names = FILES + (REGISTER_PAYLOADS if register_flag == '1' else ())
+        return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in names}
 
     sources, audits = fingerprints(), []
+    register_candidate = None
 
     @contextmanager
     def combined(direct_admission, source_directory):
@@ -55,12 +68,19 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             raise ValueError('Both components must come from the same staged runtime')
         with (select_norm('scatter') if norm_flag == '1' else nullcontext()), \
                 scoped_cumulative_t16(direct_admission, evidence, directory,
-                **(dict(down_admission=down) if down is not None else {})) as audit:
+                **(dict(down_admission=down) if down is not None else {})) as audit, \
+                (register_candidate() if register_flag == '1' else nullcontext()) as register_audit:
+            if register_flag == '1':
+                audit['register'] = register_audit
             audits.append(audit)
             yield audit['direct']
 
     try:
-        with patch.object(direct_experiment, 'scoped_direct_windows', combined):
+        with ExitStack() as stack:
+            if register_flag == '1':
+                from cumulative_register_runtime import runtime_scope
+                register_candidate = stack.enter_context(runtime_scope(directory, runtime_root='/opt/tt-metal'))
+            stack.enter_context(patch.object(direct_experiment, 'scoped_direct_windows', combined))
             direct_experiment.run_loaded_requests(operations, generator, model, collectives, tokenizer,
                 pages, kv_cache, parameters, layer_weights, predecessor, successor, rotary, report, progress, **options)
         requests = report.get('request_checks', [])
@@ -74,6 +94,9 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             audit = next(pending) if enabled else None
             if enabled:
                 validate_request(request, audit)
+            if register_flag == '1':
+                from cumulative_fusion_validation import validate_fusion_policy
+                validate_fusion_policy(request, 'register' if enabled else 'baseline')
             if norm_flag == '1':
                 from cumulative_norm_validation import validate_norm_history
                 validate_norm_history(request, 'scatter' if enabled else 'prefetch')

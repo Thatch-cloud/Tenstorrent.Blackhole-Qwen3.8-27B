@@ -8,7 +8,7 @@ import shutil
 
 from compact_score_gate import qualify
 from compact_score_hardware_sources import payloads as hardware_payloads
-from cumulative_t16_experiment import COMPACT_FILES, DOWN_FILES, NORM_FILES
+from cumulative_t16_experiment import COMPACT_FILES, DOWN_FILES, NORM_FILES, REGISTER_FILES
 from frozen_recipe_context import replace_once
 from mlp_down_grid_gate import qualify as qualify_down
 from shared_qk_norm_scatter_gate import qualify as qualify_scatter
@@ -33,7 +33,7 @@ def stage(checkout, evidence, manifest, *, down_evidence=None, native_root=None,
         if (scripts / name).read_bytes() != (directory / name).read_bytes():
             raise ValueError('Frozen control differs from qualified compact source: ' + name)
     payloads = hardware_payloads(directory)
-    for name in COMPACT_FILES + DOWN_FILES + NORM_FILES + ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py'):
+    for name in COMPACT_FILES + DOWN_FILES + NORM_FILES + REGISTER_FILES + ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py'):
         if name not in payloads:
             payloads[name] = (directory / name).read_text()
     originals = {name: (scripts / name).read_bytes() for name in
