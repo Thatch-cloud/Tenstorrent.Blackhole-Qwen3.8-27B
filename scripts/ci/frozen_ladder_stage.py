@@ -87,7 +87,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
-    parser.add_argument('--wide-cache-evidence', type=Path)
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument('--wide-cache-evidence', type=Path)
+    cache_group.add_argument('--full-window-cache-evidence', type=Path)
     options = parser.parse_args()
     if options.manifest.exists():
         raise ValueError('Fresh ladder staging required')
@@ -104,6 +106,9 @@ def main():
     if options.wide_cache_evidence:
         payloads.update(wide_cache_payloads(scripts, options.wide_cache_evidence,
             payloads['dspark_request_experiment.py']))
+    if options.full_window_cache_evidence:
+        payloads.update(wide_cache_payloads(scripts, options.full_window_cache_evidence,
+            payloads['dspark_request_experiment.py'], full_window=True))
     for name, payload in payloads.items():
         (scripts / name).parent.mkdir(parents=True, exist_ok=True)
         (scripts / name).write_bytes(payload)
@@ -117,13 +122,17 @@ def main():
         serving_defaults_changed=False), indent=2) + '\n')
 
 
-def wide_cache_payloads(scripts, evidence, request_source):
+def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False):
     from frozen_ladder_cache_gate import qualify
     evidence = Path(evidence)
     raw = (evidence / 'reports.json').read_bytes()
     digests = json.loads(raw)
-    if set(digests) != {'65536', '131072'}:
-        raise ValueError('Both long-context simulator reports required')
+    if type(full_window) is not bool:
+        raise ValueError('Explicit full-window selection required')
+    expected = {'261888'} if full_window else {'65536', '131072'}
+    if set(digests) != expected:
+        raise ValueError('Full-window simulator report required' if full_window
+            else 'Both long-context simulator reports required')
     result = {}
     for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
             'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py'):
