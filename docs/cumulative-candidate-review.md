@@ -242,6 +242,15 @@ now discovers cumulative, direct-window and compact-score tests explicitly;
 require a green run containing these commands before hardware dispatch. The
 measurement candidate's runtime sources are unchanged by this correction.
 
+Hardware launch 35281141795 failed during source restoration, before the I/O gate
+or weight loading: the helper attempted to download runner-exported GDN kernels
+from upstream and received HTTP 404. Local staging had already populated those
+files, hiding the fresh-CI path. The workflow now downloads retained inventory
+35092212895 and explicitly supplies it to the restoration helper. Each file still
+must match the simulator report hash; corrupt retained files fail rather than
+falling back. A fresh empty-destination replay restored and verified all nine
+native files, and 40 cumulative host tests pass. No kernel arithmetic changed.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

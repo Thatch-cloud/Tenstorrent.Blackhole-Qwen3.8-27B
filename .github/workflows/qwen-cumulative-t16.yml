@@ -73,8 +73,10 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
             gh run download 35214644611 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35214644611-1 --dir "$evidence/norm-scatter"
             test "$(cat "$evidence/norm-scatter/gdn-shared-recurrence.exit-status")" = 0
+            gh run download 35092212895 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35092212895 --dir "$evidence/gdn-native"
             python3 -B read-orchestrator/scripts/ci/cumulative_native_sources.py \
               --report "$evidence/norm-scatter/gdn-shared-recurrence.json" \
+              --retained-root "$evidence/gdn-native/sources" \
               --destination "$evidence/model-native/sources" "${native_args[@]}" > read-combined/experiment-results/cumulative-native-sources.json
             down_args+=(--norm-report "$evidence/norm-scatter/gdn-shared-recurrence.json")
           fi

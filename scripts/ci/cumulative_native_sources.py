@@ -18,7 +18,7 @@ PATHS = tuple(KERNEL_ROOT + '/' + name for name in HASHES) + tuple(
     'tt_metal/hw/inc/api/compute/' + name for name in API_SOURCES)
 
 
-def restore(report_path, destination, *, register_epilogue=False):
+def restore(report_path, destination, *, register_epilogue=False, retained_root=None):
     if type(register_epilogue) is not bool:
         raise ValueError('Explicit register native-source policy required')
     raw = Path(report_path).read_bytes()
@@ -27,6 +27,9 @@ def restore(report_path, destination, *, register_epilogue=False):
     report = json.loads(raw)
     validate_report(report)
     root = Path(destination).resolve()
+    retained = Path(retained_root).resolve() if retained_root is not None else None
+    if retained is not None and not retained.is_dir():
+        raise ValueError('Existing retained native-source directory required')
     payloads = {}
     expected_sources = {relative: report['sources']['/opt/tt-metal/' + relative] for relative in PATHS}
     if register_epilogue:
@@ -35,6 +38,8 @@ def restore(report_path, destination, *, register_epilogue=False):
         target = root / relative
         if target.exists():
             payload = target.read_bytes()
+        elif retained is not None and (retained / relative).is_file():
+            payload = (retained / relative).read_bytes()
         else:
             url = f'https://raw.githubusercontent.com/tenstorrent/tt-metal/{REVISION}/{relative}'
             with urlopen(url, timeout=30) as response:
@@ -57,6 +62,7 @@ if __name__ == '__main__':
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--register-epilogue', action='store_true')
+    parser.add_argument('--retained-root', type=Path)
     options = parser.parse_args()
     print(json.dumps(restore(options.report, options.destination,
-        register_epilogue=options.register_epilogue), indent=2))
+        register_epilogue=options.register_epilogue, retained_root=options.retained_root), indent=2))

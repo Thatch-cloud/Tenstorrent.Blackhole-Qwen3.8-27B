@@ -10,7 +10,8 @@ import cumulative_native_sources as sources
 
 
 class NativeSourcesTests(unittest.TestCase):
-    def exercise(self, *, corrupt_download=False, corrupt_existing=False, invalid_report=False, register=False):
+    def exercise(self, *, corrupt_download=False, corrupt_existing=False, invalid_report=False, register=False,
+                 retained=False, corrupt_retained=False):
         payload = b'pinned native source'
         expected = hashlib.sha256(payload).hexdigest()
         raw = json.dumps(dict(sources={'/opt/tt-metal/' + name: expected for name in sources.PATHS})).encode()
@@ -19,6 +20,12 @@ class NativeSourcesTests(unittest.TestCase):
             report = root / 'report.json'
             report.write_bytes(raw)
             destination = root / 'native'
+            retained_root = root / 'retained' if retained else None
+            if retained:
+                for name in sources.PATHS[:3]:
+                    target = retained_root / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b'wrong' if corrupt_retained else payload)
             if corrupt_existing:
                 target = destination / sources.PATHS[0]
                 target.parent.mkdir(parents=True)
@@ -28,14 +35,15 @@ class NativeSourcesTests(unittest.TestCase):
                     patch.object(sources, 'validate_report'), \
                     patch.object(sources, 'urlopen', side_effect=lambda *args, **kwargs:
                         BytesIO(b'wrong' if corrupt_download else payload)) as download:
-                if corrupt_download or corrupt_existing or invalid_report:
+                if corrupt_download or corrupt_existing or invalid_report or corrupt_retained:
                     with self.assertRaises(ValueError):
-                        sources.restore(report, destination, register_epilogue=register)
+                        sources.restore(report, destination, register_epilogue=register, retained_root=retained_root)
                     self.assertFalse((destination / sources.PATHS[-1]).exists())
-                    if corrupt_existing or invalid_report:
+                    if corrupt_existing or invalid_report or corrupt_retained:
                         download.assert_not_called()
                     return
-                result = sources.restore(report, destination, register_epilogue=register)
+                result = sources.restore(report, destination, register_epilogue=register, retained_root=retained_root)
+                self.assertEqual(download.call_count, (9 if register else 7) - (3 if retained else 0))
                 self.assertEqual(len(result['sources']), 9 if register else 7)
                 self.assertIs(result['register_epilogue'], register)
                 self.assertFalse(result['hardware_qualified'])
@@ -59,3 +67,9 @@ class NativeSourcesTests(unittest.TestCase):
 
     def test_register_adds_pinned_cast_and_physical_packer(self):
         self.exercise(register=True)
+
+    def test_runner_exported_kernels_do_not_require_upstream_download(self):
+        self.exercise(register=True, retained=True)
+
+    def test_corrupt_retained_kernel_is_rejected_without_download_fallback(self):
+        self.exercise(retained=True, corrupt_retained=True)
