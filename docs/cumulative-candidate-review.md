@@ -235,6 +235,13 @@ the disk-pressure gate. Compare full-cycle committed TG and each phase against
 the same-run controls; do not add historic percentages or promote a noisy pair.
 The 200-TG objective and held-out coding-quality acceptance remain open.
 
+CI coverage correction: inspection found that the existing green integration
+workflow used an explicit test list and did not include `test_cumulative*.py`.
+Earlier cumulative counts were local results, not CI coverage. The CPU workflow
+now discovers cumulative, direct-window and compact-score tests explicitly;
+require a green run containing these commands before hardware dispatch. The
+measurement candidate's runtime sources are unchanged by this correction.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.
