@@ -47,6 +47,15 @@ this scope through all feature consumers. Four host tests exercise full-history
 coverage, lifetime protection, failure cleanup and invalid owners. Runtime
 integration and actual cold-versus-hit feature comparisons remain outstanding.
 
+`prefill_prefix_lookup.py` bounds metadata to one entry, matches exact prefix
+tokens and model/drafter/recipe fingerprints, and ties reuse to a session plus
+allocation generation. Prefix-page remapping invalidates the entry; duplicate
+pages or overlap with another slot are rejected. The caller supplies only valid
+physical pages, not padded table entries. This is **not** a device page lease:
+the runtime must still reserve these pages, invalidate before any cold overwrite,
+and publish metadata only after all checkpoint components succeed. Six host
+tests cover changed suffixes, misses, identity changes and ownership conflicts.
+
 ## Remaining integration gates
 
 1. Connect owned KV-prefix storage and captured feature chunks at the native
