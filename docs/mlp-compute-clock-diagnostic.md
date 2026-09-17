@@ -1,6 +1,6 @@
 # Bounded MLP compute-processor timing
 
-**Simulator qualified; hardware qualification pending.**
+**Simulator and small hardware fixture qualified; combined instrumentation pending.**
 
 [Simulator run 35218187889](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35218187889)
 at `bebb0040a29bb81741be4aea31ed1061cc9cc97a` passed in 3m53s.
@@ -9,6 +9,18 @@ changed-input and packed-weight checks, and the missing-execution negative
 control. Process exit and container cleanup are clean. Report SHA-256:
 `027af7feffa73ee1d3fca5c47a265d810e1a59ab27bac9ad07c9faad401f7cb3`.
 This proves simulator execution, not hardware performance or combined TG.
+
+[Hardware run 35219468061](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35219468061)
+at `6027e5b5f3fd372a007b657bddadbb1ac181f491` passes the same numerical and
+180-sample checks. Its hardware step takes 11 seconds, without loading the full
+model. Staging requires the exact simulator source hashes; the hardware kernel
+manifest must match simulation. Independent downloaded-report validation passes,
+and the container exits zero without OOM. Hardware report SHA-256:
+`f95a0a568250b00e338accfc0904e3f2e98646de52e76e7b0d3b6348db143634`.
+
+Next: apply these bounded intervals to the winning combined verifier across
+all 64 MLP layers and two replay positions. The fixture alone does not establish
+which operation dominates the full request; no throughput promotion is justified.
 
 The winning verifier's MLP group takes about 11.4 ms per replay. Reader samples
 and the rejected bank-order change do not identify whether matmul, packing or
