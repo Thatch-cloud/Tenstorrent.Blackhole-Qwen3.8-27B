@@ -16,6 +16,15 @@ The new explicit context uses the same geometry calculation: 4,096 addressable
 64-row KV pages, eight spare cache blocks, and a 262,144-row target sequence.
 Padding for scratch storage is not extra usable model positions.
 
+The captured drafter always evaluates 15 query positions, even when fewer
+tokens are requested. Above position 262,129 that would exceed the fixed RoPE
+limit. The full-window-only staging scope therefore selects the existing
+singleton target path for those final positions. Both request and verifier
+plans use the same guard; the original planner is restored on exit. No draft
+positions are clamped and no extra RoPE positions are generated. This tail
+policy still needs complete hardware output/state acceptance and is included
+in measured TG rather than excluded as overhead.
+
 ## Acceptance order
 
 1. Finish the existing 131,072-token combined hardware request, including its

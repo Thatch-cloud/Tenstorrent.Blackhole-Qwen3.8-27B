@@ -137,6 +137,17 @@ def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False)
     for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
             'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py'):
         result[name] = Path(__file__).with_name(name).read_bytes()
+    if full_window:
+        from frozen_recipe_context import replace_once
+        result['full_window_tail.py'] = Path(__file__).with_name('full_window_tail.py').read_bytes()
+        scope = result['frozen_ladder_cache_scope.py'].decode()
+        scope = replace_once(scope,
+            '    with page_geometry(context) as evidence, audit_scope() as reference_audit:',
+            '    from full_window_tail import runtime_scope as tail_scope\n'
+            '    with tail_scope() as tail, page_geometry(context) as evidence, audit_scope() as reference_audit:\n'
+            "        evidence['full_window_tail'] = tail")
+        compile(scope, 'frozen_ladder_cache_scope.py', 'exec')
+        result['frozen_ladder_cache_scope.py'] = scope.encode()
     for context, digest in digests.items():
         report = qualify(Path(__file__).parent, evidence / context, digest, int(context))
         for name in ('frozen_context_geometry.py', 'ordered_cache.py', 'attention_batch.py'):

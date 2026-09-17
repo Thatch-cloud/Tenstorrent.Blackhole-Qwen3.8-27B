@@ -1,0 +1,39 @@
+import unittest
+
+from attention_request_plan import Capture, ReplayPlan
+from full_window_tail import runtime_scope
+
+
+class FullWindowTailTests(unittest.TestCase):
+    def test_fixed_draft_boundary_and_singleton_tail(self):
+        plan = ReplayPlan(261888, 262144, tuple(Capture(rows, 261888, None)
+            for rows in (1, 2, 4, 8, 16)))
+        original = ReplayPlan.available
+        with runtime_scope() as evidence:
+            self.assertEqual(plan.max_rows(262129, 15), 8)
+            for position in range(262130, 262144):
+                remaining = 262144 - position
+                self.assertEqual(plan.max_rows(position, remaining), 1)
+                self.assertEqual(plan.select(position, 1, remaining).rows, 1)
+                with self.assertRaises(ValueError):
+                    plan.select(position, 2, remaining)
+            with self.assertRaises(ValueError):
+                plan.max_rows(262144, 1)
+        self.assertIs(ReplayPlan.available, original)
+        self.assertTrue(evidence['restored'])
+        self.assertGreater(evidence['target_only_calls'], 0)
+
+    def test_wrong_request_and_missing_singleton_fail_closed(self):
+        for plan in (ReplayPlan(131072, 131328, (Capture(1, 131072, None),)),
+                ReplayPlan(261888, 262400, (Capture(1, 261888, None),)),
+                ReplayPlan(261888, 262144, (Capture(2, 261888, None),))):
+            original = ReplayPlan.available
+            with self.assertRaises(ValueError), runtime_scope() as evidence:
+                position = max(plan.start, 262130) if plan.start == 261888 else plan.start
+                plan.max_rows(position, plan.stop - position)
+            self.assertIs(ReplayPlan.available, original)
+            self.assertTrue(evidence['restored'])
+
+
+if __name__ == '__main__':
+    unittest.main()
