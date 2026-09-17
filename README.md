@@ -28,7 +28,8 @@ and commit—not draft tokens or isolated kernel throughput.
 | 16,384 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 2,564.54 | **50.45** | Passed |
-| 131,072 | — | — | Audit-memory fix awaits hardware; retries blocked by host I/O |
+| 131,072 | 2,124.78 | **53.69** | Passed |
+| 261,888 | — | — | 262,144 total window including 256 output; qualification underway |
 | 262,144 | — | — | Prompt + 256 output tokens exceeds position limit |
 
 These are **offline complete-runtime tests**, not a streaming serving benchmark.
