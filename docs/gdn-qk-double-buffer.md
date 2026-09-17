@@ -1,7 +1,42 @@
 # Two-slot normalized Q/K reader rings
 
-**Simulator-qualified candidate; hardware performance is unqualified.**
-Serving and the winning recipe are unchanged.
+**Combined correctness passes; the performance screen fails. Not promoted.**
+Serving and the winning recipe are unchanged. Do not retry this candidate unchanged.
+
+## Combined hardware result
+
+[Run 35251919204](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35251919204)
+at `9ac4461349dd6852b081491d145e196dfa7dff82` completes in **6m25s**.
+Independent report validation passes both native-reference audits and all four
+timed requests, including exact tokens, target state, inactive slots, feature and
+proposal checks. Each arm commits 242 tokens with 224/300 proposals accepted.
+
+| CTX / streams | Runtime | PP tok/s | Complete-cycle TG tok/s |
+| --- | --- | ---: | ---: |
+| 4,096 / 1 | Unchanged T16 | 3,331.52 | 122.26 |
+| 4,096 / 1 | Double-buffered Q/K | 3,349.04 | 124.35 |
+
+Aggregate TG rises **1.71%**, but paired changes are **+2.05% / +1.36%**,
+below the required >2% in both pairs. More importantly, the changed verifier
+gets slower in both pairs. Mean T16 block timings:
+
+| ABBA request | Draft ms | Verify/readback ms | Commit ms | Whole cycle ms |
+| --- | ---: | ---: | ---: | ---: |
+| Control A | 27.142 | 66.514 | 5.126 | 99.711 |
+| Candidate B | 24.845 | 67.016 | 4.966 | 97.697 |
+| Candidate B | 24.519 | 66.913 | 4.715 | 96.824 |
+| Control A | 25.817 | 66.522 | 4.961 | 98.145 |
+
+The verifier penalty averages **0.446 ms**. Faster drafting accompanies the small
+whole-cycle gain; these observations do not establish that reader buffering
+improved the intended bottleneck. Extra L1 is not justified by this result.
+Setup-inclusive latency also rises from 5,921.22 to 6,119.11 ms.
+
+Exit is zero, no OOM, and all 864 script, 1,520 native and five adapter source
+fingerprints remain unchanged. Report SHA-256:
+`35700e0be291ac19a1b6b69a340d470658462400023cb0c98bc935c55e2d90a1`.
+Held-out coding quality and 200 TG remain unqualified. Further work must address
+larger full-cycle costs rather than infer a speed win from dependency clocks.
 
 ## Simulator result
 
