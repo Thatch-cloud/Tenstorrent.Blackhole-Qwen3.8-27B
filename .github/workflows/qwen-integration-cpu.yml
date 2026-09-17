@@ -62,6 +62,8 @@ jobs:
           python -B -m unittest test_gdn_recurrence_clock_experiment
           python -B -m unittest test_gdn_recurrence_clock_combined_report
           python -B -m unittest test_gdn_input_overlap
+          python -B -m unittest test_gdn_input_overlap_gate test_gdn_input_overlap_scope
+          python -B -m unittest test_gdn_input_overlap_comparison test_gdn_input_overlap_experiment test_gdn_input_overlap_report
           python -B -m unittest test_mlp_compute_clock_capture
           python -B -m unittest test_mlp_compute_clock_report
           python -B -m unittest test_mlp_compute_clock_hardware
