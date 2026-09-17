@@ -226,7 +226,8 @@ This is evidence compatibility, not a new simulator or hardware test result.
 
 The dedicated `qwen-t32-combined-hardware.yml` workflow now connects the historical
 T32 model loader to `t32_combined_experiment.run_loaded_requests`, fetching those
-three retained artifacts. It validates runtime installation, target source pins,
+four retained artifacts, including all 33 T32 commit prefixes from simulator run
+**34654732582** (revalidated against current sources locally). It validates runtime installation, target source pins,
 attention and MLP evidence before loading weights. It uses the existing pinned
 image/cache, both allocated cards, explicit four-link configuration and the same
 exclusive runner group as the ladder. The audit has a 10-minute subprocess cap

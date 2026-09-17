@@ -11,7 +11,7 @@ python3 /experiment-scripts/ci/dspark_runtime_cache.py
 arguments=(--checkpoint /dspark/model.safetensors --config /dspark/config.json --target "$MODEL_WEIGHTS_DIR"
     --proposal-evidence /evidence/proposal/t32-combined.json
     --score-evidence /evidence/score/t32-markov.json
-    --attention-evidence /evidence/attention/t32-attention.json)
+    --attention-evidence /evidence/attention/t32-attention.json --commit-evidence /evidence/commit)
 python3 -u /experiment-scripts/ci/t32-combined-hardware.py "${arguments[@]}" \
     --preflight --output /experiment/results/t32-preflight.json
 set +e

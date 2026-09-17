@@ -21,7 +21,7 @@ class CombinedCliTests(unittest.TestCase):
             target = Path(temporary) / '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
             arguments = ['probe', '--preflight', '--checkpoint', 'weights', '--config', 'config.json',
                 '--target', str(target), '--output', str(output), '--proposal-evidence', 'proposal.json',
-                '--score-evidence', 'score.json', '--attention-evidence', 'attention.json']
+                '--score-evidence', 'score.json', '--attention-evidence', 'attention.json', '--commit-evidence', 'commit']
             def digest(value):
                 if str(value) == 'config.json':
                     return module.FILES['config.json'][1]
@@ -32,6 +32,7 @@ class CombinedCliTests(unittest.TestCase):
                     patch.object(module, 'composition_audit', return_value={'component': True}), \
                     patch.object(module, 'qualify_request', return_value={'attention': True}), \
                     patch('fused_t16_admission.qualify_simulator', return_value={'mlp': True}), \
+                    patch('t32_commit_gate.qualify', return_value={'prefixes': 33}), \
                     patch('t32_hardware_kernel.installed', return_value=nullcontext({'runtime': True})) as installed, \
                     patch.object(module, 'run_request') as loaded:
                 module.main()

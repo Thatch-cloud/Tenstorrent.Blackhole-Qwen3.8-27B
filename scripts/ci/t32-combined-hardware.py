@@ -32,7 +32,7 @@ def load_rotary(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('checkpoint', 'config', 'target', 'output', 'proposal-evidence', 'score-evidence', 'attention-evidence'):
+    for name in ('checkpoint', 'config', 'target', 'output', 'proposal-evidence', 'score-evidence', 'attention-evidence', 'commit-evidence'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
     options = parser.parse_args()
@@ -46,6 +46,8 @@ def main():
             hardware_mask_compatibility=True))
     from fused_t16_admission import qualify_simulator
     admission['target_mlp'] = qualify_simulator()
+    from t32_commit_gate import qualify as qualify_commit
+    admission['target_commit'] = qualify_commit(options.commit_evidence)
     from importlib.util import spec_from_file_location, module_from_spec
     spec = spec_from_file_location('target_loader_metadata', directory / 'dspark-target-hardware.py')
     metadata = module_from_spec(spec)

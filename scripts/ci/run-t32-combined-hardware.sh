@@ -6,6 +6,7 @@ test -z "${TT_METAL_SIMULATOR:-}"
 test -f experiment-evidence/proposal/t32-combined.json
 test -f experiment-evidence/score/t32-markov.json
 test -f experiment-evidence/attention/t32-attention.json
+test -f experiment-evidence/commit/t32-commit.json
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
 fixture=/home/thatch/.cache/qwen-experiments/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B

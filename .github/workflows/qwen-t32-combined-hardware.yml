@@ -27,6 +27,7 @@ jobs:
           gh run download 34660555430 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34660555430 --dir experiment-evidence/proposal
           gh run download 35177332339 --repo "$GITHUB_REPOSITORY" --name qwen-t32-score-35177332339 --dir experiment-evidence/score
           gh run download 34590151457 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34590151457 --dir experiment-evidence/attention
+          gh run download 34654732582 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34654732582 --dir experiment-evidence/commit
       - name: Check disk pressure before weight loading
         working-directory: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
