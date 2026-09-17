@@ -1,6 +1,40 @@
 # Bounded MLP compute-processor timing
 
-**Simulator and small hardware fixture qualified; combined instrumentation pending.**
+**Simulator, small hardware fixture and combined 4K diagnostic qualified.**
+
+## Combined result
+
+[Run 35221730435](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35221730435)
+at `43e0c61c34cc335551b43b2a7c4100c3d101e9b8` passes in **3m57s**.
+All 4,608 samples cover 64 layers, both chips, three processors, six intervals
+and replay positions 4,096/4,109. Independent validation confirms native tokens,
+state, all five feature taps, proposals, 256 packed-weight checks and unchanged
+source fingerprints. Container exit is zero without OOM. Report SHA-256:
+`7c656e3f7300970d23fc4dd4d35c9c01476b1772fcf6ebf724dceb198799d6e6`.
+
+| Selected interval and processor | Chip 0 median cycles | Chip 1 median cycles |
+| --- | ---: | ---: |
+| Input/weight wait, UNPACK | 3,540 | 3,620 |
+| Matmul issue including stalls, MATH | 4,088.5 | 4,169 |
+| Partial handoff/pack, PACK | 168 | 168 |
+| Final reload, UNPACK / MATH | 541 / 2,626 | 540 / 2,642.5 |
+| Gate rounding/handoff/pack, PACK | 4,981 | 5,009 |
+| Rounded-product epilogue, MATH | 5,749 | 5,749 |
+
+Across the 128 layer/replay observations on each chip, the MATH issue interval
+tracks UNPACK's input/weight wait almost perfectly (Pearson r > 0.999998).
+Their median paired difference is 545/544 cycles; this is **not** an arithmetic
+cost estimate because processor intervals are asynchronous. The evidence points
+to operand readiness driving much of this sampled MATH interval, not proof of
+matrix-unit saturation. The partial-pack interval is small at this sample.
+
+Next kernel selection should address operand delivery or the rounded epilogue,
+not assume holding accumulators longer will remove the observed wait. The
+previous bank-order and deeper-buffer candidates already failed combined TG;
+do not repeat those unchanged. Any epilogue candidate must preserve intermediate
+BF16 rounding and undergo exact simulator checks before a matched combined run.
+These overlapping samples cannot be summed into a per-request speedup. No
+performance promotion or new committed-TG result is claimed.
 
 [Simulator run 35218187889](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35218187889)
 at `bebb0040a29bb81741be4aea31ed1061cc9cc97a` passed in 3m53s.
@@ -35,7 +69,7 @@ The adapter requires explicit `QWEN_MLP_COMPUTE_CLOCK_COMBINED=1`; ordinary
 ladder and serving routes are unchanged. Hardware admission pins both the
 simulator and fixture report hashes and the instrumented projection source.
 Fresh full-recipe staging and host ownership/report tests pass. Combined
-hardware qualification is pending. PP/TG remain null because poisoning,
+hardware qualification is recorded above. PP/TG remain null because poisoning,
 synchronization and readback intentionally perturb request timing.
 
 First combined attempt `35220106378` stopped at fusion admission, before
