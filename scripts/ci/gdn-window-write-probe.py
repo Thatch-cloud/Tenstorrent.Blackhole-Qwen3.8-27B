@@ -9,6 +9,7 @@ from pathlib import Path
 from attention_batch import capture_operation
 from feature_projection import require_projection_environment
 from gdn_conv_windows import build_windows as compact
+from gdn_multitoken_conv import addresses, release_owned
 import importlib.util
 
 
@@ -18,12 +19,12 @@ def candidate(mesh, projected, history):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.build_windows(mesh, projected, history)
-from gdn_multitoken_conv import addresses, release_owned
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--logical-width', type=int, choices=(8240, 8256), default=8240)
     options = parser.parse_args()
     require_projection_environment(os.environ, False)
     if options.output.exists():
@@ -38,7 +39,8 @@ def main():
     def hashes():
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in sources}
     report = dict(passed=False, closed_cleanly=False, backend='simulator', sources=hashes(),
-        checks=[], immutable_checks=[], hardware_qualified=False, scope=__doc__, timing_qualified=False)
+        checks=[], immutable_checks=[], hardware_qualified=False, scope=__doc__, timing_qualified=False,
+        logical_width=options.logical_width)
     mesh, owned, traces = None, [], []
     def save(stage):
         report['stage'] = stage
@@ -46,7 +48,7 @@ def main():
         print(json.dumps(dict(stage=stage)), flush=True)
     def fixture(seed):
         generator = torch.Generator().manual_seed(385100 + seed)
-        projected = torch.randn((2, 16, 8256), generator=generator).to(torch.bfloat16)
+        projected = torch.randn((2, 16, options.logical_width), generator=generator).to(torch.bfloat16)
         history = [torch.randn((2, 8, 5120), generator=generator).to(torch.bfloat16) for slot in range(4)]
         for slot, value in enumerate(history):
             for chip in range(2):
