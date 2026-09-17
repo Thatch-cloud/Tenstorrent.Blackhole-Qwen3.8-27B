@@ -107,6 +107,11 @@ def main():
         payloads.update(wide_cache_payloads(scripts, options.wide_cache_evidence,
             payloads['dspark_request_experiment.py']))
     if options.full_window_cache_evidence:
+        from full_window_geometry_admission import adapt as adapt_geometry_admission
+        payloads['frozen_combined_runtime.py'] = adapt_geometry_admission(
+            payloads['frozen_combined_runtime.py'].decode()).encode()
+        payloads['full_window_geometry_admission.py'] = Path(__file__).with_name(
+            'full_window_geometry_admission.py').read_bytes()
         payloads.update(wide_cache_payloads(scripts, options.full_window_cache_evidence,
             payloads['dspark_request_experiment.py'], full_window=True))
     for name, payload in payloads.items():

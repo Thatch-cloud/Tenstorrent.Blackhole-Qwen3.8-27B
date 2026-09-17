@@ -83,3 +83,11 @@ with clean device closure and unchanged source fingerprints. Report SHA-256:
 The full-window hardware workflow now consumes this pinned report, not either
 timed-out attempt. This qualifies page-cache operations only, not model TG or
 the full-window combined request; those still require hardware acceptance.
+
+Hardware run **35191651862** stopped before model loading: historical component
+admission rejected the added `261888` entry in `frozen_context_geometry.py`.
+The full-window-only adapter now admits exactly that pinned source delta:
+removing the single context-list entry must reproduce the original report hash.
+All other component hashes remain mandatory. Local replay of actual historical
+component reports verifies all 42 component sources with this adapter; geometry
+math or unrelated edits still fail. This does not grant full-request acceptance.
