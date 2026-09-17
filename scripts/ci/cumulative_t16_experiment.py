@@ -1,0 +1,69 @@
+"""Native versus direct-window plus compact-score complete T16 requests."""
+
+from contextlib import contextmanager
+import hashlib
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+import gdn_direct_window_experiment as direct_experiment
+from compact_score_gate import qualify, REPORT_SHA256
+from cumulative_t16_scope import scoped_cumulative_t16, validate_request
+from gdn_direct_window_comparison import repeatability
+
+
+COMPACT_FILES = ('compact_score_gate.py', 'compact_score_report.py', 'compact_score_hardware_sources.py',
+    'compact_score_scope.py', 'compact_score_device.py', 'compact_markov.py', 'compact-score-probe.py',
+    'compact_score_hardware_device.py', 'compact_score_hardware_markov.py',
+    'compact_score_io.cpp', 'compact_score_compute.cpp', 'compact_score_reduce.cpp')
+FILES = tuple(dict.fromkeys(direct_experiment.FILES + COMPACT_FILES +
+    ('cumulative_t16_experiment.py', 'cumulative_t16_scope.py')))
+
+
+def run_loaded_requests(operations, generator, model, collectives, tokenizer, pages, kv_cache, parameters,
+        layer_weights, predecessor, successor, rotary, report, progress, **options):
+    if any(os.environ.get(name) != '1' for name in ('QWEN_CUMULATIVE_T16', 'QWEN_COMPACT_SCORE_HARDWARE')):
+        raise ValueError('Explicit cumulative T16 and compact-score opt-ins required')
+    directory = Path(__file__).parent
+    evidence = qualify(directory, directory / 'compact-score-evidence')
+
+    def fingerprints():
+        return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in FILES}
+
+    sources, audits = fingerprints(), []
+
+    @contextmanager
+    def combined(direct_admission, source_directory):
+        if Path(source_directory).resolve() != directory.resolve():
+            raise ValueError('Both components must come from the same staged runtime')
+        with scoped_cumulative_t16(direct_admission, evidence, directory) as audit:
+            audits.append(audit)
+            yield audit['direct']
+
+    try:
+        with patch.object(direct_experiment, 'scoped_direct_windows', combined):
+            direct_experiment.run_loaded_requests(operations, generator, model, collectives, tokenizer,
+                pages, kv_cache, parameters, layer_weights, predecessor, successor, rotary, report, progress, **options)
+        requests = report.get('request_checks', [])
+        if len(requests) != 6 or len(audits) != 3:
+            raise ValueError('Complete two-audit ABBA cumulative schedule required')
+        pending = iter(audits)
+        for request, (enabled, audited) in zip(requests, direct_experiment.SCHEDULE, strict=True):
+            if (request.get('gdn_direct_window', {}).get('direct') is not enabled
+                    or request.get('instrumented_timing') is not audited):
+                raise ValueError('Cumulative schedule identity changed')
+            audit = next(pending) if enabled else None
+            if enabled:
+                validate_request(request, audit)
+            request['compact_score'] = dict(compact=enabled,
+                hits=audit['compact']['calls'] if enabled else 0,
+                report_sha256=REPORT_SHA256 if enabled else None, restored=True)
+        report.update(cumulative_t16=True, cumulative_components=['direct_windows', 'compact_scores'],
+            cumulative_route_diagnostics=audits,
+            cumulative_measurement_quality=repeatability(report['gdn_direct_window_comparison']),
+            scope='Native retained T16 versus direct windows and compact draft selection together')
+    finally:
+        report['cumulative_sources'] = sources
+        report['cumulative_sources_after'] = fingerprints()
+        if report['cumulative_sources_after'] != sources or qualify(directory, directory / 'compact-score-evidence') != evidence:
+            raise ValueError('Cumulative sources or compact admission changed')

@@ -6,6 +6,17 @@ is measured, but unstable control timing requires repetition before promotion.
 
 ## First combined hardware result
 
+Attempt 2 of the same run also passes correctness, but fails repeatability:
+native TG **78.35 / 34.37**, direct **85.06 / 129.41**. Mean selection/commit
+times are 55.65 / 256.25 ms for native and 50.43 / 4.93 ms for direct.
+Verifier means remain 67.54 / 67.43 ms versus 63.75 / 63.05 ms.
+Do not promote the apparent aggregate +114.83% gain. The stalls recur across
+both arms; their cause is not established. All samples remain included.
+Attempt-2 report SHA-256:
+`7a6f0b6a954a2bbb6ee5a59f4b2180e6b18380eff2e4c9e87b3d29d0aeb63614`.
+The next experiment composes direct windows with compact draft selection;
+it does not silently discard either failed-repeatability result.
+
 Run **35273229698**, revision `b16f936`, passes in about seven minutes.
 Both audited requests and four timed requests preserve exact tokens, target
 state and inactive slots. Each candidate builds 96 direct-window calls, with

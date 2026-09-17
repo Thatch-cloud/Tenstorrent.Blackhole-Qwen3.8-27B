@@ -103,4 +103,9 @@ composition; they must not be advertised as established incremental gains.
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.
-This is not yet a staged hardware experiment or a performance result.
+The cumulative request driver now runs both components in the same candidate
+requests, retaining native controls, two audits and ABBA timing. It verifies
+both route hit counts and all source fingerprints. A separate report validator
+requires both component identities, complete request correctness and repeatability.
+The staging workflow retains both simulator admissions and loads weights once.
+There is no cumulative hardware performance result yet.
