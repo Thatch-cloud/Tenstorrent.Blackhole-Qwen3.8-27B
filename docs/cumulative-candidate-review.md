@@ -200,6 +200,25 @@ measurements, and composition with the wider-down request scope. Fifth-component
 candidate payload/evidence staging and CI activation remain pending. No hardware
 or precision change was made while the user requested the hardware pause.
 
+Five-component staging now passes against real retained evidence in
+`D:\qwen-cumulative-five-stage-20260918`. It rebuilds the exact admitted epilogue
+payload, verifies its simulator report (35238822290), and checks both physical
+rounding headers against the pinned runtime. All five admissions pass together;
+this is source/staging qualification, not combined hardware acceptance.
+
+| CI tag family | Candidate components |
+| --- | --- |
+| `experiment/cumulative-t16-v*` | Direct windows + compact drafting |
+| `experiment/cumulative-t16-down-v*` | Above + wider MLP down |
+| `experiment/cumulative-t16-stack-v*` | Above + norm scatter |
+| `experiment/cumulative-t16-full-v*` | Above + register epilogue |
+
+The new five-component lane is prepared but not dispatched. All lanes retain
+unchanged controls, complete-request audits/ABBA timing, the I/O gate, exclusive
+card ownership and independent report validation. No inference precision or
+serving default changes. The host suite has 36 cumulative tests; neither that
+count nor successful source staging establishes a throughput improvement.
+
 Implementation started: `cumulative_t16_scope.py` composes direct windows and
 compact selection for one request. Three host tests cover simultaneous scope
 activation, component entry failure, request failure and both-route engagement.

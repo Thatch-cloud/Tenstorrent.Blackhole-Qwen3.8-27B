@@ -8,20 +8,24 @@ import shutil
 
 from compact_score_gate import qualify
 from compact_score_hardware_sources import payloads as hardware_payloads
-from cumulative_t16_experiment import COMPACT_FILES, DOWN_FILES, NORM_FILES, REGISTER_FILES
+from cumulative_t16_experiment import COMPACT_FILES, DOWN_FILES, NORM_FILES, REGISTER_FILES, REGISTER_PAYLOADS
 from frozen_recipe_context import replace_once
 from mlp_down_grid_gate import qualify as qualify_down
 from shared_qk_norm_scatter_gate import qualify as qualify_scatter
 from frozen_gdn_norm_gate import qualify as qualify_prefetch
+from mlp_register_epilogue_gate import stage_candidate as stage_register, qualify as qualify_register
 
 
-def stage(checkout, evidence, manifest, *, down_evidence=None, native_root=None, norm_report=None):
+def stage(checkout, evidence, manifest, *, down_evidence=None, native_root=None, norm_report=None,
+          register_evidence=None):
     directory, scripts = Path(__file__).parent, Path(checkout) / 'scripts/ci'
     manifest = Path(manifest)
-    if manifest.exists() or (scripts / 'compact-score-evidence').exists():
+    if (manifest.exists() or (scripts / 'compact-score-evidence').exists()
+            or (scripts / 'register-epilogue-evidence').exists()
+            or (scripts / 'mlp-register-epilogue-candidate').exists()):
         raise ValueError('Fresh cumulative staging required')
     qualify(directory, evidence)
-    if (down_evidence is not None or norm_report is not None) != (native_root is not None):
+    if any(value is not None for value in (down_evidence, norm_report, register_evidence)) != (native_root is not None):
         raise ValueError('Optional component evidence and pinned runtime sources must be supplied together')
     down = qualify_down(down_evidence, directory, native_root) if down_evidence is not None else None
     norm = qualify_scatter(norm_report, directory, native_root) if norm_report is not None else None
@@ -52,6 +56,7 @@ def stage(checkout, evidence, manifest, *, down_evidence=None, native_root=None,
         '    -e "QWEN_DSPARK_MODE=$mode"',
         '    -e "QWEN_CUMULATIVE_T16=${QWEN_CUMULATIVE_T16:-0}" \\\n'
         '    -e "QWEN_CUMULATIVE_NORM=${QWEN_CUMULATIVE_NORM:-0}" \\\n'
+        '    -e "QWEN_CUMULATIVE_REGISTER=${QWEN_CUMULATIVE_REGISTER:-0}" \\\n'
         '    -e "QWEN_CUMULATIVE_MLP_DOWN=${QWEN_CUMULATIVE_MLP_DOWN:-0}" \\\n'
         '    -e "QWEN_COMPACT_SCORE_HARDWARE=${QWEN_COMPACT_SCORE_HARDWARE:-0}" \\\n'
         '    -e "QWEN_DSPARK_MODE=$mode"')
@@ -70,12 +75,22 @@ def stage(checkout, evidence, manifest, *, down_evidence=None, native_root=None,
         shutil.copytree(down_evidence, scripts / 'mlp-down-grid-evidence')
         if qualify_down(scripts / 'mlp-down-grid-evidence', scripts, native_root) != down:
             raise ValueError('Staged down-grid admission differs')
+    register, register_sources = None, {}
+    if register_evidence is not None:
+        stage_register(scripts)
+        shutil.copytree(register_evidence, scripts / 'register-epilogue-evidence')
+        register = qualify_register(scripts, scripts / 'register-epilogue-evidence', runtime_root=native_root)
+        register_sources = {name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
+                            for name in REGISTER_PAYLOADS}
     result = dict(compact_admission=admission,
         before={name: hashlib.sha256(source).hexdigest() for name, source in originals.items()},
-        after={name: hashlib.sha256(source.encode()).hexdigest() for name, source in payloads.items()},
+        after=dict({name: hashlib.sha256(source.encode()).hexdigest() for name, source in payloads.items()},
+                   **register_sources),
         components=['direct_windows', 'compact_scores'] + (['wider_mlp_down'] if down is not None else [])
-            + (['norm_scatter'] if norm is not None else []),
-        down_admission=down, norm_admission=norm, hardware_qualified=False, performance_qualified=False)
+            + (['norm_scatter'] if norm is not None else [])
+            + (['register_epilogue'] if register is not None else []),
+        down_admission=down, norm_admission=norm, register_admission=register,
+        hardware_qualified=False, performance_qualified=False)
     manifest.write_text(json.dumps(result, indent=2) + '\n')
     return result
 
@@ -88,6 +103,8 @@ if __name__ == '__main__':
     parser.add_argument('--down-evidence', type=Path)
     parser.add_argument('--native-root', type=Path)
     parser.add_argument('--norm-report', type=Path)
+    parser.add_argument('--register-evidence', type=Path)
     options = parser.parse_args()
     stage(options.checkout, options.evidence, options.manifest,
-          down_evidence=options.down_evidence, native_root=options.native_root, norm_report=options.norm_report)
+          down_evidence=options.down_evidence, native_root=options.native_root, norm_report=options.norm_report,
+          register_evidence=options.register_evidence)

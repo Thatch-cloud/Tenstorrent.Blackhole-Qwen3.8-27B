@@ -10,8 +10,9 @@ import cumulative_t16_stage as staging
 class CumulativeStageTests(unittest.TestCase):
     def test_both_component_sets_stage_with_explicit_down_admission(self):
         source = Path(staging.__file__).parent
-        for with_down, with_norm in ((False, False), (True, False), (False, True), (True, True)):
-            with self.subTest(with_down=with_down, with_norm=with_norm), TemporaryDirectory() as temporary:
+        for with_down, with_norm, with_register in ((False, False, False), (True, False, False),
+                (False, True, False), (True, True, False), (True, True, True)):
+            with self.subTest(with_down=with_down, with_norm=with_norm, with_register=with_register), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 scripts = root / 'scripts/ci'
                 scripts.mkdir(parents=True)
@@ -27,14 +28,29 @@ class CumulativeStageTests(unittest.TestCase):
                 evidence = root / 'evidence'
                 evidence.mkdir()
                 (evidence / 'fixture.json').write_text('{}')
+
+                def register_payloads(directory):
+                    for name in staging.REGISTER_PAYLOADS:
+                        path = directory / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text('fixture')
+
                 with patch.object(staging, 'qualify', return_value={'compact': True}), \
+                        patch.object(staging, 'stage_register', side_effect=register_payloads) as register_stage, \
+                        patch.object(staging, 'qualify_register', return_value={'register': True}) as register_gate, \
                         patch.object(staging, 'qualify_prefetch') as prefetch, \
                         patch.object(staging, 'qualify_scatter', return_value={'scatter': True}) as scatter, \
                         patch.object(staging, 'qualify_down', return_value={'down': True}) as qualify_down:
                     result = staging.stage(root, evidence, root / 'manifest.json',
                         down_evidence=evidence if with_down else None,
                         native_root=root if with_down or with_norm else None,
-                        norm_report=evidence / 'fixture.json' if with_norm else None)
+                        norm_report=evidence / 'fixture.json' if with_norm else None,
+                        register_evidence=evidence if with_register else None)
+                self.assertEqual(register_stage.call_count, int(with_register))
+                self.assertEqual(register_gate.call_count, int(with_register))
+                self.assertEqual('register_epilogue' in result['components'], with_register)
+                self.assertEqual((scripts / 'register-epilogue-evidence').exists(), with_register)
+                self.assertEqual(all(name in result['after'] for name in staging.REGISTER_PAYLOADS), with_register)
                 self.assertEqual(qualify_down.call_count, 2 if with_down else 0)
                 self.assertEqual(prefetch.call_count, 2 if with_norm else 0)
                 self.assertEqual(scatter.call_count, 2 if with_norm else 0)

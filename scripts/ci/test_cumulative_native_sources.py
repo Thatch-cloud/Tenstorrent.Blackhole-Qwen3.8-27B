@@ -10,7 +10,7 @@ import cumulative_native_sources as sources
 
 
 class NativeSourcesTests(unittest.TestCase):
-    def exercise(self, *, corrupt_download=False, corrupt_existing=False, invalid_report=False):
+    def exercise(self, *, corrupt_download=False, corrupt_existing=False, invalid_report=False, register=False):
         payload = b'pinned native source'
         expected = hashlib.sha256(payload).hexdigest()
         raw = json.dumps(dict(sources={'/opt/tt-metal/' + name: expected for name in sources.PATHS})).encode()
@@ -24,23 +24,25 @@ class NativeSourcesTests(unittest.TestCase):
                 target.parent.mkdir(parents=True)
                 target.write_bytes(b'wrong')
             with patch.object(sources, 'REPORT_SHA256', 'invalid' if invalid_report else hashlib.sha256(raw).hexdigest()), \
+                    patch.object(sources, 'TYPECAST', expected), patch.object(sources, 'HARDWARE_PACKER', expected), \
                     patch.object(sources, 'validate_report'), \
                     patch.object(sources, 'urlopen', side_effect=lambda *args, **kwargs:
                         BytesIO(b'wrong' if corrupt_download else payload)) as download:
                 if corrupt_download or corrupt_existing or invalid_report:
                     with self.assertRaises(ValueError):
-                        sources.restore(report, destination)
+                        sources.restore(report, destination, register_epilogue=register)
                     self.assertFalse((destination / sources.PATHS[-1]).exists())
                     if corrupt_existing or invalid_report:
                         download.assert_not_called()
                     return
-                result = sources.restore(report, destination)
-                self.assertEqual(len(result['sources']), 7)
+                result = sources.restore(report, destination, register_epilogue=register)
+                self.assertEqual(len(result['sources']), 9 if register else 7)
+                self.assertIs(result['register_epilogue'], register)
                 self.assertFalse(result['hardware_qualified'])
                 for call in download.call_args_list:
                     self.assertIn('/' + sources.REVISION + '/', call.args[0])
                 download.reset_mock()
-                self.assertEqual(sources.restore(report, destination), result)
+                self.assertEqual(sources.restore(report, destination, register_epilogue=register), result)
                 download.assert_not_called()
 
     def test_pinned_download_and_verified_reuse(self):
@@ -54,3 +56,6 @@ class NativeSourcesTests(unittest.TestCase):
 
     def test_unqualified_report_cannot_request_downloads(self):
         self.exercise(invalid_report=True)
+
+    def test_register_adds_pinned_cast_and_physical_packer(self):
+        self.exercise(register=True)
