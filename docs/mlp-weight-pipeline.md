@@ -1,6 +1,17 @@
 # Two in-flight MLP weight blocks
 
-**Unqualified candidate; no throughput claim or serving change.**
+**Simulator qualified; combined hardware performance unqualified.**
+
+[Simulator run 35223012166](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35223012166)
+at `3f6f6cb582cfdbd9a72834d8a9ade85e7c004b5a` passes in **3m55s**.
+Independent validation confirms both-chip native-exact T16 eager output,
+all 12 changed-input replay comparisons, four stale-input negative controls,
+four packed-weight comparisons, zero exit and clean container teardown.
+Report SHA-256:
+`abbb01d1ece1b625c19909263c9a45eab5fa859d46d27e265cd84e1535166371`.
+Next admission must bind the generated reader and unchanged projection to this
+report before a matched combined baseline/candidate hardware comparison.
+No throughput claim, default change or hardware promotion follows from SIM.
 
 Combined timing run `35221730435` shows the sampled MATH issue interval tracks
 UNPACK input/weight readiness. Earlier read-order and larger-buffer trials did
