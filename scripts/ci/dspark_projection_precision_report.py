@@ -8,6 +8,38 @@ from pathlib import Path
 from dspark_projection_precision_stage import PROJECTIONS
 
 
+SOURCE_NAMES = (
+    'dspark-projection-precision-probe.py', 'dspark_projection_precision.py',
+    'dspark_layer.py', 'dspark_projection.py', 'dspark_weights.py',
+    'dspark_checkpoint.py', 'dspark_intake.py', 'attention_batch.py', 'gdn_multitoken_conv.py',
+)
+
+
+def validate_set(reports, *, expected_sources, checkpoint_sha256):
+    def valid_digest(value):
+        return (isinstance(value, str) and len(value) == 64 and value != '0' * 64
+            and all(character in '0123456789abcdef' for character in value))
+
+    if (set(expected_sources) != set(SOURCE_NAMES)
+            or not all(valid_digest(value) for value in expected_sources.values())
+            or not valid_digest(checkpoint_sha256)):
+        raise ValueError('Complete independently supplied source and checkpoint fingerprints required')
+    if len(reports) != len(PROJECTIONS):
+        raise ValueError('All seven projection reports required')
+    checked = {}
+    for report in reports:
+        projection = report.get('projection')
+        if projection not in PROJECTIONS or projection in checked:
+            raise ValueError('Each expected projection must occur exactly once')
+        if (report.get('sources') != expected_sources
+                or report.get('weight_sha256') != checkpoint_sha256):
+            raise ValueError('Projection evidence differs from admitted source or checkpoint identity')
+        checked[projection] = validate(report, projection=projection)
+    return dict(component_execution_passed=True, target_correctness_qualified=False,
+        committed_tg=None, projections=checked, sources=dict(expected_sources),
+        checkpoint_sha256=checkpoint_sha256)
+
+
 def validate(report, *, projection='self_attn.q_proj.weight'):
     if projection not in PROJECTIONS:
         raise ValueError('Supported expected projection required')

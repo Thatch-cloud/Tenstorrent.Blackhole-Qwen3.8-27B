@@ -47,6 +47,23 @@ its report hash is
 `1cd094769e75979dc687ed06302087c27ca2b095cf3cd4415db0f0e43905bf18`.
 The matrix is not yet complete; no broader admission follows from this result.
 
+Value and output projections also pass independent validation, each with six
+exact poisoned replays, five integrity checks and clean container teardown.
+Their HiFi2/HiFi4 RMS differences are 0.00913–0.00941 and 0.00614–0.00625,
+respectively; neither is numerical equivalence or a throughput result.
+Report hashes:
+
+| Projection | SHA-256 |
+| --- | --- |
+| Value | `33d1cebe54648ff48180b228011f48c270a8b0810b3be75a10207c5271c14e3a` |
+| Output | `649f2f11c50d691bbb3842da5a541af9fba29ccdd21648163af1a7b40e99a23d` |
+
+The report validator now also checks a complete seven-projection set against
+independently supplied source and checkpoint fingerprints. Missing or duplicate
+projections, source drift and partial replay evidence fail closed. This is only
+the component evidence gate; native runtime identity and combined correctness
+still require separate admission.
+
 `dspark_layer_precision.py` supplies the pending integration boundary: an explicit
 operations proxy for one proposal layer, requiring all seven expected projection
 shapes in order. It does not patch shared TT-NN operations, change history setup,

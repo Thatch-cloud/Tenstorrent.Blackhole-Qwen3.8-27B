@@ -1,6 +1,7 @@
 import unittest
 
-from dspark_projection_precision_report import validate
+from dspark_projection_precision_report import SOURCE_NAMES, validate, validate_set
+from dspark_projection_precision_stage import PROJECTIONS
 
 
 def fixture():
@@ -17,6 +18,44 @@ def fixture():
 
 
 class PrecisionReportTests(unittest.TestCase):
+    def complete_set(self):
+        sources = {name: 'a' * 64 for name in SOURCE_NAMES}
+        reports = []
+        for projection in PROJECTIONS:
+            report = fixture()
+            report.update(projection=projection, sources=dict(sources), sources_after=dict(sources),
+                weight_sha256='b' * 64)
+            reports.append(report)
+        return reports, sources
+
+    def test_complete_set_requires_exact_identity_without_quality_claim(self):
+        reports, sources = self.complete_set()
+        result = validate_set(list(reversed(reports)), expected_sources=sources, checkpoint_sha256='b' * 64)
+        self.assertEqual(set(result['projections']), set(PROJECTIONS))
+        self.assertFalse(result['target_correctness_qualified'])
+        self.assertIsNone(result['committed_tg'])
+
+    def test_set_rejects_missing_duplicate_changed_or_incomplete_evidence(self):
+        for mutate in (lambda reports: reports.pop(),
+                lambda reports: reports.append(reports[0]),
+                lambda reports: reports[-1].update(projection=PROJECTIONS[0]),
+                lambda reports: reports[-1]['sources'].update({'dspark_layer.py': 'c' * 64}),
+                lambda reports: reports[-1].update(weight_sha256='c' * 64),
+                lambda reports: reports[-1]['replay_checks'].pop()):
+            reports, sources = self.complete_set()
+            mutate(reports)
+            with self.assertRaises(ValueError):
+                validate_set(reports, expected_sources=sources, checkpoint_sha256='b' * 64)
+
+    def test_set_rejects_invalid_external_identities(self):
+        reports, sources = self.complete_set()
+        for invalid in ('', '0' * 64, 'g' * 64, None):
+            with self.assertRaises(ValueError):
+                validate_set(reports, expected_sources=sources, checkpoint_sha256=invalid)
+        sources.pop(SOURCE_NAMES[0])
+        with self.assertRaises(ValueError):
+            validate_set(reports, expected_sources=sources, checkpoint_sha256='b' * 64)
+
     def test_projection_identity_cannot_be_substituted(self):
         report = fixture()
         report['projection'] = 'mlp.down_proj.weight'
