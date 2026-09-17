@@ -47,6 +47,15 @@ execution and two changed-input replays on both chips, including whole logical
 destination state and source preservation. Kernel correctness remains unproven
 until its report passes; KV routing and combined multi-user integration remain separate gates.
 
+Simulator attempts (17 September): run 35176302618 failed during checkout;
+the workflow now uses a fresh per-attempt checkout directory. Run 35176440059
+passed checkout but timed out after 30 seconds in Docker preflight creation,
+before opening a mesh or executing the kernel. Retained host diagnostics show
+59.34% full I/O stall over the recent 10-second window (41.78% over 60 seconds);
+the named preflight container did not exist when inspected. This is a host setup
+failure, not a numerical failure or simulator pass. Avoid increasing kernel
+timeouts or changing the candidate to address disk contention.
+
 ## Measurement contract
 
 - Keep model/image/kernel pins, prompt token IDs, sampler, output policy and warmup
