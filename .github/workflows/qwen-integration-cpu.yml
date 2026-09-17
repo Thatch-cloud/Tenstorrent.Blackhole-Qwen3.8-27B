@@ -81,6 +81,7 @@ jobs:
           python -B -m unittest test_mlp_weight_pipeline
           python -B -m unittest test_mlp_k_block
           python -B -m unittest test_mlp_k_block_gate
+          python -B -m unittest test_mlp_k_block_experiment test_mlp_k_block_comparison test_mlp_k_block_report
           python -B -m unittest test_dspark_projection_precision
           python -B -m unittest test_dspark_layer_precision
           python -B -m unittest test_dspark_precision_comparison
