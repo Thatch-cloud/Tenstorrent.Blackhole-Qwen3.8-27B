@@ -2,8 +2,6 @@ name: Qwen T16 T32 integration CPU
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [integration/main-recipe-20260917]
 permissions:
   contents: read
 concurrency:

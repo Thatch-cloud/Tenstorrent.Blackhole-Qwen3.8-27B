@@ -19,12 +19,16 @@ or new T32 performance claim follows from integrating the source.
 | Shared full-request, fusion, SDPA, profiling and routing regression tests | 47 tests; pass with one Linux-only skip on Windows |
 | Frozen ladder guards, source pins, prompt, cache and audit ownership | 25 tests pass locally |
 | Default generated SDPA replacements and signature vs T16 parent | Exact equality |
-| Linux CPU CI | Required before merge |
+| Linux CPU CI | [35175404913](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35175404913): all 138 tests pass, no skips |
+| Frozen T16 source staging after merge | Recipe, draft-tail and wide-cache ladder stages pass against the exact frozen checkout and retained evidence |
 | Fresh T32 changed-input simulator replay after integration | Pending |
 | Matched combined T16/T32 hardware PP/CTX/TG and state audit | Pending; host backlog first |
 
 Local checks use Python 3.11, CPU torch 2.14.0 and NumPy 2.4.6. They load small
 test fixtures, not the 27B checkpoint, and do not establish hardware correctness.
+Linux CI completes in under a minute; its 138 tests take about four seconds.
+This admits integration of guarded experimental source, not T32 promotion into
+the active hardware recipe. Fresh replay and combined hardware gates remain pending.
 
 ## T32 CI selection
 
