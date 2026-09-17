@@ -84,23 +84,26 @@ class SharedHeadTests(unittest.TestCase):
             return SimpleNamespace(shape=shape, dtype='bf16', layout='tile', memory_config=lambda: 'dram')
         def linear(hidden, weight):
             calls.append(('linear', weight))
-            return tensor((1, 1, 8, 124160))
+            return tensor((1, 1, hidden.shape[2], 124160))
         def slice_tensor(value, start, stop, stride):
-            return tensor((1, 1, 8, stop[-1] - start[-1]))
+            return tensor((1, 1, value.shape[2], stop[-1] - start[-1]))
         def pad(value, padding, fill):
             calls.append(('pad', fill))
-            return tensor((1, 1, 8, value.shape[-1] + padding[-1][1]))
+            return tensor((1, 1, value.shape[2], value.shape[-1] + padding[-1][1]))
         def topk(value, **options):
             calls.append(('topk', value.shape[-1], options))
-            return tensor((1, 1, 8, 16)), tensor((1, 1, 8, 16))
+            return tensor((1, 1, value.shape[2], 16)), tensor((1, 1, value.shape[2], 16))
         operations = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', DRAM_MEMORY_CONFIG='dram',
                                      linear=linear, slice=slice_tensor, pad=pad, topk=topk)
         weight = object()
         model = SimpleNamespace(num_devices=2, vocab_size=248320, _lmhead_vocab_sharded=True, lm_head_weight=weight)
-        owned = []
-        outputs = shared_head_candidates(operations, model, tensor((1, 1, 8, 5120)), owned)
-        self.assertEqual(len(outputs), 4)
-        self.assertEqual(len(owned), 14)
-        self.assertIs(calls[0][1], weight)
-        self.assertEqual(sum(call[0] == 'pad' for call in calls), 1)
-        self.assertEqual([call[1] for call in calls if call[0] == 'topk'], [32768] * 4)
+        for rows in (8, 16, 32):
+            calls.clear()
+            owned = []
+            outputs = shared_head_candidates(operations, model, tensor((1, 1, rows, 5120)), owned)
+            self.assertEqual(len(outputs), 4)
+            self.assertEqual(len(owned), 14)
+            self.assertTrue(all(output['values'].shape[2] == rows for output in outputs))
+            self.assertIs(calls[0][1], weight)
+            self.assertEqual(sum(call[0] == 'pad' for call in calls), 1)
+            self.assertEqual([call[1] for call in calls if call[0] == 'topk'], [32768] * 4)

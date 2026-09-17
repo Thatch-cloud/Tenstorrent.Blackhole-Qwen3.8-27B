@@ -9,7 +9,7 @@ from frozen_recipe_context import replace_once
 
 FILES = ('drafter_comparison_experiment.py', 'drafter_comparison_report.py',
          'drafter_request_environment.py', 'dflash_combined_request.py', 'full_dflash_request.py',
-         'dflash_device.py', 'draft_attention_branch.py', 'dflash_proposal_inputs.py',
+         'dflash_device.py', 'dflash_request_runtime.py', 'draft_attention_branch.py', 'dflash_proposal_inputs.py',
          'draft_attention.py', 'draft_shared_head.py', 'cumulative_t16_scope.py', 'dflash-fixtures.sh')
 
 

@@ -6,6 +6,18 @@ from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
 
 
 class DFlashRequestRuntimeTests(unittest.TestCase):
+    def test_t16_geometry_accepts_fifteen_proposals(self):
+        runtime, drafter, session, engine = self.fixture()
+        drafter.max_drafts = 15
+        drafter.propose.return_value = tuple(range(11, 26))
+        runtime = DFlashRequestRuntime(drafter, position=170)
+        runtime.bind(session, engine)
+        session.phase = 'drafting'
+        self.assertEqual(runtime('request', (9, 10), 15), tuple(range(11, 26)))
+        drafter.max_drafts = 16
+        with self.assertRaises(ValueError):
+            DFlashRequestRuntime(drafter, position=170)
+
     def fixture(self):
         drafter = SimpleNamespace(position=170, propose=Mock(return_value=(11, 12, 13)),
             prepare_publication=Mock(side_effect=lambda features, prefix, **kwargs: (features, prefix)),

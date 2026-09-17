@@ -8,10 +8,10 @@ def candidate_chunks():
 def shared_head_candidates(operations, model, normalized, owned):
     rows = normalized.shape[2] if len(normalized.shape) == 4 else 0
     if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
-            or rows not in (8, 32) or tuple(normalized.shape) != (1, 1, rows, 5120)
+            or rows not in (8, 16, 32) or tuple(normalized.shape) != (1, 1, rows, 5120)
             or normalized.dtype != operations.bfloat16 or normalized.layout != operations.TILE_LAYOUT
             or normalized.memory_config() != operations.DRAM_MEMORY_CONFIG):
-        raise ValueError('Replicated eight/32-row learned-normalized input and pinned TP2 vocabulary head required')
+        raise ValueError('Replicated eight/16/32-row learned-normalized input and pinned TP2 vocabulary head required')
     logits = operations.linear(normalized, model.lm_head_weight)
     owned.append(logits)
     return local_head_candidates(operations, logits, owned)
@@ -19,7 +19,7 @@ def shared_head_candidates(operations, model, normalized, owned):
 
 def local_head_candidates(operations, logits, owned):
     rows = logits.shape[2] if len(logits.shape) == 4 else 0
-    if rows not in (8, 32) or tuple(logits.shape) != (1, 1, rows, 124160):
+    if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, 124160):
         raise ValueError('Expected local vocabulary shards, not gathered logits')
     outputs = []
     for start, stop in candidate_chunks():

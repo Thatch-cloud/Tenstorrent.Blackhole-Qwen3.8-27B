@@ -8,7 +8,7 @@ TARGET_TAPS = (5, 19, 33, 47, 61)
 class DFlashRequestRuntime:
     tap_ids = TARGET_TAPS
     drafter_name = 'dflash2'
-    proposal_counts = (7, 31)
+    proposal_counts = (7, 15, 31)
 
     def __init__(self, drafter, *, position, validate_features=None):
         if (type(position) is not int or position < 1 or drafter.position != position
