@@ -44,6 +44,13 @@ Eight focused comparison/scope/staging tests pass. A fresh frozen checkout at
 and shell syntax checks. Live native-source admission remains enforced on CI;
 this local result does not qualify hardware performance.
 
+Combined run `35233247736` uses `a807865c3fd5521d34ffc7f962876710b91a60f8`
+under `experiment/gdn-dual-state-combined-v1`. Exact-commit CPU CI passed;
+hardware staging and disk-pressure admission passed before the combined step.
+The independent `gdn_dual_state_report.py` checks matching recurrence/norm build
+counts, restored policy, packed target weights, complete feature/replay evidence
+and recomputed TG. Five report/comparison tests pass locally. Results are pending.
+
 ## Implementation and qualification history
 
 The shared-Q/K recurrence copies each new state twice for intermediate tokens:
