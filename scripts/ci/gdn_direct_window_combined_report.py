@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from gdn_direct_window_comparison import summarize
+from gdn_direct_window_comparison import summarize, repeatability
 from dspark_request_experiment import summarize as summarize_requests
 from mlp_weight_pipeline_report import validate_audit, validate_fusion, NORM_SHA256, HISTORY_SHA256
 
@@ -42,7 +42,7 @@ def validate(report):
     comparison = summarize(report.get('request_checks', []), summarize_requests, validate_audit, validate_route)
     if comparison != report.get('gdn_direct_window_comparison'):
         raise ValueError('Saved comparison differs from independently recomputed complete-cycle evidence')
-    return comparison
+    return dict(comparison, measurement_quality=repeatability(comparison))
 
 
 if __name__ == '__main__':

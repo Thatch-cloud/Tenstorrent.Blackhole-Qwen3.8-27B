@@ -1,7 +1,37 @@
 # Direct causal windows inside GDN convolution
 
-Status: DRAM and exact L1 projection simulator checks pass. The request-scoped
-hardware adapter is prepared. **No hardware measurement or serving change.**
+Status: simulator and combined hardware correctness pass. A verifier reduction
+is measured, but unstable control timing requires repetition before promotion.
+**No serving change.**
+
+## First combined hardware result
+
+Run **35273229698**, revision `b16f936`, passes in about seven minutes.
+Both audited requests and four timed requests preserve exact tokens, target
+state and inactive slots. Each candidate builds 96 direct-window calls, with
+288 native shorter-tail calls and restored bindings. All 870 script, 1,520
+native and 11 candidate fingerprints remain unchanged; device/checkpoint close
+and process exit succeed. Report SHA-256:
+`52e5d31229982dfa926d27b6bf0beb86a3b767f2e85957ec107da456af9d3e21`.
+
+| Timed request order | Committed TG | Mean verifier ms | Mean selection/commit ms |
+| --- | ---: | ---: | ---: |
+| Native A1 | 25.14 | 66.82 | 387.17 |
+| Direct B1 | 124.03 | 63.07 | 5.04 |
+| Direct B2 | 128.99 | 63.13 | 5.11 |
+| Native A2 | 122.15 | 66.51 | 5.28 |
+
+The candidate aggregate is **126.46 TG**. Native A1 has two whole cycles of
+2,582 and 1,316 ms, dominated by selection/commit; its prefill is also slow.
+The cause is not established. Do not discard those samples or claim the
+misleading aggregate +203% as a kernel speedup. Both candidate verifier means
+are around 3.5 ms below controls, consistent with the window-builder target.
+The cleaner second pair improves TG 5.60%, but one pair is insufficient.
+
+The independent report now adds a repeatability check: neither arm may differ
+by more than 10% between its two timed TG measurements. This is an engineering
+screen, not statistical significance. This run fails that screen despite its
+two positive paired changes. Next: repeat the same runtime, not a new kernel.
 
 L1 run **35271886537**, commit `c86d9dd2b27faf0fdd78453470f28c546d9795dd`,
 passes in **59 seconds**. The strict validator independently confirms all 56

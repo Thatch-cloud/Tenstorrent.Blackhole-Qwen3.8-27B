@@ -2,7 +2,7 @@ import copy
 import unittest
 
 from dspark_request_experiment import summarize as summarize_requests
-from gdn_direct_window_comparison import SCHEDULE, summarize
+from gdn_direct_window_comparison import SCHEDULE, summarize, repeatability
 
 
 def fixture():
@@ -17,7 +17,15 @@ def fixture():
         for enabled, audit in SCHEDULE]
 
 
-class DownGridComparisonTests(unittest.TestCase):
+class DirectWindowComparisonTests(unittest.TestCase):
+    def test_slow_control_cannot_establish_repeatable_improvement(self):
+        requests = fixture()
+        requests[2].update(committed_tokens_per_second=25, decode_ms=480)
+        result = summarize(requests, summarize_requests, lambda request: None, lambda request, arm: None)
+        self.assertTrue(result['improvement_screen_passed'])
+        self.assertFalse(repeatability(result)['repeatable_improvement'])
+        self.assertEqual(repeatability(result)['observed_spread_percent']['unchanged'], 300)
+
     def test_complete_cycle_accounting_and_abba_pairs(self):
         audits, routes = [], []
         result = summarize(fixture(), summarize_requests, audits.append,
@@ -27,6 +35,7 @@ class DownGridComparisonTests(unittest.TestCase):
         self.assertEqual(result['arms']['unchanged']['committed_tg'], 100)
         self.assertEqual(result['arms']['direct']['committed_tg'], 120)
         self.assertTrue(result['improvement_screen_passed'])
+        self.assertTrue(repeatability(result)['repeatable_improvement'])
         self.assertFalse(result['performance_promoted'])
         self.assertFalse(result['held_out_coding_quality'])
 

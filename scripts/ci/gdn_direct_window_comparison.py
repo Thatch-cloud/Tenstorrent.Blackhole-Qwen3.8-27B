@@ -8,6 +8,21 @@ from dspark_request_variants import proposal_signature
 SCHEDULE = ((False, True), (True, True), (False, False), (True, False), (True, False), (False, False))
 
 
+def repeatability(comparison):
+    spreads = {}
+    for arm in ('unchanged', 'direct'):
+        rates = [pair[arm + '_tg'] for pair in comparison['pairs']]
+        if len(rates) != 2 or any(type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0
+                                  for rate in rates):
+            raise ValueError('Two positive finite repeated rates per arm required')
+        spreads[arm] = 100 * (max(rates) / min(rates) - 1)
+    stable = all(spread <= 10 for spread in spreads.values())
+    return dict(max_spread_percent=10, observed_spread_percent=spreads,
+                repeatability_passed=stable,
+                repeatable_improvement=stable and comparison['improvement_screen_passed'],
+                statistical_significance_established=False)
+
+
 def summarize(requests, summarize_requests, validate_audit, validate_route):
     if [(value.get('gdn_direct_window', {}).get('direct'), value.get('instrumented_timing'))
             for value in requests] != list(SCHEDULE):
