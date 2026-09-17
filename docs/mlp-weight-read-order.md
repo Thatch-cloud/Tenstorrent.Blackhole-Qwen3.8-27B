@@ -49,5 +49,14 @@ across all six requests. Each arm reports cold PP and complete-cycle TG separate
 Both paired TG gains must exceed 2% to pass the improvement screen; passing that
 screen is not automatic promotion or held-out coding-quality acceptance.
 
-The source gate passes against a local frozen runtime staging. Hardware workflow
-integration and execution are still pending; no throughput result is claimed.
+Fresh local staging of the complete frozen runtime passes, including the source
+gate and simulator evidence. The dedicated `qwen-mlp-read-order-combined.yml`
+loads the model once, keeps the normal disk-pressure and exclusive-card gates,
+and schedules two audits plus four complete timed requests at 4K. Its launcher
+cap is 600 seconds and whole-job cap is 12 minutes; the full context ladder is
+unchanged. Hardware acceptance and throughput improvement remain unproven.
+
+Host integration tests exercise all six calls, verify the candidate projection
+and simulator identity are installed only for their intended arm, and check
+restoration between requests. Per-request TG must agree with committed tokens
+divided by complete decode wall time before the improvement screen is evaluated.

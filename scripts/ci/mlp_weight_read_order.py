@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import subprocess
 
-from frozen_mlp_buffer_trial import adapt_probe
 from frozen_recipe_context import REVISION, replace_once
 
 
@@ -53,6 +52,8 @@ def issue_model(staggered):
 
 
 def main():
+    from frozen_mlp_buffer_trial import adapt_probe
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
