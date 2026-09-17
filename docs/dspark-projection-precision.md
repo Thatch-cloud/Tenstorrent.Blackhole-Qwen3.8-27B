@@ -40,6 +40,20 @@ ownership, policy rejection and failure without mutating shared operations.
 
 ## Required gates
 
+The remaining six layer-zero projection screens run serially in CI matrix
+`35226751937`, source `ba16283d40bfa5bd59f3e6b6d106c1a723d76674`.
+The key-projection job has passed independent replay/integrity validation;
+its report hash is
+`1cd094769e75979dc687ed06302087c27ca2b095cf3cd4415db0f0e43905bf18`.
+The matrix is not yet complete; no broader admission follows from this result.
+
+`dspark_layer_precision.py` supplies the pending integration boundary: an explicit
+operations proxy for one proposal layer, requiring all seven expected projection
+shapes in order. It does not patch shared TT-NN operations, change history setup,
+or install itself into serving. Two host tests cover full routing and rejection
+of partial, out-of-order or wrong-width execution. Device integration still
+needs source-bound admission and complete candidate eager/replay verification.
+
 1. Simulator: compare real-weight HiFi4/HiFi2 projection outputs; record numerical
    differences, require finite output and exact same-policy changed-input replay,
    poisoned-output replacement, input/weight integrity and stable trace bindings.
