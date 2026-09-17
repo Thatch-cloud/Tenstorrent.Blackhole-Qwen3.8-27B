@@ -1,7 +1,30 @@
 # T16 fused MLP larger reduction blocks
 
-Status: bounded simulator correctness passes; combined hardware qualification
-remains pending. No serving or winning-recipe changes.
+Status: simulator and combined hardware correctness pass; performance regresses.
+**Rejected for promotion. Keep the original K8 recipe.** No serving changes.
+
+## Combined hardware result
+
+[Run 35258782100](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35258782100)
+at `d7f0d62a483c73ad32365b552c32a958be14e672` completes in 6m28s.
+Two native audits and four complete ABBA requests pass at 4,096 context tokens,
+one stream on both P150A cards. The independent report verifier recomputes:
+
+| Arm | PP tok/s | Committed TG tok/s | Accepted / proposed |
+| --- | ---: | ---: | ---: |
+| Original K8 | 3,340.87 | 123.98 | 224 / 300 |
+| Candidate K32 | 3,299.23 | 122.41 | 224 / 300 |
+
+Both arms commit 242 timed tokens. TG regresses **1.26%** overall; paired
+changes are **-1.73% and -0.79%**. Mean T16 verification/readback increases
+from 66.63 to 67.14 ms. Fewer reduction blocks did not reduce combined verifier
+latency; do not rerun the unchanged candidate as a performance improvement.
+
+All 866 script, 1,520 native and seven candidate-source fingerprints remain
+unchanged. The request report records clean closure and process exit is zero.
+Report SHA-256:
+`40a3d2de2acfd43f84be924f493cab6b7fb2184143362a17160f865f2d1aa0e5`.
+This bounded correctness pass does not qualify held-out coding quality or serving.
 
 ## Simulator evidence
 
@@ -15,9 +38,8 @@ are zero. Report SHA-256:
 `d7594fda2ade8ff6252fcb0a7d0bb8c450ed49a4695c6ecd5d64b72dcc05517d`.
 
 This covers synthetic full-projection T16 inputs, not model-wide numerical
-equivalence, coding quality or speed. Next admission must bind these sources
-and compute hashes to the combined hardware candidate, then compare complete
-requests against the unchanged control.
+equivalence, coding quality or speed. Combined admission binds these sources
+and compute hashes to the hardware candidate before comparing complete requests.
 
 | Property | Frozen control | Candidate |
 | --- | ---: | ---: |
