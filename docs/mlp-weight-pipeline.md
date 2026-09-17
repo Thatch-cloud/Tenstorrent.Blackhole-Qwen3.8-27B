@@ -1,6 +1,36 @@
 # Two in-flight MLP weight blocks
 
-**Simulator qualified; combined hardware performance unqualified.**
+**Numerically qualified; rejected for performance promotion.**
+
+## Combined hardware result
+
+[Run 35223968603](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35223968603)
+at `d671a1b0389b67cdd6ee3011b6f6dbb2e962b54f` completes in **6m27s**.
+Independent report validation passes both feature audits, exact native output
+and state, packed weights, source identities and complete-cycle accounting.
+The container exits zero without OOM. Report SHA-256:
+`cfef8973baa3b1b1e0ba08a4eade81aa16ff0e941e15324f3f6c3a40300759b8`.
+
+| 4K context, one stream | Original reader | Two-inflight pipeline |
+| --- | ---: | ---: |
+| Cold PP, tok/s | 3,302.32 | 3,378.78 |
+| Complete committed TG, tok/s | 121.11 | 123.16 |
+| Timed committed tokens | 242 | 242 |
+| Accepted / proposed | 224 / 300 | 224 / 300 |
+| Mean blocking verifier, ms | 65.779 | 66.160 |
+
+Aggregate TG is +1.69%, but matched pairs are **-2.31% / +5.78%**, failing
+the repeatability screen. More importantly, blocking verifier latency worsens
+in both pairs (65.773 -> 66.162 ms; 65.785 -> 66.159 ms). The favorable aggregate
+TG therefore does not demonstrate a kernel gain; drafting/selection variation
+dominates that comparison. Cold PP differences are not attributable to this
+decode-only reader change.
+
+Keep the original reader. Do not rerun this unchanged two-inflight schedule or
+promote it based on the aggregate rate. The next candidate needs a different
+mechanism, not another capacity/ordering/barrier variation without evidence.
+
+## Simulator admission
 
 [Simulator run 35223012166](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35223012166)
 at `3f6f6cb582cfdbd9a72834d8a9ade85e7c004b5a` passes in **3m55s**.
