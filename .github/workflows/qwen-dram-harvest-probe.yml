@@ -212,8 +212,8 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           # Introspection only: no device is opened and no kernel is launched.
           image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
-          timeout -k 10 180 docker run --rm --network none             --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g             -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=128m             --mount "type=bind,src=$PWD,dst=/source,readonly"             --mount "type=bind,src=$PWD/experiment-results,dst=/out"             --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_api_survey.py             --output /out/prefetcher-api.json > experiment-results/prefetcher-api.log 2>&1 || true
-          tail -5 experiment-results/prefetcher-api.log || true
+          timeout -k 10 180 docker run --rm --network none             --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g             -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=128m             --mount "type=bind,src=$PWD,dst=/source,readonly"             --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_api_survey.py             > experiment-results/prefetcher-api.log 2>&1 || true
+          sed -n '/<<<PREFETCHER_API_JSON_BEGIN>>>/,/<<<PREFETCHER_API_JSON_END>>>/p'             experiment-results/prefetcher-api.log             | sed '1d;$d' > experiment-results/prefetcher-api.json || true
           python3 -B -c "import json;d=json.load(open('experiment-results/prefetcher-api.json'));print('symbols:',d['match_count']);[print(' ',k) for k in d['matches']]"
       - name: Diagnose the missing third card on the PCIe switch
         working-directory: dram-harvest-probe
