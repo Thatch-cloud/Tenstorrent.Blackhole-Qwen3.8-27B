@@ -9,6 +9,19 @@ import serving_native_install as install
 
 
 class NativeInstallTests(unittest.TestCase):
+    def test_bundled_patch_is_hash_checked_before_git_application(self):
+        with TemporaryDirectory() as directory:
+            patch_file = Path(directory) / 'sdpa-graft-registration.patch'
+            patch_file.write_bytes(b'patch')
+            with patch.object(install.subprocess, 'run') as run:
+                install.apply_patch_file(Path(directory), patch_file, install.digest(patch_file))
+                self.assertEqual(run.call_args_list[0].args[0],
+                    ['git', '-C', directory, 'apply', '--check', str(patch_file)])
+                self.assertEqual(run.call_count, 2)
+                with self.assertRaises(ValueError):
+                    install.apply_patch_file(Path(directory), patch_file, '0' * 64)
+                self.assertEqual(run.call_count, 2)
+
     def test_binary_and_builder_bytes_are_checked_before_native_edits(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

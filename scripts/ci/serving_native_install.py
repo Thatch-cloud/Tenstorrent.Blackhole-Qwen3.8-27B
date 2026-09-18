@@ -63,7 +63,7 @@ def install(root, scripts, optimisation, binary, manifest):
     apply_patch_file(root, optimisation / 'sim/sdpa-tree-scratch.patch', scratch['patch_sha256'])
     if scratch_audit(root, patched=True) != scratch['sources']:
         raise ValueError('Restored scratch sources differ from cached runtime')
-    apply_patch_file(root, Path('/tmp/ccl-graft-registration.patch'), inputs['registration_patch'])
+    apply_patch_file(root, optimisation / 'sim/sdpa-graft-registration.patch', inputs['registration_patch'])
     links = apply_links(root)
     for name in ('build_Release/lib/_ttnncpp.so', 'build_Release/ttnn/_ttnncpp.so'):
         destination = root / name
