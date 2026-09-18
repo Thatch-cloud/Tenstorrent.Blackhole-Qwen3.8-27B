@@ -1,10 +1,36 @@
 from pathlib import Path
+import tempfile
 import unittest
 
 from gdn_direct_window_t32_adapter import payloads
+from gdn_direct_window_t32_stage import stage
 
 
 class T32DirectWindowAdapterTests(unittest.TestCase):
+    def test_staged_probe_retains_native_control_and_complete_matrix(self):
+        directory = Path(__file__).parent
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / 'scripts/ci'
+            scripts.mkdir(parents=True)
+            for name in ('gdn_conv_windows.py', 'gdn_conv_windows.cpp', 'attention_batch.py',
+                    'gdn_multitoken_conv.py'):
+                (scripts / name).write_bytes((directory / name).read_bytes())
+            (scripts / 'simulator-suite.sh').write_text('frozen_sim_phase.py --phase probe --seconds 510 --output report')
+            report = stage(temporary)
+            self.assertEqual(report['rows'], 32)
+            self.assertFalse(report['hardware_qualified'])
+            probe = (scripts / 'gdn-output-grid-probe.py').read_text()
+            self.assertIn('batch=32,', probe)
+            self.assertIn('rows=32, hardware_qualified=False', probe)
+            self.assertIn("len(report['checks']) != 56", probe)
+            self.assertIn("len(report['immutable_checks']) != 88", probe)
+            self.assertIn("float('nan')", probe)
+            self.assertIn('from gdn_direct_window_t32_device import', probe)
+            for name in self.originals:
+                self.assertEqual((scripts / name).read_text(), self.originals[name])
+            with self.assertRaises(ValueError):
+                stage(temporary)
+
     def setUp(self):
         directory = Path(__file__).parent
         self.originals = {name: (directory / name).read_text() for name in

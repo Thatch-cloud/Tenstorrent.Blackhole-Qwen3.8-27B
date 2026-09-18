@@ -25,10 +25,16 @@ jobs:
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p gdn-direct-window-candidate/experiment-results
+          if [[ "$GITHUB_REF_NAME" == *-t32 ]]; then
+            python3 -B gdn-direct-window-orchestrator/scripts/ci/runner_io_gate.py --attempts 1 \
+              --output gdn-direct-window-candidate/experiment-results/runner-io-admission.json
+          fi
           python3 -B gdn-direct-window-orchestrator/scripts/ci/frozen_recipe_context.py \
             --checkout gdn-direct-window-candidate --context 8192 \
             --manifest gdn-direct-window-candidate/experiment-results/frozen-geometry.json
-          python3 -B gdn-direct-window-orchestrator/scripts/ci/gdn_direct_window_stage.py \
+          stage=gdn_direct_window_stage.py
+          if [[ "$GITHUB_REF_NAME" == *-t32 ]]; then stage=gdn_direct_window_t32_stage.py; fi
+          python3 -B "gdn-direct-window-orchestrator/scripts/ci/$stage" \
             --checkout gdn-direct-window-candidate > gdn-direct-window-candidate/experiment-results/cache-candidate.json
           git -C gdn-direct-window-candidate diff --check
           git -C gdn-direct-window-candidate diff > gdn-direct-window-candidate/experiment-results/cache.patch
