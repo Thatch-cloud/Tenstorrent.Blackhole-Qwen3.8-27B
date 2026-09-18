@@ -1,12 +1,21 @@
 import unittest
 from unittest.mock import patch
 
-from dflash_native_comparison_report import summarize, qualify_report
+from dflash_native_comparison_report import summarize, qualify_report, latency_budget
 import test_proposal_native_request as proposal_fixtures
 import test_drafter_comparison_report as target_fixtures
 
 
 class NativeComparisonTests(unittest.TestCase):
+    def test_budget_uses_committed_tokens_not_draft_rows(self):
+        entries = [dict(committed_decode_tokens=11, decode_ms=110.,
+            blocks=[dict(verify_readback_ms=62.5)])] * 2
+        result = latency_budget(entries)
+        self.assertEqual(result['allowed_mean_cycle_ms'], 55.)
+        self.assertEqual(result['verification_only_upper_bound_tg'], 176.)
+        self.assertEqual(result['required_decode_reduction_fraction'], .5)
+        self.assertTrue(result['verifier_alone_exceeds_budget'])
+
     def test_independent_validator_rejects_incomplete_or_rewritten_report(self):
         report = dict(passed=True, closed_cleanly=True, drafter_comparison_sources={'source': 'hash'},
             drafter_comparison_sources_after={'source': 'hash'}, request_checks=[], dflash_native_comparison={'checked': True})

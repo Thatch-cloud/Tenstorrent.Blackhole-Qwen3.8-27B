@@ -105,6 +105,20 @@ an AMD-runner result or combined TG gain, and is insufficient for promotion.
 Keep it separate from the pending native-attention comparison so gains or
 regressions can be attributed before combining candidates.
 
+### Budget for 200 committed TG
+
+Recomputed from the two timed DFlash2 requests in run 35287866254: 242 committed
+tokens over 22 blocks, or 11 tokens per block. At that acceptance, 200 TG needs
+an average complete cycle of **55 ms**. Measured decode time needs a **51.21%**
+reduction. Verification/readback alone averages about **62.65 ms** per block.
+
+With that acceptance and serial verification cost unchanged, even eliminating
+every other cost gives a conditional ceiling of **175.57 TG**. This is a bound,
+not a performance prediction. Native draft attention alone therefore cannot
+reach 200 unless acceptance improves enough; verifier latency must also be
+addressed otherwise. The combined comparison now reports this budget per arm
+alongside actual TG and acceptance, without claiming unmeasured gains.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.

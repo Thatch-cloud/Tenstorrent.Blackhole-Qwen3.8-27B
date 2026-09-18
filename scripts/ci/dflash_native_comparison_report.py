@@ -8,6 +8,24 @@ SCHEDULE = ((False, True), (True, True), (False, False), (True, False), (True, F
 BLOCK_FIELDS = ('rows', 'source', 'accepted', 'match_length', 'position', 'input_tokens', 'committed')
 
 
+def latency_budget(entries):
+    blocks = [block for entry in entries for block in entry['blocks']]
+    tokens = sum(entry['committed_decode_tokens'] for entry in entries)
+    verify_ms = sum(block['verify_readback_ms'] for block in blocks)
+    decode_ms = sum(entry['decode_ms'] for entry in entries)
+    if not blocks or tokens <= 0 or verify_ms <= 0 or decode_ms <= 0:
+        raise ValueError('Positive measured committed-token and verification totals required')
+    return dict(target_tg=200, committed_tokens=tokens, blocks=len(blocks),
+        committed_tokens_per_block=tokens / len(blocks),
+        allowed_total_decode_ms=tokens * 5.0,
+        allowed_mean_cycle_ms=tokens * 5.0 / len(blocks),
+        measured_decode_ms=decode_ms,
+        required_decode_reduction_fraction=max(0., 1 - tokens * 5.0 / decode_ms),
+        verification_only_upper_bound_tg=1000 * tokens / verify_ms,
+        verifier_alone_exceeds_budget=verify_ms > tokens * 5.0,
+        scope='Conditional bound at measured acceptance and verification cost; not a predicted speed result')
+
+
 def acceptance(entry):
     blocks = entry.get('blocks')
     emitted, prompt = entry.get('emitted'), entry.get('prompt_tokens')
@@ -87,6 +105,7 @@ def summarize(requests):
         summary['per_request_acceptance'] = counts
         summary['mean_block_costs_ms'] = {key: sum(block[key] for entry in group[1:] for block in entry['blocks'])
             / totals['blocks'] for key in ('draft_ms', 'input_ms', 'verify_readback_ms', 'select_commit_ms', 'cycle_ms')}
+        summary['latency_budget'] = latency_budget(group[1:])
         output[name] = summary
     return dict(**output, measured_order=['control', 'candidate', 'candidate', 'control'],
         committed_tokens_per_second=output['candidate']['committed_tokens_per_second'],
