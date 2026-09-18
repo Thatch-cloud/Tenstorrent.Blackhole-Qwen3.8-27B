@@ -16,7 +16,8 @@ REQUIRED_METRIC_FIELDS = ["id", "title", "tool", "gates", "metrics", "records"]
 KNOWN_RULES = {
     "at_least_repeats", "abba_ordering", "candidate_not_worse_than",
     "candidate_at_least", "all_stages_present", "sum_matches_total",
-    "all_cards_present", "weight_digests_equal", "exact_output_state",
+    "all_cards_present", "dispatch_config_identity", "by_id_resolution",
+    "reclaimable_arithmetic", "weight_digests_equal", "exact_output_state",
     "added_latency_below", "all_blocks_not_worse",
     "gain_repeats_beyond_variability",
 }

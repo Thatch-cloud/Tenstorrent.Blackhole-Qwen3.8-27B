@@ -100,6 +100,23 @@ class GateTests(unittest.TestCase):
         uni_only = gates.evaluate_phase(phase, {"repeats_uni": list(range(9))})
         self.assertFalse(uni_only["all_passed"])  # bidi missing -> FAIL, never skipped
 
+    def test_p04_inventory_gates(self):
+        good = {
+            "cards": [0, 1],
+            "dispatch_config_sha256": "abc123", "config_cache_echoed_sha256": "abc123",
+            "by_id_resolved": True, "cabling_pair_confirmed": True,
+            "mesh_degree_histograms_equal": True,
+            "inventory": {"0": {"tensix_total": 10, "dispatch_reserved": 2, "compute_available": 8, "reclaimable": 2},
+                          "1": {"tensix_total": 12, "dispatch_reserved": 3, "compute_available": 9, "reclaimable": 3}},
+        }
+        self.assertTrue(gates.evaluate_phase(self.phase("P0.4"), good)["all_passed"])
+        wrong_count = dict(good)
+        wrong_count["inventory"] = {"1": {"tensix_total": 12, "dispatch_reserved": 3, "compute_available": 9, "reclaimable": 5}}
+        self.assertFalse(gates.evaluate_phase(self.phase("P0.4"), wrong_count)["all_passed"])
+        cache_reuse = dict(good)
+        cache_reuse["config_cache_echoed_sha256"] = "deadbeef"
+        self.assertFalse(gates.evaluate_phase(self.phase("P0.4"), cache_reuse)["all_passed"])
+
 
 class InventoryTests(unittest.TestCase):
     def test_reclaimable_counts_card1_reserved(self):

@@ -67,6 +67,15 @@ phases:
       - id: both_cards
         rule: all_cards_present
         params: {cards: [0, 1]}
+      - id: dispatch_config_identity
+        rule: dispatch_config_identity
+        desc: config file hash must match the tool-echoed hash; guards the descriptor cache-key reuse risk
+      - id: by_id_resolution
+        rule: by_id_resolution
+        desc: by-id device resolution, (1,2) cabling pair confirmation and Logical/Physical mesh-degree histogram assertion
+      - id: reclaimable_arithmetic
+        rule: reclaimable_arithmetic
+        desc: reclaimable equals tensix_total minus dispatch_reserved on every card
     metrics: [tensix_total, dispatch_reserved, reclaimable]
     records: baseline
 
