@@ -83,11 +83,19 @@ def main(argv=None):
     parser.add_argument("--mode", required=True, choices=["pcie", "fabric"])
     parser.add_argument("--payload-mib", type=int, default=256)
     parser.add_argument("--repeats", type=int, default=9)
+    parser.add_argument("--devices", default="0,2",
+                        help="comma-separated device IDs of the fabric-linked pair; "
+                             "the rig host has three cards and device numbers are "
+                             "not stable across resets (docs/gotchas.md) — resolve "
+                             "by-id before invoking and pass the pair explicitly")
     args = parser.parse_args(argv)
+    device_ids = [int(part) for part in args.devices.split(",") if part.strip()]
+    if len(device_ids) != 2:
+        raise SystemExit(f"Expected exactly two device IDs, got {device_ids!r}")
 
     import ttnn
 
-    device_0 = ttnn.open_device(device_id=0)
+    device_0 = ttnn.open_device(device_id=device_ids[0])
     try:
         if args.mode == "pcie":
             samples_by_direction = {}
@@ -100,14 +108,15 @@ def main(argv=None):
                 samples_by_direction[direction] = samples
             artifact = {
                 "mode": "pcie",
-                "card": 0,
+                "card": device_ids[0],
+                "device_ids": device_ids,
                 "payload_mib": args.payload_mib,
                 "directions": {d: summarize(s) for d, s in samples_by_direction.items()},
                 "raw_samples": samples_by_direction,
                 "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         else:
-            device_1 = ttnn.open_device(device_id=1)
+            device_1 = ttnn.open_device(device_id=device_ids[1])
             try:
                 samples = transfer_bandwidth(
                     fabric_copy_fn([device_0, device_1]),
@@ -116,7 +125,8 @@ def main(argv=None):
                 )
                 artifact = {
                     "mode": "fabric",
-                    "cards": [0, 1],
+                    "cards": device_ids,
+                    "device_ids": device_ids,
                     "payload_mib": args.payload_mib,
                     "summary": summarize(samples),
                     "raw_samples": samples,
