@@ -28,6 +28,21 @@ PROJECTIONS = {'gate': (5120, 8704, 'bfloat4_b'),
                'down': (8704, 5120, 'bfloat8_b')}
 
 
+# Upstream's prefetcher_common.bytes_per_tile maps only bfloat16 and bfloat8_b, so
+# their harness never exercises bfloat4_b - which is exactly what Qwen's gate and up
+# weights use. Blackhole tiles are 32x32: bf8_b is 1024 mantissa + 64 exponent bytes,
+# bf4_b is 512 + 64. Supplying it here lets the arm run; whether the DRISC path is
+# happy with bf4_b is what the run then tells us.
+TILE_BYTES = {'bfloat16': 2048, 'bfloat8_b': 1088, 'bfloat4_b': 576}
+
+
+def tile_bytes(common, ttnn, dtype_name, dtype):
+    try:
+        return common.bytes_per_tile(dtype)
+    except KeyError:
+        return TILE_BYTES[dtype_name]
+
+
 def legal_rings(k_tiles, n_tiles, banks, max_rows):
     """Rings are banks x rows; K and N must both divide the ring for integral shards."""
     out = []
@@ -46,8 +61,10 @@ def emit(report):
     sys.stdout.flush()
 
 
-def build_and_run(ttnn, torch, common, device, name, rows_choice, report):
+def build_and_run(ttnn, torch, common, device, name, rows_choice, report, dtype_override=None):
     inner, width, dtype_name = PROJECTIONS[name]
+    if dtype_override:
+        dtype_name = dtype_override
     k_tiles, n_tiles = inner // TILE, width // TILE
     banks = device.dram_grid_size().x
     options = legal_rings(k_tiles, n_tiles, banks, 10)
@@ -100,8 +117,9 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report):
         fuse_batch=True, fused_activation=None, mcast_in0=False)
     entry['program_config_built'] = True
 
-    tile_bytes = common.bytes_per_tile(dtype)
-    in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * tile_bytes
+    per_tile = tile_bytes(common, ttnn, dtype_name, dtype)
+    entry['tile_bytes'] = per_tile
+    in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * per_tile
     gcb_size = ring_size * in1_block
     entry['in1_block_bytes'] = in1_block
     entry['gcb_size'] = gcb_size
@@ -174,6 +192,8 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--projections', default='gate')
+    parser.add_argument('--dtype', default=None,
+                        help='override the weight dtype, e.g. bfloat8_b as a control')
     parser.add_argument('--rows', type=int, default=None,
                         help='receivers per bank; default is the largest legal ring')
     options = parser.parse_args()
@@ -188,7 +208,8 @@ def main():
         report['supported'] = ttnn.experimental.is_tensor_prefetcher_supported(device)
         for name in options.projections.split(','):
             try:
-                build_and_run(ttnn, torch, common, device, name, options.rows, report)
+                build_and_run(ttnn, torch, common, device, name, options.rows, report,
+                              options.dtype)
             except BaseException:
                 if report['arms']:
                     report['arms'][-1]['error'] = traceback.format_exc(limit=8)[-2000:]
