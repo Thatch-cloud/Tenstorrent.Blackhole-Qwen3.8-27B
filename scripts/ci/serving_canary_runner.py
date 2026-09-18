@@ -29,14 +29,20 @@ def validate_environment(environment):
         raise ValueError(f'Canary environment rejected before loading: missing={missing}, incompatible={incompatible}')
 
 
+def additional_config(target):
+    return dict(qwen_fast_t16=True,
+        tt=dict(trace_mode='decode_only', trace_region_size=1073741824, l1_small_size=24576),
+        qwen_fast_runtime=dict(directory='/experiment-scripts/ci', runtime_root='/opt/tt-metal',
+            fixtures='/experiment-dflash-fixture', target_snapshot=target))
+
+
 def main():
     validate_environment(os.environ)
     target = '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
     results = Path('/experiment/results')
     results.mkdir(parents=True, exist_ok=True)
     subprocess.run([sys.executable, '/experiment-scripts/ci/device-owners.py'], check=True, timeout=20)
-    recipe = dict(qwen_fast_t16=True, qwen_fast_runtime=dict(directory='/experiment-scripts/ci',
-        runtime_root='/opt/tt-metal', fixtures='/experiment-dflash-fixture', target_snapshot=target))
+    recipe = additional_config(target)
     speculative = dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
         draft_sample_method='greedy', rejection_sample_method='standard')
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server', '--model', target,

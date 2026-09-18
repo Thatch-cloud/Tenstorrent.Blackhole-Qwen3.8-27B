@@ -26,6 +26,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_scheduler.py:/canary-tests/test_serving_scheduler.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_vllm_installed.py:/canary-tests/test_serving_vllm_installed.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_fast_policy.py:/canary-tests/serving_fast_policy.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_canary_runner.py:/canary-tests/serving_canary_runner.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_dflash_registry.py:/canary-tests/serving_dflash_registry.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_dflash_registry_installed.py:/canary-tests/test_serving_dflash_registry_installed.py:ro" \
             -e PYTHONPATH=/canary-tests:/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal \

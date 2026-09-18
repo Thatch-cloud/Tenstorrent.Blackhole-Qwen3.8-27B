@@ -8,6 +8,24 @@ from serving_vllm_contract import draft_token_ids, execute_scheduled, model_runn
 
 
 class InstalledVllmContractTests(unittest.TestCase):
+    def test_canary_trace_capacity_reaches_pinned_worker_device_parameters(self):
+        import ast
+        from importlib.util import find_spec
+        from pathlib import Path
+        from types import SimpleNamespace
+        from serving_canary_runner import additional_config
+        from vllm_tt_plugin.config import get_tt_config
+
+        config = get_tt_config(SimpleNamespace(additional_config=additional_config('/target')))
+        source = Path(find_spec('vllm_tt_plugin').origin).with_name('worker.py').read_text()
+        function = next(node for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == 'device_params_from_tt_config')
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<installed-device-params>', 'exec'), namespace)
+        self.assertEqual(config['trace_mode'], 'decode_only')
+        parameters = namespace['device_params_from_tt_config'](config, config['trace_mode'])
+        self.assertEqual(parameters, dict(trace_region_size=1073741824, l1_small_size=24576))
+
     def test_target_generation_eos_is_not_rejected_as_custom_stopping(self):
         from vllm.sampling_params import SamplingParams
         from serving_fast_policy import validate_request_sampling
