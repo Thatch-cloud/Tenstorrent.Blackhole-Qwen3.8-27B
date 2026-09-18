@@ -141,14 +141,12 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
         pt_weight[:, :, :, native_width:] = 0.0
     pt_act = torch.randn(1, 1, rows, inner)
 
-    dram_cores = ttnn.CoreRangeSet(
-        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))})
-    weight_mem = ttnn.MemoryConfig(
-        ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM,
-        ttnn.ShardSpec(dram_cores, [inner, width // banks], ttnn.ShardOrientation.ROW_MAJOR))
-    weight = ttnn.as_tensor(pt_weight, device=device, dtype=dtype,
-                            memory_config=weight_mem, layout=ttnn.TILE_LAYOUT)
+    # One shard per receiver, not per bank: with ring > num_banks the factory requires
+    # a receiver-contiguous layout ("num_shards must equal receiver_count"). A plain
+    # width-sharded DRAM weight gives num_shards = banks and is rejected.
+    weight = common.make_recv_contig_weight(device, pt_weight, banks, ring_size, dtype)
     entry['weight_built'] = True
+    entry['weight_layout'] = 'receiver_contiguous'
 
     k_per_shard = common.round_up(math.ceil(inner / ring_size), TILE)
     act_mem = ttnn.create_sharded_memory_config(
