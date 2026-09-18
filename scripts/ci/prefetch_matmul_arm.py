@@ -227,7 +227,11 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     with common.tensor_prefetcher_session(device):
         out = prefetched()
         entry['matmul_ran'] = True
-        got = ttnn.to_torch(out)
+        # The weight is replicated across the 1x2 mesh, so every device computes the
+        # same result; read one shard rather than composing duplicates together.
+        shards = ttnn.get_device_tensors(out)
+        entry['device_shards'] = len(shards)
+        got = ttnn.to_torch(shards[0])
         ttnn.deallocate(out)
         passed, message = common.comp_pcc(expected, got.float(), 0.96)
         entry['pcc_passed'] = bool(passed)
