@@ -5,6 +5,19 @@ in 6m7s. DFlash2 is not promoted; serving defaults are unchanged.
 
 ## Latest matched DFlash2 result
 
+Follow-up **35298946581** retains native drafting and changes only target MLP
+weight transport: **113.89 -> 116.97 TG** at CTX4096, one stream (+2.71%).
+See [combined transport results](mlp-block-stream.md) for setup/memory costs
+and exact proposal/output/state checks. It is not promoted.
+
+The next width experiment must preserve cached native drafting and the target
+recipe rather than repeat the old uncached T32 run. At the latest 93.92-ms
+cycle, even 16 committed tokens would yield only about 170 TG; 200 requires
+lower latency and/or more useful committed tokens per cycle. T32 is not an
+assured improvement: historical eager DFlash T32 accepted only 8.82 committed
+tokens/block. A simulator-only full-32-query native-attention helper is prepared;
+cached history, target T32 recipe parity and combined acceptance remain ungated.
+
 | Attention | CTX | Streams | PP tok/s | Committed TG tok/s |
 | --- | ---: | ---: | ---: | ---: |
 | Composed control | 4096 | 1 | 3271.03 | 93.53 |
