@@ -21,6 +21,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     from gdn_snapshot import ActiveSnapshot
     from models.common.sampling.generator import SamplingGenerator
     from models.tt_transformers.tt.ccl import TT_CCL
+    from sampling_link_policy import sampler_links
 
     validate_fast_config(worker.vllm_config)
     if (native_attention_evidence is None or kv_publication_evidence is None
@@ -62,6 +63,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
     scopes = ExitStack()
     try:
+        scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
             block_stream=block_stream, kv_publication_evidence=kv_publication_evidence))

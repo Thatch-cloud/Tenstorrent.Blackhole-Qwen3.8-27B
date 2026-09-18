@@ -1,7 +1,8 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 import sys
 import unittest
+import torch
 from unittest.mock import Mock, patch
 
 import serving_runtime
@@ -33,6 +34,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 'gdn_snapshot': SimpleNamespace(ActiveSnapshot=Mock())}), \
                 patch('dflash_combined_request.combined_runtime', side_effect=combined), \
                 patch.object(serving_runtime, 'ServingCacheOwner'), \
+                patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle) as install:
             try:
                 with serving_runtime.attach_combined_runtime(worker, Mock(), directory='.', runtime_root='.',
@@ -40,6 +42,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         block_stream={'streams': 'serial', 'evidence': 'stream'},
                         kv_publication_evidence='dma', eos_ids=(99,), cancelled=lambda: False) as attached:
                     self.assertIs(attached['lifecycle'], lifecycle)
+                    self.assertEqual(links.call_args.args[1], 4)
                     self.assertFalse(attached['serving_qualified'])
                     self.assertTrue(callable(install.call_args.kwargs['capture_factory']))
                     self.assertTrue(callable(install.call_args.kwargs['bridge_factory']))
