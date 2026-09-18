@@ -3,7 +3,51 @@
 Decision: integrate the measured combined runtime first. **Do not publish the
 historical baseline as the fast serving image.** Existing service stays unchanged.
 
-## Current boundary
+## Current acceptance (2026-09-18)
+
+The opt-in T16/DFlash worker path is now packaged in a built image. **Hardware
+HTTP serving is not qualified; nothing has been published or deployed.**
+
+| Gate | Evidence | Status |
+|---|---|---|
+| Pinned vLLM contracts | CPU 35327950138 | Real data types and pinned worker delegation pass; no complete engine loop |
+| Source regression | CPU 35329738162 | Passed |
+| Serving image | Build 35329741168 | Passed; 63 tests passed, 2 skipped; native bindings import |
+| Two-card HTTP lifecycle | Pending | No serving correctness or performance claim |
+| Registry / Thatch deployment | Pending | Existing serving unchanged |
+
+Build source: `8168bcd49532043f9e60ff7c9e9bfa8e7f838cb8`.
+Local runner tag: `qwen-fast-serving:ci-8168bcd49532043f9e60ff7c9e9bfa8e7f838cb8`.
+Local Docker ID:
+`sha256:4a7a6dc280fe6a9e80b6c69f62fec648f20cfadc08bc064e816bab47c75bcf73`.
+This ID is not a registry manifest digest or proof of a clean pull elsewhere.
+The build accessed neither cards nor weights; its build/test step took 23 seconds.
+
+The image restores hash-verified native sources and the cached binary, stages the
+pinned plugin patch, and connects startup, prefill feature capture, request
+construction, scheduler reservations, committed-block output and cleanup. It does
+not run offline reference generation before each serving request. Fast mode still
+requires explicit configuration, admitted recipe paths and evidence; it is off by
+default. Initial qualification is 4K input, up to 256 output, greedy T16, one
+scheduler request, internal GDN B8, BF8 target KV and the four-link P150 pair.
+
+Next gates: changed-page replay and complete scheduler validation; repeated HTTP
+requests on both cards with reference equality, EOS, cancellation and clean release;
+then API PP/CTX/TG and streaming latency. Registry publication and Thatch rollout
+follow acceptance, not merely a successful build. Worker-side rejection is not yet
+a production HTTP admission layer.
+
+The measured offline DMA result remains **121.12 TG at 4K**, not API throughput.
+At 11 committed tokens per block, 200 TG requires a 55 ms total cycle; the roughly
+60 ms target verifier alone exceeds that budget. Image packaging is not a speedup.
+
+## Implementation history
+
+The following records successive implementation stages. Statements that helpers
+are unregistered or uninstalled describe their state at that stage, not the built
+image above. Hardware and complete engine-loop acceptance remain outstanding.
+
+### Original boundary
 
 The combined T16 request loop is an offline experiment. `full_request.py` generates
 a complete native reference before measuring the candidate. That reference pass
