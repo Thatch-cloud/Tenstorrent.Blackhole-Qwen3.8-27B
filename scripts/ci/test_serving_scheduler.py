@@ -4,7 +4,7 @@ import unittest
 
 import torch
 from transformers import GPT2Config
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -27,7 +27,7 @@ class RealSchedulerTests(unittest.TestCase):
             skip_tokenizer_init=True, seed=0)
         speculative = SpeculativeConfig(model='ngram', num_speculative_tokens=15)
         speculative.method = 'dflash'
-        config = VllmConfig(model_config=model,
+        config = VllmConfig(model_config=model, device_config=DeviceConfig(device='cpu'),
             scheduler_config=SchedulerConfig(max_num_seqs=1, max_num_batched_tokens=4352,
                 max_model_len=4352, is_encoder_decoder=False, enable_chunked_prefill=False,
                 async_scheduling=False, watermark=0.0),
