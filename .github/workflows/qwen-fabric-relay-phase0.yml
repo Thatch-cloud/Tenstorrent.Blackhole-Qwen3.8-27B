@@ -41,3 +41,42 @@ jobs:
         with:
           name: qwen-fabric-relay-phase0-${{ github.run_id }}
           path: fabric-relay-phase0/
+  bench:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    needs: identity
+    steps:
+      - name: Verify dedicated host
+        run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+      - name: Shallow-clone the repository fresh
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          workdir=$(mktemp -d /tmp/fabric-relay-bench.XXXXXX)
+          git clone --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$workdir/repo"
+          echo "FABRIC_RELAY_BENCH_DIR=$workdir/repo" >> "$GITHUB_ENV"
+      - name: P0.1 PCIe and P0.2 fabric bandwidth on the pinned image
+        working-directory: ${{ env.FABRIC_RELAY_BENCH_DIR }}
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+        run: |
+          mkdir -p experiment-results
+          chmod 2775 experiment-results
+          timeout -k 15 500 bash scripts/ci/run-fabric-relay-phase0-bench.sh
+      - name: Phase-0 gate summaries
+        if: always()
+        run: |
+          cd "${{ env.FABRIC_RELAY_BENCH_DIR }}"
+          for f in experiment-results/p0-bench-*.json; do
+            [ -e "$f" ] || continue
+            echo "=== $f ==="
+            cat "$f"
+          done
+          if [ -e experiment-results/p02-fabric-unavailable.txt ]; then
+            cat experiment-results/p02-fabric-unavailable.txt
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fabric-relay-phase0-bench-${{ github.run_id }}
+          path: ${{ env.FABRIC_RELAY_BENCH_DIR }}/experiment-results/
