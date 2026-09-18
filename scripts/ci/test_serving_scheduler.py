@@ -29,7 +29,8 @@ class RealSchedulerTests(unittest.TestCase):
         speculative.method = 'dflash'
         config = VllmConfig(model_config=model,
             scheduler_config=SchedulerConfig(max_num_seqs=1, max_num_batched_tokens=4352,
-                max_model_len=4352, enable_chunked_prefill=False, async_scheduling=False, watermark=0.0),
+                max_model_len=4352, is_encoder_decoder=False, enable_chunked_prefill=False,
+                async_scheduling=False, watermark=0.0),
             cache_config=CacheConfig(block_size=64, enable_prefix_caching=False),
             parallel_config=ParallelConfig(), speculative_config=speculative)
         config.cache_config.num_gpu_blocks = 128
