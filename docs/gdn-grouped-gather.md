@@ -26,8 +26,6 @@ artifact/runtime, clean exit, local/native dependencies and reconstructed reader
 hashes. The runtime scope restores the original loader and preserves compute,
 writer and norm-prefetch composition. It is not enabled in serving defaults.
 
-## Cheap rejected alternative
-
 ## Combined serving comparison
 
 Image build **35342832559** and CPU checks **35342808631** passed. The
