@@ -10,6 +10,17 @@ from draft_kv_slide_report import validate
 REPORT_SHA256 = '7eb9560c661f77bc422d9551d513bf0e264f88eb2a0c7ab0ac0ce6a7a8099a38'
 
 
+def validate_record(admission):
+    directory = Path(__file__).parent
+    sources = {name: hashlib.sha256((directory / filename).read_bytes()).hexdigest()
+        for name, filename in (('history-append-probe.py', 'draft-kv-slide-probe.py'),
+            ('draft_kv_slide.py', 'draft_kv_slide.py'), ('draft_kv_slide.cpp', 'draft_kv_slide.cpp'))}
+    if (not isinstance(admission, dict) or admission.get('report_sha256') != REPORT_SHA256
+            or admission.get('passed') is not True or admission.get('checks') != 120
+            or admission.get('sources') != sources):
+        raise ValueError('Complete source-bound K/V simulator admission required')
+
+
 def qualify(directory, evidence):
     evidence = Path(evidence)
     raw = (evidence / 'history-append.json').read_bytes()

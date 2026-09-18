@@ -14,7 +14,8 @@ class TransportComparisonTests(unittest.TestCase):
             entry['draft_kv_slide'] = dict(enabled=index in (1, 3, 4), restored=True,
                 serving_defaults_changed=False, prepare_calls=len(entry['blocks']),
                 tensor_copies=10 * len(entry['blocks']))
-        with patch('dflash_native_comparison_report.validate_target_components'), \
+        with patch('draft_kv_slide_gate.validate_record'), \
+                patch('dflash_native_comparison_report.validate_target_components'), \
                 patch('full_dflash_request.summarize_dflash_requests', return_value=dict(
                     committed_tokens_per_second=100, committed_tokens=4, target_reached=False)):
             result = summarize(records, kv_publication=True)

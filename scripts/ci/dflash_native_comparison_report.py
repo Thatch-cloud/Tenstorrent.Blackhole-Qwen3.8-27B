@@ -91,6 +91,10 @@ def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publi
             raise ValueError('K/V publication ABBA requires unchanged serial bulk weights in both arms')
         for entry in requests:
             audit = entry['draft_kv_slide']
+            if audit['enabled']:
+                from draft_kv_slide_gate import validate_record
+
+                validate_record(audit.get('admission'))
             if audit.get('restored') is not True or audit.get('serving_defaults_changed') is not False:
                 raise ValueError('K/V publication scope must restore without changing serving')
             if audit['enabled'] and (type(audit.get('prepare_calls')) is not int
