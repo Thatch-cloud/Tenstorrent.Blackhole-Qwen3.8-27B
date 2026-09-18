@@ -28,6 +28,25 @@ writer and norm-prefetch composition. It is not enabled in serving defaults.
 
 ## Cheap rejected alternative
 
+## Combined serving comparison
+
+Image build **35342832559** and CPU checks **35342808631** passed. The
+candidate is packaged in image
+`sha256:29153355a914393e98345ff77c5bd3619943f1d93b6fd0042d7fe538665c2ff1`.
+
+The hardware canary loads the model once: warm control, warm candidate, then
+control/candidate/candidate/control. All six requests use the same 4K prompt,
+122-token exact reference, T16 DFlash2 recipe, precision and four fabric links.
+Only the local recurrence reader copy schedule changes. Two warmups are excluded.
+
+`gather-comparison.json` requires exact HTTP outputs, contiguous decode accounting,
+identical acceptance/buckets, matching candidate kernel hashes and clean device
+shutdown. It reports whole-cycle TG and verifier time separately; nested trace
+time is not added twice. This is a paired screen, not production acceptance or
+proof of 200 TG. The candidate remains off by default.
+
+## Lookup screen
+
 A retrospective lookup screen against the existing 4K reference found no full
 15-token candidates with an eight-token suffix match across 121 output positions.
 At four matching tokens, six positions qualified but averaged only 0.167 matching
