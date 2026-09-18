@@ -33,4 +33,8 @@ jobs:
         run: python -B -m unittest discover -s optimisation/fabric-relay/spec -p 'test_*.py' -v
       - name: Phase-0 identity capture tests
         run: python -B -m unittest discover -s scripts/ci -p 'test_fabric_relay_phase0_identity.py' -v
+      - name: Shell syntax gates for phase-0 scripts
+        run: |
+          bash -n scripts/ci/run-fabric-relay-phase0-bench.sh
+          bash -n scripts/ci/fabric-relay-phase0-bench-inner.sh
       - run: git diff --check
