@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - 'optimisation/fabric-relay/**'
+      - 'scripts/ci/fabric_relay_phase0_identity.py'
+      - 'scripts/ci/test_fabric_relay_phase0_identity.py'
       - 'docs/fabric-weight-loading-plan.md'
   workflow_dispatch:
 
@@ -29,4 +31,6 @@ jobs:
         run: python -B -m unittest discover -s optimisation/fabric-relay -p 'test_*.py' -v
       - name: Registry test gate
         run: python -B -m unittest discover -s optimisation/fabric-relay/spec -p 'test_*.py' -v
+      - name: Phase-0 identity capture tests
+        run: python -B -m unittest discover -s scripts/ci -p 'test_fabric_relay_phase0_identity.py' -v
       - run: git diff --check

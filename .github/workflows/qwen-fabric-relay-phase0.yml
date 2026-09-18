@@ -1,0 +1,34 @@
+name: Qwen fabric-relay Phase-0 identity capture
+on:
+  push:
+    tags: ['experiment/fabric-relay-phase0-v1']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  identity:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - name: Verify host
+        run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Read-only host and device identity snapshot
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          mkdir -p fabric-relay-phase0
+          python3 -B scripts/ci/fabric_relay_phase0_identity.py \
+            --out fabric-relay-phase0/identity.json
+          git rev-parse HEAD > fabric-relay-phase0/repo_revision.txt
+          printf 'No runtime or serving-default change: this capture opens no device and loads no weight.\n' \
+            > fabric-relay-phase0/README.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fabric-relay-phase0-${{ github.run_id }}
+          path: fabric-relay-phase0/
