@@ -98,6 +98,19 @@ jobs:
               --manifest read-combined/experiment-results/block-stream-hardware-sources.json
           fi
           git -C read-combined diff --check
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native ]]; then
+            gh run download 35299919048 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-attention-35299919048-1 --dir "$evidence/t32/attention"
+            gh run download 35301426428 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-cache-35301426428-2 --dir "$evidence/t32/cache"
+            gh run download 35304765890 --repo "$GITHUB_REPOSITORY" --name qwen-gdn-shared-qk-t32-35304765890-1 --dir "$evidence/t32/gdn"
+            gh run download 35305449655 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-direct-window-35305449655-1 --dir "$evidence/t32/windows"
+            gh run download 35305677689 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35305677689-1 --dir "$evidence/t32/down"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10531081390/zip" > "$evidence/t32-stream.zip"
+            mkdir -p "$evidence/t32/stream"
+            unzip -q "$evidence/t32-stream.zip" -d "$evidence/t32/stream"
+            python3 -B read-orchestrator/scripts/ci/dflash_t32_combined_stage.py --checkout read-combined \
+              --evidence "$evidence/t32" --manifest read-combined/experiment-results/t32-combined-sources.json
+            git -C read-combined diff --check
+          fi
       - name: Check host pressure before loading
         run: |
           python3 -B read-orchestrator/scripts/ci/runner_io_gate.py --attempts 4 \
@@ -129,6 +142,10 @@ jobs:
         run: timeout -k 20 600 bash scripts/ci/run-dspark-hardware.sh
       - name: Independently validate combined request evidence
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native ]]; then
+            python3 -c 'import json; p=json.load(open("read-combined/experiment-results/t32-preload-admission.json")); assert p["passed"] is True and p["weights_loaded"] is False and p["hardware_qualified"] is False and p["performance_qualified"] is False'
+            exit 0
+          fi
           validator=cumulative_t16_report.py
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
             validator=drafter_comparison_report.py
