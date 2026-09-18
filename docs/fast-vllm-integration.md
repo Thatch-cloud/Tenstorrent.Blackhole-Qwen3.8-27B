@@ -108,6 +108,15 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+`FastServingLifecycle` provides the worker-level sequence: capture the native
+prefill, return its seed once, construct/attach the fast bridge, publish drafts,
+return committed decode blocks, and release traces before processing a finished
+request's scheduler cleanup. Terminal prefill skips verifier allocation. Invalid
+or partial prefill and setup failures poison the opt-in lifecycle rather than
+silently falling back to slow decode. CPU tests compose this sequence with fake
+device boundaries. Runtime-scope construction and startup registration remain
+unconnected; no serving image has been published from these helpers.
+
 `serving_request_factory.from_prefill` constructs the T16/DFlash request from
 captured serving features and the already-emitted target seed. It does not invoke
 the offline benchmark or perform reference generation. It retains the combined
