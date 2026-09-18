@@ -16,8 +16,12 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
     if type(live_query_qk) is not bool or (live_query_qk and (block_rows != 8 or precise_native)):
         raise ValueError('Live-query QK requires the eight-row composed-attention path')
     if type(native_proposal_attention) is not bool or (native_proposal_attention and
-            (block_rows != 8 or precise_native or live_query_qk or not native_head_layout)):
-        raise ValueError('Native proposal attention requires an isolated T8 native-head-layout experiment')
+            (block_rows not in (8, 16) or precise_native or live_query_qk or not native_head_layout)):
+        raise ValueError('Native proposal attention requires an isolated native-head-layout experiment')
+    if native_proposal_attention and block_rows == 16:
+        from dflash_t16_native_scope import require_active
+
+        require_active()
 
     native_kernel = None
     if precise_native:
@@ -63,8 +67,12 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         raise ValueError('Live-query QK requires a validated T8 mask and the qualified64-worker path')
     if parameters.get('native_proposal_attention') and (native_proposal_mask_validated is not True
             or wide_dot_placement or parameters.get('native_kernel') or parameters.get('live_query_qk')
-            or parameters.get('block_rows', 8) != 8 or not parameters.get('native_head_layout')):
-        raise ValueError('Native proposal attention requires its own validated mask and isolated T8 policy')
+            or parameters.get('block_rows', 8) not in (8, 16) or not parameters.get('native_head_layout')):
+        raise ValueError('Native proposal attention requires its own validated mask and isolated policy')
+    if parameters.get('native_proposal_attention') and parameters.get('block_rows', 8) == 16:
+        from dflash_t16_native_scope import require_active
+
+        require_active()
     if type(context) is not int or context < 1 or context > 2048:
         raise ValueError('Explicit bounded committed feature context required')
     block_rows = parameters.get('block_rows', 8)
@@ -142,7 +150,10 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     attention_owned = []
     try:
         if parameters.get('native_proposal_attention'):
-            from proposal_native_attention import attention as native_proposal
+            if block_rows == 16:
+                from dflash_t16_native_attention import attention as native_proposal
+            else:
+                from proposal_native_attention import attention as native_proposal
 
             attention = native_proposal(operations, heads['q'], heads['k'], heads['v'], mask, mask_validated=True)
             attention_owned.append(attention)

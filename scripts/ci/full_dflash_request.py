@@ -95,12 +95,16 @@ def summarize_dflash_requests(requests, *, audit_only=False):
                 or entry['dflash'].get('validated_live_masks') != len(entry['dflash']['proposal_contexts'])):
             raise ValueError('Every captured live-query bucket requires a validated mask')
         if native_proposal_attention and (entry['dflash'].get('native_proposal_attention') is not True
-                or entry['dflash'].get('proposal_capture') is not True or entry['dflash'].get('block_rows') != 8
+                or entry['dflash'].get('proposal_capture') is not True or entry['dflash'].get('block_rows') not in (8, 16)
                 or not entry['dflash'].get('proposal_contexts')
                 or type(entry['dflash'].get('validated_native_proposal_masks')) is not int
                 or entry['dflash']['validated_native_proposal_masks'] != len(entry['dflash']['proposal_contexts'])
                 or entry['dflash'].get('attention') != 'Native BF16 proposal-only attention; not an exact replacement'):
             raise ValueError('Every native proposal bucket requires its own validated mask and explicit approximate policy')
+        if native_proposal_attention and entry['dflash'].get('block_rows') == 16:
+            from dflash_t16_native_scope import validate_record
+
+            validate_record(entry.get('dflash_t16_native_admission'))
         count = entry['committed_decode_tokens']
         if (type(count) is not int or count <= 0 or count != len(entry['emitted']) - 1
                 or sum(block['committed'] for block in entry['blocks']) != count
@@ -317,9 +321,13 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             or type(target_attention_t16) is not bool
             or (block_rows == 16) != target_attention_t16
             or (target_attention_t16 and (not proposal_capture or not cache_history or not commit_only_gdn
-                or not fused_convolution or profile_verifier or native_proposal_attention or live_query_qk
+                or not fused_convolution or profile_verifier or live_query_qk
                 or cache_projection_capture))):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
+    if native_proposal_attention and target_attention_t16:
+        from dflash_t16_native_scope import require_active
+
+        require_active()
     window = prefill_window(len(prompt))
     manifests, layers, projection, selector = fixtures
     capture = device = runtime = None
@@ -428,6 +436,8 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['cache_projection_capture'] = cache_projection_capture
         result['live_query_qk'] = live_query_qk
         result['native_proposal_attention'] = native_proposal_attention
+        if native_proposal_attention and target_attention_t16:
+            result['dflash_t16_native_admission'] = dict(require_active())
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
             prefill_window=window, prefill_checks=prefill_checks, prefill_chunks=prefill_chunks,
             prefill_assembly_checks=prefill_assembly_checks,

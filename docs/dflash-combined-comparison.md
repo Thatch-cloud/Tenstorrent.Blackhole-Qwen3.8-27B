@@ -60,6 +60,15 @@ Next is an explicitly approximate proposal-only combined candidate, requiring
 fresh exact target-output/state audits and measured acceptance/TG when hardware
 is released. The current combined runtime remains unchanged.
 
+The combined request API now has an opt-in `native_attention_evidence` argument.
+It requires both pinned simulator reports and matching source/native hashes,
+then enables the T16-specific mask validator and native proposal operation.
+The admission is rechecked on exit and recorded with each request; summary
+validation rejects missing admission. All existing target optimization scopes
+remain active. The default comparison driver does not select this candidate;
+candidate CI staging and combined acceptance are still pending. No hardware
+dispatch is authorized while the pause remains in force.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.

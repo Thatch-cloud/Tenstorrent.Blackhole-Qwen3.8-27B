@@ -14,7 +14,7 @@ from shared_qk_norm_scatter import build as scatter_build
 
 
 def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, *, directory,
-                            runtime_root, **options):
+                            runtime_root, native_attention_evidence=None, **options):
     from full_dflash_request import measure_dflash_request
     from fused_t16_scope import FusedT16Arm
     from gdn_shared_qk_scope import scoped_shared_qk
@@ -23,6 +23,8 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
     from models.tt_transformers.tt.ccl import tt_all_reduce
 
     directory = Path(directory)
+    if 'native_proposal_attention' in options:
+        raise ValueError('Select native T16 proposals through explicit simulator evidence, not a bare flag')
     if len(prompt) != 4096 or options.get('max_new_tokens') != 256:
         raise ValueError('Initial combined drafter comparison requires CTX4096 and 256 output budget')
     windows = qualify_windows(directory, directory / 'gdn-direct-window-evidence')
@@ -36,6 +38,10 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
         return result
 
     with ExitStack() as stack:
+        if native_attention_evidence is not None:
+            from dflash_t16_native_scope import scoped_native_t16
+
+            stack.enter_context(scoped_native_t16(native_attention_evidence, directory, runtime_root))
         stack.enter_context(patch.object(gdn_shared_qk_scope, 'build', build))
         stack.enter_context(patch.object(gdn_shared_qk_gate, 'qualify', lambda *args: norm))
         target = stack.enter_context(scoped_cumulative_t16(windows, None, directory,
@@ -46,7 +52,8 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
         stack.enter_context(fusion.install())
         result = measure_dflash_request(operations, model, sampler, prompt, pages, helpers,
             block_rows=16, proposal_capture=True, commit_only_gdn=True, fused_convolution=True,
-            cache_history=True, target_attention_t16=True, **options)
+            cache_history=True, target_attention_t16=True,
+            **(dict(native_proposal_attention=True) if native_attention_evidence is not None else {}), **options)
     result['gdn_shared_qk'] = shared
     result['fused_t16_mlp'] = fusion.audit
     result['register_epilogue'] = dict(register, register_resident=True)

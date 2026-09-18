@@ -76,7 +76,13 @@ class PreparedDFlashProposal:
 
             validate_live_qk_mask(host['mask'])
         if getattr(device, 'native_proposal_attention', False):
-            from proposal_native_attention import validate_mask
+            if device.block_rows == 16:
+                from dflash_t16_native_scope import require_active
+                from dflash_t16_native_attention import validate_mask
+
+                require_active()
+            else:
+                from proposal_native_attention import validate_mask
 
             validate_mask(host['mask'])
         sources = [host['identifiers'], host['mask'], *host['rope']['q'], *host['rope']['k']]

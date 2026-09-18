@@ -36,7 +36,7 @@ class DFlashDevice:
                 or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
                 or type(live_query_qk) is not bool or (live_query_qk and (not proposal_capture or block_rows != 8))
                 or type(native_proposal_attention) is not bool or (native_proposal_attention and
-                    (not proposal_capture or not cache_history or block_rows != 8 or live_query_qk or cache_projection_capture))):
+                    (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
