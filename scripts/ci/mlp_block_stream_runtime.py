@@ -42,7 +42,7 @@ def t32_hardware_projection(source):
 
 @contextmanager
 def scoped_block_stream(directory, evidence, *, runtime_root, operations, weights, streams, token_rows=16,
-                        pipeline_evidence=None):
+                        pipeline_evidence=None, progressive_evidence=None):
     import fused_t16_scope
 
     if type(token_rows) is not int or token_rows not in (16, 32):
@@ -54,6 +54,9 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
             raise ValueError('Explicit T32 combined experiment required')
         if pipeline_evidence is not None and (token_rows != 16 or environment.get('QWEN_BULK_PIPELINE_EXPERIMENT') != '1'):
             raise ValueError('Explicit separately admitted T16 bulk-pipeline experiment required')
+        if progressive_evidence is not None and (token_rows != 16 or pipeline_evidence is not None
+                or environment.get('QWEN_PROGRESSIVE_INPUT_EXPERIMENT') != '1'):
+            raise ValueError('Explicit separately admitted serial-weight T16 progressive-input experiment required')
 
     require_runtime(os.environ)
     if getattr(fused_t16_scope.FusedProjection, '_block_stream_experiment', False):
@@ -79,22 +82,37 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
 
         def qualify_stream(directory, evidence, register):
             return qualify_pipeline(directory, evidence, pipeline_evidence, register)
+    if progressive_evidence is not None:
+        from mlp_progressive_input_gate import qualify as qualify_progressive, hardware_source, hardware_reader
+        from mlp_progressive_input_gate import CANDIDATE_SHA256 as candidate_hash
+        from mlp_progressive_input import projection as progressive_projection
+
+        def qualify_stream(directory, evidence, register):
+            return qualify_progressive(directory, evidence, progressive_evidence, register)
     admission = qualify_stream(directory, evidence, register)
     baseline, = register['kernels']
     if token_rows == 32:
         baseline = dict(copy.deepcopy(baseline), token_rows=32)
+    if progressive_evidence is not None:
+        baseline = dict(copy.deepcopy(baseline), progressive_input=True, input_buffer_tiles=160)
     expected, = admission['kernels']
     source_path = directory / 'mlp-register-epilogue-candidate/fused_1d.py'
     source = (candidate_sources(directory)['fused_1d.py'] if token_rows == 32
         else adapt_projection(source_path.read_text()))
+    if progressive_evidence is not None:
+        source = progressive_projection(source)
     if hashlib.sha256(source.encode()).hexdigest() != candidate_hash:
         raise ValueError('Executed projection source differs from simulator candidate')
     if token_rows == 32:
         source = t32_hardware_projection(source)
+    if progressive_evidence is not None:
+        source = hardware_source(source_path.read_text())
     candidate = ModuleType('block_stream_hardware_candidate')
     candidate.__file__ = str(source_path)
     candidate.require_hardware, candidate.os = require_runtime, os
     exec(compile(source, str(source_path), 'exec'), candidate.__dict__)
+    if progressive_evidence is not None:
+        candidate.progressive_reader = hardware_reader
     if pipeline_evidence is not None:
         from mlp_block_stream_pipeline import transform
         from mlp_block_stream import reader_source
@@ -113,6 +131,10 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
         audit.update(rows=32, hardware_projection_sha256=hashlib.sha256(source.encode()).hexdigest())
     if pipeline_evidence is not None:
         audit.update(bulk_pipeline=True, pipeline_reader_sha256=expected['reader_sha256']['fused_1d_weights.cpp'])
+    if progressive_evidence is not None:
+        audit.update(progressive_input=True, input_reader_sha256=expected['reader_sha256']['fused_1d_input.cpp'],
+            extra_l1_bytes_per_multicast_core=144 * 2048,
+            hardware_projection_sha256=hashlib.sha256(source.encode()).hexdigest())
     constructed = set()
     active = True
 

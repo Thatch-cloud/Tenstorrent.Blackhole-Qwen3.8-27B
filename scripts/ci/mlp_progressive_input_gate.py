@@ -14,6 +14,7 @@ from mlp_register_epilogue_gate import SIM_PACKER
 REPORT_SHA256 = '8b843215d54c68ee2f7272db1a4c2ec0d4bdab1524cb062bb02239bf9422c72a'
 STAGING_SHA256 = '618ede1c41773d6c9a7f4a2412b21efdf2fd787cce4d90308d753d4dc0581fb4'
 READER_SHA256 = '5d433b22eeab77f80dee3d3ef2a0cf9b34ae21743897b312d23032904684b4a5'
+CANDIDATE_SHA256 = 'f8e227fd3e95977b52b18c4fdb3855d78040cdad4250197935a3f89d7f33be01'
 
 
 def qualify(directory, serial_evidence, evidence, register_admission):

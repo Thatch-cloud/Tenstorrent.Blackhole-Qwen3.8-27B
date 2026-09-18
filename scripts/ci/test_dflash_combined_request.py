@@ -8,7 +8,7 @@ import dflash_combined_request as combined
 
 
 class CombinedDFlashTests(unittest.TestCase):
-    def exercise(self, fail=False, native=False, block_stream=False, runtime_only=False):
+    def exercise(self, fail=False, native=False, block_stream=False, runtime_only=False, progressive=False):
         active = []
         audits = []
 
@@ -29,6 +29,11 @@ class CombinedDFlashTests(unittest.TestCase):
         module = SimpleNamespace(build=object(), scoped_shared_qk=lambda *args: scoped('shared', shared))
         model = SimpleNamespace(layers=[SimpleNamespace(feed_forward=SimpleNamespace(
             weights=SimpleNamespace(w_gate_up=index))) for index in range(64)])
+
+        def stream_scope(*args, **kwargs):
+            self.assertEqual(kwargs.get('progressive_evidence'), 'progressive-evidence' if progressive else None)
+            self.assertNotIn('pipeline_evidence', kwargs)
+            return scoped('stream', dict(constructions=64, calls=64))
 
         def measure(*args, **kwargs):
             self.assertEqual(active, (['native'] if native else []) +
@@ -51,7 +56,7 @@ class CombinedDFlashTests(unittest.TestCase):
                 patch('full_dflash_request.measure_dflash_request', side_effect=measure) as benchmark, \
                 patch('dflash_t16_native_scope.scoped_native_t16', side_effect=lambda *args: scoped('native', {})), \
                 patch('mlp_block_stream_runtime.scoped_block_stream',
-                    side_effect=lambda *args, **kwargs: scoped('stream', dict(constructions=64, calls=64))), \
+                    side_effect=stream_scope), \
                 patch('mlp_block_stream_request.validate_request') as stream_validation, \
                 patch.object(combined, 'qualify_windows', return_value={}), \
                 patch.object(combined, 'qualify_down', return_value={}), \
@@ -76,7 +81,8 @@ class CombinedDFlashTests(unittest.TestCase):
                     return runtime
                 result = combined.measure_combined_dflash(None, model, None, [1] * 4096, None, None,
                     directory='.', runtime_root='.', max_new_tokens=256,
-                    **(dict(block_stream=dict(evidence='evidence', streams=tuple(range(64)))) if block_stream else {}),
+                    **(dict(block_stream=dict(evidence='evidence', streams=tuple(range(64)),
+                        **(dict(progressive_evidence='progressive-evidence') if progressive else {}))) if block_stream else {}),
                     **(dict(native_attention_evidence='evidence') if native else {}))
                 self.assertEqual(stream_validation.call_count, int(block_stream))
                 return result
@@ -109,3 +115,8 @@ class CombinedDFlashTests(unittest.TestCase):
         self.exercise(runtime_only=True)
         with self.assertRaisesRegex(RuntimeError, 'serving request failed'):
             self.exercise(runtime_only=True, fail=True)
+
+    def test_progressive_route_retains_complete_runtime_and_cleanup(self):
+        self.exercise(native=True, block_stream=True, progressive=True)
+        with self.assertRaisesRegex(RuntimeError, 'device request failed'):
+            self.exercise(native=True, block_stream=True, progressive=True, fail=True)

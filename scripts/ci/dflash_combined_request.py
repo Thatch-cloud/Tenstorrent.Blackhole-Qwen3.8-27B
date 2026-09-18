@@ -56,7 +56,8 @@ def combined_runtime(operations, model, *, directory, runtime_root,
                 runtime_root=runtime_root, operations=operations,
                 weights=[layer.feed_forward.weights.w_gate_up for layer in model.layers],
                 streams=block_stream['streams'],
-                **(dict(pipeline_evidence=block_stream['pipeline_evidence']) if 'pipeline_evidence' in block_stream else {})))
+                **{name: block_stream[name] for name in ('pipeline_evidence', 'progressive_evidence')
+                    if name in block_stream}))
         shared = stack.enter_context(scoped_shared_qk(operations, norm))
         fusion = FusedT16Arm(operations, model, tt_all_reduce)
         stack.enter_context(fusion.install())

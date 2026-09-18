@@ -49,9 +49,15 @@ reference. Simulator exit and all container cleanup statuses are zero.
 
 The report reviewer is `scripts/ci/mlp_progressive_input_report.py`. The new
 hardware admission helper pins these artifacts, retains serial/register
-qualification and requires the identical reader. Its adapter-source tests pass,
-but it is not yet connected to a hardware request scope. Next: complete that
-scope, validate it against the actual image and run combined ABBA requests.
+qualification and requires the identical reader. The combined DFlash runtime now
+accepts explicit `progressive_evidence` and requires
+`QWEN_PROGRESSIVE_INPUT_EXPERIMENT=1`. It rejects T32, simultaneous weight
+pipelining, missing admission, changed bindings and use after scope closure.
+All 64 layers must execute, restore their bindings and report the additional L1
+capacity. Eighteen focused host tests cover routing, admission/source changes,
+full layer ownership and exception cleanup. These are not device results.
+Next: stage the paired comparison, validate against the actual image and run
+combined ABBA requests with native drafting and direct KV publication in both arms.
 There is no isolated hardware timing or serving promotion.
 
 1. Host checks: source identity, reader protocol structure, slow-receiver counter

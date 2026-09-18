@@ -9,6 +9,9 @@ def validate_request(request):
     audit = request.get('block_stream', {})
     expected = REPORT_SHA256
     pipeline = audit.get('bulk_pipeline', False)
+    progressive = audit.get('progressive_input', False)
+    if type(progressive) is not bool or (progressive and pipeline):
+        raise ValueError('Progressive input requires the separately admitted serial weight path')
     if type(pipeline) is not bool:
         raise ValueError('Explicit bulk-pipeline route identity required')
     if pipeline:
@@ -18,6 +21,14 @@ def validate_request(request):
             raise ValueError('Exact simulator-qualified pipeline reader required')
     elif 'pipeline_reader_sha256' in audit:
         raise ValueError('Serial reader cannot claim pipeline execution')
+    if progressive:
+        from mlp_progressive_input_gate import REPORT_SHA256 as expected, READER_SHA256
+
+        if (audit.get('input_reader_sha256') != READER_SHA256
+                or audit.get('extra_l1_bytes_per_multicast_core') != 144 * 2048):
+            raise ValueError('Exact simulator-qualified progressive input route required')
+    elif 'input_reader_sha256' in audit:
+        raise ValueError('Control cannot claim progressive activation delivery')
     validate_fusion(request, expected, expected_extra_weight_allocations=64)
     register = request.get('register_epilogue', {})
     hits = request['fused_t16_mlp']['hits']

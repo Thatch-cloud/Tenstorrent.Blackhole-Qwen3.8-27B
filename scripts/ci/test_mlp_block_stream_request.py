@@ -40,6 +40,21 @@ class BlockStreamRequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_request(request)
 
+    def test_progressive_requires_own_identity_and_capacity(self):
+        from mlp_progressive_input_gate import REPORT_SHA256 as PROGRESSIVE_SHA256, READER_SHA256
+
+        request = self.fixture()
+        request['block_stream'].update(progressive_input=True, input_reader_sha256=READER_SHA256,
+            extra_l1_bytes_per_multicast_core=144 * 2048)
+        with self.assertRaises(ValueError):
+            validate_request(request)
+        request['block_stream']['report_sha256'] = PROGRESSIVE_SHA256
+        request['fused_t16_mlp']['passed_simulator'] = PROGRESSIVE_SHA256
+        validate_request(request)
+        request['block_stream']['extra_l1_bytes_per_multicast_core'] = 0
+        with self.assertRaises(ValueError):
+            validate_request(request)
+
 
 if __name__ == '__main__':
     unittest.main()

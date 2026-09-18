@@ -27,13 +27,26 @@ class HardwareScopeTests(unittest.TestCase):
     def test_pipeline_scope_binds_all_layers_and_restores_on_failure(self):
         self.check_scope(pipeline=True)
 
+    def test_progressive_scope_binds_all_layers_and_restores_on_failure(self):
+        self.check_scope(pipeline=False, progressive=True)
+
+    def test_progressive_rejects_missing_flag_width_and_pipeline(self):
+        for environment, options in (
+                (self.environment, {}),
+                (dict(self.environment, QWEN_PROGRESSIVE_INPUT_EXPERIMENT='1', QWEN_T32_COMBINED_EXPERIMENT='1'), dict(token_rows=32)),
+                (dict(self.environment, QWEN_PROGRESSIVE_INPUT_EXPERIMENT='1', QWEN_BULK_PIPELINE_EXPERIMENT='1'), dict(pipeline_evidence='.'))):
+            with patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValueError, 'progressive-input'):
+                with scoped_block_stream('.', '.', runtime_root='.', operations=None,
+                        weights=[], streams=[], progressive_evidence='.', **options):
+                    self.fail('unadmitted progressive scope entered')
+
     def test_pipeline_cannot_be_enabled_by_evidence_alone(self):
         with patch.dict(os.environ, self.environment, clear=True), self.assertRaisesRegex(ValueError, 'bulk-pipeline'):
             with scoped_block_stream('.', '.', runtime_root='.', operations=None,
                     weights=[], streams=[], pipeline_evidence='.'):
                 self.fail('unadmitted pipeline entered')
 
-    def check_scope(self, *, pipeline):
+    def check_scope(self, *, pipeline, progressive=False):
         source = '''class FusedProjection:
     def __init__(self, mesh, weights, **options):
         self.weights = weights
@@ -44,8 +57,12 @@ class HardwareScopeTests(unittest.TestCase):
         validate_binding(self, ttnn)
         if 'reader_source' in globals():
             assert reader_source('original') == 'pipeline'
+        if 'progressive_reader' in globals():
+            assert progressive_reader('original') == 'progressive'
         return value
 '''
+        if progressive:
+            source = source.replace("{'baseline': True}", "{'baseline': True, 'progressive_input': True, 'input_buffer_tiles': 160}")
         weights = [SimpleNamespace(address=layer) for layer in range(64)]
         streams = [SimpleNamespace(address=layer + 1000, dtype='uint32', layout='row',
             shape=(1, 1, 1820, 6912), memory_config=lambda: 'dram') for layer in range(64)]
@@ -55,13 +72,21 @@ class HardwareScopeTests(unittest.TestCase):
         original_projection = original.FusedProjection
         baseline = dict(passed=True, kernels=[dict(baseline=True)])
         admission = dict(passed=True, kernels=[dict(fused_compute_sha256=hashlib.sha256(b'compute').hexdigest(),
-            reader_sha256={'fused_1d_weights.cpp': hashlib.sha256(b'pipeline').hexdigest()})])
+            reader_sha256={'fused_1d_weights.cpp': hashlib.sha256(b'pipeline').hexdigest(),
+                'fused_1d_input.cpp': hashlib.sha256(b'progressive').hexdigest()})])
         environment = dict(self.environment, **({'QWEN_BULK_PIPELINE_EXPERIMENT': '1'} if pipeline else {}))
+        if progressive:
+            environment['QWEN_PROGRESSIVE_INPUT_EXPERIMENT'] = '1'
         with patch.dict(os.environ, environment, clear=True), \
                 patch.dict('sys.modules', {'fused_t16_scope': original, 'ttnn': operations}), \
                 patch('mlp_block_stream_runtime.qualify_register', return_value=baseline), \
                 patch('mlp_block_stream_runtime.qualify', return_value=admission), \
                 patch('mlp_block_stream_pipeline_gate.qualify', return_value=admission), \
+                patch('mlp_progressive_input_gate.qualify', return_value=admission), \
+                patch('mlp_progressive_input_gate.hardware_source', return_value=source), \
+                patch('mlp_progressive_input_gate.hardware_reader', return_value='progressive'), \
+                patch('mlp_progressive_input.projection', return_value=source), \
+                patch('mlp_progressive_input_gate.CANDIDATE_SHA256', hashlib.sha256(source.encode()).hexdigest()), \
                 patch('mlp_block_stream_pipeline.transform', return_value='pipeline'), \
                 patch('mlp_block_stream.reader_source', return_value='serial'), \
                 patch('mlp_block_stream_runtime.Path.read_text', return_value=source), \
@@ -69,13 +94,15 @@ class HardwareScopeTests(unittest.TestCase):
                 patch('mlp_block_stream_runtime.CANDIDATE_SHA256', hashlib.sha256(source.encode()).hexdigest()):
             with self.assertRaisesRegex(RuntimeError, 'request failed'):
                 with scoped_block_stream('.', '.', runtime_root='.', operations=operations,
-                        weights=weights, streams=streams, pipeline_evidence='.' if pipeline else None) as audit:
+                        weights=weights, streams=streams, pipeline_evidence='.' if pipeline else None,
+                        progressive_evidence='.' if progressive else None) as audit:
                     projections = [original.FusedProjection(None, weight) for weight in weights]
                     for projection in projections:
                         self.assertEqual(projection('output'), 'output')
                     self.assertEqual(audit['constructions'], 64)
                     self.assertEqual(audit['calls'], 64)
                     self.assertIs(audit.get('bulk_pipeline', False), pipeline)
+                    self.assertIs(audit.get('progressive_input', False), progressive)
                     with self.assertRaises(ValueError):
                         original.FusedProjection(None, weights[0])
                     streams[0].address += 100
