@@ -1,0 +1,131 @@
+name: Qwen hung card reset
+on:
+  push:
+    tags: ['experiment/card-reset-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  reset:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: card-reset
+          persist-credentials: false
+      - name: Record the hung state and confirm nothing holds a card
+        working-directory: card-reset
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'A process holds a card; refusing to reset'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          {
+            printf '=== pci before ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || true
+            printf '\n=== device list before ===\n'
+            timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 || echo 'tt-smi -ls failed'
+          } > experiment-results/before.txt 2>&1
+          cat experiment-results/before.txt
+      - name: Reset the hung board
+        working-directory: card-reset
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Device-level reset only, on the board UMD reported hung (PCIe ID 2).
+          # No firmware is written and no host reboot is performed.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          status=0
+          timeout -k 20 300 "${prefix[@]}" "$smi" -r /dev/tenstorrent/2 \
+            > experiment-results/reset.log 2>&1 || status=$?
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -40 experiment-results/reset.log || true
+      - name: Confirm the board answers again
+        if: always()
+        working-directory: card-reset
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          {
+            printf '=== pci after ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || true
+            printf '\n=== device nodes after ===\n'
+            ls -l /dev/tenstorrent/ 2>&1 || true
+            printf '\n=== device list after ===\n'
+            timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 || echo 'tt-smi -ls failed'
+          } > experiment-results/after.txt 2>&1
+          cat experiment-results/after.txt
+          timeout -k 5 60 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-after.json" \
+            > experiment-results/tt-smi-after.log 2>&1 || true
+          python3 -B -c "
+          import json
+          from pathlib import Path
+          p = Path('experiment-results/tt-smi-after.json')
+          if not p.is_file():
+              print('no snapshot; board may still be down')
+          else:
+              s = json.loads(p.read_text())
+              for i, d in enumerate(s.get('device_info', [])):
+                  fw = (d.get('firmwares') or {}).get('fw_bundle_version')
+                  print('device %d bundle %s' % (i, fw))
+          "
+      - name: Open the cluster through the runtime
+        if: always()
+        working-directory: card-reset
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The real proof of recovery: UMD builds a cluster and the capability
+          # still reports natively. Opens the cards once, then closes.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-reset-verify-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 10 300 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/source/scripts/ci \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/tensor-prefetch-capability.py \
+            --hardware --output /tmp/cap.json \
+            > experiment-results/verify.log 2>&1 || true
+          grep -E '"supported"|Established firmware|hung|0xffffffff' experiment-results/verify.log | tail -10 || true
+          tail -5 experiment-results/verify.log || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-card-reset-${{ github.run_id }}
+          path: card-reset/experiment-results/
