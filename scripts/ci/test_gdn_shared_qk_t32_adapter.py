@@ -2,6 +2,8 @@ import ast
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,6 +15,22 @@ from frozen_recipe_context import adapt_cache_launcher
 
 
 class T32SharedQKAdapterTests(unittest.TestCase):
+    def test_runtime_guard_imports_without_staging_dependencies(self):
+        source = Path(__file__).with_name('gdn_shared_qk_t32_adapter.py').read_text()
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = Path(temporary) / 'gdn_shared_qk_t32_adapter.py'
+            adapter.write_text(source)
+            command = (
+                'import os, runpy, sys; '
+                'namespace = runpy.run_path(sys.argv[1]); '
+                'os.environ.clear(); '
+                "os.environ.update(QWEN_SIM_ONLY='1', TT_METAL_SIMULATOR='fixture'); "
+                "namespace['require_simulator'](); "
+                "assert 'frozen_recipe_context' not in sys.modules"
+            )
+            subprocess.run([sys.executable, '-I', '-B', '-c', command, str(adapter)],
+                check=True, timeout=10, cwd=temporary)
+
     def test_stage_retains_baseline_builders_and_records_generated_sources(self):
         directory = Path(__file__).parent
         names = ('gdn_shared_qk_program.py', 'gdn_shared_qk_pipeline.py', 'gdn-shared-recurrence-probe.py')

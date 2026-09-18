@@ -2,9 +2,6 @@
 
 import os
 
-from frozen_recipe_context import replace_once
-
-
 def require_simulator():
     if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or os.environ.get('QWEN_HARDWARE_TESTS') or os.environ.get('QWEN_CARDS_ALLOCATED')):
@@ -12,6 +9,8 @@ def require_simulator():
 
 
 def payloads(originals):
+    from frozen_recipe_context import replace_once
+
     program = originals['gdn_shared_qk_program.py']
     for before, after in (
         ('    if type(serial) is not bool',
@@ -55,6 +54,7 @@ def payloads(originals):
 
 
 def adapt_probe(source):
+    from frozen_recipe_context import replace_once
     from frozen_gdn_cache_stage import adapt_probe as scatter_probe
 
     source = scatter_probe(source, norm_scatter=True)
