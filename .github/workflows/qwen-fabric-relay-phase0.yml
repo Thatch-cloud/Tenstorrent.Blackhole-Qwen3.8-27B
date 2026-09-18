@@ -1,7 +1,7 @@
 name: Qwen fabric-relay Phase-0 identity capture
 on:
   push:
-    tags: ['experiment/fabric-relay-phase0-v1']
+    tags: ['experiment/fabric-relay-phase0-v1', 'experiment/fabric-relay-phase0-v2']
 permissions:
   contents: read
 concurrency:
@@ -14,19 +14,28 @@ jobs:
     steps:
       - name: Verify host
         run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Read-only host and device identity snapshot
+      # Shallow clone into a fresh directory instead of actions/checkout:
+      # the runner work area holds stale checkout state that makes
+      # actions/checkout fail with "not a git repository" after its own
+      # content wipe. A plain clone is self-contained and unaffected.
+      - name: Shallow-clone the repository fresh
         timeout-minutes: 2
         run: |
           set -euo pipefail
-          mkdir -p fabric-relay-phase0
+          workdir=$(mktemp -d /tmp/fabric-relay-src.XXXXXX)
+          git clone --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$workdir/repo"
+          echo "FABRIC_RELAY_SOURCE_DIR=$workdir/repo" >> "$GITHUB_ENV"
+      - name: Read-only host and device identity snapshot
+        timeout-minutes: 2
+        working-directory: ${{ env.FABRIC_RELAY_SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/fabric-relay-phase0"
           python3 -B scripts/ci/fabric_relay_phase0_identity.py \
-            --out fabric-relay-phase0/identity.json
-          git rev-parse HEAD > fabric-relay-phase0/repo_revision.txt
+            --out "$GITHUB_WORKSPACE/fabric-relay-phase0/identity.json"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/fabric-relay-phase0/repo_revision.txt"
           printf 'No runtime or serving-default change: this capture opens no device and loads no weight.\n' \
-            > fabric-relay-phase0/README.txt
+            > "$GITHUB_WORKSPACE/fabric-relay-phase0/README.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
