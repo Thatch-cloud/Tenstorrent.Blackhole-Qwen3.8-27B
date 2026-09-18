@@ -105,6 +105,12 @@ jobs:
               --manifest read-combined/experiment-results/bulk-pipeline-hardware-sources.json
             git -C read-combined diff --check
           fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-kv-slide-block-stream-dflash-native ]]; then
+            gh run download 35317724110 --repo "$GITHUB_REPOSITORY" --name qwen-draft-kv-slide-35317724110-1 --dir "$evidence/kv-slide"
+            python3 -B read-orchestrator/scripts/ci/draft_kv_slide_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/kv-slide" --manifest read-combined/experiment-results/kv-slide-hardware-sources.json
+            git -C read-combined diff --check
+          fi
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
             gh run download 35299919048 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-attention-35299919048-1 --dir "$evidence/t32/attention"
             gh run download 35301426428 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-cache-35301426428-2 --dir "$evidence/t32/cache"

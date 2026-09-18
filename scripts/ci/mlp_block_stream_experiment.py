@@ -27,6 +27,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if pipeline_flag not in ('0', '1'):
         raise ValueError('Explicit zero/one bulk-pipeline experiment required')
     bulk_pipeline = pipeline_flag == '1'
+    publication_flag = os.environ.get('QWEN_DRAFT_KV_SLIDE_EXPERIMENT', '0')
+    if publication_flag not in ('0', '1') or (publication_flag == '1' and bulk_pipeline):
+        raise ValueError('One explicit publication or weight transport experiment required')
+    kv_publication = publication_flag == '1'
     prompt = options.get('prompt', ())
     if (any(os.environ.get(name) != '1' for name in
             ('QWEN_CUMULATIVE_NORM', 'QWEN_CUMULATIVE_REGISTER', 'QWEN_CUMULATIVE_MLP_DOWN'))
@@ -38,6 +42,11 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     runtime_root = os.environ['TT_METAL_HOME']
     native_evidence = directory / 'dflash-t16-native-evidence'
     admission = admit(native_evidence, directory, runtime_root)
+    if kv_publication:
+        from draft_kv_slide_gate import qualify as qualify_publication
+
+        publication_evidence = directory / 'draft-kv-slide-evidence'
+        publication_admission = qualify_publication(directory, publication_evidence)
     if bulk_pipeline:
         from mlp_block_stream_pipeline_preload import preload
 
@@ -60,6 +69,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     report.update(coding_context=options['context'], request_checks=[], request_output_limit=256, sampler_links=4)
     if bulk_pipeline:
         report['weight_comparison_policy'] = 'serial-vs-bulk-pipeline'
+    if kv_publication:
+        report['weight_comparison_policy'] = 'serial-weights-kv-publication'
     warm_native_control(generator, kv_cache, report, progress)
     weights = [layer.feed_forward.weights.w_gate_up for layer in model.layers]
     mesh = model.layers[0].feed_forward.device
@@ -72,24 +83,28 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 for ordinal, (enabled, audited) in enumerate(SCHEDULE):
                     progress(f'block_stream_{ordinal}_' + ('candidate' if enabled else 'control'))
                     stream_options = (dict(evidence=directory / 'block-stream-evidence', streams=streams)
-                        if enabled or bulk_pipeline else None)
+                        if enabled or bulk_pipeline or kv_publication else None)
                     if enabled and bulk_pipeline:
                         stream_options['pipeline_evidence'] = directory / 'bulk-pipeline-evidence'
                     result = measure_combined_dflash(operations, model, sampler, prompt, pages, helpers,
                         directory=directory, runtime_root=runtime_root, fixtures=fixtures,
                         native_attention_evidence=native_evidence,
                         block_stream=stream_options,
-                        audit_features=audited, max_new_tokens=256, **callbacks)
+                        audit_features=audited, max_new_tokens=256, **callbacks,
+                        **(dict(kv_publication_evidence=publication_evidence) if enabled and kv_publication else {}))
+                    if kv_publication and not enabled:
+                        result['draft_kv_slide'] = dict(enabled=False, restored=True, serving_defaults_changed=False)
                     record_request(report, result, 'dflash2', sampler.tt_sampling, fabric)
                     if (result.get('native_proposal_attention') is not True
-                            or ('block_stream' in result) is not (enabled or bulk_pipeline)
+                            or ('block_stream' in result) is not (enabled or bulk_pipeline or kv_publication)
                             or result.get('block_stream', {}).get('bulk_pipeline', False) is not (enabled and bulk_pipeline)):
                         raise ValueError('Executed request differs from scheduled transport policy')
                     if audited:
                         summarize_dflash_requests([result], audit_only=True)
                     progress(f'block_stream_{ordinal}_complete')
         report.update(block_stream_comparison=summarize(report['request_checks'],
-            weight_transport=not bulk_pipeline, bulk_pipeline=bulk_pipeline),
+            weight_transport=not (bulk_pipeline or kv_publication), bulk_pipeline=bulk_pipeline,
+            kv_publication=kv_publication),
             pp=None, committed_tg=None, ctx_tokens=4096, scope=__doc__, performance_promoted=False)
     finally:
         report['drafter_comparison_sources'] = sources
@@ -100,5 +115,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             raise ValueError('Native proposal admission changed during comparison')
         if bulk_pipeline and preload(directory, runtime_root) != pipeline_admission:
             raise ValueError('Bulk pipeline admission changed during comparison')
+        if kv_publication and qualify_publication(directory, publication_evidence) != publication_admission:
+            raise ValueError('K/V publication admission changed during comparison')
         if audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'}) != fabric:
             raise ValueError('Sampling provenance changed during comparison')

@@ -20,3 +20,8 @@ def qualify(directory, evidence):
     report = json.loads(raw)
     result = validate(report, directory, staged_probe=False)
     return dict(result, report_sha256=REPORT_SHA256, sources=report['sources'])
+
+
+if __name__ == '__main__':
+    directory = Path(__file__).parent
+    print(json.dumps(qualify(directory, directory / 'draft-kv-slide-evidence')))
