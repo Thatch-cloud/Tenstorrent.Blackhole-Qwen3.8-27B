@@ -98,7 +98,7 @@ jobs:
               --manifest read-combined/experiment-results/block-stream-hardware-sources.json
           fi
           git -C read-combined diff --check
-          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
             gh run download 35299919048 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-attention-35299919048-1 --dir "$evidence/t32/attention"
             gh run download 35301426428 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-cache-35301426428-2 --dir "$evidence/t32/cache"
             gh run download 35304765890 --repo "$GITHUB_REPOSITORY" --name qwen-gdn-shared-qk-t32-35304765890-1 --dir "$evidence/t32/gdn"
@@ -107,8 +107,12 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10531081390/zip" > "$evidence/t32-stream.zip"
             mkdir -p "$evidence/t32/stream"
             python3 -B -m zipfile -e "$evidence/t32-stream.zip" "$evidence/t32/stream"
+            t32_args=()
+            if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
+              t32_args=(--run-comparison)
+            fi
             python3 -B read-orchestrator/scripts/ci/dflash_t32_combined_stage.py --checkout read-combined \
-              --evidence "$evidence/t32" --manifest read-combined/experiment-results/t32-combined-sources.json
+              --evidence "$evidence/t32" --manifest read-combined/experiment-results/t32-combined-sources.json "${t32_args[@]}"
             git -C read-combined diff --check
           fi
       - name: Check host pressure before loading
@@ -147,6 +151,7 @@ jobs:
             exit 0
           fi
           validator=cumulative_t16_report.py
+          validator_root=read-orchestrator
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
             validator=drafter_comparison_report.py
           fi
@@ -156,7 +161,11 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
             validator=mlp_block_stream_report.py
           fi
-          python3 -B "read-orchestrator/scripts/ci/$validator" \
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
+            validator=dflash_t32_comparison_report.py
+            validator_root=read-combined
+          fi
+          python3 -B "$validator_root/scripts/ci/$validator" \
             read-combined/experiment-results/dspark-captured-publication-request-hardware.json \
             > read-combined/experiment-results/cumulative-validation.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

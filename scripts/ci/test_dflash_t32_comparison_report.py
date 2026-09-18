@@ -61,6 +61,18 @@ class T32ComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualify_report(dict(passed=True, closed_cleanly=False))
 
+    def test_report_requires_shared_pool_cleanup_and_recomputed_summary(self):
+        report = dict(passed=True, closed_cleanly=True, streams=1, ctx_tokens=4096, sampler_links=4,
+            drafter_comparison_sources={'source': 'hash'}, drafter_comparison_sources_after={'source': 'hash'},
+            block_stream_pool=dict(released=True, native_bindings_unchanged=True, allocated_layers=64,
+                serving_defaults_changed=False, admission=[{}, {}], setup_ms=1.),
+            request_checks=[], dflash_t32_comparison={'checked': True})
+        with patch('dflash_t32_comparison_report.summarize', return_value={'checked': True}):
+            self.assertEqual(qualify_report(report), {'checked': True})
+            for key, value in (('sampler_links', 1), ('dflash_t32_comparison', {}), ('block_stream_pool', {})):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    qualify_report({**report, key: value})
+
 
 if __name__ == '__main__':
     unittest.main()

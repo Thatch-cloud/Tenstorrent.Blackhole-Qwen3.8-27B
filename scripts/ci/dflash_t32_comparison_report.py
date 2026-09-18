@@ -63,10 +63,26 @@ def summarize(requests):
 
 def qualify_report(report):
     if (report.get('passed') is not True or report.get('closed_cleanly') is not True or report.get('error')
+            or report.get('streams') != 1 or report.get('ctx_tokens') != 4096 or report.get('sampler_links') != 4
             or not report.get('drafter_comparison_sources')
             or report['drafter_comparison_sources'] != report.get('drafter_comparison_sources_after')):
         raise ValueError('Clean complete combined report with unchanged sources required')
+    pool = report.get('block_stream_pool', {})
+    if (pool.get('released') is not True or pool.get('native_bindings_unchanged') is not True
+            or pool.get('allocated_layers') != 64 or pool.get('serving_defaults_changed') is not False
+            or len(pool.get('admission', [])) != 2 or pool.get('setup_ms', 0) <= 0):
+        raise ValueError('Complete admitted weight pool with successful release required')
     result = summarize(report.get('request_checks'))
     if result != report.get('dflash_t32_comparison'):
         raise ValueError('Recorded T32 comparison differs from complete request evidence')
     return result
+
+
+if __name__ == '__main__':
+    import hashlib
+    import json
+    from pathlib import Path
+    import sys
+
+    raw = Path(sys.argv[1]).read_bytes()
+    print(json.dumps(dict(qualify_report(json.loads(raw)), raw_sha256=hashlib.sha256(raw).hexdigest()), indent=2))

@@ -21,6 +21,12 @@ class T32CombinedStageTests(unittest.TestCase):
             cwd=Path(__file__).parent, check=True, timeout=10)
 
     def test_stage_generates_all_components_and_stops_before_weights(self):
+        self.check_stage(preflight_only=True)
+
+    def test_full_comparison_keeps_preload_then_routes_loaded_model(self):
+        self.check_stage(preflight_only=False)
+
+    def check_stage(self, *, preflight_only):
         source = Path(__file__).parent
         with tempfile.TemporaryDirectory() as temporary:
             checkout = Path(temporary) / 'checkout'
@@ -33,6 +39,8 @@ class T32CombinedStageTests(unittest.TestCase):
             for name in names:
                 (scripts / name).write_bytes((source / name).read_bytes())
             (scripts / 'simulator-suite.sh').write_text('unchanged simulator launcher')
+            (scripts / 'dspark-target-hardware.py').write_text(
+                'from mlp_block_stream_experiment import run_loaded_requests\n')
             (scripts / 'frozen_context_geometry.py').write_text('pinned context geometry')
             (scripts / 'run-dspark-hardware.sh').write_text('    -e "QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1"\n')
             (scripts / 'dspark-hardware-suite.sh').write_text(
@@ -41,16 +49,22 @@ class T32CombinedStageTests(unittest.TestCase):
             for name in ('attention', 'cache', 'gdn', 'windows', 'down', 'stream'):
                 (evidence / name).mkdir(parents=True)
             manifest = checkout / 'manifest.json'
-            stage(checkout, evidence, manifest)
+            stage(checkout, evidence, manifest, preflight_only=preflight_only)
             report = json.loads(manifest.read_text())
-            self.assertTrue(report['preflight_only'])
+            self.assertIs(report['preflight_only'], preflight_only)
             self.assertFalse(report['hardware_qualified'])
             self.assertEqual((scripts / 'frozen_context_geometry.py').read_text(), 'pinned context geometry')
             for name, expected in report['sources'].items():
                 self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), expected)
             suite = (scripts / 'dspark-hardware-suite.sh').read_text()
-            self.assertLess(suite.index('dflash_t32_preload.py'), suite.index('exit 0'))
-            self.assertLess(suite.index('exit 0'), suite.index('load-model'))
+            self.assertLess(suite.index('dflash_t32_preload.py'), suite.index('load-model'))
+            if preflight_only:
+                self.assertLess(suite.index('dflash_t32_preload.py'), suite.index('exit 0'))
+                self.assertLess(suite.index('exit 0'), suite.index('load-model'))
+            else:
+                self.assertNotIn('exit 0', suite)
+                self.assertIn('from dflash_t32_comparison_experiment import run_loaded_requests',
+                    (scripts / 'dspark-target-hardware.py').read_text())
             self.assertIn('QWEN_T32_COMBINED_EXPERIMENT=1', (scripts / 'run-dspark-hardware.sh').read_text())
             self.assertIn('rows == 32', (scripts / 'gdn_direct_window_t32_hardware_batch.py').read_text())
             self.assertIn('(1, 32, 5120)', (scripts / 'gdn_shared_qk_t32_pipeline.py').read_text())

@@ -15,10 +15,12 @@ from gdn_direct_window_t32_hardware_sources import payloads as window_payloads
 
 FILES = ('full_dflash_request.py', 'mlp_block_stream_runtime.py', 'mlp_block_stream_gate.py',
     'mlp_weight_pipeline_report.py', 'mlp_down_grid_gate.py', 'frozen_recipe_context.py',
-    'frozen_mlp_buffer_trial.py', 'mlp_register_epilogue_stage.py')
+    'frozen_mlp_buffer_trial.py', 'mlp_register_epilogue_stage.py', 'dflash_native_comparison_report.py')
 
 
-def stage(checkout, evidence, manifest):
+def stage(checkout, evidence, manifest, *, preflight_only=True):
+    if type(preflight_only) is not bool:
+        raise ValueError('Explicit preflight or full comparison selection required')
     checkout, evidence, manifest = Path(checkout), Path(evidence), Path(manifest)
     directory, scripts = Path(__file__).parent, checkout / 'scripts/ci'
     destination = scripts / 't32-evidence'
@@ -48,13 +50,19 @@ def stage(checkout, evidence, manifest):
         '> /experiment/results/block-stream-preload-admission.json\nset +e',
         '> /experiment/results/block-stream-preload-admission.json\n'
         'timeout -k 5 45 python3 -B /experiment-scripts/ci/dflash_t32_preload.py '
-        '> /experiment/results/t32-preload-admission.json\nexit 0\nset +e')
+        '> /experiment/results/t32-preload-admission.json\n'
+        + ('exit 0\n' if preflight_only else '') + 'set +e')
+    if not preflight_only:
+        generated['dspark-target-hardware.py'] = replace_once(
+            (scripts / 'dspark-target-hardware.py').read_text(),
+            'from mlp_block_stream_experiment import run_loaded_requests',
+            'from dflash_t32_comparison_experiment import run_loaded_requests')
     for name, source in generated.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
         (scripts / name).write_bytes(source.encode())
     shutil.copytree(evidence, destination)
-    manifest.write_text(json.dumps(dict(preflight_only=True, hardware_qualified=False,
+    manifest.write_text(json.dumps(dict(preflight_only=preflight_only, hardware_qualified=False,
         performance_qualified=False, serving_defaults_changed=False,
         sources={name: hashlib.sha256(source.encode()).hexdigest()
             for name, source in {**sources, **generated}.items()}), indent=2) + '\n')
@@ -65,5 +73,6 @@ if __name__ == '__main__':
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--run-comparison', action='store_true')
     options = parser.parse_args()
-    stage(options.checkout, options.evidence, options.manifest)
+    stage(options.checkout, options.evidence, options.manifest, preflight_only=not options.run_comparison)
