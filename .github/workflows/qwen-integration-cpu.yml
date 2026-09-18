@@ -121,7 +121,7 @@ jobs:
           python -B -m unittest discover -s scripts/ci -p 'test_drafter_comparison*.py'
           python -B -m unittest test_dflash_combined_request test_dflash_request_runtime test_dflash_attention_mask test_dflash_t16_native_attention test_dflash_t16_native_scope
           python -B -m unittest test_dflash_native_comparison test_dflash_native_comparison_driver
-          python -B -m unittest test_dflash_compact_selector test_dflash_combined_sim_runtime test_mlp_block_stream test_mlp_block_stream_projection test_mlp_block_stream_admission test_mlp_block_stream_probe test_mlp_block_stream_gate test_mlp_block_stream_pool test_mlp_block_stream_runtime test_mlp_block_stream_request
+          python -B -m unittest test_dflash_compact_selector test_dflash_combined_sim_runtime test_mlp_block_stream test_mlp_block_stream_projection test_mlp_block_stream_admission test_mlp_block_stream_probe test_mlp_block_stream_gate test_mlp_block_stream_pool test_mlp_block_stream_runtime test_mlp_block_stream_request test_mlp_block_stream_comparison
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
           bash -n scripts/ci/run-simulator.sh

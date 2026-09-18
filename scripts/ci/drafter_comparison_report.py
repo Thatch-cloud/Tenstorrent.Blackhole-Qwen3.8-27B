@@ -6,13 +6,18 @@ SCHEDULE = (('dspark', True), ('dflash2', True), ('dspark', False),
             ('dflash2', False), ('dflash2', False), ('dspark', False))
 
 
-def validate_target_components(request):
+def validate_target_components(request, *, block_stream=False):
     from cumulative_fusion_validation import validate_fusion_policy
     from shared_qk_norm_scatter_gate import REPORT_SHA256 as NORM_SHA256
     from gdn_direct_window_gate import REPORT_SHA256 as WINDOW_SHA256
     from mlp_down_grid_gate import REPORT_SHA256 as DOWN_SHA256
 
-    validate_fusion_policy(request, 'register')
+    if block_stream:
+        from mlp_block_stream_request import validate_request
+
+        validate_request(request)
+    else:
+        validate_fusion_policy(request, 'register')
     norm, windows, down = (request.get(key, {}) for key in ('norm_reader', 'gdn_direct_window', 'mlp_down_grid'))
     shared = request.get('gdn_shared_qk', {})
     loads = shared.get('loads', [])

@@ -62,13 +62,16 @@ def acceptance(entry):
         fully_accepted_blocks=sum(block['rows'] > 1 and block['accepted'] == block['rows'] - 1 for block in blocks))
 
 
-def summarize(requests):
+def summarize(requests, *, weight_transport=False):
     from full_dflash_request import summarize_dflash_requests
 
     if (not isinstance(requests, list) or len(requests) != 6
-            or [entry.get('native_proposal_attention') for entry in requests] != [False, True, False, True, True, False]
+            or [entry.get('native_proposal_attention') for entry in requests] !=
+                ([True] * 6 if weight_transport else [False, True, False, True, True, False])
             or [entry.get('instrumented_timing') for entry in requests] != [True, True, False, False, False, False]):
         raise ValueError('Two policy audits followed by a complete native-proposal ABBA required')
+    if weight_transport and [('block_stream' in entry) for entry in requests] != [False, True, False, True, True, False]:
+        raise ValueError('Two transport audits followed by unchanged/native-stream ABBA required')
     if any(len(entry.get('prompt_tokens', [])) != 4096 or entry.get('max_new_tokens') != 256 for entry in requests):
         raise ValueError('Matched CTX4096 and 256-output T16 comparison required')
     reference = requests[0]
@@ -88,8 +91,12 @@ def summarize(requests):
                 or entry['dflash']['block_rows'] != 16 or entry['dflash']['proposal_capture'] is not True
                 or entry['dflash'].get('native_proposal_attention', False) is not entry['native_proposal_attention']):
             raise ValueError('Only proposal arithmetic may change; target, outputs, source and cache policy must match')
-        validate_target_components(entry)
+        validate_target_components(entry, block_stream=weight_transport and 'block_stream' in entry)
         acceptance(entry)
+    if weight_transport:
+        trajectories = [[[block[key] for key in BLOCK_FIELDS] for block in entry['blocks']] for entry in requests]
+        if any(trajectory != trajectories[0] for trajectory in trajectories[1:]):
+            raise ValueError('Weight transport must not change proposals or acceptance')
     output = {}
     for name, indices in (('control', (0, 2, 5)), ('candidate', (1, 3, 4))):
         group = [requests[index] for index in indices]
@@ -110,9 +117,10 @@ def summarize(requests):
     return dict(**output, measured_order=['control', 'candidate', 'candidate', 'control'],
         committed_tokens_per_second=output['candidate']['committed_tokens_per_second'],
         candidate_over_control=output['candidate']['committed_tokens_per_second'] / output['control']['committed_tokens_per_second'],
-        target_reached=output['candidate']['target_reached'], proposal_trajectories_may_differ=True,
+        target_reached=output['candidate']['target_reached'], proposal_trajectories_may_differ=not weight_transport,
         performance_promoted=False, serving_qualified=False, held_out_coding_quality=False,
-        scope='Different draft arithmetic with exact native target tokens/state; not held-out quality or serving certification')
+        scope=('Only target MLP weight transport changes; exact proposals and target tokens/state; not serving certification'
+            if weight_transport else 'Different draft arithmetic with exact native target tokens/state; not held-out quality or serving certification'))
 
 
 def qualify_report(report):
