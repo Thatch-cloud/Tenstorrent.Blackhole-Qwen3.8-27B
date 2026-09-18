@@ -173,6 +173,42 @@ jobs:
             > experiment-results/runtime-harvest-lines.txt || true
           echo '--- harvesting lines ---'
           head -60 experiment-results/runtime-harvest-lines.txt || true
+      - name: Diagnose the missing third card on the PCIe switch
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Read-only. A device reset cannot restore a card absent from PCI
+          # enumeration, so establish first whether the bus sees it at all.
+          {
+            printf '=== all tenstorrent endpoints ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || echo 'lspci unavailable'
+            printf '\n=== full bridge tree ===\n'
+            lspci -Dt 2>&1 || true
+            printf '\n=== switch at f2 and its downstream ports ===\n'
+            lspci -D 2>/dev/null | grep -iE '^0000:f2:|bridge' | head -30 || true
+            printf '\n=== downstream port link status ===\n'
+            for slot in $(lspci -D 2>/dev/null | awk "/^0000:f2:/ {print \$1}"); do
+              printf -- '--- %s ---\n' "$slot"
+              lspci -s "$slot" -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:|SltSta:|DevSta:|^\s+Kernel' || true
+            done
+            printf '\n=== expected slots ===\n'
+            for slot in 0000:d1:00.0 0000:f3:00.0 0000:f4:00.0; do
+              if [ -e "/sys/bus/pci/devices/$slot" ]; then
+                printf '%s PRESENT\n' "$slot"
+              else
+                printf '%s ABSENT from /sys/bus/pci/devices\n' "$slot"
+              fi
+            done
+            printf '\n=== pci removal/rescan capability ===\n'
+            [ -w /sys/bus/pci/rescan ] && echo 'rescan node writable' || echo 'rescan node not writable by this user'
+            printf '\n=== kernel messages: tenstorrent / pcie errors ===\n'
+            (journalctl -k --no-pager -n 4000 2>/dev/null || dmesg 2>/dev/null || true) \
+              | grep -iE 'tenstorrent|tt_|pcie|aer|link (down|up)|bus error' | tail -60 || true
+          } > experiment-results/pcie-card-b.txt 2>&1
+          cat experiment-results/pcie-card-b.txt
       - name: Survey python packages for a UMD binding
         working-directory: dram-harvest-probe
         timeout-minutes: 2
