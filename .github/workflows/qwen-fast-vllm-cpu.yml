@@ -41,6 +41,7 @@ jobs:
           source "$RUNNER_TEMP/qwen-vllm-contract/bin/activate"
           python -c 'import vllm, torch; assert vllm.__version__ == "0.25.1"; assert "+cpu" in torch.__version__; print(vllm.__version__, torch.__version__)'
           python -B -m unittest test_serving_vllm_installed
+          VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest test_serving_scheduler
           QWEN_PLUGIN_SOURCE=upstream-plugin python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
           python -B -m unittest test_serving_lifecycle
