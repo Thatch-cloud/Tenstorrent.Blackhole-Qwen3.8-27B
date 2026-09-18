@@ -30,6 +30,15 @@ native weights adds approximately **3.00 GiB/card**. Do not hide this allocation
 or release borrowed native weights. Full-runtime memory admission is required;
 packing time belongs in setup measurements, not steady-state TG.
 
+The prepared experiment-owned pool checks both chips' DRAM before allocation
+and before each layer. Admission includes bank-page rounding, enough total free
+space for the remaining layers, one contiguous stream allocation, and an explicit
+1 GiB/card reserve. It records setup time and memory snapshots, releases only its
+own streams (including after partial allocation/request failure), and checks that
+native weight addresses have not moved. The reserve is a conservative experiment
+budget, not proof that every context or batch will fit; live combined allocation
+still has to succeed. The pool is not enabled in serving or hardware yet.
+
 1. Weight-free simulator: check every raw word, padding and source preservation
    for two patterns, both chips, a multi-block tail case and all 91 workers.
 2. Actual BF4 fused MLP: validate unchanged register epilogue, eager output,
