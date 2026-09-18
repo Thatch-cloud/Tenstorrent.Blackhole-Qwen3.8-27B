@@ -3,6 +3,24 @@
 from gdn_multitoken_conv import addresses
 
 
+def validate_initial_capture_pages(pages, blocks, *, position, output_budget, rows=16):
+    blocks = tuple(blocks)
+    if (type(position) is not int or position < 1 or type(output_budget) is not int
+            or output_budget < 2 or type(rows) is not int or rows != 16
+            or not blocks or len(set(blocks)) != len(blocks)
+            or any(type(block) is not int or block < 0 for block in blocks)):
+        raise ValueError('Explicit unique scheduler allocation and T16 request bounds required')
+    if (pages.ndim != 2 or pages.shape[0] != 1
+            or pages.shape[1] * 64 < position + output_budget - 1
+            or len(blocks) > pages.shape[1]
+            or len(blocks) * 64 < position + min(rows, output_budget - 1)):
+        raise ValueError('Scheduler must own capture warmup pages before verifier allocation')
+    values = pages[0].tolist()
+    if (tuple(values[:len(blocks)]) != blocks
+            or any(type(value) is not int or value not in blocks for value in values)):
+        raise ValueError('Captured page table must reference only this request allocation')
+
+
 class VerifierPageBinding:
     def __init__(self, engine, initial_blocks, *, physical_pages):
         self.engine = engine

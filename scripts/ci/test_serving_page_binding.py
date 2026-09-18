@@ -4,10 +4,22 @@ from unittest.mock import Mock
 
 import torch
 
-from serving_page_binding import VerifierPageBinding
+from serving_page_binding import VerifierPageBinding, validate_initial_capture_pages
 
 
 class PageBindingTests(unittest.TestCase):
+    def test_capture_pages_require_real_warmup_headroom(self):
+        blocks = list(range(4, 69))
+        pages = torch.tensor([blocks + [4] * 3], dtype=torch.int32)
+        validate_initial_capture_pages(pages, blocks, position=4096, output_budget=256)
+        with self.assertRaises(ValueError):
+            validate_initial_capture_pages(pages, blocks[:-1], position=4096, output_budget=256)
+        for column, value in ((64, 4), (67, 99)):
+            changed = pages.clone()
+            changed[0, column] = value
+            with self.assertRaises(ValueError):
+                validate_initial_capture_pages(changed, blocks, position=4096, output_budget=256)
+
     def fixture(self):
         tensors = []
 

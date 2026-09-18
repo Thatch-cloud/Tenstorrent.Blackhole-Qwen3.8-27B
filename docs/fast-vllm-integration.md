@@ -118,6 +118,14 @@ CPU tests cover ownership, seed accounting and setup-failure cleanup. Integratio
 still requires the admitted combined-runtime scopes, actual plugin prefill capture,
 page binding and request-lifecycle attachment; this is not a serving acceptance.
 
+Capture warmup performs real KV writes: at the 4096-token frontier, a T16 verifier
+needs 65 scheduler-owned 64-token pages, not just the 64 prompt pages. The factory
+now rejects insufficient lookahead allocation before creating device resources.
+It also checks that the captured table matches the scheduler's block IDs and that
+unused entries reference only owned pages. Padding alone is not ownership and
+must never redirect warmup writes into the prompt. Future decode page allocations
+still require the existing append-only refresh before verification.
+
 `FastWorkerHook` routes a prepared single-request bridge through the worker's
 existing `execute_model` delegation and exposes actual draft IDs through
 `take_draft_token_ids`. It returns committed blocks directly, never queues the

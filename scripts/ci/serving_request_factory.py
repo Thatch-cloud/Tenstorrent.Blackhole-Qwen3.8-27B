@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
 from serving_fast_policy import validate_request_sampling
+from serving_page_binding import validate_initial_capture_pages
 
 
 def device_components():
@@ -33,6 +34,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         raise ValueError('Valid target-selected prefill seed required')
     if seed in eos_ids:
         raise ValueError('Terminal prefill must finish without allocating a verifier')
+    if len(state.block_ids) != 1:
+        raise ValueError('One scheduler-owned KV group required')
+    validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=256)
     components = device_components()
     _, layers, projection, selector = fixtures
     capture_released = False

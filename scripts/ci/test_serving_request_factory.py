@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+import torch
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding/harness'))
@@ -17,7 +18,8 @@ class RequestFactoryTests(unittest.TestCase):
             logprobs=None, prompt_logprobs=None, presence_penalty=0, frequency_penalty=0,
             repetition_penalty=1, stop=[], stop_token_ids=[])
         state = SimpleNamespace(req_id='request', prompt_token_ids=[1] * 4096,
-            output_token_ids=[10], num_computed_tokens=4096, sampling_params=sample)
+            output_token_ids=[10], num_computed_tokens=4096, sampling_params=sample,
+            block_ids=(list(range(65)),))
         device = SimpleNamespace(position=4096, max_drafts=15, proposal_capture=None,
             propose=Mock(), prepare_publication=Mock(), commit_publication=Mock(),
             discard_publication=Mock(), close=Mock())
@@ -39,7 +41,8 @@ class RequestFactoryTests(unittest.TestCase):
     def build(self, components, arguments):
         with patch('serving_request_factory.device_components', return_value=components):
             return from_prefill(object(), SimpleNamespace(args=SimpleNamespace(vocab_size=100),
-                mesh_device=object()), object(), object(), [object()] * 48, **arguments)
+                mesh_device=object()), object(), torch.tensor([list(range(65)) + [0] * 3], dtype=torch.int32),
+                [object()] * 48, **arguments)
 
     def test_prefilled_seed_not_emitted_or_prefilled_twice(self):
         components, device, engines, arguments = self.fixture()
@@ -69,3 +72,10 @@ class RequestFactoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.build(components, arguments)
             components.device.assert_not_called()
+
+    def test_prompt_only_allocation_cannot_be_used_for_trace_warmup(self):
+        components, _, _, arguments = self.fixture()
+        arguments['state'].block_ids = (list(range(64)),)
+        with self.assertRaisesRegex(ValueError, 'warmup pages'):
+            self.build(components, arguments)
+        components.device.assert_not_called()
