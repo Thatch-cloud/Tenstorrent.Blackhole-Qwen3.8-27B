@@ -26,8 +26,11 @@ REPLACEMENT = '''    const bool qwen_draft_fp32_intermediates =
 
 
 def digest(path):
+    checksum = hashlib.sha256()
     with Path(path).open('rb') as source:
-        return hashlib.file_digest(source, 'sha256').hexdigest()
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
 def factory_bytes(source):
