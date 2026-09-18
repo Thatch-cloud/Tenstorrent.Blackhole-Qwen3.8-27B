@@ -197,8 +197,15 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     entry['gcb_depth_pages'] = depth
     entry['gcb_size'] = gcb_size
     entry['gcb_size_mb'] = round(gcb_size / (1024 * 1024), 3)
-    bank_to_receivers = [(b, bank_receivers_row_major(ttnn, b, ring_rows, ring_cols))
+    # Receiver-contiguous weights require the STRIDED topology, not row-major:
+    # design doc section 6 says BDS round-robin puts shard m at bank m % num_senders,
+    # slab m // num_senders, and the caller pairs that with bank b -> ring positions
+    # [b, b+num_senders, ...] so shard index == ring position with no host permutation.
+    # Row-major pairs with a width-sharded weight; mixing them delivers each receiver
+    # the wrong shard, which is what produced PCC 0.025.
+    bank_to_receivers = [(b, common.bank_receivers_strided(b, ring_rows, banks, ring_cols))
                          for b in range(banks)]
+    entry['topology'] = 'strided'
     entry['receivers_per_bank'] = ring_rows
     entry['bank0_receivers'] = str(bank_to_receivers[0][1])[:120]
     global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
