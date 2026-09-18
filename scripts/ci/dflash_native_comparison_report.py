@@ -26,7 +26,9 @@ def latency_budget(entries):
         scope='Conditional bound at measured acceptance and verification cost; not a predicted speed result')
 
 
-def acceptance(entry):
+def acceptance(entry, *, max_rows=16):
+    if type(max_rows) is not int or max_rows not in (16, 32):
+        raise ValueError('Explicit T16 or T32 proposal accounting required')
     blocks = entry.get('blocks')
     emitted, prompt = entry.get('emitted'), entry.get('prompt_tokens')
     if not isinstance(blocks, list) or not blocks or not isinstance(emitted, list) or not isinstance(prompt, list):
@@ -35,7 +37,8 @@ def acceptance(entry):
     for block in blocks:
         if (not isinstance(block, dict) or any(type(block.get(name)) is not int
                 for name in ('rows', 'accepted', 'committed', 'position'))
-                or block['source'] != 'dflash2' or block['rows'] not in (1, 2, 4, 8, 16)
+                or block['source'] != 'dflash2' or block['rows'] not in (1, 2, 4, 8, 16, 32)
+                or block['rows'] > max_rows
                 or not isinstance(block.get('input_tokens'), list) or len(block['input_tokens']) != block['rows']
                 or any(type(token) is not int or not 0 <= token < entry['vocab_size'] for token in block['input_tokens'])
                 or not 0 <= block['accepted'] < block['rows'] or not 1 <= block['committed'] <= block['accepted'] + 1
