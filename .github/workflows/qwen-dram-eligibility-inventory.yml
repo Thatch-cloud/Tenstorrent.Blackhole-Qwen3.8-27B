@@ -1,0 +1,68 @@
+name: Qwen DRAM prefetch eligibility inventory
+on:
+  push:
+    tags: ['experiment/dram-eligibility-inventory-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: dram-eligibility-inventory
+          persist-credentials: false
+      - name: Read two-card telemetry without changing firmware
+        working-directory: dram-eligibility-inventory
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          python3 -B - <<'PY'
+          import json
+          from pathlib import Path
+          import stat
+          root = Path('/dev/tenstorrent')
+          boards = {'blackhole-3707293C249A5E67': '0', 'blackhole-CEF5729692C19E6D': '2'}
+          nodes = {path.name for path in root.iterdir() if stat.S_ISCHR(path.stat().st_mode)}
+          if nodes != set(boards.values()):
+              raise ValueError('Exact allocated pair required')
+          for board, node in boards.items():
+              if (root / 'by-id' / board).resolve(strict=True) != root / node:
+                  raise ValueError('Physical board identity changed')
+          driver = Path('/sys/module/tenstorrent/version')
+          Path('experiment-results/identity.json').write_text(json.dumps(dict(
+              boards=boards, driver_version=driver.read_text().strip() if driver.is_file() else None,
+              firmware_modified=False, devices_reset=False, model_loaded=False), indent=2))
+          PY
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          holders=$(command -v fuser)
+          status=0
+          "${prefix[@]}" "$holders" -v /dev/tenstorrent/0 /dev/tenstorrent/2 \
+            > experiment-results/open-holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/open-holders.txt ]; then
+            echo 'Device ownership not clear; no telemetry command launched'
+            exit 1
+          fi
+          smi=$(command -v tt-smi || true)
+          if [ -z "$smi" ] && [ -x /home/thatch/.local/bin/tt-smi ]; then smi=/home/thatch/.local/bin/tt-smi; fi
+          test -n "$smi"
+          timeout -k 5 15 "$smi" --help > experiment-results/tt-smi-help.txt
+          grep -q -- '--filename' experiment-results/tt-smi-help.txt
+          timeout -k 5 15 "$smi" --version > experiment-results/tt-smi-version.txt
+          timeout -k 5 45 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-snapshot.json" \
+            > experiment-results/tt-smi.log 2>&1
+          python3 -B scripts/ci/dram_eligibility_inventory.py --snapshot experiment-results/tt-smi-snapshot.json \
+            --output experiment-results/eligibility-observations.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-dram-eligibility-${{ github.run_id }}
+          path: dram-eligibility-inventory/experiment-results/
