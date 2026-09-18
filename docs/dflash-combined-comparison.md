@@ -65,7 +65,7 @@ the measured T16 recipe. Keep the T16 control intact while closing these gaps.
 | Component | Current T32 coverage | Required before combined acceptance |
 |---|---|---|
 | Native draft attention and cache replay | Synthetic simulator checks pass | Learned proposal/output and acceptance checks |
-| Register MLP and block-stream reader | Candidate prepared; run 35302273096 stopped at storage gate, 31.7% stall | Exact eager/replay at 32 rows and fresh source-bound admission |
+| Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay | Fresh source-bound hardware admission and combined target checks |
 | Shared-Q/K GDN and scatter normalization | Scope recognizes only `(1,16,5120)`; other widths use original executor | T32 allocations, recurrence, normalization and accepted-prefix continuation checks |
 | Direct convolution windows | Scope selects only `(1,16,8240)` | T32 window/checkpoint qualification and per-layer execution counts |
 | Wider MLP-down grid | Scope selects only `(1,1,16,5120)` | T32 numerical/replay coverage and all 64 layer hits |
@@ -75,7 +75,7 @@ Source pointers: `gdn_shared_qk_scope.py`, `gdn_direct_window_scope.py`,
 `mlp_down_grid_scope.py`, `dflash_combined_request.py`, `full_dflash_request.py`
 (all under `scripts/ci`). Existing T16 reports must not be relabelled T32.
 
-Execution order: finish the pending MLP qualification, close the GDN/window/down
+Execution order: bind the passed MLP evidence, close the GDN/window/down
 width gaps, then integrate and run one matched full-request comparison. Report
 actual optimized-layer hits and fallbacks, not merely enabled flags.
 At 200 TG, an average of 11 committed tokens permits **55 ms per whole cycle**;
@@ -87,6 +87,17 @@ It changes host tensor shapes and runtime token counts, not recurrence,
 normalization or scatter kernel arithmetic. In particular, 16-row tile-face
 offsets remain unchanged: they are physical tile indexing, not draft width.
 This adapter has not executed on a device and is not hardware-admitted.
+
+T32 block-stream MLP run **35302273096, attempt 3** passed in **5m17s**:
+two exact eager comparisons, 12 exact changing-input replay comparisons and
+four stale-input controls across both simulated chips. Stream bytes remained
+unchanged and container cleanup succeeded. Attempts 1 and 2 stopped before
+simulation at the unchanged storage gate (31.7% and 1.33% full I/O stall).
+This is MLP correctness evidence, not combined T32 acceptance or throughput.
+Report SHA256:
+`0fbdcbdd9c688a5a2e497b682ab3cd4fadcb40279fda952c8e24323a92856766`.
+Executed projection SHA256:
+`4e1127829c6aa567f5af3ea403d067923d3f545e983a0107a2a61f7ea81485f3`.
 
 Report SHA256 (31):
 `aeb9e55a2426c31ea695bd191124abb233ca652dc6252bccc8c4e1cf858b8408`.
