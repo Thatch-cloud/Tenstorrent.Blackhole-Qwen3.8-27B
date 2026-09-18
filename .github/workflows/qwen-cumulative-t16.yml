@@ -82,9 +82,14 @@ jobs:
           fi
           python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
             --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json "${down_args[@]}"
-          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+            drafter_args=()
+            if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+              gh run download 35289482417 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t16-attention-35289482417-1 --dir "$evidence/dflash-native"
+              drafter_args=(--native-evidence "$evidence/dflash-native")
+            fi
             python3 -B read-orchestrator/scripts/ci/drafter_comparison_stage.py --checkout read-combined \
-              --manifest read-combined/experiment-results/drafter-comparison-sources.json
+              --manifest read-combined/experiment-results/drafter-comparison-sources.json "${drafter_args[@]}"
           fi
           git -C read-combined diff --check
       - name: Check host pressure before loading
@@ -121,6 +126,9 @@ jobs:
           validator=cumulative_t16_report.py
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
             validator=drafter_comparison_report.py
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+            validator=dflash_native_comparison_report.py
           fi
           python3 -B "read-orchestrator/scripts/ci/$validator" \
             read-combined/experiment-results/dspark-captured-publication-request-hardware.json \

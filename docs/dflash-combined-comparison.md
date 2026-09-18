@@ -75,7 +75,11 @@ one loaded session. It stops before timings if either audit fails. Its report
 validator checks target components, exact committed output, source/cache policy,
 per-arm proposal repeatability, acceptance accounting and stage costs. Different
 draft proposals between arms are allowed; different committed output is not.
-This driver is CPU-tested but not yet selected by a hardware workflow.
+This driver is CPU-tested. The existing combined workflow selects it only for
+an explicit `experiment/cumulative-t16-full-v*-dflash-native` tag. That route
+downloads the pinned simulator artifact, validates it before and after staging,
+and selects the independent native-comparison report validator. No such tag
+has been published; hardware remains paused until the user releases it.
 
 ## Comparison contract
 
