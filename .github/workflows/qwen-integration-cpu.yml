@@ -53,7 +53,7 @@ jobs:
           python -B -m unittest test_serving_canary_runner
           python -B -m unittest test_gdn_grouped_gather
           python -B -m unittest test_gdn_grouped_gather_gate test_gdn_grouped_gather_scope
-            python -B -m unittest test_serving_gather_experiment test_serving_gather_report test_mlp_progressive_input
+            python -B -m unittest test_serving_gather_experiment test_serving_gather_report test_mlp_progressive_input test_mlp_progressive_input_report
           python -B -m unittest test_draft_kv_slide_adapter
           python -B -m unittest test_draft_kv_slide_scope
           python -B -m unittest test_draft_kv_slide_hardware_stage
