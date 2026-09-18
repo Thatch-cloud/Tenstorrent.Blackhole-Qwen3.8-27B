@@ -143,8 +143,15 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     entry['gcb_depth_pages'] = depth
     entry['gcb_size'] = gcb_size
     entry['gcb_size_mb'] = round(gcb_size / (1024 * 1024), 3)
-    bank_to_receivers = [(b, common.bank_receivers_strided(b, ring_rows, banks, ring_cols))
-                         for b in range(banks)]
+    # Build the mapping explicitly: the grid is ring_cols wide by ring_rows tall and
+    # bank b feeds column b, so bank b owns exactly ring_rows receivers. Going through
+    # bank_receivers_strided produced one receiver per bank and tripped
+    # "num_senders * num_recv_per_bank == ring_size".
+    bank_to_receivers = [
+        (b, ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(b, 0),
+                                              ttnn.CoreCoord(b, ring_rows - 1))}))
+        for b in range(banks)]
+    entry['receivers_per_bank'] = ring_rows
     global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
         device, [program_config], [weight], bank_to_receivers=bank_to_receivers, size=gcb_size)
     entry['gcb_built'] = True
