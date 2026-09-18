@@ -1,7 +1,32 @@
 # DFlash2 versus the promoted combined runtime
 
-Status: native-attention combined comparison passed in run **35293989426**
-in 6m7s. DFlash2 is not promoted; serving defaults are unchanged.
+Status: T32 combined-runtime preflight passed in **35311905218**. Full matched
+T16/T32 hardware comparison **35312183859** is underway; no T32 throughput is
+validated yet. DFlash2 is not promoted; serving defaults are unchanged.
+
+## Current combined experiment
+
+Both arms use cached native DFlash proposals and the qualified target recipe:
+register MLP, block-stream weights, shared-Q/K GDN with scatter normalization,
+direct convolution windows and the wider MLP-down grid.
+
+| Setting | T16 control | T32 candidate |
+|---|---|---|
+| Context / streams | 4,096 / 1 | 4,096 / 1 |
+| Maximum verification rows | 16 | 32 |
+| Output budget | 256 tokens | 256 tokens |
+| Model and weight pool | Shared, loaded once | Same pool |
+| Measurement | Audit, then two timed requests | Audit, then two timed requests |
+
+Timed order is T16, T32, T32, T16. Exact target tokens, state and features must
+pass; proposals and acceptance may differ by width. PP and committed TG include
+their documented request costs, not isolated kernel rates. Setup is reported
+separately. Passing this pilot alone does not establish held-out coding quality.
+
+Preflight checked all five source-bound component admissions against the
+restored runtime, without weights or device execution. It caught and fixed a
+missing ZIP tool, an overwritten pinned geometry file and staging-only imports.
+Report and kernel pins were not relaxed.
 
 ## Latest matched DFlash2 result
 
@@ -15,8 +40,9 @@ recipe rather than repeat the old uncached T32 run. At the latest 93.92-ms
 cycle, even 16 committed tokens would yield only about 170 TG; 200 requires
 lower latency and/or more useful committed tokens per cycle. T32 is not an
 assured improvement: historical eager DFlash T32 accepted only 8.82 committed
-tokens/block. A simulator-only full-32-query native-attention helper is prepared;
-learned cached drafting, target T32 recipe parity and combined acceptance remain ungated.
+tokens/block. The full-32-query native-attention helper now has simulator replay
+evidence and an explicitly scoped hardware route; learned acceptance and combined
+target correctness remain pending the full request test.
 
 T32 native proposal attention run **35299919048** passed its mask-isolation and
 changed-input replay gate in **2m13s** on the exact combined runtime binary.
@@ -48,11 +74,12 @@ any simulation. The successful rerun passed that same unchanged gate.
 The probe uses synthetic K/V projection, not learned drafting. It validates
 cache publication together with actual captured T32 native attention, but
 does not establish learned acceptance or target-state correctness. The adapter
-still rejects hardware execution. Matching T32 target validation remains pending.
+rejects bare hardware execution; the combined experiment supplies source-bound,
+request-scoped admission. Matching T32 target validation remains pending.
 The MLP probe retains the register arithmetic and block-stream reader,
 changing only token width and simulator routing. Its T32 simulator evidence
 is recorded below; hardware execution remains unqualified.
-Hardware selection remains rejected until the complete request route is admitted.
+Serving selection remains unchanged; only the explicit experiment enables T32.
 
 Cache replay report SHA256:
 `2ad1b72e02ab978b82cfc252d8226a98a2c1d9a3296a15c13b85da418164e7a6`.
@@ -65,11 +92,11 @@ the measured T16 recipe. Keep the T16 control intact while closing these gaps.
 | Component | Current T32 coverage | Required before combined acceptance |
 |---|---|---|
 | Native draft attention and cache replay | Synthetic simulator checks pass | Learned proposal/output and acceptance checks |
-| Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay | Fresh source-bound hardware admission and combined target checks |
-| Shared-Q/K GDN and scatter normalization | Run 35304765890 passed exact T32 eager/replay; runtime scope remains T16 | Source-bound T32 scope and accepted-prefix continuation checks |
-| Direct convolution windows | Run 35305449655 passed T32 native output/checkpoint replay; runtime scope remains T16 | Source-bound T32 integration and per-layer execution counts |
-| Wider MLP-down grid | Run 35305677689 passed exact T32 numerical/replay checks; runtime scope remains T16 | Source-bound T32 scope and all 64 layer hits |
-| Full request integration | Combined wrapper explicitly constructs T16; cached request guard excludes T32 | Dedicated T32 admissions, target attention parity, exact tokens/state/features, then matched timed requests |
+| Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay; runtime preflight passed | Combined target checks and all 64 layer hits |
+| Shared-Q/K GDN and scatter normalization | Run 35304765890 passed exact replay; T32 scope and preflight ready | Accepted-prefix continuation and all 48 layer hits |
+| Direct convolution windows | Run 35305449655 passed native output/checkpoint replay; T32 scope ready | Combined per-layer execution and exact state checks |
+| Wider MLP-down grid | Run 35305677689 passed exact replay; T32 scope ready | Combined execution in all 64 layers |
+| Full request integration | Dedicated T32 wrapper, cached/native routing and matched driver pass CPU checks | Hardware exact tokens/state/features, then matched timed requests |
 
 Source pointers: `gdn_shared_qk_scope.py`, `gdn_direct_window_scope.py`,
 `mlp_down_grid_scope.py`, `dflash_combined_request.py`, `full_dflash_request.py`
