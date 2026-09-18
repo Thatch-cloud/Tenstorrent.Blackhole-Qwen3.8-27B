@@ -21,7 +21,7 @@ class T32ComparisonTests(unittest.TestCase):
     def check(self, records):
         with patch('dflash_t32_comparison_report.validate_target_components') as control, \
                 patch('dflash_t32_comparison_report.validate_t32') as candidate, \
-                patch('full_dflash_request.summarize_dflash_requests', return_value=dict(
+                patch('full_dflash_request.summarize_dflash_requests', side_effect=lambda group: dict(
                     committed_tokens_per_second=100., committed_tokens=4, target_reached=False)) as measured:
             result = summarize(records)
             self.assertEqual(control.call_count, 3)
