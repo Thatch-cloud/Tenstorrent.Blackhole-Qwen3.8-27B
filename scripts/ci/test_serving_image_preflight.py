@@ -12,8 +12,8 @@ class ImagePreflightTests(unittest.TestCase):
     def check(self, root, *, imported=None):
         with patch.object(preflight, 'SOURCES', {'source.py': hashlib.sha256(b'pinned').hexdigest()}), \
                 patch.object(preflight, 'DEPENDENCIES', {'test_dependency': ('entry',)}), \
-                patch.object(preflight.importlib, 'import_module', return_value=imported or SimpleNamespace(entry=lambda: None)), \
-                patch('serving_request_factory.device_components', return_value=SimpleNamespace(engine=lambda: None)):
+                patch('serving_request_factory.device_components', return_value=SimpleNamespace(engine=lambda: None)), \
+                patch.object(preflight.importlib, 'import_module', return_value=imported or SimpleNamespace(entry=lambda: None)):
             return preflight.audit(root)
 
     def test_all_checks_pass_without_claiming_serving_acceptance(self):
