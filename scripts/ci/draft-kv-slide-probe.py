@@ -88,6 +88,8 @@ def main():
                 for tensor, host, name in ((active, active_host, 'active_unchanged'),
                         (delta, delta_host, 'delta_unchanged'), (spare, expected, 'sliding_output')):
                     compare(tensor, host, history=history, prefix=prefix, ordinal=ordinal, name=name)
+                print(json.dumps(dict(stage='replay_complete', history=history, prefix=prefix,
+                    ordinal=ordinal, checks=len(report['checks']))), flush=True)
             ttnn.release_trace(mesh, trace)
             traces.remove(trace)
             for value in reversed(owned):

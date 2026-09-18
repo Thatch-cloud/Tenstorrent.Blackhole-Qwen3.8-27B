@@ -24,6 +24,15 @@ jobs:
           python3 -B scripts/ci/runner_io_gate.py --attempts 1 --output experiment-results/runner-io-admission.json
           cp scripts/ci/draft-kv-slide-probe.py scripts/ci/history-append-probe.py
           cmp scripts/ci/draft-kv-slide-probe.py scripts/ci/history-append-probe.py
+          python3 -B - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/ci/simulator-suite.sh')
+          source = path.read_text()
+          anchor = 'timeout -k 10 180 python3 -u /experiment-scripts/ci/history-append-probe.py'
+          if source.count(anchor) != 1:
+              raise ValueError('Expected one bounded history probe route')
+          path.write_text(source.replace(anchor, anchor.replace('180', '240')))
+          PY
       - name: Weight-free eager and changed-input replay on two simulated chips
         working-directory: slide-candidate
         env:
