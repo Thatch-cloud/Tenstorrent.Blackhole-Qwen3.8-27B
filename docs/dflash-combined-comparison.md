@@ -1,10 +1,50 @@
 # DFlash2 versus the promoted combined runtime
 
-Status: T32 combined-runtime preflight passed in **35311905218**. Full matched
-T16/T32 hardware comparison **35312183859** is underway; no T32 throughput is
-validated yet. DFlash2 is not promoted; serving defaults are unchanged.
+Status: matched combined hardware run **35312812439** passed correctness and
+measurement validation. **T32 is rejected for performance: 83.24 TG versus
+121.45 TG for T16.** DFlash2 is not promoted; serving defaults are unchanged.
 
-## Current combined experiment
+## Matched T16/T32 hardware result
+
+Run **35312812439**, source `188ab501461bfde01a7bc249377729d7c77f7251`,
+uses two P150A cards, four fabric links, unchanged precision and one coding stream.
+Two audited requests precede timed T16/T32/T32/T16 requests. Each arm commits
+242 timed decode tokens across two requests, with identical target token tapes
+and exact state, inactive-slot and feature checks.
+
+| Metric | T16 control | T32 candidate |
+|---|---:|---:|
+| CTX tokens | 4,096 | 4,096 |
+| PP tokens/s | 3,359.16 | 3,319.24 |
+| Committed TG tokens/s | **121.45** | **83.24** |
+| Per-request TG | 120.04 / 122.90 | 81.84 / 84.69 |
+| Accepted proposals | 222 / 330 (67.27%) | 218 / 806 (27.05%) |
+| Committed tokens/block | 11.00 | 9.31 |
+| Draft ms/block | 19.18 | 22.53 |
+| Verify/readback ms/block | 60.27 | 75.21 |
+| Select/commit ms/block | 9.76 | 11.65 |
+| Complete cycle ms/block | 90.45 | 111.69 |
+
+T32 is **31.46% slower**, despite carrying the combined optimizations. Wider
+drafting produces fewer useful tokens per block and increases verification cost.
+Keep T16 as the DFlash performance control; do not promote T32 or pursue still
+longer drafts without new acceptance evidence.
+
+At T16's measured acceptance, 200 TG requires a **55-ms complete cycle**.
+Verification alone costs 60.27 ms, so eliminating drafting/publication alone
+cannot reach the target. The next priority is reducing the combined T16 verifier
+cost, using retained attribution to select a substantial target-kernel change.
+Historical profile timings are not measurements of this exact updated recipe.
+
+PP includes target prefill, feature capture and first-token selection. TG counts
+committed decode after the prefill seed, including drafting, verification and
+publication; it excludes prefill and request setup. This single coding pilot is
+not held-out coding-quality or serving certification.
+
+Raw report SHA256:
+`c0b7fadeafb56706dadb29c17128f191593ac8a8d4134c5b288da08249b07cce`.
+
+## Combined experiment protocol
 
 Both arms use cached native DFlash proposals and the qualified target recipe:
 register MLP, block-stream weights, shared-Q/K GDN with scatter normalization,
