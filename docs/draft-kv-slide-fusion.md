@@ -1,6 +1,12 @@
 # Fused DFlash K/V history publication
 
-**Candidate only. No model integration or speedup is qualified yet.**
+**Simulator passed; no combined hardware speedup is qualified yet.**
+
+Run **35317724110** passed in **3m38s**: all 120 bitwise comparisons, five boundary
+cases, both chips, eager and changed-input replay 0/1/0. Exit zero and clean close.
+Report SHA256: `7eb9560c661f77bc422d9551d513bf0e264f88eb2a0c7ab0ac0ce6a7a8099a38`.
+The previous run stopped at its 180-second probe deadline during the final case;
+the successful retry used a 240-second inner cap, with the same kernel bytes.
 
 `DraftKVHistory.prepare` currently performs historical slice, accepted-prefix
 slice, concatenation, tail slice, padding and copy for each of five layers' K/V

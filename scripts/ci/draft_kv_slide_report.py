@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-def validate(report, directory):
+def validate(report, directory, *, staged_probe=True):
     expected = {(history, prefix, ordinal, name, chip)
         for history, prefix in ((31, 2), (2047, 2), (2048, 1), (2048, 16), (2048, 32))
         for ordinal in (-1, 0, 1, 2)
@@ -23,11 +23,12 @@ def validate(report, directory):
     if len(observed) != len(expected) or set(observed) != expected:
         raise ValueError('Complete unique eager and replay matrix required')
     directory = Path(directory)
-    sources = {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+    sources = {name: hashlib.sha256((directory / ('draft-kv-slide-probe.py'
+        if name == 'history-append-probe.py' and not staged_probe else name)).read_bytes()).hexdigest()
         for name in ('history-append-probe.py', 'draft_kv_slide.py', 'draft_kv_slide.cpp')}
     if report.get('sources') != sources:
         raise ValueError('Executed sources differ from candidate')
-    if (directory / 'history-append-probe.py').read_bytes() != (directory / 'draft-kv-slide-probe.py').read_bytes():
+    if staged_probe and (directory / 'history-append-probe.py').read_bytes() != (directory / 'draft-kv-slide-probe.py').read_bytes():
         raise ValueError('Staged probe differs from reviewed probe')
     return dict(passed=True, checks=len(expected), performance_qualified=False, model_integrated=False)
 
