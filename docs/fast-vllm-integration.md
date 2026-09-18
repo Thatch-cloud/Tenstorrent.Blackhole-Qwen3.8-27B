@@ -18,7 +18,7 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
 | DFlash2 metadata | Image 35336103126 | Real speculative configuration preserves DFlash2 architecture; standard model construction fails closed; all 8 installed-vLLM tests pass |
-| Two-card HTTP lifecycle | Hardware 35335212616 | Failed before weight loading: missing DFlash2 registry entry; no throughput result |
+| Two-card HTTP lifecycle | Hardware 35337247864 | API starts and native prefill completes; fast-request construction rejects the scheduler's pre-step counter; fix awaiting image validation |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
 Build source: `c3e60dc` (tag `experiment/fast-serving-image-v7`).
@@ -31,6 +31,12 @@ The DFlash2 registry fix is metadata-only: it preserves `DFlash2DraftModel`
 through vLLM configuration and rejects standard model construction. Actual draft
 execution remains in the explicit combined TT worker, not an aliased upstream
 DFlash implementation. Image checks must pass before the next hardware canary.
+
+The pinned TT runner keeps `num_computed_tokens` at the scheduler's pre-step
+snapshot until its next `_update_states` call. After fresh prefill that value is
+still zero, even though sampling has appended the first output token. The fast
+factory uses the completed prompt length for the device/session frontier without
+rewriting scheduler-owned state. Cached or partial prefills remain unsupported.
 
 The image restores hash-verified native sources and the cached binary, stages the
 pinned plugin patch, and connects startup, prefill feature capture, request

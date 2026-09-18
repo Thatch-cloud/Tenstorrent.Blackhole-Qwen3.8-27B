@@ -25,10 +25,10 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
 
     prompt = tuple(state.prompt_token_ids)
     validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt), eos_ids=eos_ids)
-    if (len(state.output_token_ids) != 1 or state.num_computed_tokens != len(prompt)
+    if (len(state.output_token_ids) != 1 or state.num_computed_tokens != 0
             or not isinstance(state.req_id, str) or not state.req_id
             or len(helpers) != 48):
-        raise ValueError('Completed native prefill with exactly one emitted seed and all GDN helpers required')
+        raise ValueError('Fresh native prefill with pre-step frontier zero, one emitted seed and all GDN helpers required')
     seed = state.output_token_ids[0]
     if type(seed) is not int or not 0 <= seed < model.args.vocab_size:
         raise ValueError('Valid target-selected prefill seed required')

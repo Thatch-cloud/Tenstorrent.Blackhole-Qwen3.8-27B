@@ -18,7 +18,7 @@ class RequestFactoryTests(unittest.TestCase):
             logprobs=None, prompt_logprobs=None, presence_penalty=0, frequency_penalty=0,
             repetition_penalty=1, stop=[], stop_token_ids=[])
         state = SimpleNamespace(req_id='request', prompt_token_ids=[1] * 4096,
-            output_token_ids=[10], num_computed_tokens=4096, sampling_params=sample,
+            output_token_ids=[10], num_computed_tokens=0, sampling_params=sample,
             block_ids=(list(range(65)),))
         device = SimpleNamespace(position=4096, max_drafts=15, proposal_capture=None,
             propose=Mock(), prepare_publication=Mock(), commit_publication=Mock(),
@@ -50,6 +50,7 @@ class RequestFactoryTests(unittest.TestCase):
         self.assertEqual(request.session.emitted, [10])
         self.assertEqual(arguments['state'].output_token_ids, [10])
         self.assertEqual(request.session.position, 4096)
+        self.assertEqual(arguments['state'].num_computed_tokens, 0)
         self.assertIs(request.runtime.engine, engines[0])
         components.proposal.assert_called_once_with(device, max_new_tokens=256)
         arguments['capture'].close.assert_called_once()
@@ -79,3 +80,11 @@ class RequestFactoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'warmup pages'):
             self.build(components, arguments)
         components.device.assert_not_called()
+
+    def test_cached_or_advanced_scheduler_snapshot_is_not_a_fresh_prefill(self):
+        for frontier in (1, 2048, 4096):
+            components, _, _, arguments = self.fixture()
+            arguments['state'].num_computed_tokens = frontier
+            with self.subTest(frontier=frontier), self.assertRaisesRegex(ValueError, 'pre-step frontier zero'):
+                self.build(components, arguments)
+            components.device.assert_not_called()
