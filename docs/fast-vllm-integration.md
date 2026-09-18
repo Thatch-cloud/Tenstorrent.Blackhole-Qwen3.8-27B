@@ -13,6 +13,8 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 | Pinned vLLM contracts | CPU 35327950138 | Real data types and pinned worker delegation pass; no complete engine loop |
 | Source regression | CPU 35329738162 | Passed |
 | Serving image | Build 35329741168 | Passed; 63 tests passed, 2 skipped; native bindings import |
+| Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
+| Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
 | Two-card HTTP lifecycle | Pending | No serving correctness or performance claim |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
@@ -31,7 +33,13 @@ requires explicit configuration, admitted recipe paths and evidence; it is off b
 default. Initial qualification is 4K input, up to 256 output, greedy T16, one
 scheduler request, internal GDN B8, BF8 target KV and the four-link P150 pair.
 
-Next gates: changed-page replay and complete scheduler validation; repeated HTTP
+The scheduler check runs real vLLM scheduling and KV allocation against synthetic
+token outputs and a local metadata-only model configuration. It does not execute
+Qwen, the worker, device traces or HTTP. `qwen-serving-scheduler.yml` reuses the
+already-built image with no device or weight mounts, two CPUs and a 90-second
+test cap, avoiding source-bundle downloads and image rebuilds for each check.
+
+Next gates: changed-page device replay and complete engine/worker validation; repeated HTTP
 requests on both cards with reference equality, EOS, cancellation and clean release;
 then API PP/CTX/TG and streaming latency. Registry publication and Thatch rollout
 follow acceptance, not merely a successful build. Worker-side rejection is not yet
