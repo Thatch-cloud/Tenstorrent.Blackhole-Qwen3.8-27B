@@ -4,10 +4,25 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from gdn_shared_qk_t32_adapter import payloads, require_simulator
+from gdn_shared_qk_t32_adapter import adapt_probe, payloads, require_simulator
 
 
 class T32SharedQKAdapterTests(unittest.TestCase):
+    def test_probe_checks_all_states_and_changing_inputs(self):
+        source = Path(__file__).with_name('gdn-shared-recurrence-probe.py').read_text()
+        probe = adapt_probe(source)
+        self.assertIn('rows=32, norm_unchanged=True', probe)
+        self.assertIn('mask.reshape(32, -1)', probe)
+        self.assertIn('from shared_qk_norm_t32_scatter import build as build_pipeline', probe)
+        self.assertIn("len(report['checks']) != 24", probe)
+        self.assertIn("len(report['immutable_checks']) != 48", probe)
+        self.assertIn("len(report['stale_controls']) != 6", probe)
+        self.assertIn('torch.equal(previous, current)', probe)
+        self.assertNotIn('(2, 16,', probe)
+        self.assertNotIn('allocate((16,', probe)
+        with self.assertRaises(ValueError):
+            adapt_probe(probe)
+
     def test_separate_builders_change_width_not_kernel_sources(self):
         directory = Path(__file__).parent
         originals = {name: (directory / name).read_text() for name in

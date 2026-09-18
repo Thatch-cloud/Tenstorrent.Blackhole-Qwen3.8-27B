@@ -52,3 +52,40 @@ def payloads(originals):
     for name, source in sources.items():
         compile(source, name, 'exec')
     return sources
+
+
+def adapt_probe(source):
+    from frozen_gdn_cache_stage import adapt_probe as scatter_probe
+
+    source = scatter_probe(source, norm_scatter=True)
+    source = replace_once(source, 'from shared_qk_norm_scatter import build as build_pipeline',
+        'from shared_qk_norm_t32_scatter import build as build_pipeline')
+    replacements = (
+        ('rows=16, norm_unchanged=True', 'rows=32, norm_unchanged=True', 1),
+        ('(2, 16, 5120)', '(2, 32, 5120)', 1),
+        ('(2, 16, 24)', '(2, 32, 24)', 2),
+        ('(2, 16, 3072)', '(2, 32, 3072)', 1),
+        ('mask.reshape(16, -1)', 'mask.reshape(32, -1)', 1),
+        ('allocate((16, 1, 96, 32)', 'allocate((32, 1, 96, 32)', 1),
+        ('allocate((16, 24, 128, 128)', 'allocate((32, 24, 128, 128)', 1),
+        ('allocate((1, 16, 3072)', 'allocate((1, 32, 3072)', 1),
+        ('allocate((1, 16, 1024)', 'allocate((1, 32, 1024)', 2))
+    for before, after, count in replacements:
+        if source.count(before) != count:
+            raise ValueError('Exact T16 probe geometry required: ' + before)
+        source = source.replace(before, after)
+    source = replace_once(source, "        for seed in (1, 2, 0):",
+        "        report['stale_controls'] = []\n"
+        "        for seed in (1, 2, 0):\n"
+        "            previous_states = read(actual[1])")
+    source = replace_once(source, "            check(reference, actual, host, 'replay_' + str(seed))",
+        "            check(reference, actual, host, 'replay_' + str(seed))\n"
+        "            for chip, (previous, current) in enumerate(zip(previous_states, read(actual[1]), strict=True)):\n"
+        "                if torch.equal(previous, current):\n"
+        "                    raise AssertionError('Changed-input T32 replay retained stale recurrent states')\n"
+        "                report['stale_controls'].append(dict(seed=seed, chip=chip, detected=True))")
+    source = replace_once(source, "        if len(report['checks']) != 24 or len(report['immutable_checks']) != 48:",
+        "        if (len(report['checks']) != 24 or len(report['immutable_checks']) != 48\n"
+        "                or len(report['stale_controls']) != 6):")
+    compile(source, 'gdn-shared-qk-t32-probe.py', 'exec')
+    return source
