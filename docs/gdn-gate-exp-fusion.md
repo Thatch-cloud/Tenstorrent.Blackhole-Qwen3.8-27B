@@ -1,7 +1,36 @@
 # Gate conversion and exponentiation fusion
 
-Status: simulator correctness qualified; hardware/performance unqualified.
-Not enabled in the combined runtime or serving defaults.
+Status: simulator and combined HTTP correctness screen pass; performance
+promotion rejected. Not enabled in the normal combined recipe or serving defaults.
+
+## Combined hardware result
+
+[Run 35348721064](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35348721064)
+at `1956d5e` completed in **3m17s**. One model load, two compilation warmups and
+four timed ABBA requests passed exact HTTP token identity. All candidate requests
+recorded 96 admitted constructions and restored their scope. Worker and devices
+closed cleanly; server exit was zero. Independent artifact validation passed.
+
+| CTX / streams | Arm | Committed cycle TG | Verifier replay | Whole cycle |
+|---|---|---:|---:|---:|
+| 4096 / 1 | Control | 114.38 | 59.124 ms | 96.169 ms |
+| 4096 / 1 | Gate-exp fusion | 116.41 | 59.035 ms | 94.494 ms |
+
+Both timed arms committed 242 tokens across 22 blocks. Aggregate TG is **+1.77%**,
+but paired changes are **-2.10% / +5.80%**: not repeatable. Mean blocking verifier
+replay improves only **0.0885 ms**, while most of the aggregate difference is in
+other host intervals. Do not promote, attribute the entire difference to this
+fusion, or rerun it unchanged. PP was not separately measured by this HTTP screen.
+
+At eleven committed tokens per block, 200 TG requires **55 ms for the whole
+cycle**. This control takes 96.17 ms, including roughly 21.72 ms draft, 62.74 ms
+verification/readback, 10.53 ms commit and 1.17 ms outside those phases. Blocking
+replay is nested within verification; do not add it again. Eliminating this one
+intermediate does not address the roughly 41 ms remaining whole-cycle gap.
+
+Report SHA256: `bd979cf4f9d23bcce457ce5181d106adb4ad26ba35d4988547ed5bfc4e852501`.
+Preload I/O stall was 0.5934%; that observation does not prove later isolation.
+This remains a one-fixture screen, not held-out coding-quality acceptance.
 
 ## Simulator result
 
@@ -25,7 +54,7 @@ The comparison retains native DFlash, serial BF4 weights, direct DMA draft KV,
 four fabric links, CTX4096 and one stream in both arms. HTTP token identity is
 checked against the retained native-reference request. This is a performance
 screen, not held-out coding quality or a full hardware state-parity qualification.
-No throughput result exists for this candidate yet.
+The hardware result is recorded above; no default enablement follows from it.
 
 ## Change
 
