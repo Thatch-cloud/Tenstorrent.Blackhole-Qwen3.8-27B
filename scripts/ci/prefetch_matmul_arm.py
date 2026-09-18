@@ -27,6 +27,21 @@ PROJECTIONS = {'gate': (5120, 8704, 'bfloat4_b'),
                'up': (5120, 8704, 'bfloat4_b'),
                'down': (8704, 5120, 'bfloat8_b')}
 
+# Padding N changes the factorisation of n_tiles, which is what caps the ring.
+# 8704 -> 8960 takes n_tiles from 272 = 2^4 x 17 to 280 = 2^3 x 5 x 7, admitting
+# ring=40 instead of 16. The padded columns are zeroed here, so the padded output
+# columns are zero and the unpadded result is unchanged.
+PADDED_WIDTH = {'gate': 8960, 'up': 8960}
+
+# Worker L1 CB space, per the prefetcher design doc. Held below the nominal ~1.5 MB
+# because the activation and output CBs also have to live there.
+L1_CB_BUDGET = 1_200_000
+
+
+def gcb_bytes_per_receiver(k_tiles, n_tiles, tile, ring):
+    """The matmul does wait_front(ring), so every page must be resident."""
+    return (k_tiles // ring) * (n_tiles // ring) * tile * ring
+
 
 # Upstream's prefetcher_common.bytes_per_tile maps only bfloat16 and bfloat8_b, so
 # their harness never exercises bfloat4_b - which is exactly what Qwen's gate and up
@@ -78,23 +93,36 @@ def emit(report):
 
 
 def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
-                  dtype_override=None, stream=True):
-    inner, width, dtype_name = PROJECTIONS[name]
+                  dtype_override=None, stream=True, pad=True):
+    inner, native_width, dtype_name = PROJECTIONS[name]
     if dtype_override:
         dtype_name = dtype_override
+    width = PADDED_WIDTH.get(name, native_width) if pad else native_width
     k_tiles, n_tiles = inner // TILE, width // TILE
     banks = device.dram_grid_size().x
+    per_tile_probe = TILE_BYTES[dtype_name]
     options = legal_rings(k_tiles, n_tiles, banks, 10)
-    entry = dict(projection=name, dtype=dtype_name, inner=inner, width=width,
+    for option in options:
+        option['gcb_bytes'] = gcb_bytes_per_receiver(k_tiles, n_tiles, per_tile_probe,
+                                                     option['ring'])
+        option['fits_l1'] = option['gcb_bytes'] <= L1_CB_BUDGET
+    fitting = [o for o in options if o['fits_l1']]
+    entry = dict(projection=name, dtype=dtype_name, inner=inner,
+                 native_width=native_width, width=width, padded=width != native_width,
+                 pad_overhead_pct=round(100.0 * (width - native_width) / native_width, 2),
                  k_tiles=k_tiles, n_tiles=n_tiles, banks=banks,
-                 legal_rings=[o['ring'] for o in options])
+                 legal_rings=[o['ring'] for o in options],
+                 rings_fitting_l1=[o['ring'] for o in fitting])
     report['arms'].append(entry)
     if not options:
         entry['stopped_at'] = 'no ring divides both K and N'
         return
-    chosen = options[-1]
+    if not fitting:
+        entry['stopped_at'] = 'no legal ring keeps the GCB inside L1'
+        return
+    chosen = fitting[-1]
     if rows_choice is not None:
-        chosen = next((o for o in options if o['rows'] == rows_choice), options[-1])
+        chosen = next((o for o in fitting if o['rows'] == rows_choice), fitting[-1])
     entry.update(chosen)
 
     dtype = getattr(ttnn, dtype_name)
@@ -108,6 +136,9 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     rows = 32  # activation rows (M)
     torch.manual_seed(0)
     pt_weight = torch.randn(1, 1, inner, width)
+    if width != native_width:
+        # Zeroing the padding is what keeps the real output columns untouched.
+        pt_weight[:, :, :, native_width:] = 0.0
     pt_act = torch.randn(1, 1, rows, inner)
 
     dram_cores = ttnn.CoreRangeSet(
@@ -162,7 +193,7 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     per_tile = tile_bytes(common, ttnn, dtype_name, dtype)
     entry['tile_bytes'] = per_tile
     in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * per_tile
-    depth = 2 if stream_kwargs else ring_size
+    depth = ring_size
     gcb_size = depth * in1_block
     entry['in1_block_bytes'] = in1_block
     entry['gcb_depth_pages'] = depth
@@ -239,6 +270,8 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--projections', default='gate')
+    parser.add_argument('--no-pad', action='store_true',
+                        help='use the native width instead of the padded one')
     parser.add_argument('--no-stream', action='store_true',
                         help='use batched gather-in0 instead of a streaming window')
     parser.add_argument('--dtype', default=None,
@@ -258,7 +291,8 @@ def main():
         for name in options.projections.split(','):
             try:
                 build_and_run(ttnn, torch, common, device, name, options.rows, report,
-                              options.dtype, not options.no_stream)
+                              options.dtype, not options.no_stream,
+                              not options.no_pad)
             except BaseException as error:
                 detail = dict(kind=type(error).__name__,
                               message=str(error)[:1600],
