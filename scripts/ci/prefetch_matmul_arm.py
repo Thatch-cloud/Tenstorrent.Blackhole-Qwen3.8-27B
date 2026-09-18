@@ -61,7 +61,8 @@ def emit(report):
     sys.stdout.flush()
 
 
-def build_and_run(ttnn, torch, common, device, name, rows_choice, report, dtype_override=None):
+def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
+                  dtype_override=None, stream=True):
     inner, width, dtype_name = PROJECTIONS[name]
     if dtype_override:
         dtype_name = dtype_override
@@ -110,19 +111,37 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report, dtype_
                           memory_config=act_mem, layout=ttnn.TILE_LAYOUT)
     entry['act_built'] = True
 
+    # Batched gather-in0 needs ring_size pages resident per receiver. At this ring
+    # a page is k_tiles_per_shard x n_tiles_per_receiver x tile_bytes, so the whole
+    # fifo exceeds Blackhole's ~1.5 MB L1. Streaming consumes from a shallow window.
+    stream_kwargs = {}
+    if stream:
+        try:
+            ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+                compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), in0_block_w=1,
+                out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
+                fuse_batch=True, fused_activation=None, mcast_in0=False, stream_in1=True)
+            stream_kwargs = dict(stream_in1=True)
+        except BaseException as error:
+            entry['stream_in1_unavailable'] = str(error)[:200]
     program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
         compute_with_storage_grid_size=ttnn.CoreCoord(ring_cols, ring_rows),
         in0_block_w=chosen['k_tiles_per_shard'], out_subblock_h=1, out_subblock_w=1,
         per_core_M=1, per_core_N=chosen['n_tiles_per_receiver'],
-        fuse_batch=True, fused_activation=None, mcast_in0=False)
+        fuse_batch=True, fused_activation=None, mcast_in0=False,
+        **stream_kwargs)
     entry['program_config_built'] = True
+    entry['stream_in1'] = stream_kwargs.get('stream_in1', False)
 
     per_tile = tile_bytes(common, ttnn, dtype_name, dtype)
     entry['tile_bytes'] = per_tile
     in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * per_tile
-    gcb_size = ring_size * in1_block
+    depth = 2 if stream_kwargs else ring_size
+    gcb_size = depth * in1_block
     entry['in1_block_bytes'] = in1_block
+    entry['gcb_depth_pages'] = depth
     entry['gcb_size'] = gcb_size
+    entry['gcb_size_mb'] = round(gcb_size / (1024 * 1024), 3)
     bank_to_receivers = [(b, common.bank_receivers_strided(b, ring_rows, banks, ring_cols))
                          for b in range(banks)]
     global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
@@ -192,6 +211,8 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report, dtype_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--projections', default='gate')
+    parser.add_argument('--no-stream', action='store_true',
+                        help='use batched gather-in0 instead of a streaming window')
     parser.add_argument('--dtype', default=None,
                         help='override the weight dtype, e.g. bfloat8_b as a control')
     parser.add_argument('--rows', type=int, default=None,
@@ -209,12 +230,15 @@ def main():
         for name in options.projections.split(','):
             try:
                 build_and_run(ttnn, torch, common, device, name, options.rows, report,
-                              options.dtype)
-            except BaseException:
+                              options.dtype, not options.no_stream)
+            except BaseException as error:
+                detail = dict(kind=type(error).__name__,
+                              message=str(error)[:1600],
+                              stack_tail=traceback.format_exc(limit=4)[-700:])
                 if report['arms']:
-                    report['arms'][-1]['error'] = traceback.format_exc(limit=8)[-2000:]
+                    report['arms'][-1]['error'] = detail
                 else:
-                    report['fatal'] = traceback.format_exc(limit=8)[-2000:]
+                    report['fatal'] = detail
     except BaseException:
         report['fatal'] = traceback.format_exc(limit=8)[-2000:]
     # Emit before teardown: a TT_FATAL can leave close_mesh_device hanging, and an
