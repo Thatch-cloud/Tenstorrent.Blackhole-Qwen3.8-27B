@@ -12,18 +12,18 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 |---|---|---|
 | Pinned vLLM contracts | CPU 35327950138 | Real data types and pinned worker delegation pass; no complete engine loop |
 | Source regression | CPU 35329738162 | Passed |
-| Serving image | Build 35336103126 | Passed; includes EOS admission, runtime path and explicit DFlash2 registration fixes |
+| Serving image | Build 35337728778 | Passed; includes scheduler pre-step frontier fix, EOS admission and explicit DFlash2 registration |
 | Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
 | Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
 | DFlash2 metadata | Image 35336103126 | Real speculative configuration preserves DFlash2 architecture; standard model construction fails closed; all 8 installed-vLLM tests pass |
-| Two-card HTTP lifecycle | Hardware 35337247864 | API starts and native prefill completes; fast-request construction rejects the scheduler's pre-step counter; fix awaiting image validation |
+| Two-card HTTP lifecycle | Hardware 35337247864 | API starts and native prefill completes; pre-step counter fix now image-tested, hardware retry pending |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
-Build source: `c3e60dc` (tag `experiment/fast-serving-image-v7`).
+Build source: `738f0c6` (tag `experiment/fast-serving-image-v8`).
 Local Docker ID:
-`sha256:1b33b800d32b95a9b81b819e6a006f419fa7bb7f3bb5d763fa30ef3da29ca0c7`.
+`sha256:8c756526dc1c938e431f1bad0fb14f11743ba030b4f7890cbccd42b516f21ee2`.
 This ID is not a registry manifest digest or proof of a clean pull elsewhere.
 The build accessed neither cards nor weights.
 

@@ -25,7 +25,7 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results canary/draft-config
           python3 -B scripts/ci/runner_io_gate.py --attempts 4 --output experiment-results/runner-io-admission.json
-          docker image inspect sha256:1b33b800d32b95a9b81b819e6a006f419fa7bb7f3bb5d763fa30ef3da29ca0c7 --format '{{json .Id}}' > experiment-results/image-id.json
+          docker image inspect sha256:8c756526dc1c938e431f1bad0fb14f11743ba030b4f7890cbccd42b516f21ee2 --format '{{json .Id}}' > experiment-results/image-id.json
           gh run download 35321449903 --repo "$GITHUB_REPOSITORY" --name qwen-cumulative-t16-35321449903 --dir canary/reference
           cp canary/reference/dspark-captured-publication-request-hardware.json canary/reference.json
           echo '0be812cceaf6f91686570bb02a9991cc5a58d8aaa95e05d0633388802799a2bc  canary/reference.json' | sha256sum -c -
@@ -43,7 +43,7 @@ jobs:
       - name: Run isolated two-card HTTP canary
         working-directory: fast-serving-canary
         run: |
-          image=sha256:1b33b800d32b95a9b81b819e6a006f419fa7bb7f3bb5d763fa30ef3da29ca0c7
+          image=sha256:8c756526dc1c938e431f1bad0fb14f11743ba030b4f7890cbccd42b516f21ee2
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           cache=/home/thatch/.cache/qwen-experiments
           revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
