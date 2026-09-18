@@ -67,7 +67,7 @@ the measured T16 recipe. Keep the T16 control intact while closing these gaps.
 | Native draft attention and cache replay | Synthetic simulator checks pass | Learned proposal/output and acceptance checks |
 | Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay | Fresh source-bound hardware admission and combined target checks |
 | Shared-Q/K GDN and scatter normalization | Run 35304765890 passed exact T32 eager/replay; runtime scope remains T16 | Source-bound T32 scope and accepted-prefix continuation checks |
-| Direct convolution windows | Separate T32 tile-addressing adapter passes CPU regression; runtime scope remains T16 | T32 window/checkpoint simulator qualification and per-layer execution counts |
+| Direct convolution windows | Run 35305449655 passed T32 native output/checkpoint replay; runtime scope remains T16 | Source-bound T32 integration and per-layer execution counts |
 | Wider MLP-down grid | Scope selects only `(1,1,16,5120)` | T32 numerical/replay coverage and all 64 layer hits |
 | Full request integration | Combined wrapper explicitly constructs T16; cached request guard excludes T32 | Dedicated T32 admissions, target attention parity, exact tokens/state/features, then matched timed requests |
 
@@ -100,7 +100,14 @@ The next direct-window adapter fixes a separate width dependency: T16's
 linear row offsets do not address the bottom tile faces correctly at T32.
 The generated reader uses explicit 16-row face offsets for all 32 rows,
 while retaining native convolution arithmetic and the untouched T16 sources.
-CPU run **35305118623** passed; simulator numerical qualification is pending.
+CPU run **35305118623** passed. Simulator run **35305449655** subsequently
+passed in **43.02 seconds of probe execution**: 56 exact native output/checkpoint
+comparisons and 88 immutable-input checks across two chips, with L1 projected
+inputs. Changed-input trace replay overwrote NaN-poisoned outputs. Source
+hashes matched the staging manifest and were unchanged; container cleanup
+succeeded. This does not yet qualify the full T32 request or hardware timing.
+Report SHA256:
+`bdc8b31ec1ed80a401ecec1b581baf3006e3d72e3699c3e73417ef494a6962e1`.
 
 T32 block-stream MLP run **35302273096, attempt 3** passed in **5m17s**:
 two exact eager comparisons, 12 exact changing-input replay comparisons and
