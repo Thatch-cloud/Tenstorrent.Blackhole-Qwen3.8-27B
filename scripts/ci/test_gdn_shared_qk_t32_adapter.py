@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from gdn_shared_qk_t32_adapter import adapt_probe, payloads, require_simulator
 from gdn_shared_qk_t32_stage import stage
+from frozen_recipe_context import adapt_cache_launcher
 
 
 class T32SharedQKAdapterTests(unittest.TestCase):
@@ -22,7 +23,19 @@ class T32SharedQKAdapterTests(unittest.TestCase):
             scripts.mkdir(parents=True)
             for name, source in originals.items():
                 (scripts / name).write_text(source)
-            (scripts / 'simulator-suite.sh').write_text((directory / 'simulator-suite.sh').read_text())
+            from frozen_sim_assets import ASSETS
+
+            downloads = '\n'.join(f'curl --fail --location --max-time 180 {url} -o "$assets/{name}"'
+                for name, url, checksum in ASSETS)
+            launcher = ("    -e \"QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}\"\n" + downloads + '\n'
+                '        docker logs "$container" > experiment-results/simulator-container.log 2>&1 || true\n'
+                '        docker cp "$container:/experiment/results/." experiment-results/ || true\n'
+                '        docker rm -f "$container" >/dev/null || true\ncontainer=$(docker create\n')
+            suite = ('if [[ "$QWEN_SIM_CASE" = dspark-native-8k-attention ]]; then\n'
+                'timeout -k 30 1900 python3 -u /experiment-scripts/ci/dspark_fp32_build.py\n'
+                'timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"\nfi\n')
+            prepared = adapt_cache_launcher({'run-simulator.sh': launcher, 'simulator-suite.sh': suite})
+            (scripts / 'simulator-suite.sh').write_text(prepared['simulator-suite.sh'])
             manifest = checkout / 'candidate.json'
             with patch('gdn_shared_qk_t32_stage.subprocess.check_output',
                     side_effect=lambda command: originals[command[-1].rsplit('/', 1)[1]].encode()):
@@ -38,7 +51,8 @@ class T32SharedQKAdapterTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), digest)
                 if name.endswith('.py'):
                     compile((scripts / name).read_text(), name, 'exec')
-            self.assertIn('then limit=420', (scripts / 'simulator-suite.sh').read_text())
+            self.assertIn('frozen_sim_phase.py --phase probe --seconds 420',
+                (scripts / 'simulator-suite.sh').read_text())
 
     def test_probe_checks_all_states_and_changing_inputs(self):
         source = Path(__file__).with_name('gdn-shared-recurrence-probe.py').read_text()

@@ -28,9 +28,8 @@ def stage(checkout, manifest):
     for name in ('gdn_shared_qk_t32_adapter.py', 'gdn_norm_scatter.py'):
         sources[name] = (directory / name).read_text()
     sources['simulator-suite.sh'] = replace_once((scripts / 'simulator-suite.sh').read_text(),
-        '        timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"',
-        '        if [ "$QWEN_SIM_CASE" = gdn-shared-recurrence ]; then limit=420; fi\n'
-        '        timeout -k 15 "$limit" python3 -u "/experiment-scripts/ci/$QWEN_SIM_CASE-probe.py"')
+        'frozen_sim_phase.py --phase probe --seconds 510 ',
+        'frozen_sim_phase.py --phase probe --seconds 420 ')
     for name, source in sources.items():
         (scripts / name).write_bytes(source.encode())
     manifest.write_text(json.dumps(dict(rows=32, state_math_changed=False, tile_indexing_changed=False,
