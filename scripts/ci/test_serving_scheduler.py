@@ -18,6 +18,8 @@ from serving_vllm_contract import admit_scheduler_output
 
 
 class RealSchedulerTests(unittest.TestCase):
+    scheduler_type = Scheduler
+
     def scheduler(self):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -38,7 +40,7 @@ class RealSchedulerTests(unittest.TestCase):
             KVCacheGroupSpec(['layer'], FullAttentionSpec(block_size=64,
                 num_kv_heads=2, head_size=256, dtype=torch.bfloat16))])
         register_all_kvcache_specs(config)
-        scheduler = Scheduler(config, cache, StructuredOutputManager(config), block_size=64)
+        scheduler = self.scheduler_type(config, cache, StructuredOutputManager(config), block_size=64)
         scheduler.use_v2_model_runner = False
         self.assertEqual(scheduler.num_lookahead_tokens, 16)
         return scheduler
@@ -98,3 +100,11 @@ class RealSchedulerTests(unittest.TestCase):
         scheduler.finish_requests('replacement', RequestStatus.FINISHED_ABORTED)
         self.assertNotIn('replacement', scheduler.requests)
         self.assertEqual(scheduler.schedule().finished_req_ids, {'replacement'})
+
+
+class TTPluginSchedulerTests(RealSchedulerTests):
+    def scheduler(self):
+        from vllm_tt_plugin.scheduler import TTScheduler
+
+        self.scheduler_type = TTScheduler
+        return super().scheduler()
