@@ -40,3 +40,18 @@ packing time belongs in setup measurements, not steady-state TG.
 The first probe is transport-only. It does not qualify floating-point math,
 trace replay, the bulk reader, hardware, coding quality or performance. Neither
 the packer nor reader transform is connected to serving or the combined runtime.
+
+## Current evidence
+
+Run **35295292083** stopped at Docker preflight creation (exit 124 after
+30 seconds), before simulator startup. Retained host telemetry recorded
+65.08% full I/O pressure (`avg10`), about 95 GiB available RAM, and two active
+BuildKit containers. This is storage contention, not an observed kernel failure.
+The next launch checks one bounded 15-second I/O observation before Docker
+creation; timeouts and the existing 1% admission threshold are unchanged.
+
+The simulator-only projection adapter is prepared and host-tested. It changes
+the weight accessor and reader source, retaining the constructor, fused compute,
+input distribution and output publication. It rejects hardware, aliased buffers,
+partial streams and changed bindings/arithmetic. Caller ownership of the extra
+stream remains explicit. Full MLP device qualification is still pending.

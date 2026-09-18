@@ -16,6 +16,12 @@ jobs:
         with:
           path: mlp-stream-${{ github.run_id }}
           persist-credentials: false
+      - name: Admit host storage before Docker creation
+        working-directory: mlp-stream-${{ github.run_id }}
+        run: |
+          mkdir -p experiment-results
+          python3 -B scripts/ci/runner_io_gate.py --attempts 1 \
+            --output experiment-results/runner-io-admission.json
       - name: Exact packed-word transport on simulated chips
         working-directory: mlp-stream-${{ github.run_id }}
         env:
