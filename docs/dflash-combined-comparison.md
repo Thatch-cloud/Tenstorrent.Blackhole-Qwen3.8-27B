@@ -33,6 +33,13 @@ masked-key invariance checks across both simulated chips.
 This is **approximate proposal attention**, not an exact target replacement.
 The short-history diagnostic is retained, not relaxed or relabelled. There is
 no learned acceptance, target-state or throughput result for this new T32 path.
+
+Cached T32 source preparation now has a simulator-only adapter, leaving the
+admitted T8/T16 source files unchanged. Seven local host tests pass, including
+cache publication and rollback across every accepted prefix length from 1 to
+32. These are host regression checks, not a device cache-replay qualification.
+The adapter rejects hardware execution; cached proposal replay and matching
+T32 target validation are still required before combined hardware testing.
 Hardware selection remains rejected until the complete request route is admitted.
 
 Report SHA256 (31):
