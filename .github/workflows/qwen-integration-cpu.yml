@@ -30,6 +30,7 @@ jobs:
         run: |
           python -B -m unittest test_dflash_host_attribution
           python -B -m unittest test_draft_kv_slide
+          python -B -m unittest test_draft_kv_slide_direct
           python -B -m unittest test_draft_kv_slide_adapter
           python -B -m unittest test_draft_kv_slide_scope
           python -B -m unittest test_draft_kv_slide_hardware_stage

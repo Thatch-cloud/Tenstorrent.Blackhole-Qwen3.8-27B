@@ -24,6 +24,10 @@ jobs:
           python3 -B scripts/ci/runner_io_gate.py --attempts 1 --output experiment-results/runner-io-admission.json
           cp scripts/ci/draft-kv-slide-probe.py scripts/ci/history-append-probe.py
           cmp scripts/ci/draft-kv-slide-probe.py scripts/ci/history-append-probe.py
+          if [[ "$GITHUB_REF_NAME" == *-direct-dma ]]; then
+            cp scripts/ci/draft_kv_slide_direct.cpp scripts/ci/draft_kv_slide.cpp
+            cmp scripts/ci/draft_kv_slide_direct.cpp scripts/ci/draft_kv_slide.cpp
+          fi
           python3 -B - <<'PY'
           from pathlib import Path
           path = Path('scripts/ci/simulator-suite.sh')

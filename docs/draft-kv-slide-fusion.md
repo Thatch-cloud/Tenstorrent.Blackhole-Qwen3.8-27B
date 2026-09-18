@@ -78,6 +78,22 @@ checked source hashes; this is not reuse of the old append kernel's qualificatio
 
 ## Other fusion boundaries
 
+### Direct face-segment DMA candidate
+
+The first fused writer still assembles every output row with scalar 32-bit loads
+and stores on its data-movement processor. `draft_kv_slide_direct.cpp` instead
+issues 32-byte-aligned NoC reads directly into the output tile, splitting only at
+source/destination face boundaries and the historical/accepted frontier. Reads
+complete before the output write; writes complete before reusing scratch.
+Only invalid tail rows use scalar zeroing. The original qualified kernel remains
+unchanged, and the direct-DMA candidate requires its own simulator evidence.
+
+This is a different mechanism, not an unchanged retry of the first fusion.
+More small NoC transfers could offset the saved scalar copies, so no benefit is
+assumed. CPU segment tests cover all accepted lengths 1-32, all 64 tiles and
+history/face boundaries. The dedicated simulator selects it only with a
+`-direct-dma` tag, retaining the same two-chip 120-comparison matrix.
+
 Next review the copy from committed K/V banks into captured proposal buffers.
 The banks swap on commit while trace addresses are fixed, so removing this copy
 requires explicit bank-specific trace binding or stable-address publication.
