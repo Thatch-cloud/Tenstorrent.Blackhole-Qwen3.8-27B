@@ -49,9 +49,9 @@ The probe uses synthetic K/V projection, not learned drafting. It validates
 cache publication together with actual captured T32 native attention, but
 does not establish learned acceptance or target-state correctness. The adapter
 still rejects hardware execution. Matching T32 target validation remains pending.
-Its next prepared MLP probe retains the register arithmetic and block-stream
-reader, changing only token width and simulator routing. Eight host regression
-tests passed; that T32 MLP candidate has not executed on simulator or hardware.
+The MLP probe retains the register arithmetic and block-stream reader,
+changing only token width and simulator routing. Its T32 simulator evidence
+is recorded below; hardware execution remains unqualified.
 Hardware selection remains rejected until the complete request route is admitted.
 
 Cache replay report SHA256:
@@ -66,8 +66,8 @@ the measured T16 recipe. Keep the T16 control intact while closing these gaps.
 |---|---|---|
 | Native draft attention and cache replay | Synthetic simulator checks pass | Learned proposal/output and acceptance checks |
 | Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay | Fresh source-bound hardware admission and combined target checks |
-| Shared-Q/K GDN and scatter normalization | Scope recognizes only `(1,16,5120)`; other widths use original executor | T32 allocations, recurrence, normalization and accepted-prefix continuation checks |
-| Direct convolution windows | Scope selects only `(1,16,8240)` | T32 window/checkpoint qualification and per-layer execution counts |
+| Shared-Q/K GDN and scatter normalization | Run 35304765890 passed exact T32 eager/replay; runtime scope remains T16 | Source-bound T32 scope and accepted-prefix continuation checks |
+| Direct convolution windows | Separate T32 tile-addressing adapter passes CPU regression; runtime scope remains T16 | T32 window/checkpoint simulator qualification and per-layer execution counts |
 | Wider MLP-down grid | Scope selects only `(1,1,16,5120)` | T32 numerical/replay coverage and all 64 layer hits |
 | Full request integration | Combined wrapper explicitly constructs T16; cached request guard excludes T32 | Dedicated T32 admissions, target attention parity, exact tokens/state/features, then matched timed requests |
 
@@ -86,7 +86,21 @@ A separate simulator-only shared-Q/K T32 builder adapter is now prepared.
 It changes host tensor shapes and runtime token counts, not recurrence,
 normalization or scatter kernel arithmetic. In particular, 16-row tile-face
 offsets remain unchanged: they are physical tile indexing, not draft width.
-This adapter has not executed on a device and is not hardware-admitted.
+Run **35304765890** passed this adapter on both simulated chips: 24 exact
+output/state/bridge checks, 48 immutable-input checks and six changed-input
+stale-state controls. All 32 recurrent prefixes were compared. Source hashes
+matched the staging manifest and remained unchanged; cleanup succeeded.
+The probe took **387.42 seconds**, inside its 420-second cap. Earlier attempts
+failed at staging and a staging-only import, not numerical comparisons.
+This is not accepted-prefix continuation, combined target or hardware admission.
+Report SHA256:
+`c88ceb06a8983b156c90161354f7f9f7da918b86e4329e03ad54ebf909bb66b3`.
+
+The next direct-window adapter fixes a separate width dependency: T16's
+linear row offsets do not address the bottom tile faces correctly at T32.
+The generated reader uses explicit 16-row face offsets for all 32 rows,
+while retaining native convolution arithmetic and the untouched T16 sources.
+CPU run **35305118623** passed; simulator numerical qualification is pending.
 
 T32 block-stream MLP run **35302273096, attempt 3** passed in **5m17s**:
 two exact eager comparisons, 12 exact changing-input replay comparisons and
