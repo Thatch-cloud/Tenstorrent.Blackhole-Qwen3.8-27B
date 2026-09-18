@@ -41,6 +41,9 @@ jobs:
           source "$RUNNER_TEMP/qwen-vllm-contract/bin/activate"
           python -c 'import vllm, torch; assert vllm.__version__ == "0.25.1"; assert "+cpu" in torch.__version__; print(vllm.__version__, torch.__version__)'
           python -B -m unittest test_serving_vllm_installed
+          QWEN_PLUGIN_SOURCE=upstream-plugin python -B -m unittest test_serving_plugin_patch test_serving_fast_policy
+          python scripts/ci/serving_plugin_patch.py upstream-plugin
+          python -m compileall -q upstream-plugin/src/vllm_tt_plugin
           python -B -m unittest test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state test_serving_runner_bridge
           mkdir -p experiment-results
           python -c 'import json; print(json.dumps(dict(installed_vllm="0.25.1", passed=True, device_execution=False, engine_loop_tested=False, serving_qualified=False, performance_qualified=False)))' > experiment-results/installed-vllm-contract.json

@@ -108,6 +108,15 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+Installed-vLLM CPU contract run **35325017284 passed** against vLLM 0.25.1.
+This validates real scheduler/output data types, not the complete engine loop or
+device execution. `serving_plugin_patch.py` stages the native batch-capacity hook
+against the pinned plugin: one scheduler request retains eight internal GDN slots.
+Default batch sizing is unchanged. CI checks the actual upstream function and
+rejects a changed or already-patched contract. The platform's speculative-decoding
+rejection remains in place until the request factory and runner hooks are wired;
+this patch alone deliberately cannot enable an incomplete serving path.
+
 - Reuse the platform registry/authentication and runtime ownership; no copied
   secrets or hard-coded deployment credentials.
 - Use a registry digest, explicit model snapshot revisions and source admission
