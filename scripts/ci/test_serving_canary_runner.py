@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import re
 import unittest
@@ -30,3 +31,13 @@ class CanaryEnvironmentTests(unittest.TestCase):
         source = (root / '.github/workflows/qwen-fast-serving-canary.yml').read_text()
         supplied = dict(re.findall(r'-e ([A-Z0-9_]+)=([^\s\\]+)', source))
         validate_environment(supplied)
+
+    def test_generated_direct_window_guard_is_covered_before_loading(self):
+        from gdn_direct_window_hardware_sources import HARDWARE_GUARD
+
+        tree = ast.parse(HARDWARE_GUARD.strip() + '\n    pass\n')
+        required = [value.value for node in ast.walk(tree) if isinstance(node, ast.Tuple)
+            for value in node.elts if isinstance(value, ast.Constant) and isinstance(value.value, str)]
+        self.assertIn('QWEN_GDN_DIRECT_WINDOW', required)
+        for name in required:
+            self.assertEqual(REQUIRED_ENVIRONMENT[name], '1')
