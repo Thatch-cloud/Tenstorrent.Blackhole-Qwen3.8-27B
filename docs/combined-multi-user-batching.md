@@ -12,6 +12,13 @@ owns one session and saves/restores its helper state. `full_dflash_request.py`
 creates one drafter and proposal capture after fresh prefill. These interfaces
 cannot become concurrent simply by increasing a batch flag or adding threads.
 
+The first implementation component is the unselected `gdn_slot_copy.py/.cpp`:
+explicit slot 0-7 snapshot save/restore, with whole recurrent-state pages and
+face-row-only convolution writes. The existing `gdn_state_copy` remains unchanged.
+CPU tests exercise every slot and preserve other convolution rows and padding;
+they do not execute the kernel. Weight-free two-chip eager/replay qualification is
+required next, before binding this transport into a two-user request harness.
+
 `DraftKVHistory` has request-local position, active/spare banks and pending
 publication. Its current tensor shapes assume one request. Combined scopes also
 temporarily patch shared methods: overlapping independent scopes are unsafe.

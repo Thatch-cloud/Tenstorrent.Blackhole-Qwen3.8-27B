@@ -32,6 +32,7 @@ jobs:
           python -B -m unittest test_draft_kv_slide
           python -B -m unittest test_draft_kv_slide_direct
           python -B -m unittest test_draft_kv_slide_gate
+          python -B -m unittest test_gdn_slot_copy
           python -B -m unittest test_draft_kv_slide_adapter
           python -B -m unittest test_draft_kv_slide_scope
           python -B -m unittest test_draft_kv_slide_hardware_stage
