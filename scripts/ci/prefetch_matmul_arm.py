@@ -120,7 +120,8 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
             ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
                 compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), in0_block_w=1,
                 out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
-                fuse_batch=True, fused_activation=None, mcast_in0=False, stream_in1=True)
+                fuse_batch=True, fused_activation=None, mcast_in0=False,
+                gather_in0=True, stream_in1=True)
             stream_kwargs = dict(stream_in1=True)
         except BaseException as error:
             entry['stream_in1_unavailable'] = str(error)[:200]
@@ -128,7 +129,7 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
         compute_with_storage_grid_size=ttnn.CoreCoord(ring_cols, ring_rows),
         in0_block_w=chosen['k_tiles_per_shard'], out_subblock_h=1, out_subblock_w=1,
         per_core_M=1, per_core_N=chosen['n_tiles_per_receiver'],
-        fuse_batch=True, fused_activation=None, mcast_in0=False,
+        fuse_batch=True, fused_activation=None, mcast_in0=False, gather_in0=True,
         **stream_kwargs)
     entry['program_config_built'] = True
     entry['stream_in1'] = stream_kwargs.get('stream_in1', False)
