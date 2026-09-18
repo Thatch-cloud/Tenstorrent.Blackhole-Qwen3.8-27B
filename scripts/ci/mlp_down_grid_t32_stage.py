@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from frozen_recipe_context import replace_once
-from mlp_down_grid_stage import stage as stage_baseline
 
 
 def adapt_probe(source):
@@ -22,6 +21,8 @@ def adapt_probe(source):
 
 
 def stage(checkout):
+    from mlp_down_grid_stage import stage as stage_baseline
+
     baseline = stage_baseline(checkout)
     scripts = Path(checkout) / 'scripts/ci'
     probe = scripts / 'gdn-output-grid-probe.py'

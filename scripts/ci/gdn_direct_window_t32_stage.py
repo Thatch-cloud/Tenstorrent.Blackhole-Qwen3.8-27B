@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from frozen_recipe_context import replace_once
-from gdn_direct_window_stage import stage as stage_baseline
 from gdn_direct_window_t32_adapter import payloads
 
 
@@ -25,6 +24,8 @@ def adapt_probe(probe):
 
 
 def stage(checkout):
+    from gdn_direct_window_stage import stage as stage_baseline
+
     baseline = stage_baseline(checkout)
     scripts = Path(checkout) / 'scripts/ci'
     originals = {name: (scripts / name).read_text() for name in

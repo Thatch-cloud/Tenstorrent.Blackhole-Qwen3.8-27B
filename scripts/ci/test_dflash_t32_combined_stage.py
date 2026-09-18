@@ -2,12 +2,24 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 from dflash_t32_combined_stage import stage
 
 
 class T32CombinedStageTests(unittest.TestCase):
+    def test_runtime_admission_does_not_import_simulator_stagers(self):
+        command = (
+            'import sys; '
+            "sys.modules['gdn_direct_window_stage'] = None; "
+            "sys.modules['mlp_down_grid_stage'] = None; "
+            'import gdn_direct_window_t32_gate, mlp_down_grid_t32_gate'
+        )
+        subprocess.run([sys.executable, '-B', '-c', command],
+            cwd=Path(__file__).parent, check=True, timeout=10)
+
     def test_stage_generates_all_components_and_stops_before_weights(self):
         source = Path(__file__).parent
         with tempfile.TemporaryDirectory() as temporary:
