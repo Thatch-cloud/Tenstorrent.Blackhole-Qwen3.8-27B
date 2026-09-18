@@ -105,6 +105,33 @@ for the same combined publication comparison. The original scalar-copy route is
 unchanged. Hardware performance remains unqualified: extra transfers and barriers
 may negate any benefit.
 
+### Combined staged-DMA result
+
+Hardware run **35321449903**, source `01ab58b`, completed both feature audits and
+ABBA requests with exact matching proposals, target tokens/state and clean close.
+The workflow failed only in its final external validator: it inspected the
+orchestrator's original kernel rather than the staged DMA kernel. Recovery run
+**35322243498** passed the unchanged complete report validator with the exact
+executed kernel; no hardware work was repeated. Raw report SHA256:
+`0be812cceaf6f91686570bb02a9991cc5a58d8aaa95e05d0633388802799a2bc`.
+
+| 4K, one stream, native DFlash T16 | Control | Staged DMA |
+|---|---:|---:|
+| PP tokens/s | 3314.98 | 3309.40 |
+| Committed TG tokens/s | 111.94 | 121.12 |
+| Individual request TG | 107.89 / 116.30 | 119.09 / 123.23 |
+| Draft ms/block | 22.12 | 19.98 |
+| Verify/readback ms/block | 60.46 | 60.24 |
+| Select/commit ms/block | 12.71 | 8.77 |
+| Complete cycle ms/block | 98.15 | 90.70 |
+
+Both arms committed 242 timed tokens over 22 blocks. Aggregate TG improved 8.21%
+in this run and publication-containing select/commit fell 3.94 ms/block; drafter
+and input differences account for part of the total improvement. This is one
+matched run, not a repeatability or held-out coding-quality qualification.
+No promotion or serving change. At 11 committed tokens/block, the 200-TG budget
+is 55 ms, still below the roughly 60-ms verifier alone.
+
 This is a different mechanism, not an unchanged retry of the first fusion.
 More small NoC transfers could offset the saved scalar copies, so no benefit is
 assumed. CPU segment tests cover all accepted lengths 1-32, all 64 tiles and
