@@ -12,20 +12,26 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 |---|---|---|
 | Pinned vLLM contracts | CPU 35327950138 | Real data types and pinned worker delegation pass; no complete engine loop |
 | Source regression | CPU 35329738162 | Passed |
-| Serving image | Build 35329741168 | Passed; 63 tests passed, 2 skipped; native bindings import |
+| Serving image | Build 35334618239 | Passed; includes EOS admission and runtime path fixes; superseding DFlash2 registration build pending |
 | Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
 | Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
-| Two-card HTTP lifecycle | Pending | No serving correctness or performance claim |
+| DFlash2 metadata | CPU image 35335959408 | Real speculative configuration passes without weights; separate guard test had an API-signature error, fixed in c3e60dc and awaiting image checks |
+| Two-card HTTP lifecycle | Hardware 35335212616 | Failed before weight loading: missing DFlash2 registry entry; no throughput result |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
-Build source: `8168bcd49532043f9e60ff7c9e9bfa8e7f838cb8`.
-Local runner tag: `qwen-fast-serving:ci-8168bcd49532043f9e60ff7c9e9bfa8e7f838cb8`.
+Build source: `555e0cfd841fb90a94889876774c44067df5b15f`.
+Local runner tag: `qwen-fast-serving:ci-555e0cfd841fb90a94889876774c44067df5b15f`.
 Local Docker ID:
-`sha256:4a7a6dc280fe6a9e80b6c69f62fec648f20cfadc08bc064e816bab47c75bcf73`.
+`sha256:42390dc83917d0c95cafbf43c1bc4c2367eef7feb3465c8b19711042004eacdd`.
 This ID is not a registry manifest digest or proof of a clean pull elsewhere.
-The build accessed neither cards nor weights; its build/test step took 23 seconds.
+The build accessed neither cards nor weights.
+
+The DFlash2 registry fix is metadata-only: it preserves `DFlash2DraftModel`
+through vLLM configuration and rejects standard model construction. Actual draft
+execution remains in the explicit combined TT worker, not an aliased upstream
+DFlash implementation. Image checks must pass before the next hardware canary.
 
 The image restores hash-verified native sources and the cached binary, stages the
 pinned plugin patch, and connects startup, prefill feature capture, request
