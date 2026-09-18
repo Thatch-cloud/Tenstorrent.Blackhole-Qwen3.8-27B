@@ -50,8 +50,15 @@ BuildKit containers. This is storage contention, not an observed kernel failure.
 The next launch checks one bounded 15-second I/O observation before Docker
 creation; timeouts and the existing 1% admission threshold are unchanged.
 
+Guarded retry **35295976475** measured **13.61%** full I/O stall over 15 seconds
+and correctly stopped before Docker creation. No simulator kernels ran in
+either attempt. Further launches wait for competing storage work to finish.
+
 The simulator-only projection adapter is prepared and host-tested. It changes
 the weight accessor and reader source, retaining the constructor, fused compute,
 input distribution and output publication. It rejects hardware, aliased buffers,
 partial streams and changed bindings/arithmetic. Caller ownership of the extra
 stream remains explicit. Full MLP device qualification is still pending.
+Its manifest identifies the generated bulk reader rather than incorrectly
+retaining the original reader's hash. Host tests also preserve the register
+epilogue's constructor/compute source and reject changed reader metadata.

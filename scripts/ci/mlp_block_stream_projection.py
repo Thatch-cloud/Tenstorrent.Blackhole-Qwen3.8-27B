@@ -2,9 +2,10 @@
 
 import hashlib
 import os
+from pathlib import Path
 
 from frozen_recipe_context import replace_once
-from mlp_block_stream import BLOCK_BYTES, geometry
+from mlp_block_stream import BLOCK_BYTES, geometry, reader_source
 
 
 def adapt_projection(source):
@@ -52,13 +53,25 @@ def identity(projection, stream, operations):
         for before, after in zip(source_shards, stream_shards, strict=True))
     if any(before == after for before, after in addresses):
         raise ValueError('Stream cannot alias native weights')
-    return dict(addresses=addresses, compute_sha256=hashlib.sha256(projection.compute.encode()).hexdigest())
+    generated_reader = reader_source(Path(__file__).with_name('fused_1d_weights.cpp').read_text())
+    return dict(addresses=addresses, compute_sha256=hashlib.sha256(projection.compute.encode()).hexdigest(),
+        stream_reader_sha256=hashlib.sha256(generated_reader.encode()).hexdigest(),
+        pack_sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('mlp_block_stream.py', 'mlp_block_stream.cpp')})
 
 
 def bind_stream(projection, stream, operations):
     if hasattr(projection, '_block_stream_binding'):
         raise ValueError('A projection cannot be rebound to another stream')
     binding = identity(projection, stream, operations)
+    manifest = dict(projection.manifest)
+    readers = dict(manifest['reader_sha256'])
+    manifest['native_weight_reader_sha256'] = readers['fused_1d_weights.cpp']
+    readers['fused_1d_weights.cpp'] = binding['stream_reader_sha256']
+    manifest.update(reader_sha256=readers, block_stream_sources=binding['pack_sources'],
+        weight_transport='block-major-raw-bf4', stream_page_bytes=BLOCK_BYTES,
+        extra_weight_bytes_per_chip=geometry()['stream_bytes'])
+    projection.manifest = manifest
     projection._block_stream_binding = (stream, binding)
     return dict(binding, extra_weight_bytes_per_chip=geometry()['stream_bytes'],
         borrowed_source=True, stream_owned_by_caller=True, arithmetic_changed=False,
@@ -70,6 +83,8 @@ def validate_binding(projection, operations):
     if binding is None:
         raise ValueError('Explicit caller-owned stream binding required before execution')
     stream, expected = binding
-    if identity(projection, stream, operations) != expected:
+    if (identity(projection, stream, operations) != expected
+            or projection.manifest.get('reader_sha256', {}).get('fused_1d_weights.cpp') != expected['stream_reader_sha256']
+            or projection.manifest.get('block_stream_sources') != expected['pack_sources']):
         raise ValueError('Weight buffers or fused arithmetic changed after stream binding')
     return stream
