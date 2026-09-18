@@ -28,15 +28,18 @@ def validate_route(request, arm):
         raise ValueError('Winning norm prefetch and incremental publication required in both arms')
 
 
-def validate_fusion(request, expected_sha256=BASELINE_SHA256, *, expected_extra_weight_allocations=0):
-    fusion = request.get('fused_t16_mlp', {})
+def validate_fusion(request, expected_sha256=BASELINE_SHA256, *, expected_extra_weight_allocations=0,
+                    expected_rows=16, fusion_key='fused_t16_mlp'):
+    if type(expected_rows) is not int or expected_rows not in (16, 32):
+        raise ValueError('Explicit supported fusion width required')
+    fusion = request.get(fusion_key, {})
     if (fusion.get('passed_simulator') != expected_sha256
-            or fusion.get('rows') != 16 or fusion.get('layers') != 64
+            or fusion.get('rows') != expected_rows or fusion.get('layers') != 64
             or fusion.get('restored') is not True or fusion.get('native_bindings_unchanged') is not True
             or fusion.get('extra_weight_allocations') != expected_extra_weight_allocations or len(fusion.get('hits', [])) != 64
             or any(type(count) is not int or count < 1 for count in fusion['hits'])
             or len(set(fusion['hits'])) != 1):
-        raise ValueError('Restored all-layer T16 fusion and retained weights required')
+        raise ValueError('Restored all-layer requested-width fusion and retained weights required')
     weights = fusion.get('weight_audit', {})
     checks = weights.get('checks', [])
     expected = {(layer, offset, chip) for layer in range(64) for offset in (0, 1) for chip in (0, 1)}
