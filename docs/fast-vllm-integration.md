@@ -15,6 +15,7 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 | Serving image | Build 35329741168 | Passed; 63 tests passed, 2 skipped; native bindings import |
 | Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
 | Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
+| Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Two-card HTTP lifecycle | Pending | No serving correctness or performance claim |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
@@ -39,7 +40,13 @@ Qwen, the worker, device traces or HTTP. `qwen-serving-scheduler.yml` reuses the
 already-built image with no device or weight mounts, two CPUs and a 90-second
 test cap, avoiding source-bundle downloads and image rebuilds for each check.
 
-Next gates: changed-page device replay and complete engine/worker validation; repeated HTTP
+The page simulator uses the real serving page binder and native captured cache
+writer, comparing the complete BF8 cache and all three metadata tables after
+append-only page changes. Report SHA256:
+`89678a253a11d30972670374faa7fb20b6af91bec01441dbc30f06647569305c`.
+It does not qualify attention-reader execution, the full model or hardware speed.
+
+Next gates: changed-page attention replay and complete engine/worker validation; repeated HTTP
 requests on both cards with reference equality, EOS, cancellation and clean release;
 then API PP/CTX/TG and streaming latency. Registry publication and Thatch rollout
 follow acceptance, not merely a successful build. Worker-side rejection is not yet
