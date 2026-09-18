@@ -31,6 +31,11 @@ jobs:
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           timeout -k 15 240 bash scripts/ci/run-simulator.sh
+      - name: Independently admit complete transport evidence
+        working-directory: mlp-stream-${{ github.run_id }}
+        run: |
+          python3 -B scripts/ci/mlp_block_stream_admission.py \
+            --report experiment-results/mlp-block-stream.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
