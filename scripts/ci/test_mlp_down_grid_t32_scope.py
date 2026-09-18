@@ -5,9 +5,24 @@ from unittest.mock import patch
 from mlp_down_grid_t32_scope import scoped_down_grid_t32
 from mlp_down_grid_t32_gate import REPORT_SHA256
 from test_mlp_down_grid import DownGridTests
+from test_mlp_down_grid_gate import fixture
+from mlp_down_grid_gate import validate_report
 
 
 class T32DownScopeTests(unittest.TestCase):
+    def test_width_admission_is_explicit_and_t16_default_unchanged(self):
+        report = fixture()
+        validate_report(report)
+        with self.assertRaises(ValueError):
+            validate_report(report, rows=32)
+        report['rows'] = 32
+        validate_report(report, rows=32)
+        with self.assertRaises(ValueError):
+            validate_report(report)
+        for rows in (True, 32.0, 8):
+            with self.assertRaises(ValueError):
+                validate_report(report, rows=rows)
+
     def test_only_t32_changes_and_restores_on_failure(self):
         for failed in (False, True):
             program = DownGridTests().original()
