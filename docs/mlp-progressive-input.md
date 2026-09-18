@@ -56,8 +56,13 @@ pipelining, missing admission, changed bindings and use after scope closure.
 All 64 layers must execute, restore their bindings and report the additional L1
 capacity. Eighteen focused host tests cover routing, admission/source changes,
 full layer ownership and exception cleanup. These are not device results.
-Next: stage the paired comparison, validate against the actual image and run
-combined ABBA requests with native drafting and direct KV publication in both arms.
+The staged comparison now retains native drafting, serial contiguous weights and
+direct DMA KV publication in both arms. Two native-reference audits precede
+timed control/candidate/candidate/control requests in one loaded model. Report
+validation rejects changed proposals, acceptance, missing publication coverage or
+an accidental pipeline/control change. Preload checks run before target weights.
+The hardware tag ends in `-progressive-direct-dma-kv-slide-block-stream-dflash-native`.
+Next: finish CPU CI, verify actual-image admission and run this combined comparison.
 There is no isolated hardware timing or serving promotion.
 
 1. Host checks: source identity, reader protocol structure, slow-receiver counter

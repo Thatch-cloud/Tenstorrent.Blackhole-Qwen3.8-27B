@@ -1,4 +1,4 @@
-"""Complete DFlash native-draft requests, varying only target weight transport."""
+"""Complete DFlash native-draft requests with one explicit transport comparison."""
 
 import hashlib
 import os
@@ -31,6 +31,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if publication_flag not in ('0', '1') or (publication_flag == '1' and bulk_pipeline):
         raise ValueError('One explicit publication or weight transport experiment required')
     kv_publication = publication_flag == '1'
+    progressive_flag = os.environ.get('QWEN_PROGRESSIVE_INPUT_EXPERIMENT', '0')
+    if progressive_flag not in ('0', '1') or (progressive_flag == '1' and (bulk_pipeline or not kv_publication)):
+        raise ValueError('Progressive comparison requires serial weights and fixed KV publication')
+    progressive_input = progressive_flag == '1'
     prompt = options.get('prompt', ())
     if (any(os.environ.get(name) != '1' for name in
             ('QWEN_CUMULATIVE_NORM', 'QWEN_CUMULATIVE_REGISTER', 'QWEN_CUMULATIVE_MLP_DOWN'))
@@ -51,6 +55,13 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         from mlp_block_stream_pipeline_preload import preload
 
         pipeline_admission = preload(directory, runtime_root)
+    if progressive_input:
+        from mlp_progressive_input_preload import preload as preload_progressive
+        from draft_kv_slide_gate import DIRECT_REPORT_SHA256
+
+        if publication_admission.get('report_sha256') != DIRECT_REPORT_SHA256:
+            raise ValueError('Progressive comparison requires direct DMA in both arms')
+        progressive_admission = preload_progressive(directory, runtime_root)
     fabric = audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
     if report.get('sampling_link_sources') != fabric:
         raise ValueError('Loaded sampling runtime differs from four-link admission')
@@ -71,6 +82,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         report['weight_comparison_policy'] = 'serial-vs-bulk-pipeline'
     if kv_publication:
         report['weight_comparison_policy'] = 'serial-weights-kv-publication'
+    if progressive_input:
+        report['weight_comparison_policy'] = 'progressive-input-fixed-publication'
     warm_native_control(generator, kv_cache, report, progress)
     weights = [layer.feed_forward.weights.w_gate_up for layer in model.layers]
     mesh = model.layers[0].feed_forward.device
@@ -86,25 +99,28 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                         if enabled or bulk_pipeline or kv_publication else None)
                     if enabled and bulk_pipeline:
                         stream_options['pipeline_evidence'] = directory / 'bulk-pipeline-evidence'
+                    if enabled and progressive_input:
+                        stream_options['progressive_evidence'] = directory / 'progressive-input-evidence'
                     result = measure_combined_dflash(operations, model, sampler, prompt, pages, helpers,
                         directory=directory, runtime_root=runtime_root, fixtures=fixtures,
                         native_attention_evidence=native_evidence,
                         block_stream=stream_options,
                         audit_features=audited, max_new_tokens=256, **callbacks,
-                        **(dict(kv_publication_evidence=publication_evidence) if enabled and kv_publication else {}))
-                    if kv_publication and not enabled:
+                        **(dict(kv_publication_evidence=publication_evidence) if kv_publication and (enabled or progressive_input) else {}))
+                    if kv_publication and not enabled and not progressive_input:
                         result['draft_kv_slide'] = dict(enabled=False, restored=True, serving_defaults_changed=False)
                     record_request(report, result, 'dflash2', sampler.tt_sampling, fabric)
                     if (result.get('native_proposal_attention') is not True
                             or ('block_stream' in result) is not (enabled or bulk_pipeline or kv_publication)
-                            or result.get('block_stream', {}).get('bulk_pipeline', False) is not (enabled and bulk_pipeline)):
+                            or result.get('block_stream', {}).get('bulk_pipeline', False) is not (enabled and bulk_pipeline)
+                            or result.get('block_stream', {}).get('progressive_input', False) is not (enabled and progressive_input)):
                         raise ValueError('Executed request differs from scheduled transport policy')
                     if audited:
                         summarize_dflash_requests([result], audit_only=True)
                     progress(f'block_stream_{ordinal}_complete')
         report.update(block_stream_comparison=summarize(report['request_checks'],
             weight_transport=not (bulk_pipeline or kv_publication), bulk_pipeline=bulk_pipeline,
-            kv_publication=kv_publication),
+            kv_publication=kv_publication and not progressive_input, progressive_input=progressive_input),
             pp=None, committed_tg=None, ctx_tokens=4096, scope=__doc__, performance_promoted=False)
     finally:
         report['drafter_comparison_sources'] = sources
@@ -115,6 +131,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             raise ValueError('Native proposal admission changed during comparison')
         if bulk_pipeline and preload(directory, runtime_root) != pipeline_admission:
             raise ValueError('Bulk pipeline admission changed during comparison')
+        if progressive_input and preload_progressive(directory, runtime_root) != progressive_admission:
+            raise ValueError('Progressive input admission changed during comparison')
         if kv_publication and qualify_publication(directory, publication_evidence) != publication_admission:
             raise ValueError('K/V publication admission changed during comparison')
         if audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'}) != fabric:

@@ -7,6 +7,39 @@ from test_dflash_native_comparison import NativeComparisonTests
 
 
 class TransportComparisonTests(unittest.TestCase):
+    def test_progressive_requires_fixed_direct_publication_and_serial_weights(self):
+        from draft_kv_slide_gate import DIRECT_REPORT_SHA256
+
+        records = self.records()
+        for index, entry in enumerate(records):
+            entry['block_stream'] = dict(bulk_pipeline=False, progressive_input=index in (1, 3, 4))
+            entry['draft_kv_slide'] = dict(enabled=True, restored=True, serving_defaults_changed=False,
+                prepare_calls=len(entry['blocks']), tensor_copies=10 * len(entry['blocks']),
+                admission=dict(report_sha256=DIRECT_REPORT_SHA256))
+        with patch('draft_kv_slide_gate.validate_record'), \
+                patch('dflash_native_comparison_report.validate_target_components'), \
+                patch('full_dflash_request.summarize_dflash_requests', return_value=dict(
+                    committed_tokens_per_second=100, committed_tokens=4, target_reached=False)):
+            result = summarize(records, progressive_input=True)
+            self.assertIn('activation delivery', result['scope'])
+            self.assertFalse(result['proposal_trajectories_may_differ'])
+            for mutation in ('publication', 'reader', 'dma', 'pipeline', 'copies'):
+                changed = copy.deepcopy(records)
+                if mutation == 'publication':
+                    changed[0]['draft_kv_slide']['enabled'] = False
+                elif mutation == 'reader':
+                    changed[0]['block_stream']['progressive_input'] = True
+                elif mutation == 'dma':
+                    changed[0]['draft_kv_slide']['admission']['report_sha256'] = 'wrong'
+                elif mutation == 'pipeline':
+                    changed[3]['block_stream']['bulk_pipeline'] = True
+                else:
+                    changed[3]['draft_kv_slide']['tensor_copies'] -= 1
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    summarize(changed, progressive_input=True)
+            with self.assertRaises(ValueError):
+                summarize(records, kv_publication=True)
+
     def test_kv_publication_requires_full_coverage_and_unchanged_weights(self):
         records = self.records()
         for index, entry in enumerate(records):

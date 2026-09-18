@@ -65,10 +65,10 @@ def acceptance(entry, *, max_rows=16):
         fully_accepted_blocks=sum(block['rows'] > 1 and block['accepted'] == block['rows'] - 1 for block in blocks))
 
 
-def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publication=False):
+def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publication=False, progressive_input=False):
     from full_dflash_request import summarize_dflash_requests
 
-    policies = (weight_transport, bulk_pipeline, kv_publication)
+    policies = (weight_transport, bulk_pipeline, kv_publication, progressive_input)
     if any(type(policy) is not bool for policy in policies) or sum(policies) > 1:
         raise ValueError('One explicit transport comparison policy required')
     transport = any(policies)
@@ -83,18 +83,28 @@ def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publi
             or [entry['block_stream'].get('bulk_pipeline', False) for entry in requests]
                 != [False, True, False, True, True, False]):
         raise ValueError('Serial/pipeline audits and ABBA on the same bulk streams required')
-    if kv_publication:
+    if progressive_input:
+        if (any('block_stream' not in entry or entry['block_stream'].get('bulk_pipeline', False)
+                for entry in requests)
+                or [entry['block_stream'].get('progressive_input', False) for entry in requests]
+                    != [False, True, False, True, True, False]):
+            raise ValueError('Progressive-input ABBA requires the same serial weights in both arms')
+    elif any(entry.get('block_stream', {}).get('progressive_input', False) for entry in requests):
+        raise ValueError('Progressive input requires its explicit comparison policy')
+    if kv_publication or progressive_input:
         if (any('block_stream' not in entry or entry['block_stream'].get('bulk_pipeline', False)
                 for entry in requests)
                 or [entry.get('draft_kv_slide', {}).get('enabled') for entry in requests]
-                    != [False, True, False, True, True, False]):
+                    != ([True] * 6 if progressive_input else [False, True, False, True, True, False])):
             raise ValueError('K/V publication ABBA requires unchanged serial bulk weights in both arms')
         for entry in requests:
             audit = entry['draft_kv_slide']
             if audit['enabled']:
-                from draft_kv_slide_gate import validate_record
+                from draft_kv_slide_gate import validate_record, DIRECT_REPORT_SHA256
 
                 validate_record(audit.get('admission'))
+                if progressive_input and audit.get('admission', {}).get('report_sha256') != DIRECT_REPORT_SHA256:
+                    raise ValueError('Both progressive comparison arms require direct DMA publication')
             if audit.get('restored') is not True or audit.get('serving_defaults_changed') is not False:
                 raise ValueError('K/V publication scope must restore without changing serving')
             if audit['enabled'] and (type(audit.get('prepare_calls')) is not int
@@ -149,7 +159,8 @@ def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publi
         candidate_over_control=output['candidate']['committed_tokens_per_second'] / output['control']['committed_tokens_per_second'],
         target_reached=output['candidate']['target_reached'], proposal_trajectories_may_differ=not transport,
         performance_promoted=False, serving_qualified=False, held_out_coding_quality=False,
-        scope=('Only draft K/V publication transport changes; exact proposals and target tokens/state; not serving certification'
+        scope=('Only target MLP activation delivery changes; serial weights and direct KV publication in both arms; not serving certification'
+            if progressive_input else 'Only draft K/V publication transport changes; exact proposals and target tokens/state; not serving certification'
             if kv_publication else 'Only target MLP weight transport changes; exact proposals and target tokens/state; not serving certification'
             if transport else 'Different draft arithmetic with exact native target tokens/state; not held-out quality or serving certification'))
 

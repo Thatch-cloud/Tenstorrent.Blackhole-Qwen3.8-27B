@@ -117,6 +117,13 @@ jobs:
               --evidence "$evidence/kv-slide" --manifest read-combined/experiment-results/kv-slide-hardware-sources.json "${slide_args[@]}"
             git -C read-combined diff --check
           fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-progressive-direct-dma-kv-slide-block-stream-dflash-native ]]; then
+            gh run download 35344423357 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35344423357 --dir "$evidence/progressive-input"
+            python3 -B read-orchestrator/scripts/ci/mlp_progressive_input_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/progressive-input" --native-root "$evidence/model-native/prefill-cache/sources" \
+              --manifest read-combined/experiment-results/progressive-input-hardware-sources.json
+            git -C read-combined diff --check
+          fi
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
             gh run download 35299919048 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-attention-35299919048-1 --dir "$evidence/t32/attention"
             gh run download 35301426428 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-cache-35301426428-2 --dir "$evidence/t32/cache"

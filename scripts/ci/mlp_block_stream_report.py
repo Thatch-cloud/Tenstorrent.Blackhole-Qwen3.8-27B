@@ -20,12 +20,14 @@ def qualify_report(report):
             or len(pool.get('admission', [])) != 2 or pool.get('setup_ms', 0) <= 0):
         raise ValueError('Explicitly admitted complete weight pool and successful release required')
     policy = report.get('weight_comparison_policy', 'native-vs-bulk-stream')
-    if policy not in ('native-vs-bulk-stream', 'serial-vs-bulk-pipeline', 'serial-weights-kv-publication'):
+    if policy not in ('native-vs-bulk-stream', 'serial-vs-bulk-pipeline', 'serial-weights-kv-publication',
+            'progressive-input-fixed-publication'):
         raise ValueError('Known matched weight transport policy required')
     pipeline = policy == 'serial-vs-bulk-pipeline'
     publication = policy == 'serial-weights-kv-publication'
-    result = summarize(report.get('request_checks', []), weight_transport=not (pipeline or publication),
-        bulk_pipeline=pipeline, kv_publication=publication)
+    progressive = policy == 'progressive-input-fixed-publication'
+    result = summarize(report.get('request_checks', []), weight_transport=not (pipeline or publication or progressive),
+        bulk_pipeline=pipeline, kv_publication=publication, progressive_input=progressive)
     if result != report.get('block_stream_comparison'):
         raise ValueError('Recomputed complete-request result differs from saved summary')
     return result

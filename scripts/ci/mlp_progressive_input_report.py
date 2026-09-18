@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 from mlp_block_stream_gate import REPORT_SHA256 as SERIAL_SHA256, validate_report
-from mlp_block_stream_pipeline_gate import validate_weights
 from mlp_block_stream_projection import adapt_projection
 from mlp_progressive_input import projection, reader
 from mlp_register_epilogue import adapt_projection as register_projection
@@ -15,6 +14,14 @@ from mlp_register_epilogue import adapt_projection as register_projection
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def validate_weights(report):
+    expected = [dict(chip=chip, pages=43520, mismatched_words=0, exact=True,
+        workers=64, source_exact=True, projection=name)
+        for name in ('gate', 'up') for chip in (0, 1)]
+    if report.get('weight_checks') != expected:
+        raise ValueError('All four complete native packed-weight comparisons required')
 
 
 def source_record(directory):
