@@ -108,6 +108,16 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+`serving_request_factory.from_prefill` constructs the T16/DFlash request from
+captured serving features and the already-emitted target seed. It does not invoke
+the offline benchmark or perform reference generation. It retains the combined
+flags (native proposal attention, cached draft history, fused convolution,
+commit-only GDN, target T16 attention), releases prefill features before verifier
+capture, and captures the proposal only after verifier persistent allocation.
+CPU tests cover ownership, seed accounting and setup-failure cleanup. Integration
+still requires the admitted combined-runtime scopes, actual plugin prefill capture,
+page binding and request-lifecycle attachment; this is not a serving acceptance.
+
 `FastWorkerHook` routes a prepared single-request bridge through the worker's
 existing `execute_model` delegation and exposes actual draft IDs through
 `take_draft_token_ids`. It returns committed blocks directly, never queues the
