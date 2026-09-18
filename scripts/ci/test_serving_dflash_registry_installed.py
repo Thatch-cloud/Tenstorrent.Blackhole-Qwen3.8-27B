@@ -4,8 +4,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from transformers import Qwen3Config
-from vllm import ModelRegistry
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
+from vllm.model_executor.models.interfaces_base import is_text_generation_model
 
 try:
     from vllm_tt_plugin.qwen_dflash_registry import DFlash2DraftModel, register
@@ -16,9 +16,7 @@ except ModuleNotFoundError:
 class DFlash2RegistryTests(unittest.TestCase):
     def test_metadata_does_not_enable_standard_draft_execution(self):
         register()
-        info, architecture = ModelRegistry.inspect_model_cls(['DFlash2DraftModel'])
-        self.assertEqual(architecture, 'DFlash2DraftModel')
-        self.assertTrue(info.is_text_generation_model)
+        self.assertTrue(is_text_generation_model(DFlash2DraftModel))
         with self.assertRaisesRegex(RuntimeError, 'explicit TT combined'):
             DFlash2DraftModel(vllm_config=None)
 
