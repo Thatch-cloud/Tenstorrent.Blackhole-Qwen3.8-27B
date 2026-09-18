@@ -25,10 +25,16 @@ jobs:
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p mlp-down-grid-candidate/experiment-results
+          if [[ "$GITHUB_REF_NAME" == *-t32 ]]; then
+            python3 -B mlp-down-grid-orchestrator/scripts/ci/runner_io_gate.py --attempts 1 \
+              --output mlp-down-grid-candidate/experiment-results/runner-io-admission.json
+          fi
           python3 -B mlp-down-grid-orchestrator/scripts/ci/frozen_recipe_context.py \
             --checkout mlp-down-grid-candidate --context 8192 \
             --manifest mlp-down-grid-candidate/experiment-results/frozen-geometry.json
-          python3 -B mlp-down-grid-orchestrator/scripts/ci/mlp_down_grid_stage.py \
+          stage=mlp_down_grid_stage.py
+          if [[ "$GITHUB_REF_NAME" == *-t32 ]]; then stage=mlp_down_grid_t32_stage.py; fi
+          python3 -B "mlp-down-grid-orchestrator/scripts/ci/$stage" \
             --checkout mlp-down-grid-candidate > mlp-down-grid-candidate/experiment-results/cache-candidate.json
           git -C mlp-down-grid-candidate diff --check
           git -C mlp-down-grid-candidate diff > mlp-down-grid-candidate/experiment-results/cache.patch
