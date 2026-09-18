@@ -29,14 +29,10 @@ jobs:
           mkdir -p "$staging"
           . /etc/os-release
           echo "host: $NAME $VERSION_ID" | tee experiment-results/host-os.txt
-          case "$VERSION_ID" in
-            22.04) flasher=tt-flash-3.11.0-ubuntu-22.04 ;;
-            24.04) flasher=tt-flash-3.11.0-ubuntu-24.04 ;;
-            *) echo "Unsupported host release $VERSION_ID; staging no flasher binary"; flasher= ;;
-          esac
-          echo "selected flasher: ${flasher:-none}" | tee -a experiment-results/host-os.txt
-          names=(fw_pack-19.12.0.fwbundle p150a.fwbundle fw-pack-v19.12.0-recovery.tar.gz)
-          [ -n "$flasher" ] && names+=("$flasher")
+          flasher=$(PYTHONPATH=scripts/ci python3 -B -c \
+            "import firmware_staging_manifest as m; print(m.flasher_for_release('$VERSION_ID'))")
+          echo "selected flasher: $flasher" | tee -a experiment-results/host-os.txt
+          names=(fw_pack-19.12.0.fwbundle p150a.fwbundle fw-pack-v19.12.0-recovery.tar.gz "$flasher")
           python3 -B - "$staging" "${names[@]}" <<'PY'
           import sys, urllib.request, os
           sys.path.insert(0, 'scripts/ci')
@@ -74,9 +70,19 @@ jobs:
             ls -l "$staging"
             printf '\n=== flasher self-report (version only) ===\n'
             binary=$(ls "$staging"/tt-flash-3.11.0-ubuntu-* 2>/dev/null | head -1 || true)
+            wheel=$(ls "$staging"/tt_flash-*.whl 2>/dev/null | head -1 || true)
             if [ -n "$binary" ]; then
               install -m 0755 "$binary" "$staging/tt-flash.run"
               timeout -k 5 30 "$staging/tt-flash.run" --version 2>&1 || echo 'version query failed'
+            elif [ -n "$wheel" ]; then
+              # Private venv: never the system interpreter, which PEP 668 protects anyway.
+              if [ ! -x "$staging/venv/bin/tt-flash" ]; then
+                timeout -k 10 120 python3 -m venv "$staging/venv"
+                timeout -k 10 300 "$staging/venv/bin/pip" install --no-input --quiet "$wheel"
+              fi
+              timeout -k 5 30 "$staging/venv/bin/tt-flash" --version 2>&1 || echo 'version query failed'
+              printf '\n=== flasher dependency set ===\n'
+              timeout -k 5 30 "$staging/venv/bin/pip" list 2>&1 | head -20
             else
               echo 'no flasher staged for this host release'
             fi

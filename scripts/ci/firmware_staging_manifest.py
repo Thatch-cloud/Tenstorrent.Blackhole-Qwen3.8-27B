@@ -42,7 +42,24 @@ ARTEFACTS = {
         url='%s/tt-flash-3.11.0-ubuntu-24.04' % TT_FLASH_BASE, size=25536296,
         sha256='7e3cb4a71d538cc630906c37fde2f73849d4ff5e2c023015394950183bb77f74',
         role='flasher, ubuntu 24.04 host'),
+    # The rig runs Ubuntu 26.04, for which upstream publishes no standalone binary.
+    # The wheel is py3-none-any, so it installs into a venv on any release; that
+    # also sidesteps PEP 668, which blocks pip into the system interpreter.
+    'tt_flash-3.11.0-py3-none-any.whl': dict(
+        url='%s/tt_flash-3.11.0-py3-none-any.whl' % TT_FLASH_BASE, size=65728,
+        sha256='e0bf01bf5b6349abc21afcd829a17561923eb23f9a5b34e30831ad1be1214dc0',
+        role='flasher wheel, any host release'),
 }
+
+# Upstream publishes standalone flasher binaries only for these releases.
+BINARY_HOST_RELEASES = {'22.04': 'tt-flash-3.11.0-ubuntu-22.04',
+                        '24.04': 'tt-flash-3.11.0-ubuntu-24.04'}
+WHEEL = 'tt_flash-3.11.0-py3-none-any.whl'
+
+
+def flasher_for_release(version_id):
+    """Pick the standalone binary when upstream ships one, else the portable wheel."""
+    return BINARY_HOST_RELEASES.get(str(version_id), WHEEL)
 
 # Kept on the host as the pre-upgrade image. Downgrades below v19 are unsupported
 # upstream; 19.8.1 is within v19 but a downgrade is still an unproven path.

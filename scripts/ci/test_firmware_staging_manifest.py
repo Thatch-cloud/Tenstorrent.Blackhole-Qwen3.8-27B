@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 from firmware_staging_manifest import (ARTEFACTS, FIRMWARE_VERSION, ROLLBACK_BUNDLE,
-                                       TT_FLASH_VERSION, summarize, verify)
+                                       TT_FLASH_VERSION, WHEEL, flasher_for_release,
+                                       summarize, verify)
 
 
 class ManifestPinningTests(unittest.TestCase):
@@ -75,6 +76,22 @@ class VerificationTests(unittest.TestCase):
         self.assertFalse(report['devices_reset'])
         self.assertFalse(report['all_verified'])
         json.dumps(report)
+
+
+class FlasherSelectionTests(unittest.TestCase):
+    def test_published_binaries_are_preferred_where_they_exist(self):
+        self.assertEqual(flasher_for_release('22.04'), 'tt-flash-3.11.0-ubuntu-22.04')
+        self.assertEqual(flasher_for_release('24.04'), 'tt-flash-3.11.0-ubuntu-24.04')
+
+    def test_unpublished_release_falls_back_to_the_portable_wheel(self):
+        # The rig runs 26.04, for which upstream ships no standalone binary.
+        for release in ('26.04', '25.10', 'unknown'):
+            self.assertEqual(flasher_for_release(release), WHEEL)
+
+    def test_the_wheel_is_platform_independent_and_pinned(self):
+        self.assertIn('py3-none-any', WHEEL)
+        self.assertIn(WHEEL, ARTEFACTS)
+        self.assertRegex(ARTEFACTS[WHEEL]['sha256'], r'^[0-9a-f]{64}$')
 
 
 class WorkflowSafetyTests(unittest.TestCase):
