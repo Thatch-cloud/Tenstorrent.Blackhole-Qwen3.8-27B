@@ -1,6 +1,23 @@
 # Two-block bulk weight-read overlap
 
-**Prepared for simulation; no performance or hardware qualification.**
+**Simulator replay passed; combined hardware performance remains unqualified.**
+
+Run **35314071196** passed in **4m29s**: two exact eager outputs, 12 exact
+changed-input comparisons, four stale-input controls, all four packed-weight
+comparisons and unchanged stream hashes. Simulator exit and container cleanup
+are zero. The executed reader reconstructs from the current source; the gate
+also requires the unchanged serial-reader and register-arithmetic admissions.
+
+Report SHA256:
+`1bb9581a17de463bd7614ddf602a44c0db444776bdc58b9f0609fb8177a4b411`.
+Reader SHA256:
+`b197b129252cb81ff2e3afabf7e014e557b0ab5cba834c7b0be746dc2cd0279b`.
+
+The combined adapter shares the same loaded model and 64-layer packed-weight
+pool in both arms. Two correctness audits precede timed serial/pipeline/pipeline/
+serial requests. It rejects changed proposals or acceptance as well as target
+token/state/feature differences. The pipelined reader is installed only inside
+the candidate request scope and must restore afterward.
 
 The matched combined DFlash T16 result (35312812439) spends 60.27 ms per block
 in verification. At 11 committed tokens per block, the entire request cycle
