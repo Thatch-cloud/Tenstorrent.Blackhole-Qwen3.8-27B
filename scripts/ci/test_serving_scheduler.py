@@ -10,7 +10,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from serving_page_binding import validate_initial_capture_pages
@@ -61,8 +61,11 @@ class RealSchedulerTests(unittest.TestCase):
         validate_initial_capture_pages(pages, blocks, position=4096, output_budget=256)
         scheduler.update_from_output(scheduled, self.output('request', [100]))
         frontier, emitted = 4096, 1
-        for committed in (1, 16, 9, 1, 16, 16, 4):
-            proposals = list(range(101, 116))
+        acceptance = iter((1, 16, 9, 1, 16, 16, 4))
+        while emitted < 256:
+            rows = max(width for width in (1, 2, 4, 8, 16) if width <= 256 - emitted)
+            committed = min(next(acceptance, rows), rows)
+            proposals = list(range(101, 100 + rows))
             scheduler.update_draft_token_ids(DraftTokenIds(['request'], [proposals]))
             scheduled = scheduler.schedule()
             ticket = SimpleNamespace(request_id='request', position=frontier, tokens=(100, *proposals))
@@ -70,8 +73,28 @@ class RealSchedulerTests(unittest.TestCase):
                 engine=SimpleNamespace(phase='idle'), session=SimpleNamespace(
                     phase='pending', pending=ticket, request_id='request', position=frontier))
             self.assertIs(admit_scheduler_output(prepared, scheduled), ticket)
+            current_blocks = tuple(scheduler.kv_cache_manager.get_block_ids('request')[0])
+            self.assertEqual(current_blocks[:len(blocks)], blocks)
+            self.assertGreaterEqual(len(current_blocks) * 64, frontier + rows)
+            self.assertLessEqual(len(current_blocks), 68)
+            blocks = current_blocks
             scheduler.update_from_output(scheduled, self.output('request', list(range(200, 200 + committed))))
             frontier += committed
             emitted += committed
             self.assertEqual(request.num_computed_tokens, frontier)
             self.assertEqual(len(request.output_token_ids), emitted)
+        self.assertEqual(request.status, RequestStatus.FINISHED_LENGTH_CAPPED)
+        self.assertNotIn('request', scheduler.requests)
+        finished = scheduler.schedule()
+        self.assertEqual(finished.finished_req_ids, {'request'})
+        self.assertEqual(finished.total_num_scheduled_tokens, 0)
+        parameters = SamplingParams(temperature=0, max_tokens=256)
+        replacement = Request('replacement', [43] * 4096, parameters, None)
+        scheduler.add_request(replacement)
+        scheduled = scheduler.schedule()
+        self.assertEqual(scheduled.num_scheduled_tokens, {'replacement': 4096})
+        self.assertGreaterEqual(len(scheduled.scheduled_new_reqs[0].block_ids[0]), 65)
+        scheduler.update_from_output(scheduled, self.output('replacement', [100]))
+        scheduler.finish_requests('replacement', RequestStatus.FINISHED_ABORTED)
+        self.assertNotIn('replacement', scheduler.requests)
+        self.assertEqual(scheduler.schedule().finished_req_ids, {'replacement'})
