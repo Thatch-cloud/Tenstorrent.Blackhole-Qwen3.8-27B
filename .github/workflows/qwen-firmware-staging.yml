@@ -1,0 +1,99 @@
+name: Qwen firmware 19.12.0 staging
+on:
+  push:
+    tags: ['experiment/firmware-staging-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  stage:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: firmware-staging
+          persist-credentials: false
+      - name: Stage tt-flash and the 19.12.0 bundle without touching any card
+        working-directory: firmware-staging
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Downloads and checksums only. No card is opened, flashed or reset here.
+          mkdir -p experiment-results
+          staging=/home/thatch/firmware-staging-19.12.0
+          mkdir -p "$staging"
+          . /etc/os-release
+          echo "host: $NAME $VERSION_ID" | tee experiment-results/host-os.txt
+          case "$VERSION_ID" in
+            22.04) flasher=tt-flash-3.11.0-ubuntu-22.04 ;;
+            24.04) flasher=tt-flash-3.11.0-ubuntu-24.04 ;;
+            *) echo "Unsupported host release $VERSION_ID; staging no flasher binary"; flasher= ;;
+          esac
+          echo "selected flasher: ${flasher:-none}" | tee -a experiment-results/host-os.txt
+          names=(fw_pack-19.12.0.fwbundle p150a.fwbundle fw-pack-v19.12.0-recovery.tar.gz)
+          [ -n "$flasher" ] && names+=("$flasher")
+          python3 -B - "$staging" "${names[@]}" <<'PY'
+          import sys, urllib.request, os
+          sys.path.insert(0, 'scripts/ci')
+          from firmware_staging_manifest import ARTEFACTS
+          staging, names = sys.argv[1], sys.argv[2:]
+          for name in names:
+              target = os.path.join(staging, name)
+              if os.path.isfile(target) and os.path.getsize(target) == ARTEFACTS[name]['size']:
+                  print('already staged:', name)
+                  continue
+              url = ARTEFACTS[name]['url']
+              print('fetching', name, 'from', url)
+              with urllib.request.urlopen(url, timeout=180) as response:
+                  data = response.read()
+              with open(target + '.part', 'wb') as handle:
+                  handle.write(data)
+              os.replace(target + '.part', target)
+              print('  wrote', len(data), 'bytes')
+          PY
+          # Deliberately not chmod +x and not on PATH: staged, not runnable by accident.
+          verify=(--directory "$staging")
+          for name in "${names[@]}"; do verify+=(--name "$name"); done
+          python3 -B scripts/ci/firmware_staging_manifest.py "${verify[@]}" \
+            --output experiment-results/staging-manifest.json
+      - name: Confirm the staged flasher runs and report the rollback image
+        working-directory: firmware-staging
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          staging=/home/thatch/firmware-staging-19.12.0
+          {
+            printf '=== staged files ===\n'
+            ls -l "$staging"
+            printf '\n=== flasher self-report (version only) ===\n'
+            binary=$(ls "$staging"/tt-flash-3.11.0-ubuntu-* 2>/dev/null | head -1 || true)
+            if [ -n "$binary" ]; then
+              install -m 0755 "$binary" "$staging/tt-flash.run"
+              timeout -k 5 30 "$staging/tt-flash.run" --version 2>&1 || echo 'version query failed'
+            else
+              echo 'no flasher staged for this host release'
+            fi
+            printf '\n=== rollback image already on host ===\n'
+            if [ -f /home/thatch/fw_pack-19.8.1.fwbundle ]; then
+              ls -l /home/thatch/fw_pack-19.8.1.fwbundle
+              sha256sum /home/thatch/fw_pack-19.8.1.fwbundle
+            else
+              echo 'MISSING: /home/thatch/fw_pack-19.8.1.fwbundle'
+            fi
+            printf '\n=== cards still untouched ===\n'
+            ls -l /dev/tenstorrent/ 2>&1 | head
+            cat /sys/module/tenstorrent/version 2>/dev/null || true
+          } > experiment-results/staging-report.txt 2>&1
+          cat experiment-results/staging-report.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-firmware-staging-${{ github.run_id }}
+          path: firmware-staging/experiment-results/

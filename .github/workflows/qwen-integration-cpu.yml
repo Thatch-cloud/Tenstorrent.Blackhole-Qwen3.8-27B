@@ -31,6 +31,7 @@ jobs:
           python -B -m unittest test_dflash_host_attribution
           python -B -m unittest test_dram_eligibility_inventory
           python -B -m unittest test_dram_harvest_probe
+          python -B -m unittest test_firmware_staging_manifest
           python -B -m unittest test_gdn_gate_exp_fusion test_gdn_gate_exp_report test_gdn_gate_exp_scope
           python -B -m unittest test_draft_kv_slide
           python -B -m unittest test_draft_kv_slide_direct
