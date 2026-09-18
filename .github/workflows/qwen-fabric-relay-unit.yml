@@ -1,0 +1,32 @@
+name: Qwen fabric-relay framework unit
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'optimisation/fabric-relay/**'
+      - 'docs/fabric-weight-loading-plan.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: qwen-fabric-relay-unit-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: optimisation/fabric-relay/spec
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate the phase registry
+        run: python optimisation/fabric-relay/spec/validate_spec.py
+      - name: Fabric-relay host tests
+        run: python -B -m unittest discover -s optimisation/fabric-relay -p 'test_*.py' -v
+      - name: Registry test gate
+        run: python -B -m unittest discover -s optimisation/fabric-relay/spec -p 'test_*.py' -v
+      - run: git diff --check

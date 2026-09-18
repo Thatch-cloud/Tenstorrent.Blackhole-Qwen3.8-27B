@@ -1,0 +1,135 @@
+# Fabric-relay experiment registry
+# Every experiment in the procedure, with its single changed variable,
+# admission gates, metrics and rejection conditions. Consumers:
+# spec/validate_spec.py, report_gen.py, workflows/fabric-tuning-cycle.workflow.js
+
+meta:
+  plan: docs/fabric-weight-loading-plan.md
+  controls: docs/winning-runtime-controls.md
+  template: docs/tuning-experiment-template.md
+  opt_in_flag: WEIGHT_LOAD_FABRIC_RELAY   # phases 1+; never a serving default
+
+phases:
+  - id: P0.1
+    title: Achieved PCIe bandwidth per card
+    tool: fabric_bench.py --mode pcie
+    variable: none (measurement only)
+    decision_needed: is card-1 x4 actually load-limiting
+    gates:
+      - id: repeats
+        rule: at_least_repeats
+        params: {count: 9}
+      - id: ordering
+        rule: abba_ordering
+    metrics: [read_GiB_s, write_GiB_s, p50_ms, p95_ms]
+    records: baseline
+
+  - id: P0.2
+    title: Achieved fabric bandwidth over four links
+    tool: fabric_bench.py --mode fabric
+    variable: none (measurement only)
+    decision_needed: fabric >= x4 sustained
+    gates:
+      - id: repeats
+        rule: at_least_repeats
+        params: {count: 9}
+      - id: fabric_ge_pcie_x4
+        rule: candidate_not_worse_than
+        params: {compare: P0.1, margin: 0.0}
+    metrics: [uni_GiB_s, bidi_GiB_s, p50_ms, p95_ms]
+    records: baseline
+
+  - id: P0.3
+    title: Per-stage model-load timeline
+    tool: load_timeline.py --events <loader-events.json>
+    variable: none (measurement only)
+    decision_needed: card-1 upload is a material share of load time
+    gates:
+      - id: stages_complete
+        rule: all_stages_present
+        params: {stages: [read, deserialize, convert, upload_card0, upload_card1]}
+      - id: totals_consistent
+        rule: sum_matches_total
+        params: {tolerance_s: 1.0}
+    metrics: [per_stage_s, total_s, card1_upload_share]
+    records: baseline
+
+  - id: P0.4
+    title: Card-1 core inventory and reclaimable count
+    tool: core_inventory.py --config <dispatch-config>
+    variable: none (measurement only)
+    decision_needed: how many tensix cores card 1 frees under eth dispatch
+    gates:
+      - id: both_cards
+        rule: all_cards_present
+        params: {cards: [0, 1]}
+    metrics: [tensix_total, dispatch_reserved, reclaimable]
+    records: baseline
+
+  - id: P1
+    title: Fabric weight relay (load-time only)
+    tool: runtime harness; opt-in via WEIGHT_LOAD_FABRIC_RELAY=1
+    variable: card-1 weight delivery path PCIe-x4 -> card0 fabric relay
+    depends: [P0.1, P0.2, P0.3]
+    gates:
+      - id: digest_equality
+        rule: weight_digests_equal
+        desc: per-tensor-family device digests identical to PCIe-load control on both chips
+      - id: exact_output
+        rule: exact_output_state
+        desc: complete request output and state digests match control
+      - id: load_time
+        rule: candidate_not_worse_than
+        params: {metric: total_load_s, margin: 0.0}
+    metrics: [total_load_s, card1_load_s, pp_tok_s, ctx, tg_tok_s]
+    records: candidate
+
+  - id: P2.a
+    title: Ethernet dispatch on card 1
+    tool: core-descriptor candidate (extends optimisation/sim/eth-dispatch-harvesting)
+    variable: card-1 dispatch core type TENSIX -> ETH
+    depends: [P1]
+    ladder: [simulator_trace_replay_84, hardware_boundary_trace_replay, combined_exact_audit]
+    gates:
+      - id: exact_output
+        rule: exact_output_state
+      - id: complete_loop
+        rule: candidate_not_worse_than
+        params: {metric: tg_tok_s, margin: 0.0}
+    metrics: [tg_tok_s, pp_tok_s, draft_ms_per_block, verify_ms_per_block]
+    records: candidate
+
+  - id: P2.b
+    title: Fabric-relayed readback
+    tool: runtime harness
+    variable: card-1 result readback path PCIe -> fabric relay via card 0
+    depends: [P1]
+    gates:
+      - id: exact_output
+        rule: exact_output_state
+      - id: latency_budget
+        rule: added_latency_below
+        desc: 33.75 ms/block total cycle budget from the programme doc allows under 1 ms added
+        params: {metric: added_ms_per_block, bound: 1.0}
+    metrics: [added_ms_per_block, tg_tok_s]
+    records: candidate
+
+  - id: P3
+    title: Reclaimed-core kernel placement
+    tool: abba.py --kernel <kernel> --grid <workers>
+    variable: one kernel's worker grid on card 1 (one kernel per experiment)
+    depends: [P2.a, P2.b]
+    candidates: [verifier_t16_readback, dspark_score, gdn_recurrence]
+    gates:
+      - id: abba_blocks
+        rule: all_blocks_not_worse
+        params: {blocks: 9}
+      - id: complete_loop
+        rule: candidate_not_worse_than
+        params: {metric: tg_tok_s, margin: 0.0}
+      - id: exact_output
+        rule: exact_output_state
+      - id: repeat
+        rule: gain_repeats_beyond_variability
+    metrics: [kernel_ms, tg_tok_s, pp_tok_s]
+    records: candidate
