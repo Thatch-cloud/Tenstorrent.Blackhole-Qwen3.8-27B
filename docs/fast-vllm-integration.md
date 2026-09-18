@@ -16,6 +16,7 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 | Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
 | Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
+| Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
 | Two-card HTTP lifecycle | Pending | No serving correctness or performance claim |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
@@ -46,7 +47,14 @@ append-only page changes. Report SHA256:
 `89678a253a11d30972670374faa7fb20b6af91bec01441dbc30f06647569305c`.
 It does not qualify attention-reader execution, the full model or hardware speed.
 
-Next gates: changed-page attention replay and complete engine/worker validation; repeated HTTP
+The separate attention replay test now covers the actual T16 grouped reader after
+the scheduler allocation grows from 65 to 66 pages. It compares both chips against
+native serial attention, poisons the output before replay, rejects stale results,
+and checks that KV remains unchanged. Report SHA256:
+`7f3e006f1957b2e44890d1fa075bd6faa585d9cceb401aac52a5d3571ec30a7c`.
+This remains weight-free component evidence, not full-model serving acceptance.
+
+Next gates: complete engine/worker validation; repeated HTTP
 requests on both cards with reference equality, EOS, cancellation and clean release;
 then API PP/CTX/TG and streaming latency. Registry publication and Thatch rollout
 follow acceptance, not merely a successful build. Worker-side rejection is not yet
