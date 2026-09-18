@@ -10,6 +10,7 @@ COPY bundle/serving-bundle.json /opt/qwen-serving/serving-bundle.json
 COPY bundle/_ttnncpp.so /tmp/qwen-runtime.so
 COPY native-cache-manifest.json /tmp/native-cache-manifest.json
 COPY scripts/ci/serving_native_install.py /experiment-scripts/ci/serving_native_install.py
+COPY scripts/ci/serving_image_preflight.py /experiment-scripts/ci/serving_image_preflight.py
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN python3 -B /experiment-scripts/ci/serving_native_install.py \
@@ -27,4 +28,5 @@ RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \
     test_serving_worker_hook test_serving_lifecycle test_serving_cache_owner test_serving_runtime
 RUN VLLM_PLUGINS='' python3 -c 'import ttnn; from importlib.metadata import version; assert version("vllm").split("+")[0] == "0.25.1"; assert all(callable(getattr(ttnn.transformer, name)) for name in ("attn_decode_prep", "gdn_decode_norm_gate", "gdn_decode_conv_gates", "decode_gated_delta_rule_packed"))'
 WORKDIR /opt/tt-metal
+RUN VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B /experiment-scripts/ci/serving_image_preflight.py --root /opt/tt-metal --output /opt/qwen-serving/startup-preflight.json
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
