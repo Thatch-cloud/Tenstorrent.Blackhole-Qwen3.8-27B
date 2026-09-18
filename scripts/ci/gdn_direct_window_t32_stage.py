@@ -10,13 +10,7 @@ from gdn_direct_window_stage import stage as stage_baseline
 from gdn_direct_window_t32_adapter import payloads
 
 
-def stage(checkout):
-    baseline = stage_baseline(checkout)
-    scripts = Path(checkout) / 'scripts/ci'
-    originals = {name: (scripts / name).read_text() for name in
-        ('gdn_direct_window.py', 'gdn_direct_window_device.py')}
-    sources = payloads(originals)
-    probe = (scripts / 'gdn-output-grid-probe.py').read_text()
+def adapt_probe(probe):
     for before, after in (
         ('from gdn_direct_window_device import execute, sources, HASHES',
             'from gdn_direct_window_t32_device import execute, sources, HASHES'),
@@ -27,7 +21,16 @@ def stage(checkout):
         ('projection_memory=options.projection_memory)',
             'projection_memory=options.projection_memory, rows=32, hardware_qualified=False)')):
         probe = replace_once(probe, before, after)
-    sources['gdn-output-grid-probe.py'] = probe
+    return probe
+
+
+def stage(checkout):
+    baseline = stage_baseline(checkout)
+    scripts = Path(checkout) / 'scripts/ci'
+    originals = {name: (scripts / name).read_text() for name in
+        ('gdn_direct_window.py', 'gdn_direct_window_device.py')}
+    sources = payloads(originals)
+    sources['gdn-output-grid-probe.py'] = adapt_probe((scripts / 'gdn-output-grid-probe.py').read_text())
     sources['simulator-suite.sh'] = replace_once((scripts / 'simulator-suite.sh').read_text(),
         'frozen_sim_phase.py --phase probe --seconds 510 ',
         'frozen_sim_phase.py --phase probe --seconds 420 ')
