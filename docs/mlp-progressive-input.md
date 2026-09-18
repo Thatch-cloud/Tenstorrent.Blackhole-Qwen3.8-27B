@@ -1,6 +1,6 @@
 # Progressive MLP activation delivery
 
-**Prototype only. No simulator, hardware or throughput qualification yet.**
+**Simulator replay passed. Hardware and throughput remain unqualified.**
 
 The combined control still takes approximately 59 ms in target replay. Earlier
 compute-clock evidence showed operand-readiness waits, but did not distinguish
@@ -33,6 +33,26 @@ core; actual L1 admission remains a device check. Added signaling barriers may
 outweigh saved readiness rounds, so no speedup is assumed.
 
 ## Gates
+
+Run **35344423357** passed in **4m28s**, source `9c1e270`. Independent review
+reconstructed both generated sources and checked two exact eager outputs,
+12 changed-input replay comparisons, four stale-input negative controls, four
+complete packed-weight comparisons and unchanged stream fingerprints. The native
+control, compute, rounding, weight reader and geometry match the pinned serial
+reference. Simulator exit and all container cleanup statuses are zero.
+
+| Retained evidence | SHA256 |
+|---|---|
+| Replay report | `8b843215d54c68ee2f7272db1a4c2ec0d4bdab1524cb062bb02239bf9422c72a` |
+| Staging manifest | `618ede1c41773d6c9a7f4a2412b21efdf2fd787cce4d90308d753d4dc0581fb4` |
+| Progressive input reader | `5d433b22eeab77f80dee3d3ef2a0cf9b34ae21743897b312d23032904684b4a5` |
+
+The report reviewer is `scripts/ci/mlp_progressive_input_report.py`. The new
+hardware admission helper pins these artifacts, retains serial/register
+qualification and requires the identical reader. Its adapter-source tests pass,
+but it is not yet connected to a hardware request scope. Next: complete that
+scope, validate it against the actual image and run combined ABBA requests.
+There is no isolated hardware timing or serving promotion.
 
 1. Host checks: source identity, reader protocol structure, slow-receiver counter
    behavior, projection reversibility and rejection of hardware execution.
