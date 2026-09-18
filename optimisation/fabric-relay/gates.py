@@ -57,6 +57,43 @@ def all_cards_present(evidence, params):
     return not missing, ("both cards present" if not missing else f"missing {missing}")
 
 
+def dispatch_config_identity(evidence, params):
+    """Config file hash must match the tool-echoed hash (cache-reuse guard)."""
+    declared = evidence.get("dispatch_config_sha256")
+    echoed = evidence.get("config_cache_echoed_sha256")
+    if not declared or not echoed:
+        return False, "config hash or tool-echoed hash missing"
+    return declared == echoed, (
+        "config hash matches tool echo" if declared == echoed
+        else f"mismatch: declared={declared[:12]} echoed={echoed[:12]}")
+
+
+def by_id_resolution(evidence, params):
+    """Device identity: by-id paths plus mesh-degree histogram assertion."""
+    resolved = evidence.get("by_id_resolved") is True
+    pair = evidence.get("cabling_pair_confirmed") is True
+    histograms = evidence.get("mesh_degree_histograms_equal") is True
+    return resolved and pair and histograms, (
+        "by-id resolution, cabling pair and mesh-degree assertion all confirmed"
+        if resolved and pair and histograms else
+        f"by_id={resolved} cabling_pair={pair} mesh_histograms={histograms}")
+
+
+def reclaimable_arithmetic(evidence, params):
+    """Per card: compute_available == tensix_total - dispatch_reserved, and
+    reclaimable (the cores freed by eth dispatch) == dispatch_reserved."""
+    inventory = evidence.get("inventory", {})
+    if not inventory:
+        return False, "inventory missing"
+    bad = []
+    for card, counts in inventory.items():
+        total = counts.get("tensix_total", 0)
+        reserved = counts.get("dispatch_reserved", 0)
+        if counts.get("compute_available") != total - reserved or counts.get("reclaimable") != reserved:
+            bad.append(card)
+    return not bad, ("arithmetic consistent on all cards" if not bad else f"inconsistent on {bad}")
+
+
 def weight_digests_equal(evidence, params):
     mismatched = [family for family, equal in evidence.get("digests", {}).items() if not equal]
     return not mismatched and bool(evidence.get("digests")), (
@@ -101,6 +138,9 @@ RULES = {
     "all_stages_present": all_stages_present,
     "sum_matches_total": sum_matches_total,
     "all_cards_present": all_cards_present,
+    "dispatch_config_identity": dispatch_config_identity,
+    "by_id_resolution": by_id_resolution,
+    "reclaimable_arithmetic": reclaimable_arithmetic,
     "weight_digests_equal": weight_digests_equal,
     "exact_output_state": exact_output_state,
     "added_latency_below": added_latency_below,
