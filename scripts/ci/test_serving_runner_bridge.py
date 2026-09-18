@@ -48,6 +48,16 @@ class RunnerBridgeTests(unittest.TestCase):
         bridge.request.engine.verify.assert_not_called()
         self.assertTrue(bridge.failed)
 
+    def test_storage_rebinding_is_rejected_before_scheduler_and_device_mutation(self):
+        bridge, _, scheduled = self.fixture()
+        bridge.validate_storage = Mock(side_effect=ValueError('KV changed'))
+        with self.assertRaises(ValueError):
+            bridge.execute_decode(scheduled, cancelled=lambda: False)
+        bridge.runner._update_states.assert_not_called()
+        bridge.page_binding.refresh.assert_not_called()
+        bridge.request.engine.verify.assert_not_called()
+        self.assertTrue(bridge.failed)
+
     def test_preempted_schedule_is_not_executed(self):
         bridge, _, scheduled = self.fixture()
         scheduled.preempted_req_ids = {'request'}

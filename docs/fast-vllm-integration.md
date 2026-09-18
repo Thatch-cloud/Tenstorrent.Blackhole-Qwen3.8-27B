@@ -108,6 +108,17 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+`serving_runtime.attach_combined_runtime` composes the loaded worker, shared
+admitted recipe, prefill feature capture, request factory, scheduler page binder
+and worker lifecycle. It requires the native-draft, serial weight-stream and KV
+publication evidence explicitly; it does not register itself or publish an image.
+`ServingCacheOwner` requires the runner, model and sixteen attention layers to
+reference the same BF8 cache objects and records both chips' buffer addresses.
+Ownership is rechecked after prefill and before target verification. This follows
+the pinned model adapter's actual contract: its `kv_cache` forward parameter is
+unused, while attention reads model-bound paged caches. Device ownership checks
+still need to run against the real serving image.
+
 The benchmark now enters `dflash_combined_request.combined_runtime`, a reusable
 context manager containing the same source-admitted target, draft-attention,
 weight-streaming and optional KV-publication scopes. Serving can hold these scopes

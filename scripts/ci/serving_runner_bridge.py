@@ -5,12 +5,15 @@ from serving_vllm_state import apply_committed_output, validate_runner_reservati
 
 
 class FastRunnerBridge:
-    def __init__(self, runner, request, page_binding):
+    def __init__(self, runner, request, page_binding, *, validate_storage=None):
         if (runner.non_dp_async_scheduling or runner.tt_data_parallel_size != 1
                 or page_binding.engine is not request.engine):
             raise ValueError('Synchronous TP2 single-request runner and matching page binding required')
         self.runner, self.request, self.page_binding = runner, request, page_binding
         self.state = runner.requests[request.session.request_id]
+        if validate_storage is not None and not callable(validate_storage):
+            raise ValueError('Explicit callable storage validation required')
+        self.validate_storage = validate_storage
         self.failed = False
 
     def drafts(self):
@@ -27,6 +30,8 @@ class FastRunnerBridge:
             raise ValueError('Failed runner bridge cannot execute another block')
         ticket = admit_scheduler_output(self.request, scheduled)
         try:
+            if self.validate_storage is not None:
+                self.validate_storage()
             self.runner._update_states(scheduled)
             validate_runner_reservation(self.runner, self.state, ticket)
             if len(self.state.block_ids) != 1:
