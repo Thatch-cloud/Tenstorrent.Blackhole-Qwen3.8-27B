@@ -227,8 +227,20 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
             act, weight, global_cb=global_cb, program_config=program_config,
             memory_config=out_mem, compute_kernel_config=compute_kernel_config, dtype=dtype)
 
+    # The control cannot reuse the receiver-contiguous weight: without a global_cb the
+    # matmul requires a width-sharded or interleaved-DRAM in1. Give it ordinary
+    # interleaved tensors and let ttnn pick the schedule - that is what this workload
+    # does today without a prefetcher.
+    control_weight = ttnn.from_torch(pt_weight, device=device, dtype=dtype,
+                                     layout=ttnn.TILE_LAYOUT,
+                                     memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    control_act = ttnn.from_torch(pt_act, device=device, dtype=ttnn.bfloat16,
+                                  layout=ttnn.TILE_LAYOUT,
+                                  memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    entry['control_layout'] = 'interleaved_dram'
+
     def control():
-        return ttnn.linear(act, weight, program_config=program_config, memory_config=out_mem,
+        return ttnn.linear(control_act, control_weight,
                            compute_kernel_config=compute_kernel_config, dtype=dtype)
 
     with common.tensor_prefetcher_session(device):
