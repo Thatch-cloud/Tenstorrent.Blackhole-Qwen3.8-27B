@@ -19,7 +19,9 @@ from serving_vllm_contract import admit_scheduler_output
 
 class RealSchedulerTests(unittest.TestCase):
     def scheduler(self):
-        directory = self.enterContext(TemporaryDirectory())
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = temporary.name
         GPT2Config(n_positions=8192, n_embd=256, n_layer=1, n_head=4).save_pretrained(directory)
         model = ModelConfig(model=directory, dtype='float32', max_model_len=4352,
             skip_tokenizer_init=True, seed=0)
