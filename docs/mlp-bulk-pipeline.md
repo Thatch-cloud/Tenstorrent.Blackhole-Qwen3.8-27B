@@ -1,6 +1,22 @@
 # Two-block bulk weight-read overlap
 
-**Simulator and first combined hardware correctness checks passed; speedup remains unconfirmed.**
+**Correctness passed; rejected as a performance candidate after the unchanged repeat.**
+
+## Repeat decision
+
+Run **35315198247, attempt 2**, passed in 6m14s with the same tested source and
+ABBA policy. Serial reached **117.02 TG**; pipeline reached **116.32 TG**, a
+**0.60% regression**. Verification averaged 60.17 ms versus 60.26 ms respectively.
+Both arms again committed 242 timed tokens with identical acceptance.
+
+The first run's apparent gain did not repeat. Retain the serial reader; do not
+promote the pipeline or repeat it unchanged. The verified transaction protocol
+remains available for future changes, but is not evidence of a bandwidth gain.
+The verifier still exceeds the 55 ms whole-cycle budget for 200 TG at the measured
+11 committed tokens/block. Selector improvements alone cannot close this gap.
+
+Attempt-2 report SHA256:
+`7326c32519277466fb47fd8729c89bc0e902d0a8b54af8d157299380e81ab3c2`.
 
 ## First combined hardware result
 
@@ -21,7 +37,7 @@ features, proposals and acceptance matched; scope restoration and cleanup passed
 Each arm committed 242 timed tokens across 22 blocks, averaging 11 tokens/block.
 The apparent **6.15% TG gain is not yet attributable to the kernel**: verification
 improved by only 0.10 ms, while most savings came from drafting and host-side work.
-An unchanged ABBA repeat is running as attempt 2. No promotion or serving change.
+The unchanged ABBA repeat above rejects this apparent gain. No promotion or serving change.
 At this acceptance rate, 200 TG requires a complete cycle of 55 ms; even the
 current verifier alone exceeds that budget.
 
