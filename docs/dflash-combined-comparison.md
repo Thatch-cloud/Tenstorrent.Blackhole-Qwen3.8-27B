@@ -40,6 +40,26 @@ The simulator workflow now uses a run-specific child checkout, as the other
 staged experiments do, rather than cleaning the shared root. This failure
 provides no evidence about native attention.
 
+### T16 simulator result
+
+Run 35289482417 passed in 2m51s on CPU TTsim, using no model weights or cards.
+Both 31-row and 2048-row histories passed finite-output, masked-key isolation,
+borrowed-input preservation, stable-binding and changed-input replay checks on
+both simulated chips. The downloaded reports also passed independent local
+validation against current source hashes.
+
+| Draft history | Maximum absolute difference from FP32 reference | All values within legacy tolerance? |
+| --- | ---: | --- |
+| 31 | 0.030413 | No |
+| 2048 | 0.004695 | Yes |
+
+This qualifies mask/replay behavior only. Native proposal arithmetic is **not
+numerically equivalent** to the reference at short history; tolerances were not
+relaxed. Do not replace target attention or declare coding-quality acceptance.
+Next is an explicitly approximate proposal-only combined candidate, requiring
+fresh exact target-output/state audits and measured acceptance/TG when hardware
+is released. The current combined runtime remains unchanged.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.
