@@ -37,6 +37,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     sampler = SamplingGenerator(args=model.args, mesh_device=model.mesh_device,
         tt_ccl=TT_CCL(model.mesh_device))
     sampler.set_trace_bucket(1)
+    from serving_gather_experiment import from_environment
+
+    experiment = from_environment(directory, runtime_root)
 
     def capture_factory(position):
         owner.validate()
@@ -52,8 +55,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             raise ValueError('Unique physical pages from the admitted cache required')
         pages = torch.full((1, 68), blocks[0], dtype=torch.int32)
         pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
-        request = from_prefill(operations, model, sampler, pages, helpers,
-            state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids)
+        def create_request():
+            return from_prefill(operations, model, sampler, pages, helpers,
+                state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids)
+
+        request = create_request() if experiment is None else experiment.create(create_request)
         try:
             binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
             return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)

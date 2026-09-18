@@ -80,7 +80,8 @@ def main():
             report.update(stage='http_reference_checks', startup_seconds=time.perf_counter() - started)
             print(json.dumps(report), flush=True)
             subprocess.run([sys.executable, '/canary/serving_canary_client.py',
-                '--reference', '/canary/reference.json', '--output', str(results / 'http-reference.json')],
+                '--reference', '/canary/reference.json', '--output', str(results / 'http-reference.json'),
+                '--requests', '6' if os.environ.get('QWEN_GDN_GROUPED_GATHER_ABBA') == '1' else '2'],
                 check=True, timeout=360)
             report.update(passed=True, stage='http_checks_complete')
     except BaseException as error:

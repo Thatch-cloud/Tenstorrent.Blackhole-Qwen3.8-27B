@@ -92,6 +92,7 @@ def main():
     parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--base-url', default='http://127.0.0.1:8000')
+    parser.add_argument('--requests', type=int, choices=(2, 6), default=2)
     arguments = parser.parse_args()
     if arguments.output.exists():
         raise ValueError('Fresh canary report destination required')
@@ -100,7 +101,7 @@ def main():
     report = dict(passed=False, reference_sha256=REFERENCE_SHA256, requests=[],
         serving_qualified=False, performance_qualified=False)
     try:
-        for ordinal in range(2):
+        for ordinal in range(arguments.requests):
             body = dict(model='qwen-fast-canary', prompt=prompt, temperature=0, max_tokens=256,
                 stream=True, stream_options=dict(include_usage=True), return_token_ids=True,
                 add_special_tokens=False)

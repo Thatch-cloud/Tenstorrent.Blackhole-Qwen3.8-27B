@@ -15,6 +15,7 @@ COPY scripts/ci/serving_fast_policy.py scripts/ci/serving_lifecycle.py scripts/c
 COPY scripts/ci/serving_plugin_patch.py scripts/ci/serving_dflash_registry.py /experiment-scripts/ci/
 COPY scripts/ci/serving_canary_runner.py /experiment-scripts/ci/
 COPY scripts/ci/serving_fast_request.py /experiment-scripts/ci/
+COPY scripts/ci/serving_runtime.py scripts/ci/serving_gather_experiment.py scripts/ci/gdn_grouped_gather.py scripts/ci/gdn_grouped_gather_gate.py scripts/ci/gdn_grouped_gather_scope.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \
@@ -31,7 +32,7 @@ COPY scripts/ci/test_serving_*.py /experiment-scripts/ci/
 RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \
     test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state \
     test_serving_page_binding test_serving_runner_bridge test_serving_request_factory \
-    test_serving_worker_hook test_serving_lifecycle test_serving_cache_owner test_serving_runtime
+    test_serving_worker_hook test_serving_lifecycle test_serving_cache_owner test_serving_runtime test_serving_gather_experiment
 RUN VLLM_PLUGINS='' python3 -c 'import ttnn; from importlib.metadata import version; assert version("vllm").split("+")[0] == "0.25.1"; assert all(callable(getattr(ttnn.transformer, name)) for name in ("attn_decode_prep", "gdn_decode_norm_gate", "gdn_decode_conv_gates", "decode_gated_delta_rule_packed"))'
 WORKDIR /opt/tt-metal
 RUN VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B /experiment-scripts/ci/serving_image_preflight.py --root /opt/tt-metal --output /opt/qwen-serving/startup-preflight.json
