@@ -43,6 +43,18 @@ the packer nor reader transform is connected to serving or the combined runtime.
 
 ## Current evidence
 
+Run **35296716954** passed: **40 seconds for the job**, including the 15-second
+storage gate; the transport simulator step took **18 seconds**. All eight checks
+passed (two geometries, two patterns, both chips), with exact raw words,
+zero padding and unchanged source buffers. The independent admission check
+passed both in CI and against the downloaded artifact locally.
+
+Report SHA256:
+`1febb741244d258ba603694dabf0168ec0a61fa010d8b09e2611a0839c93007d`.
+Source commit: `578cc1e7293a71b451ad8c1a09d2ea8491a70df5`.
+This qualifies the packer transport only. The generated bulk MLP reader,
+arithmetic, changed-input trace replay and combined performance remain unqualified.
+
 Run **35295292083** stopped at Docker preflight creation (exit 124 after
 30 seconds), before simulator startup. Retained host telemetry recorded
 65.08% full I/O pressure (`avg10`), about 95 GiB available RAM, and two active
@@ -52,7 +64,8 @@ creation; timeouts and the existing 1% admission threshold are unchanged.
 
 Guarded retry **35295976475** measured **13.61%** full I/O stall over 15 seconds
 and correctly stopped before Docker creation. No simulator kernels ran in
-either attempt. Further launches wait for competing storage work to finish.
+either attempt. The user subsequently released a clear CI window for the
+successful third attempt above; the admission threshold was not relaxed.
 
 The simulator-only projection adapter is prepared and host-tested. It changes
 the weight accessor and reader source, retaining the constructor, fused compute,
