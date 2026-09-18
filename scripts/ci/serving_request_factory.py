@@ -1,6 +1,7 @@
 """Build a request from completed serving prefill, without reference generation."""
 
 from contextlib import ExitStack
+import os
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
@@ -72,6 +73,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
             commit_only_gdn=True, target_attention_t16=True, before_capture=prepare_proposal)
         owned.callback(engine.close)
-        request = FastRequest(session, engine, runtime, release_drafter=device.close)
+        request = FastRequest(session, engine, runtime, release_drafter=device.close,
+            collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
         owned.pop_all()
     return request

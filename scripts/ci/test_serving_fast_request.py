@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding/harness'))
 
@@ -55,6 +55,47 @@ class FastServingTests(unittest.TestCase):
         self.assertEqual(events, [('verify', 16), ('target', 16), ('history', 16)])
         self.assertEqual(request.runtime.position, output.position)
         self.assertFalse(output.finished)
+
+    def test_phase_timing_includes_scheduler_gap_without_double_counting(self):
+        request, _ = self.fixture()
+        request.collect_timings = True
+        with patch('serving_fast_request.time.perf_counter', side_effect=(1.0, 1.02, 1.03, 1.09, 1.10)):
+            request.prepare('request')
+            output = request.step('request', cancelled=lambda: False)
+        record, = request.timings
+        self.assertEqual(record['committed'], len(output.token_ids))
+        self.assertAlmostEqual(record['draft_ms'], 20)
+        self.assertAlmostEqual(record['verify_host_ms'], 60)
+        self.assertAlmostEqual(record['commit_host_ms'], 10)
+        self.assertAlmostEqual(record['outside_phases_ms'], 10)
+        self.assertAlmostEqual(record['cycle_ms'], 100)
+
+    def test_next_cycle_charges_time_between_commits_and_emits_once_at_close(self):
+        request, _ = self.fixture()
+        request.collect_timings = True
+        with patch('serving_fast_request.time.perf_counter',
+                side_effect=(1.0, 1.02, 1.03, 1.09, 1.10, 1.12, 1.14, 1.15, 1.21, 1.22)):
+            request.step('request', cancelled=lambda: False)
+            request.step('request', cancelled=lambda: False)
+        self.assertAlmostEqual(request.timings[1]['cycle_ms'], 120)
+        self.assertAlmostEqual(request.timings[1]['outside_phases_ms'], 30)
+        with patch('builtins.print') as output:
+            request.close('request')
+            request.close('request')
+        output.assert_called_once()
+
+    def test_timing_off_adds_no_clock_calls(self):
+        request, _ = self.fixture()
+        with patch('serving_fast_request.time.perf_counter') as clock:
+            request.step('request', cancelled=lambda: False)
+        clock.assert_not_called()
+        self.assertEqual(request.timings, [])
+
+    def test_cancelled_verification_is_not_counted_as_committed_work(self):
+        request, _ = self.fixture()
+        request.collect_timings = True
+        request.step('request', cancelled=Mock(side_effect=(False, True)))
+        self.assertEqual(request.timings, [])
 
     def test_generation_budget_and_eos_are_not_overrun(self):
         for budget, eos_ids, expected in ((3, (), (11, 12)), (32, (13,), (11, 12, 13))):
