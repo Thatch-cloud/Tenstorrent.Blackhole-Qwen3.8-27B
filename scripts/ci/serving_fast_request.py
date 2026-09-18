@@ -24,22 +24,33 @@ class FastRequest:
         self.closed = self.cancelled = False
         self.busy = False
 
-    def step(self, request_id, *, cancelled):
+    def prepare(self, request_id):
         if (self.closed or self.busy or self.cancelled or request_id != self.session.request_id
-                or self.session.phase != 'idle' or not callable(cancelled)):
-            raise ValueError('One live owner and a cancellation callback required')
-        if cancelled():
-            self.cancelled = True
-            return CommittedOutput(request_id, (), self.session.position, True, True)
-        if self.session.finished:
-            return CommittedOutput(request_id, (), self.session.position, True)
+                or self.session.phase != 'idle' or self.session.finished or self.engine.phase != 'idle'):
+            raise ValueError('One unfinished idle owner required for draft preparation')
         self.busy = True
-        ticket = None
         try:
             rows = self.engine.proposal_rows()
             if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
                 raise ValueError('Qualified T16 verifier bucket required')
-            ticket = self.session.propose(request_id, max_rows=rows, selected=self.runtime.drafter_name)
+            return self.session.propose(request_id, max_rows=rows, selected=self.runtime.drafter_name)
+        finally:
+            self.busy = False
+
+    def step(self, request_id, *, cancelled):
+        if (self.closed or self.busy or self.cancelled or request_id != self.session.request_id
+                or self.session.phase not in ('idle', 'pending') or not callable(cancelled)):
+            raise ValueError('One live owner and a cancellation callback required')
+        if cancelled():
+            if self.session.pending is not None:
+                self.session.fail_verification(request_id, self.session.pending)
+            self.cancelled = True
+            return CommittedOutput(request_id, (), self.session.position, True, True)
+        if self.session.finished:
+            return CommittedOutput(request_id, (), self.session.position, True)
+        ticket = self.session.pending or self.prepare(request_id)
+        self.busy = True
+        try:
             predictions, _ = self.engine.verify(ticket)
             if cancelled():
                 self.session.abort(request_id, ticket, self.runtime.publish)
@@ -65,6 +76,8 @@ class FastRequest:
             raise ValueError('Only the idle owner can release request resources')
         if self.closed:
             return
+        if self.session.phase == 'pending' and self.engine.phase == 'idle':
+            self.session.fail_verification(request_id, self.session.pending)
         self.engine.close()
         self.release_drafter()
         self.session.close(request_id)

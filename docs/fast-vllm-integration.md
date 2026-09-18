@@ -43,6 +43,15 @@ Its CPU tests exercise the existing GreedySession and DFlashRequestRuntime with
 a fake device boundary. It does not yet hook TTModelRunner, perform HTTP serving,
 or establish device/coding-quality/performance acceptance.
 
+`serving_vllm_contract.py` adds a two-phase handoff: prepare the real draft IDs,
+advertise them as vLLM `DraftTokenIds`, then require the scheduler's exact request,
+computed frontier, token reservation and proposal IDs before verification. It
+constructs variable-length `ModelRunnerOutput` only from committed IDs. Repeated,
+partial, stale, preempted and mismatched schedules fail before device verification.
+Tests currently use doubles for vLLM output types, not an installed engine.
+Production runner hooks, request-state/token-count updates, page-binding admission
+and real pinned-vLLM scheduler tests remain required before enabling this path.
+
 The next adapter change must negotiate scheduler allocation before consuming
 multiple target positions. Buffering extra tokens behind a one-token runner API
 does not fix computed-token counts, KV allocation or preemption and is not an
