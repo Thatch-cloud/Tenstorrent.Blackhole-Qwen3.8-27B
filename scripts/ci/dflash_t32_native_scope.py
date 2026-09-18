@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from dflash_combined_sim_runtime import binary_hashes
+from dflash_combined_sim_runtime import binary_hashes, BINARIES, BINARY_SHA256
 from dflash_t16_native_attention_gate import PACKER, SIMULATOR_PACKER, native_hashes, hashes
 from dflash_t32_cache_gate import qualify as qualify_cache
 
@@ -36,6 +36,23 @@ def require_active():
     if admission is None:
         raise ValueError('Source-bound T32 proposal admission required')
     return admission
+
+
+def validate_record(admission):
+    if (not isinstance(admission, dict) or admission.get('block_rows') != 32
+            or admission.get('reports') != {str(context): digest for context, digest in REPORTS.items()}
+            or admission.get('cache_report_sha256') != CACHE_SHA256
+            or admission.get('approximate_proposals') is not True
+            or admission.get('accuracy_qualified') is not False
+            or admission.get('target_attention_changed') is not False
+            or admission.get('runtime_binaries') != dict.fromkeys(BINARIES, BINARY_SHA256)):
+        raise ValueError('Explicit source-bound T32 proposal and cache record required')
+    from dflash_t32_native_attention_gate import SOURCES
+
+    directory = Path(__file__).parent
+    if (admission.get('sources') != hashes(directory, SOURCES)
+            or admission.get('cache_sources') != hashes(directory, CACHE_SOURCES)):
+        raise ValueError('T32 request source record differs from current implementation')
 
 
 def admit(attention_evidence, cache_evidence, directory, runtime):
