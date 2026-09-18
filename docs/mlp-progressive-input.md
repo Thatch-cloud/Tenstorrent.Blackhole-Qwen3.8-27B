@@ -1,6 +1,49 @@
 # Progressive MLP activation delivery
 
-**Simulator replay passed. Hardware and throughput remain unqualified.**
+**Combined correctness passed. No demonstrated verifier speedup; not promoted.**
+
+## Combined hardware result
+
+Run **35346008351**, source `a92f10f`, passed in **5m58s**. One loaded model
+completed two native-reference audits followed by four timed ABBA requests.
+CI's independent staged-source validator passed; local read-only analysis
+recomputed pair rates and token totals. All six requests retain native drafting,
+serial BF4 streams and direct DMA KV publication. Candidate requests construct
+all 64 projections, record 128 calls and restore their scopes. Exit is zero,
+devices close cleanly, and experiment sources remain unchanged.
+
+| CTX / streams | Arm | PP tok/s | Complete-cycle TG tok/s | Blocking verifier replay |
+|---|---|---:|---:|---:|
+| 4096 / 1 | Control | 3337.58 | 122.77 | 59.495 ms |
+| 4096 / 1 | Progressive input | 3340.38 | 125.34 | 59.537 ms |
+
+Each timed arm commits 242 tokens across 22 blocks with identical proposals,
+acceptance and outputs. Aggregate TG improves **2.10%**, but paired changes are
+**+2.26% / +1.93%**, below the two-percent requirement in both pairs. More
+importantly, the changed target replay is **0.042 ms slower**, not faster.
+The complete-cycle difference comes mainly from host input and commit intervals,
+not a demonstrated activation-delivery saving. Do not promote this kernel or
+claim its larger buffer brings the model closer to 200 TG by the aggregate gain.
+PP variation is not attributed to this decode-only change.
+
+| Mean block interval | Control | Candidate |
+|---|---:|---:|
+| Draft | 19.236 ms | 19.042 ms |
+| Input | 1.415 ms | 0.686 ms |
+| Verification/readback | 60.156 ms | 60.191 ms |
+| Selection/commit | 8.386 ms | 7.440 ms |
+| Complete cycle | 89.492 ms | 87.648 ms |
+
+Blocking replay is nested within verification; do not add it again. At eleven
+committed tokens/block, 200 TG requires 55 ms total. Even free drafting would
+not make the measured verifier fit that budget. Stop unchanged activation
+handshake/buffer experiments; the next mechanism needs to address a different
+measured cost. Held-out coding quality and production serving remain unqualified.
+
+Report SHA256:
+`cbe24ae0dd2fd6c8fbfe98fa978e6645c24af6aaf9e7a67b9932389967f12f86`.
+
+## Experiment design
 
 The combined control still takes approximately 59 ms in target replay. Earlier
 compute-clock evidence showed operand-readiness waits, but did not distinguish
@@ -62,7 +105,8 @@ timed control/candidate/candidate/control requests in one loaded model. Report
 validation rejects changed proposals, acceptance, missing publication coverage or
 an accidental pipeline/control change. Preload checks run before target weights.
 The hardware tag ends in `-progressive-direct-dma-kv-slide-block-stream-dflash-native`.
-Next: finish CPU CI, verify actual-image admission and run this combined comparison.
+CPU CI **35345791716**, actual-image preload admission and the combined hardware
+comparison above have now passed. They do not establish a performance promotion.
 There is no isolated hardware timing or serving promotion.
 
 1. Host checks: source identity, reader protocol structure, slow-receiver counter
@@ -76,4 +120,4 @@ There is no isolated hardware timing or serving promotion.
 
 The opt-in CI tag ends in `-progressive-input`; ordinary serving and all prior
 qualified kernels remain unchanged. This mechanism alone is not expected to
-close the roughly 38-ms whole-cycle gap to 200 committed tokens/s.
+close the measured control's roughly 34.5-ms whole-cycle gap to 200 committed tokens/s.
