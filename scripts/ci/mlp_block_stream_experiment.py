@@ -23,6 +23,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     from dspark_request_limit import request_limit
 
     require_hardware(os.environ)
+    pipeline_flag = os.environ.get('QWEN_BULK_PIPELINE_EXPERIMENT', '0')
+    if pipeline_flag not in ('0', '1'):
+        raise ValueError('Explicit zero/one bulk-pipeline experiment required')
+    bulk_pipeline = pipeline_flag == '1'
     prompt = options.get('prompt', ())
     if (any(os.environ.get(name) != '1' for name in
             ('QWEN_CUMULATIVE_NORM', 'QWEN_CUMULATIVE_REGISTER', 'QWEN_CUMULATIVE_MLP_DOWN'))
@@ -34,6 +38,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     runtime_root = os.environ['TT_METAL_HOME']
     native_evidence = directory / 'dflash-t16-native-evidence'
     admission = admit(native_evidence, directory, runtime_root)
+    if bulk_pipeline:
+        from mlp_block_stream_pipeline_preload import preload
+
+        pipeline_admission = preload(directory, runtime_root)
     fabric = audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'})
     if report.get('sampling_link_sources') != fabric:
         raise ValueError('Loaded sampling runtime differs from four-link admission')
@@ -50,6 +58,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     report['target_cache_formats'] = cache_formats(operations,
         [value for pair in model._paged_kv_caches for value in pair], recurrent)
     report.update(coding_context=options['context'], request_checks=[], request_output_limit=256, sampler_links=4)
+    if bulk_pipeline:
+        report['weight_comparison_policy'] = 'serial-vs-bulk-pipeline'
     warm_native_control(generator, kv_cache, report, progress)
     weights = [layer.feed_forward.weights.w_gate_up for layer in model.layers]
     mesh = model.layers[0].feed_forward.device
@@ -61,18 +71,25 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             with sampler_links(sampler.tt_sampling, 4), runtime_scope(directory, runtime_root=runtime_root):
                 for ordinal, (enabled, audited) in enumerate(SCHEDULE):
                     progress(f'block_stream_{ordinal}_' + ('candidate' if enabled else 'control'))
+                    stream_options = (dict(evidence=directory / 'block-stream-evidence', streams=streams)
+                        if enabled or bulk_pipeline else None)
+                    if enabled and bulk_pipeline:
+                        stream_options['pipeline_evidence'] = directory / 'bulk-pipeline-evidence'
                     result = measure_combined_dflash(operations, model, sampler, prompt, pages, helpers,
                         directory=directory, runtime_root=runtime_root, fixtures=fixtures,
                         native_attention_evidence=native_evidence,
-                        block_stream=(dict(evidence=directory / 'block-stream-evidence', streams=streams) if enabled else None),
+                        block_stream=stream_options,
                         audit_features=audited, max_new_tokens=256, **callbacks)
                     record_request(report, result, 'dflash2', sampler.tt_sampling, fabric)
-                    if result.get('native_proposal_attention') is not True or ('block_stream' in result) is not enabled:
+                    if (result.get('native_proposal_attention') is not True
+                            or ('block_stream' in result) is not (enabled or bulk_pipeline)
+                            or result.get('block_stream', {}).get('bulk_pipeline', False) is not (enabled and bulk_pipeline)):
                         raise ValueError('Executed request differs from scheduled transport policy')
                     if audited:
                         summarize_dflash_requests([result], audit_only=True)
                     progress(f'block_stream_{ordinal}_complete')
-        report.update(block_stream_comparison=summarize(report['request_checks'], weight_transport=True),
+        report.update(block_stream_comparison=summarize(report['request_checks'],
+            weight_transport=not bulk_pipeline, bulk_pipeline=bulk_pipeline),
             pp=None, committed_tg=None, ctx_tokens=4096, scope=__doc__, performance_promoted=False)
     finally:
         report['drafter_comparison_sources'] = sources
@@ -81,5 +98,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             raise ValueError('Comparison sources changed during complete requests')
         if admit(native_evidence, directory, runtime_root) != admission:
             raise ValueError('Native proposal admission changed during comparison')
+        if bulk_pipeline and preload(directory, runtime_root) != pipeline_admission:
+            raise ValueError('Bulk pipeline admission changed during comparison')
         if audit_sampling(runtime_root, {**os.environ, 'QWEN_FABRIC_LINK_PROBE': '1'}) != fabric:
             raise ValueError('Sampling provenance changed during comparison')

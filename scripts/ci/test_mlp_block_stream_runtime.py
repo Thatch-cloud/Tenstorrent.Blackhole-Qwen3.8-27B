@@ -22,6 +22,18 @@ class HardwareScopeTests(unittest.TestCase):
                 require_hardware(dict(self.environment, **{name: '1'}))
 
     def test_scope_binds_all_layers_and_restores_on_failure(self):
+        self.check_scope(pipeline=False)
+
+    def test_pipeline_scope_binds_all_layers_and_restores_on_failure(self):
+        self.check_scope(pipeline=True)
+
+    def test_pipeline_cannot_be_enabled_by_evidence_alone(self):
+        with patch.dict(os.environ, self.environment, clear=True), self.assertRaisesRegex(ValueError, 'bulk-pipeline'):
+            with scoped_block_stream('.', '.', runtime_root='.', operations=None,
+                    weights=[], streams=[], pipeline_evidence='.'):
+                self.fail('unadmitted pipeline entered')
+
+    def check_scope(self, *, pipeline):
         source = '''class FusedProjection:
     def __init__(self, mesh, weights, **options):
         self.weights = weights
@@ -30,6 +42,8 @@ class HardwareScopeTests(unittest.TestCase):
     def __call__(self, value):
         import ttnn
         validate_binding(self, ttnn)
+        if 'reader_source' in globals():
+            assert reader_source('original') == 'pipeline'
         return value
 '''
         weights = [SimpleNamespace(address=layer) for layer in range(64)]
@@ -40,22 +54,28 @@ class HardwareScopeTests(unittest.TestCase):
         original = SimpleNamespace(FusedProjection=object(), qualify_simulator=object())
         original_projection = original.FusedProjection
         baseline = dict(passed=True, kernels=[dict(baseline=True)])
-        admission = dict(passed=True, kernels=[dict(fused_compute_sha256=hashlib.sha256(b'compute').hexdigest())])
-        with patch.dict(os.environ, self.environment, clear=True), \
+        admission = dict(passed=True, kernels=[dict(fused_compute_sha256=hashlib.sha256(b'compute').hexdigest(),
+            reader_sha256={'fused_1d_weights.cpp': hashlib.sha256(b'pipeline').hexdigest()})])
+        environment = dict(self.environment, **({'QWEN_BULK_PIPELINE_EXPERIMENT': '1'} if pipeline else {}))
+        with patch.dict(os.environ, environment, clear=True), \
                 patch.dict('sys.modules', {'fused_t16_scope': original, 'ttnn': operations}), \
                 patch('mlp_block_stream_runtime.qualify_register', return_value=baseline), \
                 patch('mlp_block_stream_runtime.qualify', return_value=admission), \
+                patch('mlp_block_stream_pipeline_gate.qualify', return_value=admission), \
+                patch('mlp_block_stream_pipeline.transform', return_value='pipeline'), \
+                patch('mlp_block_stream.reader_source', return_value='serial'), \
                 patch('mlp_block_stream_runtime.Path.read_text', return_value=source), \
                 patch('mlp_block_stream_runtime.adapt_projection', return_value=source), \
                 patch('mlp_block_stream_runtime.CANDIDATE_SHA256', hashlib.sha256(source.encode()).hexdigest()):
             with self.assertRaisesRegex(RuntimeError, 'request failed'):
                 with scoped_block_stream('.', '.', runtime_root='.', operations=operations,
-                        weights=weights, streams=streams) as audit:
+                        weights=weights, streams=streams, pipeline_evidence='.' if pipeline else None) as audit:
                     projections = [original.FusedProjection(None, weight) for weight in weights]
                     for projection in projections:
                         self.assertEqual(projection('output'), 'output')
                     self.assertEqual(audit['constructions'], 64)
                     self.assertEqual(audit['calls'], 64)
+                    self.assertIs(audit.get('bulk_pipeline', False), pipeline)
                     with self.assertRaises(ValueError):
                         original.FusedProjection(None, weights[0])
                     streams[0].address += 100

@@ -41,7 +41,8 @@ def t32_hardware_projection(source):
 
 
 @contextmanager
-def scoped_block_stream(directory, evidence, *, runtime_root, operations, weights, streams, token_rows=16):
+def scoped_block_stream(directory, evidence, *, runtime_root, operations, weights, streams, token_rows=16,
+                        pipeline_evidence=None):
     import fused_t16_scope
 
     if type(token_rows) is not int or token_rows not in (16, 32):
@@ -51,6 +52,8 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
         require_hardware(environment)
         if token_rows == 32 and environment.get('QWEN_T32_COMBINED_EXPERIMENT') != '1':
             raise ValueError('Explicit T32 combined experiment required')
+        if pipeline_evidence is not None and (token_rows != 16 or environment.get('QWEN_BULK_PIPELINE_EXPERIMENT') != '1'):
+            raise ValueError('Explicit separately admitted T16 bulk-pipeline experiment required')
 
     require_runtime(os.environ)
     if getattr(fused_t16_scope.FusedProjection, '_block_stream_experiment', False):
@@ -71,6 +74,11 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
     if token_rows == 32:
         from mlp_block_stream_t32_gate import qualify as qualify_stream, candidate_sources
         from mlp_block_stream_t32_gate import CANDIDATE_SHA256 as candidate_hash
+    if pipeline_evidence is not None:
+        from mlp_block_stream_pipeline_gate import qualify as qualify_pipeline
+
+        def qualify_stream(directory, evidence, register):
+            return qualify_pipeline(directory, evidence, pipeline_evidence, register)
     admission = qualify_stream(directory, evidence, register)
     baseline, = register['kernels']
     if token_rows == 32:
@@ -87,11 +95,24 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
     candidate.__file__ = str(source_path)
     candidate.require_hardware, candidate.os = require_runtime, os
     exec(compile(source, str(source_path), 'exec'), candidate.__dict__)
+    if pipeline_evidence is not None:
+        from mlp_block_stream_pipeline import transform
+        from mlp_block_stream import reader_source
+
+        def pipelined_reader(original):
+            generated = transform(reader_source(original))
+            if hashlib.sha256(generated.encode()).hexdigest() != expected['reader_sha256']['fused_1d_weights.cpp']:
+                raise ValueError('Executed bulk pipeline reader differs from admitted simulator')
+            return generated
+
+        candidate.reader_source = pipelined_reader
     mapping = dict(zip(native_bindings, streams, strict=True))
     audit = dict(report_sha256=admission.get('report_sha256', REPORT_SHA256), constructions=0, calls=0, restored=False,
         constructed_layers=[], stream_allocations=64, serving_defaults_changed=False)
     if token_rows == 32:
         audit.update(rows=32, hardware_projection_sha256=hashlib.sha256(source.encode()).hexdigest())
+    if pipeline_evidence is not None:
+        audit.update(bulk_pipeline=True, pipeline_reader_sha256=expected['reader_sha256']['fused_1d_weights.cpp'])
     constructed = set()
     active = True
 

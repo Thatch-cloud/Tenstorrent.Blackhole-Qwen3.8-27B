@@ -7,6 +7,20 @@ from test_dflash_native_comparison import NativeComparisonTests
 
 
 class TransportComparisonTests(unittest.TestCase):
+    def test_pipeline_keeps_serial_stream_control_and_exact_proposals(self):
+        records = self.records()
+        for index, entry in enumerate(records):
+            entry['block_stream'] = dict(bulk_pipeline=index in (1, 3, 4))
+        with patch('dflash_native_comparison_report.validate_target_components') as target, \
+                patch('full_dflash_request.summarize_dflash_requests', side_effect=lambda group: dict(
+                    committed_tokens_per_second=100, committed_tokens=4, target_reached=False)):
+            result = summarize(records, bulk_pipeline=True)
+            self.assertFalse(result['proposal_trajectories_may_differ'])
+            self.assertTrue(all(call.kwargs['block_stream'] for call in target.call_args_list))
+            records[0]['block_stream']['bulk_pipeline'] = True
+            with self.assertRaises(ValueError):
+                summarize(records, bulk_pipeline=True)
+
     def records(self):
         native = NativeComparisonTests().records()[1]
         records = [copy.deepcopy(native) for index in range(6)]

@@ -54,7 +54,8 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
             stream_audit = stack.enter_context(scoped_block_stream(directory, block_stream['evidence'],
                 runtime_root=runtime_root, operations=operations,
                 weights=[layer.feed_forward.weights.w_gate_up for layer in model.layers],
-                streams=block_stream['streams']))
+                streams=block_stream['streams'],
+                **(dict(pipeline_evidence=block_stream['pipeline_evidence']) if 'pipeline_evidence' in block_stream else {})))
         shared = stack.enter_context(scoped_shared_qk(operations, norm))
         fusion = FusedT16Arm(operations, model, tt_all_reduce)
         stack.enter_context(fusion.install())

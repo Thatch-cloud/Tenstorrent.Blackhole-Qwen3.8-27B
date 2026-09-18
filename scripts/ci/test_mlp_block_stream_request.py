@@ -26,6 +26,20 @@ class BlockStreamRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_request(request)
 
+    def test_pipeline_requires_its_own_reader_and_simulator_identity(self):
+        from mlp_block_stream_pipeline_gate import REPORT_SHA256 as PIPELINE_SHA256, READER_SHA256
+
+        request = self.fixture()
+        request['block_stream'].update(bulk_pipeline=True, pipeline_reader_sha256=READER_SHA256)
+        with self.assertRaises(ValueError):
+            validate_request(request)
+        request['block_stream']['report_sha256'] = PIPELINE_SHA256
+        request['fused_t16_mlp']['passed_simulator'] = PIPELINE_SHA256
+        validate_request(request)
+        request['block_stream']['pipeline_reader_sha256'] = 'wrong'
+        with self.assertRaises(ValueError):
+            validate_request(request)
+
 
 if __name__ == '__main__':
     unittest.main()
