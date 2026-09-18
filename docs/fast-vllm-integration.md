@@ -108,6 +108,14 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+Bundle **35328870330 passed**. The canary Dockerfile consumes that source/binary
+bundle and the inventoried cache manifest. `serving_native_install.py` recreates
+the recorded SDPA factory, scratch patch, slice and lazy-link sources, checks their
+cache provenance, then installs the matching binary. It does not compile kernels
+or pretend that cards have been allocated. The image build runs serving unit tests
+in the base image's actual Python/PyTorch environment. This lane builds locally on
+the runner; it does not publish, deploy or claim HTTP/hardware acceptance.
+
 Inventory **35328435640 passed**: the retained 52,480,392-byte runtime binary
 matches `4b7299c1c9233b25aad310bc9a9d751a0631c6af0602cb1a151f934b4bfa07ea`,
 and the staged direct-DMA kernel matches its qualified source. Docker reports
