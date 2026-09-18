@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from dflash_t16_native_attention_gate import SOURCES, NATIVE_SOURCES, ORIGINAL, hashes, native_hashes, qualify
+from dflash_combined_sim_runtime import binary_hashes, BINARIES, BINARY_SHA256
 
 
 REPORTS = {
@@ -29,6 +30,7 @@ def validate_record(admission):
             or admission.get('sources') != hashes(Path(__file__).parent, SOURCES)
             or admission.get('approximate_proposals') is not True
             or admission.get('target_attention_changed') is not False
+            or admission.get('runtime_binaries') != dict.fromkeys(BINARIES, BINARY_SHA256)
             or not isinstance(admission.get('native_sources'), dict)
             or set(admission['native_sources']) != set(NATIVE_SOURCES)
             or any(admission['native_sources'][name] != digest for name, digest in ORIGINAL.items())):
@@ -42,14 +44,24 @@ def validate_record(admission):
 def admit(evidence, sources, runtime):
     current_sources = hashes(sources, SOURCES)
     current_native = native_hashes(runtime)
+    current_binaries = binary_hashes(runtime)
     for context, expected in REPORTS.items():
         data = (Path(evidence) / f'dflash-t16-{context}.json').read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
             raise ValueError('Pinned T16 simulator report mismatch')
-        qualify(json.loads(data), context, current_sources, current_native)
+        report = json.loads(data)
+        from dflash_t16_native_attention_gate import PACKER, SIMULATOR_PACKER
+
+        expected_native = {**current_native, PACKER: SIMULATOR_PACKER}
+        mismatches = [name for name in NATIVE_SOURCES
+            if report.get('native_sources', {}).get(name) != expected_native[name]
+            or report.get('native_sources_after', {}).get(name) != expected_native[name]]
+        if mismatches:
+            raise ValueError('Native T16 simulator/runtime source mismatch: ' + ', '.join(mismatches))
+        qualify(report, context, current_sources, current_native)
     return dict(reports={str(context): digest for context, digest in REPORTS.items()},
         sources=current_sources, native_sources=current_native,
-        approximate_proposals=True, target_attention_changed=False)
+        approximate_proposals=True, target_attention_changed=False, runtime_binaries=current_binaries)
 
 
 @contextmanager
@@ -64,3 +76,11 @@ def scoped_native_t16(evidence, sources, runtime):
         _ACTIVE.reset(token)
         if admit(evidence, sources, runtime) != admission:
             raise ValueError('T16 proposal sources changed during the request')
+
+
+if __name__ == '__main__':
+    import os
+
+    directory = Path(__file__).parent
+    result = admit(directory / 'dflash-t16-native-evidence', directory, os.environ['TT_METAL_HOME'])
+    print(json.dumps(dict(stage='dflash_native_preload_admission', passed=True, admission=result)))

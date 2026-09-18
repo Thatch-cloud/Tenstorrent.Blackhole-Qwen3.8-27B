@@ -8,11 +8,13 @@ from pathlib import Path
 
 from live_qk_gate import require_matrix
 from dflash_t16_native_attention import POLICY
+from dflash_combined_sim_runtime import FACTORY, COMBINED_FACTORY, BINARIES, BINARY_SHA256
 
 
 SOURCES = ('dflash_t16_native_attention.py', 'dflash-t16-native-attention-probe.py',
     'dflash_t16_native_attention_gate.py', 'dflash_attention_mask.py', 'draft_attention.py',
-    'attention_batch.py', 'gdn_multitoken_conv.py', 'feature_projection.py', 'live_qk_gate.py')
+    'attention_batch.py', 'gdn_multitoken_conv.py', 'feature_projection.py', 'live_qk_gate.py',
+    'dflash_combined_sim_runtime.py')
 SDPA = 'ttnn/cpp/ttnn/operations/transformer/sdpa/'
 PACKER = 'tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h'
 SIMULATOR_PACKER = '8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7'
@@ -24,6 +26,7 @@ NATIVE_SOURCES = (PACKER, *(SDPA + name for name in ('sdpa.cpp', 'sdpa.hpp', 'sd
     'device/kernels/compute/sdpa.cpp', 'device/kernels/dataflow/reader_interleaved.cpp',
     'device/kernels/dataflow/writer_interleaved.cpp')))
 ORIGINAL = {
+    FACTORY: COMBINED_FACTORY,
     PACKER: '87b9c251202c28ffd8b3e419699b04de7d3f4cb4176fb8a28f586aa68b18d181',
     SDPA + 'device/kernels/compute/compute_common.hpp': '3fb5da2440c3bf90ebceb8acd55424c7739339de4c6b02db83836e1e3414fa19',
     SDPA + 'device/kernels/compute/sdpa.cpp': 'a3f48af8ba0fd63b136c79a54c8b6f7b4b5b8fb0d7a209bf5701f081ed7fa3e0',
@@ -55,6 +58,8 @@ def qualify(report, context, sources, native):
             or type(report.get('context')) is not int or report['context'] != context
             or report.get('target_integrated') is not False or report.get('accuracy_qualified') is not False
             or report.get('packer_zero_graft') is not True
+            or report.get('runtime_binaries') != dict.fromkeys(BINARIES, BINARY_SHA256)
+            or report.get('runtime_binaries_after') != report.get('runtime_binaries')
             or not isinstance(sources, dict) or not isinstance(native, dict)
             or report.get('sources') != sources or set(sources) != set(SOURCES)
             or report.get('native_sources') != simulated_native or report.get('native_sources_after') != simulated_native

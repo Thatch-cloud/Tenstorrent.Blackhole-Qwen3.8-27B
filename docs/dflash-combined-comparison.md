@@ -170,6 +170,26 @@ the new host-source hashes differ; old admissions are not silently reused.
 
 ## First hardware launch: preflight failure
 
+### Native T16 comparison: runtime admission mismatch
+
+Hardware run **35291967062** passed staging and the disk gate, then stopped
+after weight loading at native-attention source admission. No request audit
+or timed comparison completed; this is not a kernel failure or a TG result.
+The simulator used the original SDPA program factory, while the combined
+runtime contains the promoted DSpark statistics-factory patch. Its source
+hash differs (`a263559f...` versus `fd8c0676...`).
+
+Native admission now reports the exact differing file and runs after runtime
+construction but before model loading. The strict source gate remains intact.
+The candidate still needs reconciliation with the actual combined factory;
+the successful original-factory simulator report does not qualify that change.
+
+The replacement simulator lane restores the exact cached combined binary
+(`4b7299c1...`) read-only and reconstructs its factory byte-for-byte. Both
+library paths are hashed before and after replay. It uses synthetic operands,
+no target weights, no device access and no native rebuild. Fresh passing
+reports must be pinned before the next combined hardware comparison.
+
 Run 35285659419 attempt 3 passed the disk gate but stopped before device
 execution: the shared simulator-source gate detected modified `draft_attention.py`.
 The integration had widened a host mask argument check in a file shared with

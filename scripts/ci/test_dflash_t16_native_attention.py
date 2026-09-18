@@ -14,7 +14,11 @@ class T16NativeAttentionTests(unittest.TestCase):
     def report_fixture(self):
         report = legacy_tests.ProposalNativeAttentionGateTests().fixture()
         report.update(policy=gate.POLICY, block_rows=16, fixture_sha256=None,
-            sources={name: 'a' * 64 for name in gate.SOURCES})
+            sources={name: 'a' * 64 for name in gate.SOURCES},
+            runtime_binaries=dict.fromkeys(gate.BINARIES, gate.BINARY_SHA256),
+            runtime_binaries_after=dict.fromkeys(gate.BINARIES, gate.BINARY_SHA256))
+        for name in ('native_sources', 'native_sources_after'):
+            report[name][gate.FACTORY] = gate.COMBINED_FACTORY
         return report
 
     def qualify(self, report):
@@ -31,6 +35,11 @@ class T16NativeAttentionTests(unittest.TestCase):
             report = self.report_fixture()
             report[name] = value
             with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                self.qualify(report)
+        for name in ('runtime_binaries', 'runtime_binaries_after'):
+            report = self.report_fixture()
+            report[name] = {}
+            with self.subTest(name=name), self.assertRaises(ValueError):
                 self.qualify(report)
         for name in ('eager_checks', 'replay_checks', 'input_checks', 'negative_controls', 'masked_input_checks'):
             report = self.report_fixture()

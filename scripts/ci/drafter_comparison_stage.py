@@ -13,7 +13,8 @@ FILES = ('drafter_comparison_experiment.py', 'drafter_comparison_report.py',
          'dflash_attention_mask.py', 'draft_shared_head.py', 'cumulative_t16_scope.py', 'dflash-fixtures.sh',
          'dflash_proposal_trace.py', 'dflash_t16_native_scope.py', 'dflash_t16_native_attention.py',
          'dflash_t16_native_attention_gate.py', 'dflash-t16-native-attention-probe.py',
-         'dflash_native_comparison_experiment.py', 'dflash_native_comparison_report.py')
+         'dflash_native_comparison_experiment.py', 'dflash_native_comparison_report.py',
+         'dflash_combined_sim_runtime.py')
 
 
 def stage(checkout, manifest, *, native_evidence=None):
@@ -52,6 +53,12 @@ def stage(checkout, manifest, *, native_evidence=None):
         '    -e "QWEN_DRAFTER_COMPARISON=1" \\\n    -e "QWEN_DSPARK_MODE=$mode"')
     if native_evidence is not None:
         shell = shell.replace('QWEN_DRAFTER_COMPARISON=1', 'QWEN_DFLASH_NATIVE_COMPARISON=1')
+        suite = (scripts / 'dspark-hardware-suite.sh').read_text()
+        anchor = '    > /experiment/results/dspark-build-time.json\nset +e'
+        payloads['dspark-hardware-suite.sh'] = replace_once(suite, anchor,
+            '    > /experiment/results/dspark-build-time.json\n'
+            'timeout -k 5 30 python3 -B /experiment-scripts/ci/dflash_t16_native_scope.py '
+            '> /experiment/results/dflash-native-preload-admission.json\nset +e')
     fixture_copy = '''source scripts/ci/dflash-fixtures.sh
 dflash_cache=/home/thatch/.cache/qwen-experiments
 dflash_revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4

@@ -20,6 +20,8 @@ git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
 if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then
+    python3 -B /experiment-scripts/ci/dflash_combined_sim_runtime.py \
+        > /experiment/results/dflash-combined-runtime.json
     python3 - <<'PY'
 import importlib.util
 from pathlib import Path

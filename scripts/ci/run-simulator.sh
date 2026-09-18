@@ -112,6 +112,11 @@ if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then kinds=''; fi
 mounts=()
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then
+    native_cache=qwen-experiments-f1e9b1a64b4f
+    test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$native_cache")" = true
+    mounts+=(--mount "type=volume,src=$native_cache,dst=/combined-native-cache,readonly")
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication ]]; then
     checkpoint="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/model.safetensors"
     test -f "$checkpoint"

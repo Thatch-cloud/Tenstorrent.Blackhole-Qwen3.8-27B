@@ -12,6 +12,7 @@ from feature_projection import require_projection_environment
 from gdn_multitoken_conv import addresses, release_owned
 from dflash_t16_native_attention import POLICY, attention, numerical_difference, validate_mask
 from dflash_t16_native_attention_gate import SOURCES, hashes, native_hashes
+from dflash_combined_sim_runtime import binary_hashes
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     report = dict(passed=False, closed_cleanly=False, backend='simulator', policy=POLICY,
         context=options.context, target_integrated=False, accuracy_qualified=False, scope=__doc__,
         sources=hashes(Path(__file__).parent, SOURCES), native_sources=native_hashes(root, simulator=True),
-        packer_zero_graft=True,
+        packer_zero_graft=True, runtime_binaries=binary_hashes(root),
         fixture_sha256=None, block_rows=16,
         operand_scope='Synthetic T16 operands on both chips; no learned or target qualification',
         eager_checks=[], replay_checks=[], input_checks=[], negative_controls=[], masked_input_checks=[])
@@ -154,6 +155,7 @@ def main():
                 ttnn.close_mesh_device(mesh)
             report['closed_cleanly'] = True
             report['native_sources_after'] = native_hashes(root, simulator=True)
+            report['runtime_binaries_after'] = binary_hashes(root)
             if report['native_sources_after'] != report['native_sources']:
                 raise RuntimeError('Native sources changed during proposal simulation')
             progress('complete' if report['passed'] else 'failed')
