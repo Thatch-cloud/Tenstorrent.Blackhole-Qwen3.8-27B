@@ -63,8 +63,14 @@ class WorkflowSafetyTests(unittest.TestCase):
         for forbidden in ('--fw-tar', 'tt-flash flash', '--skip-missing-fw', '--force',
                           '"$smi" -r', '--reset', 'tensix-reset',
                           'TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES=1',
-                          '--allow-device-open', 'reboot', 'ipmitool'):
+                          'reboot', 'ipmitool'):
             self.assertNotIn(forbidden, self.source)
+
+    def test_device_open_comes_after_the_ownership_gate(self):
+        gate = self.source.index('Device ownership not clear')
+        opener = self.source.index('dram_harvest_runtime.py')
+        self.assertLess(gate, opener,
+                        'a device is opened before ownership is proven clear')
 
     def test_workflow_only_reads_tt_flash_version(self):
         for line in self.source.splitlines():

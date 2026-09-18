@@ -141,6 +141,53 @@ jobs:
           echo "probe_exit=$status" > experiment-results/dram-harvest-probe.status
           tail -40 experiment-results/dram-harvest-probe.err || true
           cat experiment-results/dram-harvest-probe.json || true
+      - name: Capture harvesting from the runtime init log
+        working-directory: dram-harvest-probe
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The ownership gate in the first step already proved no process holds a card.
+          # Opening a device here is a read; it loads no model and writes no firmware.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-harvest-log-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 10 300 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 --cpus 4 --memory 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_LOGGER_LEVEL=Debug -e TT_LOGGER_LEVEL=Debug \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/dram_harvest_runtime.py \
+            > experiment-results/runtime-init.log 2>&1 || status=$?
+          echo "runtime_exit=$status" > experiment-results/runtime-init.status
+          grep -inE 'harvest|dram.*mask|num_dram|dram_chan' experiment-results/runtime-init.log \
+            > experiment-results/runtime-harvest-lines.txt || true
+          echo '--- harvesting lines ---'
+          head -60 experiment-results/runtime-harvest-lines.txt || true
+      - name: Survey python packages for a UMD binding
+        working-directory: dram-harvest-probe
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          timeout -k 5 60 docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --cpus 1 --memory 512m \
+            --entrypoint bash "$image" -c '
+              python3 -c "import site,sys; print(\"\n\".join(site.getsitepackages()))" 2>/dev/null || true
+              for d in $(python3 -c "import site;print(\" \".join(site.getsitepackages()))" 2>/dev/null); do
+                ls "$d" 2>/dev/null | grep -iE "umd|tt_|ttnn" || true
+              done
+              ls /opt/tt-metal/build_Release/tools 2>/dev/null || true
+              find /opt/tt-metal/build_Release -maxdepth 2 -type f -executable -name "*cluster*" 2>/dev/null || true
+            ' > experiment-results/python-package-survey.txt 2>&1 || true
+          cat experiment-results/python-package-survey.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
