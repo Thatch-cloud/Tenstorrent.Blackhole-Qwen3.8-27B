@@ -1,6 +1,37 @@
 # Fused DFlash K/V history publication
 
-**Simulator passed; no combined hardware speedup is qualified yet.**
+**Simulator and combined correctness passed; no attributable speedup. Not promoted.**
+
+## Combined hardware result
+
+Run **35318783547**, source `feaa1d2`, passed at CTX4096, one stream, two cards,
+four links, unchanged T16 native-DFlash and serial packed-weight reader.
+Two audits and ABBA requests preserve proposals, accepted output, target state
+and feature checks. Both timed arms commit 242 tokens in 22 blocks, with identical
+222/330 proposal acceptance. All publication scopes restore and the pool releases.
+
+| Metric | Original publication | Fused publication |
+|---|---:|---:|
+| PP tokens/s | 3,348.23 | 3,384.72 |
+| Committed TG tokens/s | 112.98 | 115.44 |
+| Per-request TG | 112.73 / 113.22 | 112.12 / 118.97 |
+| Draft ms/block | 21.58 | 20.36 |
+| Input ms/block | 2.69 | 1.62 |
+| Verify/readback ms/block | 60.37 | 60.26 |
+| Select/commit ms/block | 12.29 | 12.65 |
+| Complete cycle ms/block | 97.25 | 95.18 |
+
+The aggregate +2.18% TG is not attributed to this change: the modified
+publication interval gets 0.36 ms slower, while savings occur mainly in drafting
+and input work. One candidate request is slower than both controls. Keep the
+original publication default; retain the exact fused implementation as a qualified
+component for a structurally different combined design, not as a proven speedup.
+Do not add this percentage to other experiments or rerun unchanged automatically.
+
+Report SHA256:
+`a3a184728660c1fdd631cb1a9c4b9c4b8363af85f7343a032d71752adf52ecac`.
+
+## Simulator evidence
 
 Run **35317724110** passed in **3m38s**: all 120 bitwise comparisons, five boundary
 cases, both chips, eager and changed-input replay 0/1/0. Exit zero and clean close.

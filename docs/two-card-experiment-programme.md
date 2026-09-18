@@ -16,7 +16,7 @@ concurrency throughput as single-stream TG.
 | --- | --- | --- |
 | DFlash T32 vs T16 | 83.24 vs 121.45 TG, matched 4K run 35312812439 | Reject T32 performance candidate |
 | Two-block bulk weight prefetch | Repeat 116.32 vs 117.02 TG, run 35315198247 attempt 2 | Retain serial reader |
-| Fused DFlash K/V sliding publication | All 120 exact simulator comparisons, run 35317724110 | Combined hardware run 35318783547 launched; no speed claim yet |
+| Fused DFlash K/V sliding publication | Combined run 35318783547: 115.44 vs 112.98 TG, but publication 12.65 vs 12.29 ms | Correctness passes; no attributable gain, not promoted |
 | Captured-draft host attribution | Bounded helper and CPU checks pass | Not yet measured on hardware |
 
 Remaining fusion review order: accepted K/V publication, captured-history input
