@@ -29,7 +29,7 @@ jobs:
       - name: T32 and unchanged T16 regression gates
         run: |
           python -B -m unittest test_dflash_host_attribution
-          python -B -m unittest test_gdn_gate_exp_fusion test_gdn_gate_exp_report
+          python -B -m unittest test_gdn_gate_exp_fusion test_gdn_gate_exp_report test_gdn_gate_exp_scope
           python -B -m unittest test_draft_kv_slide
           python -B -m unittest test_draft_kv_slide_direct
           python -B -m unittest test_draft_kv_slide_gate

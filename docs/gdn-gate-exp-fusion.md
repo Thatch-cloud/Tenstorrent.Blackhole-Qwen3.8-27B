@@ -1,6 +1,24 @@
 # Gate conversion and exponentiation fusion
 
-Status: experimental, not qualified or enabled in the combined runtime.
+Status: simulator correctness qualified; hardware/performance unqualified.
+Not enabled in the combined runtime or serving defaults.
+
+## Simulator result
+
+[Run 35347681287](https://github.com/Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B/actions/runs/35347681287)
+at `2419678` passed in **3m9s**, without model weights. Independent artifact
+validation confirms 24 exact output/bridge/prefix-state comparisons and 48
+input-immutability comparisons across eager execution and three changed-input
+replays on both simulated chips. Source fingerprints stayed unchanged, exit
+status was zero, and container cleanup passed.
+
+Report SHA256: `ce1be67c12fc03a6514fca5e69882f9642d7ec902ebd5446123991cec4dc55c2`.
+The admission gate pins this artifact and reconstructs the generated kernel;
+the optional scope changes only recurrence compute and restores the loader.
+Next: wire the admission and scope into a matched combined hardware comparison.
+No throughput result exists for this candidate yet.
+
+## Change
 
 | Path | Operation |
 |---|---|
