@@ -105,7 +105,7 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
 
     receivers = ttnn.CoreRangeSet(
         {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))})
-    rows = 32
+    rows = 32  # activation rows (M)
     torch.manual_seed(0)
     pt_weight = torch.randn(1, 1, inner, width)
     pt_act = torch.randn(1, 1, rows, inner)
@@ -127,27 +127,36 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
                           memory_config=act_mem, layout=ttnn.TILE_LAYOUT)
     entry['act_built'] = True
 
-    # Batched gather-in0 needs ring_size pages resident per receiver. At this ring
-    # a page is k_tiles_per_shard x n_tiles_per_receiver x tile_bytes, so the whole
-    # fifo exceeds Blackhole's ~1.5 MB L1. Streaming consumes from a shallow window.
+    # Parameters taken from upstream's test_tensor_prefetcher_BH_param. The one that
+    # mattered: num_global_cb_receivers defaults to 1, and the GCB factory reads
+    # receivers-per-bank from the program config rather than from bank_to_receivers,
+    # which is why it kept reporting "8 senders * 1 receivers/bank".
+    out_block_w = chosen['n_tiles_per_receiver']
+    out_subblock_w = min(out_block_w, 8)
+    while out_subblock_w > 1 and out_block_w % out_subblock_w != 0:
+        out_subblock_w -= 1
     stream_kwargs = {}
     if stream:
         try:
             ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-                compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), in0_block_w=1,
-                out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
-                fuse_batch=True, fused_activation=None, mcast_in0=False,
-                gather_in0=True, stream_in1=True)
+                compute_with_storage_grid_size=(1, 1), in0_block_w=1, out_subblock_h=1,
+                out_subblock_w=1, per_core_M=1, per_core_N=1, fuse_batch=True,
+                fused_activation=None, mcast_in0=False, gather_in0=True,
+                hop_cores=ttnn.CoreRangeSet([]), num_global_cb_receivers=1,
+                untilize_out=False, stream_in1=True)
             stream_kwargs = dict(stream_in1=True)
         except BaseException as error:
             entry['stream_in1_unavailable'] = str(error)[:200]
     program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-        compute_with_storage_grid_size=ttnn.CoreCoord(ring_cols, ring_rows),
-        in0_block_w=chosen['k_tiles_per_shard'], out_subblock_h=1, out_subblock_w=1,
-        per_core_M=1, per_core_N=chosen['n_tiles_per_receiver'],
+        compute_with_storage_grid_size=(ring_cols, ring_rows),
+        in0_block_w=1,  # the DRISC factory's kbw defaults to 1
+        out_subblock_h=1, out_subblock_w=out_subblock_w,
+        per_core_M=rows // TILE, per_core_N=out_block_w,
         fuse_batch=True, fused_activation=None, mcast_in0=False, gather_in0=True,
-        **stream_kwargs)
+        hop_cores=ttnn.CoreRangeSet([]), num_global_cb_receivers=ring_rows,
+        untilize_out=False, **stream_kwargs)
     entry['program_config_built'] = True
+    entry['out_subblock_w'] = out_subblock_w
     entry['stream_in1'] = stream_kwargs.get('stream_in1', False)
 
     per_tile = tile_bytes(common, ttnn, dtype_name, dtype)
