@@ -180,6 +180,9 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
             validator=mlp_block_stream_report.py
           fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-direct-dma-kv-slide-block-stream-dflash-native ]]; then
+            validator_root=read-combined
+          fi
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
             validator=dflash_t32_comparison_report.py
             validator_root=read-combined
