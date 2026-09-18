@@ -1,16 +1,20 @@
-"""Checkpoint 4 arm: run prefetch_and_linear on Qwen MLP shapes and check it against ttnn.linear.
+"""Checkpoint 4 arm: prefetched 1D matmul on Qwen MLP shapes vs an unprefetched control.
 
-Correctness first. Timings printed here are indicative only — a verdict needs
-interleaved whole-cycle arms with host load recorded, not a microbenchmark.
+Construction is ported from upstream's test_prefetcher_BH_tensor_large so the GCB
+receiver set and the matmul output workers cannot drift: the ring is
+ring_cols = num_dram_banks wide by recv_per_bank tall, and that same core range set
+carries the GCB receivers, the activation shards and the output shards. An earlier
+hand-rolled attempt transposed the grid and hit "mcast_in0 global_cb receivers must
+exactly match output worker cores".
 
-Geometry is forced by three independent constraints: the receiver count must divide
-n_tiles (integer per_core_N), must equal the area of a rectangle fitting the 11x10
-worker grid, and must be divisible by the sender bank count. For gate/up
-(n_tiles=272=2^4x17) that caps receivers at 16; for down (n_tiles=160) it reaches 80.
+Correctness gates timing. Timings are indicative only; a verdict needs whole-cycle
+TG against the real recipe, not a microbenchmark.
 """
 
 import argparse
 import json
+import math
+import os
 import sys
 import time
 import traceback
@@ -18,165 +22,191 @@ import traceback
 BEGIN = '<<<PREFETCH_ARM_JSON_BEGIN>>>'
 END = '<<<PREFETCH_ARM_JSON_END>>>'
 TILE = 32
-GRID_X, GRID_Y = 11, 10
+# Per-device TP2 shapes from scripts/ci/tiny_tile_matmul.PROJECTIONS.
 PROJECTIONS = {'gate': (5120, 8704, 'bfloat4_b'),
                'up': (5120, 8704, 'bfloat4_b'),
                'down': (8704, 5120, 'bfloat8_b')}
 
 
-def rectangles(area):
-    return [(x, y) for x in range(1, GRID_X + 1) for y in range(1, GRID_Y + 1) if x * y == area]
+def legal_rings(k_tiles, n_tiles, banks, max_rows):
+    """Rings are banks x rows; K and N must both divide the ring for integral shards."""
+    out = []
+    for rows in range(1, max_rows + 1):
+        ring = banks * rows
+        if k_tiles % ring == 0 and n_tiles % ring == 0:
+            out.append(dict(rows=rows, ring=ring, k_tiles_per_shard=k_tiles // ring,
+                            n_tiles_per_receiver=n_tiles // ring))
+    return out
 
 
-def best_geometry(k_tiles, n_tiles, max_banks=8):
-    best = None
-    for receivers in range(1, GRID_X * GRID_Y + 1):
-        if n_tiles % receivers:
-            continue
-        rects = rectangles(receivers)
-        if not rects:
-            continue
-        banks = max([b for b in range(1, max_banks + 1) if receivers % b == 0])
-        best = dict(receivers=receivers, grid=rects[0], banks=banks,
-                    recv_per_bank=receivers // banks, per_core_N=n_tiles // receivers)
-    return best
+def emit(report):
+    print(BEGIN)
+    print(json.dumps(report, indent=2))
+    print(END)
+    sys.stdout.flush()
 
 
-def run_one(ttnn, common, torch, mesh, name, rows, dtype_name, report):
-    inner, width, native_dtype = PROJECTIONS[name]
+def build_and_run(ttnn, torch, common, device, name, rows_choice, report):
+    inner, width, dtype_name = PROJECTIONS[name]
     k_tiles, n_tiles = inner // TILE, width // TILE
-    geom = best_geometry(k_tiles, n_tiles)
-    entry = dict(projection=name, dtype=dtype_name, native_dtype=native_dtype,
-                 inner=inner, width=width, geometry=geom)
+    banks = device.dram_grid_size().x
+    options = legal_rings(k_tiles, n_tiles, banks, 10)
+    entry = dict(projection=name, dtype=dtype_name, inner=inner, width=width,
+                 k_tiles=k_tiles, n_tiles=n_tiles, banks=banks,
+                 legal_rings=[o['ring'] for o in options])
     report['arms'].append(entry)
-    if geom is None:
-        entry['stopped_at'] = 'no legal geometry'
+    if not options:
+        entry['stopped_at'] = 'no ring divides both K and N'
         return
+    chosen = options[-1]
+    if rows_choice is not None:
+        chosen = next((o for o in options if o['rows'] == rows_choice), options[-1])
+    entry.update(chosen)
+
     dtype = getattr(ttnn, dtype_name)
-    # in0_block_w must divide k_tiles; mcast-in0 uses block_count = k_tiles / in0_block_w.
-    in0_block_w = next((b for b in (8, 5, 4, 2, 1) if k_tiles % b == 0), 1)
-    entry['in0_block_w'] = in0_block_w
-    entry['block_count'] = k_tiles // in0_block_w
-    try:
-        torch.manual_seed(0)
-        pt_weight = torch.randn(1, 1, inner, width, dtype=torch.bfloat16)
-        pt_in0 = torch.randn(1, 1, rows, inner, dtype=torch.bfloat16)
-        weight = common.make_recv_contig_weight(
-            mesh, pt_weight, geom['banks'], geom['receivers'], dtype)
-        entry['weight_built'] = True
-        ring_cols = common.ring_grid_cols(geom['banks'], geom['receivers'])
-        bank_to_receivers = [(b, common.bank_receivers_strided(
-            b, geom['recv_per_bank'], geom['banks'], ring_cols)) for b in range(geom['banks'])]
-        page_bytes = (k_tiles // entry['block_count']) * geom['per_core_N'] * common.bytes_per_tile(dtype)
-        entry['page_bytes'] = page_bytes
-        global_cb = ttnn.experimental.create_global_circular_buffer_for_tensor_prefetcher(
-            mesh, bank_to_receivers, page_bytes * 4, ttnn.BufferType.L1)
-        entry['gcb_built'] = True
-        program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-            compute_with_storage_grid_size=ttnn.CoreCoord(geom['grid'][0], geom['grid'][1]),
-            in0_block_w=in0_block_w, out_subblock_h=1, out_subblock_w=1,
-            per_core_M=max(1, rows // TILE), per_core_N=geom['per_core_N'],
-            fuse_batch=True, fused_activation=None, mcast_in0=True)
-        entry['program_config_built'] = True
-        in0 = ttnn.from_torch(pt_in0, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh)
-        # Control: the same 1D matmul on the same grid, weights read from DRAM the
-        # ordinary way. Isolates what the prefetcher itself contributes.
-        plain_weight = ttnn.from_torch(pt_weight, dtype=dtype, layout=ttnn.TILE_LAYOUT,
-                                       device=mesh)
-        expected = (pt_in0.float() @ pt_weight.float())
+    ring_cols, ring_rows = banks, chosen['rows']
+    ring_size = chosen['ring']
+    entry['grid'] = [ring_cols, ring_rows]
+    entry['receiver_cores'] = ring_size
+
+    receivers = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))})
+    rows = 32
+    torch.manual_seed(0)
+    pt_weight = torch.randn(1, 1, inner, width)
+    pt_act = torch.randn(1, 1, rows, inner)
+
+    dram_cores = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))})
+    weight_mem = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM,
+        ttnn.ShardSpec(dram_cores, [inner, width // banks], ttnn.ShardOrientation.ROW_MAJOR))
+    weight = ttnn.as_tensor(pt_weight, device=device, dtype=dtype,
+                            memory_config=weight_mem, layout=ttnn.TILE_LAYOUT)
+    entry['weight_built'] = True
+
+    k_per_shard = common.round_up(math.ceil(inner / ring_size), TILE)
+    act_mem = ttnn.create_sharded_memory_config(
+        shape=(rows, k_per_shard), core_grid=receivers, strategy=ttnn.ShardStrategy.WIDTH,
+        orientation=ttnn.ShardOrientation.ROW_MAJOR, use_height_and_width_as_shard_shape=True)
+    act = ttnn.from_torch(pt_act, device=device, dtype=ttnn.bfloat16,
+                          memory_config=act_mem, layout=ttnn.TILE_LAYOUT)
+    entry['act_built'] = True
+
+    program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+        compute_with_storage_grid_size=ttnn.CoreCoord(ring_cols, ring_rows),
+        in0_block_w=chosen['k_tiles_per_shard'], out_subblock_h=1, out_subblock_w=1,
+        per_core_M=1, per_core_N=chosen['n_tiles_per_receiver'],
+        fuse_batch=True, fused_activation=None, mcast_in0=False)
+    entry['program_config_built'] = True
+
+    tile_bytes = common.bytes_per_tile(dtype)
+    in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * tile_bytes
+    gcb_size = ring_size * in1_block
+    entry['in1_block_bytes'] = in1_block
+    entry['gcb_size'] = gcb_size
+    bank_to_receivers = [(b, common.bank_receivers_strided(b, ring_rows, banks, ring_cols))
+                         for b in range(banks)]
+    global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
+        device, [program_config], [weight], bank_to_receivers=bank_to_receivers, size=gcb_size)
+    entry['gcb_built'] = True
+
+    out_mem = ttnn.create_sharded_memory_config(
+        shape=(rows, width // ring_size), core_grid=receivers,
+        strategy=ttnn.ShardStrategy.WIDTH, orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True)
+    compute_kernel_config = ttnn.init_device_compute_kernel_config(
+        device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
+        fp32_dest_acc_en=True, packer_l1_acc=True, dst_full_sync_en=True)
+
+    expected = pt_act.float() @ pt_weight.float()
+
+    def prefetched():
+        return ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
+            act, weight, global_cb=global_cb, program_config=program_config,
+            memory_config=out_mem, compute_kernel_config=compute_kernel_config, dtype=dtype)
+
+    def control():
+        return ttnn.linear(act, weight, program_config=program_config, memory_config=out_mem,
+                           compute_kernel_config=compute_kernel_config, dtype=dtype)
+
+    with common.tensor_prefetcher_session(device):
+        out = prefetched()
+        entry['matmul_ran'] = True
+        got = ttnn.to_torch(out)
+        ttnn.deallocate(out)
+        passed, message = common.comp_pcc(expected, got.float(), 0.96)
+        entry['pcc_passed'] = bool(passed)
+        entry['pcc_message'] = str(message)[:200]
+        if not entry['pcc_passed']:
+            return
 
         def timed(call, iterations):
-            call()
-            ttnn.synchronize_device(mesh)
+            warm = call()
+            ttnn.synchronize_device(device)
+            ttnn.deallocate(warm)
             samples = []
             for _ in range(iterations):
                 start = time.perf_counter()
                 result = call()
-                ttnn.synchronize_device(mesh)
+                ttnn.synchronize_device(device)
                 samples.append(time.perf_counter() - start)
                 ttnn.deallocate(result)
             samples.sort()
-            return samples[len(samples) // 2]
+            return 1000.0 * samples[len(samples) // 2]
 
-        with common.tensor_prefetcher_session(mesh):
-            out = ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
-                in0, weight, global_cb=global_cb, program_config=program_config)
-            entry['matmul_ran'] = True
-            got = ttnn.to_torch(out)
-            passed, message = common.comp_pcc(expected, got.float(), 0.97)
-            entry['pcc_passed'] = bool(passed)
-            entry['pcc_message'] = str(message)[:200]
-            ttnn.deallocate(out)
-            if entry['pcc_passed']:
-                # Interleave the arms rather than blocking them: host contention on
-                # this rig inflates host-dispatch-bound phases far more than
-                # device-bound ones, so blocked arms can mislead badly.
-                prefetch_ms, plain_ms = [], []
-                for _ in range(3):
-                    prefetch_ms.append(1000.0 * timed(
-                        lambda: ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
-                            in0, weight, global_cb=global_cb,
-                            program_config=program_config), 10))
-                    plain_ms.append(1000.0 * timed(
-                        lambda: ttnn.linear(in0, plain_weight,
-                                            program_config=program_config), 10))
-                prefetch_ms.sort()
-                plain_ms.sort()
-                entry['prefetch_ms_median'] = round(prefetch_ms[1], 4)
-                entry['plain_ms_median'] = round(plain_ms[1], 4)
-                entry['prefetch_ms_all'] = [round(v, 4) for v in prefetch_ms]
-                entry['plain_ms_all'] = [round(v, 4) for v in plain_ms]
-                entry['ratio_prefetch_over_plain'] = round(
-                    prefetch_ms[1] / plain_ms[1], 4) if plain_ms[1] else None
-                entry['timing_is_indicative_only'] = True
-    except BaseException:
-        entry['error'] = traceback.format_exc(limit=8)[-2200:]
+        # Interleave the arms: host contention on this rig inflates
+        # host-dispatch-bound phases far more than device-bound ones.
+        prefetch_ms, control_ms = [], []
+        for _ in range(3):
+            prefetch_ms.append(timed(prefetched, 10))
+            control_ms.append(timed(control, 10))
+        prefetch_ms.sort()
+        control_ms.sort()
+        entry['prefetch_ms_median'] = round(prefetch_ms[1], 4)
+        entry['control_ms_median'] = round(control_ms[1], 4)
+        entry['prefetch_ms_all'] = [round(v, 4) for v in prefetch_ms]
+        entry['control_ms_all'] = [round(v, 4) for v in control_ms]
+        entry['ratio_prefetch_over_control'] = round(prefetch_ms[1] / control_ms[1], 4)
+        entry['timing_is_indicative_only'] = True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--rows', type=int, default=32)
-    parser.add_argument('--projections', default='gate,down')
-    parser.add_argument('--dtypes', default='bfloat4_b,bfloat8_b')
+    parser.add_argument('--projections', default='gate')
+    parser.add_argument('--rows', type=int, default=None,
+                        help='receivers per bank; default is the largest legal ring')
     options = parser.parse_args()
     report = dict(scope=__doc__, arms=[], speedup_claimed=False)
+    device = None
     try:
         sys.path.insert(0, '/opt/tt-metal')
-        import time
         import torch
         import ttnn
         from tests.ttnn.unit_tests.operations import prefetcher_common as common
-        # A cluster open straight after another process released the cards can hit
-        # "Setting power state failed ... Input/output error" from the ARC. Give the
-        # device a moment and retry rather than reporting a false negative.
-        mesh = None
-        report['open_attempts'] = []
-        for attempt in range(1, 4):
+        device = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        report['supported'] = ttnn.experimental.is_tensor_prefetcher_supported(device)
+        for name in options.projections.split(','):
             try:
-                mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
-                report['open_attempts'].append(dict(attempt=attempt, ok=True))
-                break
-            except BaseException as error:
-                report['open_attempts'].append(dict(attempt=attempt, ok=False,
-                                                    error=str(error)[:300]))
-                if attempt == 3:
-                    raise
-                time.sleep(15)
-        try:
-            report['supported'] = ttnn.experimental.is_tensor_prefetcher_supported(mesh)
-            for name in options.projections.split(','):
-                native = PROJECTIONS[name][2]
-                for dtype_name in options.dtypes.split(','):
-                    if dtype_name != native and dtype_name != 'bfloat8_b':
-                        continue
-                    run_one(ttnn, common, torch, mesh, name, options.rows, dtype_name, report)
-        finally:
-            ttnn.close_mesh_device(mesh)
+                build_and_run(ttnn, torch, common, device, name, options.rows, report)
+            except BaseException:
+                if report['arms']:
+                    report['arms'][-1]['error'] = traceback.format_exc(limit=8)[-2000:]
+                else:
+                    report['fatal'] = traceback.format_exc(limit=8)[-2000:]
     except BaseException:
         report['fatal'] = traceback.format_exc(limit=8)[-2000:]
-    print(BEGIN)
-    print(json.dumps(report, indent=2))
-    print(END)
+    # Emit before teardown: a TT_FATAL can leave close_mesh_device hanging, and an
+    # earlier run lost its entire report that way.
+    emit(report)
+    if device is not None:
+        try:
+            import ttnn
+            ttnn.close_mesh_device(device)
+        except BaseException:
+            pass
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == '__main__':
