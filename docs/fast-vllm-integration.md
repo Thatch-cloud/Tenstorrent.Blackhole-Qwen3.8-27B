@@ -68,6 +68,21 @@ and vLLM `v0.25.1` scheduler/output definitions. In the TT input batch,
 both independently would duplicate every emitted block. The new helper requires
 that identity and extends it only once.
 
+`serving_runner_bridge.py` now composes scheduler admission, pre-verification host
+capacity checks, page refresh, the existing device transaction, host token-state
+updates and vLLM output construction. It is an **uninstalled** bridge for a prepared
+request; the image's runner does not invoke it yet. CPU tests use fake device and
+vLLM boundaries, including upload failure and preempted-request rejection.
+
+`serving_page_binding.py` inventories primary, singleton and replay-reader page
+metadata across captured verifier buckets. New physical blocks are appended in
+place, preserving captured device addresses; existing page remaps are rejected.
+Unused table entries repeat a page owned by the same request rather than assuming
+physical block zero belongs to it. Partial uploads poison the verifier. The added
+`ModelBatch.singleton_pages` attribute exposes an already-owned tensor and adds
+no device operation. Actual trace replay with changing scheduler pages still
+requires simulator and hardware qualification before this binder is enabled.
+
 The next adapter change must negotiate scheduler allocation before consuming
 multiple target positions. Buffering extra tokens behind a one-token runner API
 does not fix computed-token counts, KV allocation or preemption and is not an

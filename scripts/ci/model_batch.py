@@ -162,6 +162,7 @@ class ModelBatch:
         self.positions = upload(positions, ttnn.int32)
         self.pages = upload(pages.repeat(self.rows, 1), ttnn.int32)
         singleton_pages = upload(pages, ttnn.int32)
+        self.singleton_pages = singleton_pages
         singleton_positions = [upload(position.reshape(1), ttnn.int32) for position in positions]
         self.singleton_positions = singleton_positions
         self.cos, self.sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,

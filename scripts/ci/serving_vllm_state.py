@@ -1,6 +1,24 @@
 """Explicit committed-block update for the pinned TT runner's single-request state."""
 
 
+def validate_runner_reservation(runner, captured_state, ticket):
+    state = runner.requests.get(ticket.request_id)
+    batch = runner.input_batch
+    if (state is not captured_state or state is None or batch.num_reqs != 1
+            or batch.req_id_to_index.get(ticket.request_id) != 0
+            or batch.req_output_token_ids[0] is not state.output_token_ids
+            or state.prompt_token_ids is None):
+        raise ValueError('One live captured request and stable output binding required')
+    start = int(batch.num_tokens[0])
+    if (start != ticket.position + 1 or start != len(state.prompt_token_ids) + len(state.output_token_ids)
+            or int(batch.num_computed_tokens_cpu[0]) != ticket.position
+            or state.num_computed_tokens != ticket.position):
+        raise ValueError('Runner and prepared target frontier differ before verification')
+    end = start + len(ticket.tokens)
+    if end > runner.model_config.max_model_len or end > batch.token_ids_cpu.shape[1]:
+        raise ValueError('Runner storage cannot hold the maximum committed block')
+
+
 def apply_committed_output(runner, captured_state, output):
     request_id = output.request_id
     state = runner.requests.get(request_id)
