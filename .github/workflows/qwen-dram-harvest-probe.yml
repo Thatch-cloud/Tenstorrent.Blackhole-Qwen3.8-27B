@@ -1,0 +1,148 @@
+name: Qwen DRAM harvest mask and firmware upgrade recon
+on:
+  push:
+    tags: ['experiment/dram-harvest-probe-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: dram-harvest-probe
+          persist-credentials: false
+      - name: Enumerate every card and confirm no process holds a device
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          # Enumerate whatever is present; the pair-only assumption is deliberately not made.
+          python3 -B - <<'PY'
+          import json, stat
+          from pathlib import Path
+          root = Path('/dev/tenstorrent')
+          nodes = sorted(path.name for path in root.iterdir() if stat.S_ISCHR(path.stat().st_mode))
+          by_id = {}
+          link_root = root / 'by-id'
+          if link_root.is_dir():
+              for link in sorted(link_root.iterdir()):
+                  try:
+                      by_id[link.name] = link.resolve(strict=True).name
+                  except OSError as error:
+                      by_id[link.name] = 'unresolved: %s' % error
+          driver = Path('/sys/module/tenstorrent/version')
+          Path('experiment-results/identity.json').write_text(json.dumps(dict(
+              device_nodes=nodes, node_count=len(nodes), by_id=by_id,
+              driver_version=driver.read_text().strip() if driver.is_file() else None,
+              firmware_modified=False, devices_reset=False, model_loaded=False), indent=2))
+          print(json.dumps(dict(device_nodes=nodes, by_id=by_id), indent=2))
+          PY
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          holders=$(command -v fuser)
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" "$holders" -v "${paths[@]}" > experiment-results/open-holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/open-holders.txt ]; then
+            echo 'Device ownership not clear; no telemetry or probe command launched'
+            cat experiment-results/open-holders.txt || true
+            exit 1
+          fi
+      - name: Snapshot telemetry for every card without changing firmware
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || true)
+          if [ -z "$smi" ] && [ -x /home/thatch/.local/bin/tt-smi ]; then smi=/home/thatch/.local/bin/tt-smi; fi
+          test -n "$smi"
+          timeout -k 5 15 "$smi" --version > experiment-results/tt-smi-version.txt
+          timeout -k 5 45 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-snapshot.json" \
+            > experiment-results/tt-smi.log 2>&1
+          python3 -B scripts/ci/dram_eligibility_inventory.py \
+            --snapshot experiment-results/tt-smi-snapshot.json \
+            --output experiment-results/eligibility-observations.json > /dev/null
+      - name: Record firmware upgrade prerequisites read-only
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Inventory only. This step must never flash, reset or power-cycle a card.
+          {
+            printf '=== tt-flash on PATH ===\n'
+            command -v tt-flash || echo 'tt-flash: not installed'
+            for candidate in /home/thatch/.local/bin/tt-flash /usr/local/bin/tt-flash; do
+              [ -x "$candidate" ] && echo "present: $candidate"
+            done
+            printf '\n=== tt-flash version ===\n'
+            if command -v tt-flash >/dev/null 2>&1; then timeout -k 5 20 tt-flash --version 2>&1 || true
+            elif [ -x /home/thatch/.local/bin/tt-flash ]; then timeout -k 5 20 /home/thatch/.local/bin/tt-flash --version 2>&1 || true
+            else echo 'unavailable'; fi
+            printf '\n=== python tooling ===\n'
+            timeout -k 5 30 python3 -m pip list 2>/dev/null | grep -iE 'tt-flash|tt-firmware|tt-smi|tt-tools' || echo 'none reported'
+            printf '\n=== firmware bundles on disk ===\n'
+            find /home/thatch /opt /var/lib/firmware -maxdepth 4 \( -iname '*.fwbundle' -o -iname '*.tar.gz' -path '*firmware*' \) 2>/dev/null | head -40 || true
+            printf '\n=== driver / kmd ===\n'
+            cat /sys/module/tenstorrent/version 2>/dev/null || echo 'no version file'
+            printf '\n=== pci devices ===\n'
+            lspci -nn -d 1e52: 2>/dev/null || echo 'lspci unavailable or no match'
+            printf '\n=== pci link status ===\n'
+            for slot in $(lspci -D -d 1e52: 2>/dev/null | cut -d' ' -f1); do
+              printf -- '--- %s ---\n' "$slot"
+              lspci -s "$slot" -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:' || true
+            done
+            printf '\n=== recovery path ===\n'
+            [ -e /dev/ipmi0 ] && echo 'bmc: /dev/ipmi0 present' || echo 'bmc: /dev/ipmi0 absent'
+            printf '\n=== containers holding cards ===\n'
+            timeout -k 5 15 docker ps --format '{{.ID}} {{.Image}} {{.Names}} {{.Status}}' 2>&1 | head -30 || true
+            printf '\n=== host pressure ===\n'
+            for metric in cpu memory io; do cat "/proc/pressure/$metric" 2>/dev/null || true; done
+          } > experiment-results/firmware-prereqs.txt 2>&1
+          cat experiment-results/firmware-prereqs.txt
+      - name: Read DRAM harvesting masks through the pinned runtime
+        working-directory: dram-harvest-probe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          docker image inspect "$image" --format '{{.Id}}' > experiment-results/image-id.txt
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-dram-harvest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 10 240 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 2 --memory 4g \
+            -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=256m \
+            "${devices[@]}" \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/dram_harvest_probe.py \
+            --source-root /opt/tt-metal --source-root /tmp \
+            --output /tmp/harvest.json > experiment-results/dram-harvest-probe.json 2>experiment-results/dram-harvest-probe.err || status=$?
+          echo "probe_exit=$status" > experiment-results/dram-harvest-probe.status
+          tail -40 experiment-results/dram-harvest-probe.err || true
+          cat experiment-results/dram-harvest-probe.json || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-dram-harvest-${{ github.run_id }}
+          path: dram-harvest-probe/experiment-results/
