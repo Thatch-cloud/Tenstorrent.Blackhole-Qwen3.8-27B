@@ -14,20 +14,22 @@ REPORT_SHA256 = '548805b4bc3b64c1441f59c6a7f887ec35df40308f9c10cdbaa57cd4aa62a13
 CANDIDATE_SHA256 = '00f29b83acb3eb93929b623e426c9312c158c8b8a9b9db028e7011e4f51db6d7'
 
 
-def validate_report(report):
+def validate_report(report, *, rows=16):
+    if type(rows) is not int or rows not in (16, 32):
+        raise ValueError('Explicit supported block-stream width required')
     if (report.get('passed') is not True or report.get('backend') != 'simulator'
             or report.get('timings') != [] or 'error' in report
-            or report.get('checks') != [dict(rows=16, chip=chip, exact=True) for chip in range(2)]):
-        raise ValueError('Exact T16 simulator eager coverage required')
+            or report.get('checks') != [dict(rows=rows, chip=chip, exact=True) for chip in range(2)]):
+        raise ValueError('Exact requested-width simulator eager coverage required')
     traces = report.get('trace_replays', [])
     if len(traces) != 1:
-        raise ValueError('One complete T16 replay matrix required')
+        raise ValueError('One complete requested-width replay matrix required')
     trace = traces[0]
     checks = [dict(arm=arm, repetition=repetition, pattern=pattern, chip=chip, exact=True)
         for repetition, pattern in enumerate((0, 1, 0)) for arm in ('control', 'fused') for chip in range(2)]
     negatives = [dict(arm=arm, chip=chip, stale_input_detected=True)
         for arm in ('control', 'fused') for chip in range(2)]
-    if (trace.get('passed') is not True or trace.get('rows') != 16 or trace.get('timings') != []
+    if (trace.get('passed') is not True or trace.get('rows') != rows or trace.get('timings') != []
             or trace.get('checks') != checks or trace.get('negative_controls') != negatives):
         raise ValueError('Exact changing-input and stale-input checks required')
     before = report.get('stream_bytes_before', [])
