@@ -42,7 +42,8 @@ def inventory(cache, staged, runtime):
         expected_binary_sha256=BINARY_SHA256,
         cached_binary_matches=binary.get('sha256') == BINARY_SHA256,
         staged_files={name: fingerprint(Path(staged) / 'scripts/ci' / name) for name in files},
-        runtime_revision=subprocess.check_output(['git', '-C', str(runtime), 'rev-parse', 'HEAD'], text=True).strip(),
+        runtime_revision=subprocess.check_output(['git', '-c', f'safe.directory={runtime}',
+            '-C', str(runtime), 'rev-parse', 'HEAD'], text=True).strip(),
         installed_packages=packages)
 
 

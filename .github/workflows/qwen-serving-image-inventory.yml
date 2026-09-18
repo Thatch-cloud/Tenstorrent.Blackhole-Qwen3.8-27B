@@ -30,7 +30,8 @@ jobs:
             staged=(--mount "type=bind,src=$GITHUB_WORKSPACE/read-combined,dst=/inventory-staged,readonly")
           fi
           timeout -k 10 100 docker run --rm --pull never --network none --read-only \
-            --cpus 2 --memory 2g --user "$(id -u):$(id -g)" \
+            --cpus 2 --memory 2g --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m \
             --mount "type=volume,src=$volume,dst=/inventory-cache,readonly" \
             --mount "type=bind,src=$GITHUB_WORKSPACE/serving-image-orchestrator/scripts/ci,dst=/inventory-scripts,readonly" \
