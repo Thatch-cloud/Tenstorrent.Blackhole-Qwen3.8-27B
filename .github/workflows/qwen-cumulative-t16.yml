@@ -91,6 +91,12 @@ jobs:
             python3 -B read-orchestrator/scripts/ci/drafter_comparison_stage.py --checkout read-combined \
               --manifest read-combined/experiment-results/drafter-comparison-sources.json "${drafter_args[@]}"
           fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
+            gh run download 35297164881 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35297164881 --dir "$evidence/block-stream"
+            python3 -B read-orchestrator/scripts/ci/mlp_block_stream_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/block-stream" --native-root "$evidence/model-native/prefill-cache/sources" \
+              --manifest read-combined/experiment-results/block-stream-hardware-sources.json
+          fi
           git -C read-combined diff --check
       - name: Check host pressure before loading
         run: |
@@ -129,6 +135,9 @@ jobs:
           fi
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
             validator=dflash_native_comparison_report.py
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
+            validator=mlp_block_stream_report.py
           fi
           python3 -B "read-orchestrator/scripts/ci/$validator" \
             read-combined/experiment-results/dspark-captured-publication-request-hardware.json \
