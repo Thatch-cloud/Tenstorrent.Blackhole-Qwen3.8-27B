@@ -52,6 +52,22 @@ Tests currently use doubles for vLLM output types, not an installed engine.
 Production runner hooks, request-state/token-count updates, page-binding admission
 and real pinned-vLLM scheduler tests remain required before enabling this path.
 
+`serving_vllm_state.py` implements the bounded committed-block token update for
+the pinned TT runner's existing fields. It checks captured request identity,
+output-list aliasing, pre-step computed frontier, vocabulary and storage bounds;
+then appends the accepted block once and assigns both computed-token counters to
+the committed frontier. Tests cover variable acceptance, duplicate application,
+slot reuse, cancellation and failure-before-mutation. This is not yet installed
+as a TTModelRunner hook. Capacity/page admission must happen before device commit,
+not just while updating host state afterward.
+
+Source review used TT plugin full revision
+`bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c` (`model_runner.py`, `input_batch.py`)
+and vLLM `v0.25.1` scheduler/output definitions. In the TT input batch,
+`req_output_token_ids[row]` aliases `CachedRequestState.output_token_ids`; updating
+both independently would duplicate every emitted block. The new helper requires
+that identity and extends it only once.
+
 The next adapter change must negotiate scheduler allocation before consuming
 multiple target positions. Buffering extra tokens behind a one-token runner API
 does not fix computed-token counts, KV allocation or preemption and is not an
