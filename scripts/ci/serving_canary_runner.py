@@ -36,6 +36,12 @@ def additional_config(target):
             fixtures='/experiment-dflash-fixture', target_snapshot=target))
 
 
+def shutdown_evidence(log):
+    return dict(worker_closed='QWEN_FAST_WORKER_CLOSED' in log,
+        devices_closed='Closing devices in cluster completed' in log,
+        engine_forced='force killing remaining processes' in log.lower())
+
+
 def main():
     validate_environment(os.environ)
     target = '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
@@ -48,6 +54,7 @@ def main():
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server', '--model', target,
         '--served-model-name', 'qwen-fast-canary', '--host', '127.0.0.1', '--port', '8000',
         '--dtype', 'bfloat16', '--max-model-len', '4352', '--max-num-seqs', '1',
+        '--shutdown-timeout', '30',
         '--max-num-batched-tokens', '4352', '--block-size', '64', '--num-gpu-blocks-override', '128',
         '--no-enable-prefix-caching', '--no-async-scheduling', '--no-enable-chunked-prefill',
         '--speculative-config', json.dumps(speculative), '--additional-config', json.dumps(recipe)]
@@ -83,7 +90,7 @@ def main():
         if process is not None:
             process.terminate()
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 import signal
 
@@ -93,6 +100,10 @@ def main():
                 report['passed'] = False
             report['server_exit_code'] = process.returncode
             if process.returncode not in (0, -15):
+                report['passed'] = False
+            cleanup = shutdown_evidence((results / 'server.log').read_text(errors='replace'))
+            report['shutdown'] = cleanup
+            if not cleanup['worker_closed'] or not cleanup['devices_closed'] or cleanup['engine_forced']:
                 report['passed'] = False
         report['elapsed_seconds'] = time.perf_counter() - started
         (results / 'canary.json').write_text(json.dumps(report, indent=2) + '\n')

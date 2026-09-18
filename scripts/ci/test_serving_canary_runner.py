@@ -3,10 +3,16 @@ from pathlib import Path
 import re
 import unittest
 
-from serving_canary_runner import REQUIRED_ENVIRONMENT, validate_environment
+from serving_canary_runner import REQUIRED_ENVIRONMENT, shutdown_evidence, validate_environment
 
 
 class CanaryEnvironmentTests(unittest.TestCase):
+    def test_api_exit_does_not_prove_worker_cleanup(self):
+        evidence = shutdown_evidence('Application shutdown complete. force killing remaining processes count=1')
+        self.assertEqual(evidence, dict(worker_closed=False, devices_closed=False, engine_forced=True))
+        clean = shutdown_evidence('QWEN_FAST_WORKER_CLOSED\nClosing devices in cluster completed')
+        self.assertEqual(clean, dict(worker_closed=True, devices_closed=True, engine_forced=False))
+
     def test_complete_recipe_is_admitted_without_mutation(self):
         environment = dict(REQUIRED_ENVIRONMENT)
         validate_environment(environment)

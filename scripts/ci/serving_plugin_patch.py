@@ -59,6 +59,8 @@ def patch_worker(source):
         raise ValueError('Worker already patched')
     tree = ast.parse(source)
     insertions = []
+    if any(isinstance(node, ast.FunctionDef) and node.name == 'shutdown' for node in ast.walk(tree)):
+        raise ValueError('Pinned worker now implements shutdown; explicit review required')
     for name, code in (
             ('compile_or_warm_up_model',
              '        from vllm_tt_plugin.qwen_fast_policy import fast_requested\n'
@@ -74,6 +76,17 @@ def patch_worker(source):
         if len(matches) != 1:
             raise ValueError(f'Pinned worker method missing or ambiguous: {name}')
         method = matches[0]
+        if name == '__del__':
+            insertions.append((method.lineno - 1,
+                '    def shutdown(self):\n'
+                '        from vllm_tt_plugin.qwen_fast_policy import fast_requested\n'
+                '        if not fast_requested(self.vllm_config):\n'
+                '            return super().shutdown()\n'
+                '        if getattr(self, "_qwen_fast_shutdown_complete", False):\n'
+                '            return\n'
+                '        self.__del__()\n'
+                '        self._qwen_fast_shutdown_complete = True\n'
+                '        print("QWEN_FAST_WORKER_CLOSED", flush=True)\n\n'))
         offset = 1 if isinstance(method.body[0], ast.Expr) and isinstance(method.body[0].value, ast.Constant) else 0
         insertions.append((method.body[offset].lineno - 1, code))
     lines = source.splitlines(keepends=True)

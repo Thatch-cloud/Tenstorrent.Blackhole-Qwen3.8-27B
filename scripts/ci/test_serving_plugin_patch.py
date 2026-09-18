@@ -114,6 +114,28 @@ class PluginPatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             patch_entrypoints(source.replace('register_tt_models_from_plugin', 'changed'))
 
+    def test_explicit_shutdown_closes_fast_resources_once(self):
+        source = ('class Parent:\n    def shutdown(self):\n        self.baseline_shutdown = True\n\n'
+            'class Worker(Parent):\n    def compile_or_warm_up_model(self):\n        pass\n'
+            '    def __del__(self):\n        self.model_closed = True\n')
+        parent, worker_source = source.split('class Worker')
+        namespace = {}
+        startup = SimpleNamespace(stop=Mock())
+        with patch.dict(sys.modules, {'vllm_tt_plugin.qwen_fast_policy': serving_fast_policy,
+                'serving_startup': startup}):
+            exec(parent + patch_worker('class Worker' + worker_source), namespace)
+            worker = namespace['Worker']()
+            worker.vllm_config = FastPolicyTests().fixture()
+            worker._qwen_fast_resources = object()
+            startup.stop.side_effect = lambda value: setattr(value, '_qwen_fast_resources', None)
+            worker.shutdown()
+            worker.shutdown()
+            startup.stop.assert_called_once_with(worker)
+            self.assertTrue(worker.model_closed)
+            worker.vllm_config.additional_config = None
+            worker.shutdown()
+            self.assertTrue(worker.baseline_shutdown)
+
     @unittest.skipUnless(os.environ.get('QWEN_PLUGIN_SOURCE'), 'Pinned source available in installed-vLLM CI')
     def test_actual_pinned_plugin_source(self):
         package = Path(os.environ['QWEN_PLUGIN_SOURCE']) / 'src/vllm_tt_plugin'

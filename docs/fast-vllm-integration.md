@@ -18,7 +18,8 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
 | DFlash2 metadata | Image 35336103126 | Real speculative configuration preserves DFlash2 architecture; standard model construction fails closed; all 8 installed-vLLM tests pass |
-| Two-card HTTP lifecycle | Hardware 35337247864 | API starts and native prefill completes; pre-step counter fix now image-tested, hardware retry pending |
+| Two-card HTTP requests | Hardware 35339209176 | Two sequential 4K requests exactly match all 122 reference tokens, including EOS |
+| Graceful worker shutdown | Hardware 35339209176 | Not qualified: API exits zero but force-kills the engine; explicit cleanup fix pending |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
 Build source: `738f0c6` (tag `experiment/fast-serving-image-v8`).
@@ -26,6 +27,22 @@ Local Docker ID:
 `sha256:8c756526dc1c938e431f1bad0fb14f11743ba030b4f7890cbccd42b516f21ee2`.
 This ID is not a registry manifest digest or proof of a clean pull elsewhere.
 The build accessed neither cards nor weights.
+
+### First combined HTTP result
+
+Run `35339209176`, image above, T16/DFlash2, one stream, greedy, no prefix cache:
+
+| Request | CTX | Output | TTFT | HTTP delivery TG | PP |
+|---|---:|---:|---:|---:|---|
+| First | 4,096 | 122 | 6.81 s | 106.14 tok/s | Not isolated |
+| Second | 4,096 | 122 | 5.57 s | 118.76 tok/s | Not isolated |
+
+TG counts committed tokens delivered after the first token event, not device-only
+throughput. TTFT includes prefill and request trace preparation. These two runs
+prove this reference request, not held-out coding quality, concurrency or 200 TG.
+The workflow passed its original checks, but shutdown logs expose an engine kill;
+the next canary requires worker and device closure evidence instead of exit code
+alone. Nothing is deployed or production-qualified.
 
 The DFlash2 registry fix is metadata-only: it preserves `DFlash2DraftModel`
 through vLLM configuration and rejects standard model construction. Actual draft
