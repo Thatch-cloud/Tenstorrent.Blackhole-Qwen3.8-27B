@@ -42,7 +42,7 @@ class DirectSlideTests(unittest.TestCase):
                             self.assertGreaterEqual(hops[-1][2], base + 6144)
 
     def test_simulator_regression_requires_two_hops(self):
-        hops = transfers(4, 3, 1, 0, 0x1B100, 0x594E00)
+        hops = transfers(4, 3, 1, 0, 0x1B900, 0x594E00)
         self.assertEqual(hops[0][1], 0x594E80)
         self.assertEqual(hops[-1][2], 0x1D160)
         self.assertEqual(len(hops), 2)
