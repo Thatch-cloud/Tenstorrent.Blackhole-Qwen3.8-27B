@@ -190,6 +190,13 @@ library paths are hashed before and after replay. It uses synthetic operands,
 no target weights, no device access and no native rebuild. Fresh passing
 reports must be pinned before the next combined hardware comparison.
 
+**Exact-runtime replay passed:** run **35293698929**, 1m53s. Both contexts
+(31 and 2048 draft-history rows) passed mask isolation, changed-input replay,
+stable bindings and input preservation on both simulated chips. The factory
+and both runtime binaries match the combined hardware recipe. CPU integration
+run **35293655254** also passed. This admits the hardware comparison, not TG,
+held-out coding quality or serving promotion.
+
 Run 35285659419 attempt 3 passed the disk gate but stopped before device
 execution: the shared simulator-source gate detected modified `draft_attention.py`.
 The integration had widened a host mask argument check in a file shared with

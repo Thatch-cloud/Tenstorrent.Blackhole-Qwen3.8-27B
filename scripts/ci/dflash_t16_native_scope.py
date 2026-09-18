@@ -11,8 +11,8 @@ from dflash_combined_sim_runtime import binary_hashes, BINARIES, BINARY_SHA256
 
 
 REPORTS = {
-    31: 'c67046eae2132c5cc3748a2b4ea1b91e06e3db48f71c93de8594f439bbde948f',
-    2048: '06caf0d418bb94cdc592b49a0c0dd505f900b7c36b67f0f94c34ab92d2f8ce1f',
+    31: 'ce82c70cad40a0c42d1ef1ade1673e1df1ea766ddd8e4923ea527d4681f791c9',
+    2048: 'bb4d1eaa5d424d58181ebcc114bd4d5925a6abc2c9a3a5221aed167008c346e4',
 }
 _ACTIVE = ContextVar('dflash_t16_native_admission', default=None)
 
