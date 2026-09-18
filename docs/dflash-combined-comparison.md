@@ -75,12 +75,18 @@ Source pointers: `gdn_shared_qk_scope.py`, `gdn_direct_window_scope.py`,
 `mlp_down_grid_scope.py`, `dflash_combined_request.py`, `full_dflash_request.py`
 (all under `scripts/ci`). Existing T16 reports must not be relabelled T32.
 
-Execution order: finish the queued MLP qualification, close the GDN/window/down
+Execution order: finish the pending MLP qualification, close the GDN/window/down
 width gaps, then integrate and run one matched full-request comparison. Report
 actual optimized-layer hits and fallbacks, not merely enabled flags.
 At 200 TG, an average of 11 committed tokens permits **55 ms per whole cycle**;
 20 permits **100 ms**. Wider drafts only help if measured acceptance and total
 cycle latency satisfy that budget; a simulator pass cannot establish either.
+
+A separate simulator-only shared-Q/K T32 builder adapter is now prepared.
+It changes host tensor shapes and runtime token counts, not recurrence,
+normalization or scatter kernel arithmetic. In particular, 16-row tile-face
+offsets remain unchanged: they are physical tile indexing, not draft width.
+This adapter has not executed on a device and is not hardware-admitted.
 
 Report SHA256 (31):
 `aeb9e55a2426c31ea695bd191124abb233ca652dc6252bccc8c4e1cf858b8408`.
