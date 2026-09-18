@@ -93,7 +93,14 @@ def summarize(canary, http, events, kernel):
             * 1000 / sum(item['totals']['cycle_ms'] for item in selected),
             mean_verify_ms=sum(item['totals']['verify_host_ms'] for item in selected)
             / sum(item['blocks'] for item in selected))
-    return dict(passed=True, requests=requests, measured=aggregates,
+    pairs = []
+    for control, candidate in ((requests[2], requests[3]), (requests[5], requests[4])):
+        pairs.append(dict(control_ordinal=control['ordinal'], candidate_ordinal=candidate['ordinal'],
+            cycle_speedup=candidate['cycle_tokens_per_second'] / control['cycle_tokens_per_second'],
+            verify_ms_change=(candidate['totals']['verify_host_ms'] - control['totals']['verify_host_ms'])
+            / control['blocks']))
+    return dict(passed=True, requests=requests, measured=aggregates, pairs=pairs,
+        repeatable_two_percent_screen=all(pair['cycle_speedup'] > 1.02 for pair in pairs),
         cycle_speedup=aggregates['grouped']['cycle_tokens_per_second'] / aggregates['control']['cycle_tokens_per_second'],
         performance_qualified=False, serving_qualified=False,
         scope='One fixture, warm ABBA HTTP screen; not held-out quality, state parity or production acceptance')
@@ -112,7 +119,8 @@ def main():
         json.loads((root / 'http-reference.json').read_text()), records((root / 'server.log').read_text(encoding='utf-8')),
         json.loads(raw)['generated_kernels'][0])
     (root / 'gather-comparison.json').write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps(dict(passed=report['passed'], measured=report['measured'],
+    print(json.dumps(dict(passed=report['passed'], measured=report['measured'], pairs=report['pairs'],
+        repeatable_two_percent_screen=report['repeatable_two_percent_screen'],
         cycle_speedup=report['cycle_speedup'], performance_qualified=False)))
 
 

@@ -32,6 +32,19 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result['cycle_speedup'], 1.0)
         self.assertAlmostEqual(result['measured']['control']['cycle_tokens_per_second'], 11000 / 90)
         self.assertFalse(result['performance_qualified'])
+        self.assertFalse(result['repeatable_two_percent_screen'])
+        self.assertEqual([pair['cycle_speedup'] for pair in result['pairs']], [1.0, 1.0])
+
+    def test_aggregate_win_does_not_hide_pair_regression(self):
+        fixture = self.fixture()
+        for block in fixture[2][6]['blocks']:
+            block.update(draft_ms=1.0, cycle_ms=71.0)
+        for block in fixture[2][8]['blocks']:
+            block.update(draft_ms=21.0, cycle_ms=91.0)
+        result = summarize(*fixture)
+        self.assertGreater(result['cycle_speedup'], 1.02)
+        self.assertLess(result['pairs'][1]['cycle_speedup'], 1)
+        self.assertFalse(result['repeatable_two_percent_screen'])
 
     def test_bad_or_incomplete_evidence_rejected(self):
         for corruption in ('missing', 'scope', 'tokens', 'nan', 'nested', 'shutdown', 'acceptance'):
