@@ -68,7 +68,7 @@ the measured T16 recipe. Keep the T16 control intact while closing these gaps.
 | Register MLP and block-stream reader | Run 35302273096 attempt 3 passed T32 eager/replay | Fresh source-bound hardware admission and combined target checks |
 | Shared-Q/K GDN and scatter normalization | Run 35304765890 passed exact T32 eager/replay; runtime scope remains T16 | Source-bound T32 scope and accepted-prefix continuation checks |
 | Direct convolution windows | Run 35305449655 passed T32 native output/checkpoint replay; runtime scope remains T16 | Source-bound T32 integration and per-layer execution counts |
-| Wider MLP-down grid | Scope selects only `(1,1,16,5120)` | T32 numerical/replay coverage and all 64 layer hits |
+| Wider MLP-down grid | Run 35305677689 passed exact T32 numerical/replay checks; runtime scope remains T16 | Source-bound T32 scope and all 64 layer hits |
 | Full request integration | Combined wrapper explicitly constructs T16; cached request guard excludes T32 | Dedicated T32 admissions, target attention parity, exact tokens/state/features, then matched timed requests |
 
 Source pointers: `gdn_shared_qk_scope.py`, `gdn_direct_window_scope.py`,
@@ -108,6 +108,15 @@ hashes matched the staging manifest and were unchanged; container cleanup
 succeeded. This does not yet qualify the full T32 request or hardware timing.
 Report SHA256:
 `bdc8b31ec1ed80a401ecec1b581baf3006e3d72e3699c3e73417ef494a6962e1`.
+
+T32 MLP-down run **35305677689** passed in **147.11 seconds of probe execution**:
+12 exact eager/replay comparisons, 14 activation/weight integrity checks and
+three poisoned-output replay controls. Both chips used unchanged BF8 weights,
+L1 outputs and native arithmetic; only the worker grid differed (11x3 versus
+11x8). Staged probe/helper hashes matched the report, source hashes remained
+unchanged and cleanup succeeded. Combined runtime layer coverage and TG remain
+unmeasured for T32. Report SHA256:
+`5768dc71a94c74424beae53919316700a1bc0b7b12e5bcfcc8d24487254cadac`.
 
 T32 block-stream MLP run **35302273096, attempt 3** passed in **5m17s**:
 two exact eager comparisons, 12 exact changing-input replay comparisons and
