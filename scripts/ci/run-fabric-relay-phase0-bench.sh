@@ -41,6 +41,7 @@ container=$(timeout -k 5 30 docker create --network none --hostname qwen-experim
     --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \
     --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
     --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+    --mount "type=bind,src=$(realpath -e ..),dst=/experiment/source,readonly" \
     --mount "type=bind,src=$output,dst=/experiment/results" --group-add "$(stat -c %g "$output")" \
     --label thatch.qwen.experiment-cache=true --label "thatch.qwen.workflow-run=$GITHUB_RUN_ID" \
     --label "thatch.qwen.source-revision=$GITHUB_SHA" --workdir /opt/tt-metal \
@@ -49,6 +50,5 @@ container=$(timeout -k 5 30 docker create --network none --hostname qwen-experim
     -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -e OMP_NUM_THREADS=8 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/fabric-relay-phase0-bench-inner.sh)
 docker cp scripts "$container:/experiment-scripts"
-docker cp optimisation "$container:/experiment/source/optimisation"
 timeout -k 10 420 docker start -a "$container"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
