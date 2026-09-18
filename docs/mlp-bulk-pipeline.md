@@ -1,6 +1,34 @@
 # Two-block bulk weight-read overlap
 
-**Simulator replay passed; combined hardware performance remains unqualified.**
+**Simulator and first combined hardware correctness checks passed; speedup remains unconfirmed.**
+
+## First combined hardware result
+
+Run **35315198247, attempt 1**, source `959309a`, tested the same T16 DFlash
+recipe at **4,096 context tokens, one stream, two cards and four fabric links**.
+Both arms shared the loaded model and packed weights. Target tokens, state,
+features, proposals and acceptance matched; scope restoration and cleanup passed.
+
+| Metric | Serial bulk reader | Two-block pipeline |
+|---|---:|---:|
+| PP (tokens/s) | 3,327.60 | 3,363.91 |
+| Committed TG (tokens/s) | 111.82 | 118.70 |
+| Verification/readback (ms/block) | 60.31 | 60.21 |
+| Drafting (ms/block) | 22.26 | 20.38 |
+| Select/commit (ms/block) | 12.32 | 10.57 |
+| Complete cycle (ms/block) | 98.25 | 92.55 |
+
+Each arm committed 242 timed tokens across 22 blocks, averaging 11 tokens/block.
+The apparent **6.15% TG gain is not yet attributable to the kernel**: verification
+improved by only 0.10 ms, while most savings came from drafting and host-side work.
+An unchanged ABBA repeat is running as attempt 2. No promotion or serving change.
+At this acceptance rate, 200 TG requires a complete cycle of 55 ms; even the
+current verifier alone exceeds that budget.
+
+Attempt-1 report SHA256:
+`3edb1940f2d27fbb64de86a99012144e61f2cab7d8379862654abecec0a75bfe`.
+
+## Simulator qualification
 
 Run **35314071196** passed in **4m29s**: two exact eager outputs, 12 exact
 changed-input comparisons, four stale-input controls, all four packed-weight
