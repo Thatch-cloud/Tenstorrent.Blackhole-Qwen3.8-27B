@@ -46,6 +46,12 @@ jobs:
           python3 -B stream-orchestrator/scripts/ci/mlp_block_stream_t32_stage.py --checkout stream-candidate \
             --manifest stream-candidate/experiment-results/block-stream-t32-candidate.json
           git -C stream-candidate diff --check
+      - name: Select two-block bulk-read pipeline without changing compute
+        if: endsWith(github.ref_name, '-bulk-pipeline')
+        run: |
+          python3 -B stream-orchestrator/scripts/ci/mlp_block_stream_pipeline_stage.py --checkout stream-candidate \
+            --manifest stream-candidate/experiment-results/block-stream-pipeline-candidate.json
+          git -C stream-candidate diff --check
       - name: Exact eager outputs changed-input replay and stream integrity
         timeout-minutes: 8
         working-directory: stream-candidate
