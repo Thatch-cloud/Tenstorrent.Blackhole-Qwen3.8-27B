@@ -6,6 +6,33 @@ restoring one matched runtime across the context ladder.
 
 ## Current checkpoint - 2026-09-18
 
+### Active DFlash fusion track
+
+The promoted DSpark baseline below remains separate from these unpromoted
+DFlash experiments. Do not add gains from different runs or present aggregate
+concurrency throughput as single-stream TG.
+
+| Experiment | Current evidence | Decision |
+| --- | --- | --- |
+| DFlash T32 vs T16 | 83.24 vs 121.45 TG, matched 4K run 35312812439 | Reject T32 performance candidate |
+| Two-block bulk weight prefetch | Repeat 116.32 vs 117.02 TG, run 35315198247 attempt 2 | Retain serial reader |
+| Fused DFlash K/V sliding publication | All 120 exact simulator comparisons, run 35317724110 | Combined hardware run 35318783547 launched; no speed claim yet |
+| Captured-draft host attribution | Bounded helper and CPU checks pass | Not yet measured on hardware |
+
+Remaining fusion review order: accepted K/V publication, captured-history input
+copies, feature-history publication, then target MLP producer/consumer and
+collective/residual/normalization boundaries. Preserve separate evidence for each
+change and combine only qualified implementations. The target-verifier work is
+essential: the latest serial DFlash control spends 60.17 ms verifying each block,
+while 200 TG at 11 committed tokens/block allows only 55 ms for the entire cycle.
+Publication fusion alone cannot establish the goal.
+
+See [K/V fusion](draft-kv-slide-fusion.md),
+[target worker/fusion audit](target-fusion-worker-audit.md), and
+[upstream DFlash audit](dflash-upstream-audit.md).
+
+### Retained promoted baseline
+
 The user has promoted the complete five-component T16/DSpark experimental
 baseline at `239c7c1` (`experiment/cumulative-t16-full-v3`). Combined CTX4096
 measurements are 128.65 and 127.74 committed TG, with correctness passing in
