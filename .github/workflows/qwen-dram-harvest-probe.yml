@@ -203,6 +203,17 @@ jobs:
             > experiment-results/prefetch-capability.log 2>&1 || status=$?
           echo "capability_exit=$status" > experiment-results/prefetch-capability.status
           tail -30 experiment-results/prefetch-capability.log || true
+      - name: Survey the prefetcher API surface
+        working-directory: dram-harvest-probe
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Introspection only: no device is opened and no kernel is launched.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          timeout -k 10 180 docker run --rm --network none             --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g             -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=128m             --mount "type=bind,src=$PWD,dst=/source,readonly"             --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_api_survey.py             --output /tmp/api.json > experiment-results/prefetcher-api.json 2>&1 || true
+          cat experiment-results/prefetcher-api.json
       - name: Diagnose the missing third card on the PCIe switch
         working-directory: dram-harvest-probe
         timeout-minutes: 3
