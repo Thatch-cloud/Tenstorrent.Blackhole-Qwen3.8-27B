@@ -14,8 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          path: dflash-t16-sim-${{ github.run_id }}
           persist-credentials: false
       - name: Synthetic T16 mask isolation and changed-input replay
+        working-directory: dflash-t16-sim-${{ github.run_id }}
         env:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
@@ -27,5 +29,5 @@ jobs:
         if: always()
         with:
           name: qwen-dflash-t16-attention-${{ github.run_id }}-${{ github.run_attempt }}
-          path: experiment-results/
+          path: dflash-t16-sim-${{ github.run_id }}/experiment-results/
           if-no-files-found: error

@@ -34,6 +34,12 @@ diagnostics, dispatch configuration and reference masked-key isolation. They
 do not certify device numerics, trace replay, performance or coding quality.
 The next simulator probe must use T16 operands, not relabel T8 learned fixtures.
 
+Simulator run 35289299758 failed during checkout, before any probe execution:
+the shared workspace root was not a Git repository during checkout cleanup.
+The simulator workflow now uses a run-specific child checkout, as the other
+staged experiments do, rather than cleaning the shared root. This failure
+provides no evidence about native attention.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.
