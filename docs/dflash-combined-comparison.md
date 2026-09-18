@@ -57,6 +57,31 @@ Hardware selection remains rejected until the complete request route is admitted
 Cache replay report SHA256:
 `2ad1b72e02ab978b82cfc252d8226a98a2c1d9a3296a15c13b85da418164e7a6`.
 
+### T32 combined-recipe parity checklist
+
+Source audit, 18 September: changing only the draft width would **not** retain
+the measured T16 recipe. Keep the T16 control intact while closing these gaps.
+
+| Component | Current T32 coverage | Required before combined acceptance |
+|---|---|---|
+| Native draft attention and cache replay | Synthetic simulator checks pass | Learned proposal/output and acceptance checks |
+| Register MLP and block-stream reader | Candidate prepared; run 35302273096 stopped at storage gate, 31.7% stall | Exact eager/replay at 32 rows and fresh source-bound admission |
+| Shared-Q/K GDN and scatter normalization | Scope recognizes only `(1,16,5120)`; other widths use original executor | T32 allocations, recurrence, normalization and accepted-prefix continuation checks |
+| Direct convolution windows | Scope selects only `(1,16,8240)` | T32 window/checkpoint qualification and per-layer execution counts |
+| Wider MLP-down grid | Scope selects only `(1,1,16,5120)` | T32 numerical/replay coverage and all 64 layer hits |
+| Full request integration | Combined wrapper explicitly constructs T16; cached request guard excludes T32 | Dedicated T32 admissions, target attention parity, exact tokens/state/features, then matched timed requests |
+
+Source pointers: `gdn_shared_qk_scope.py`, `gdn_direct_window_scope.py`,
+`mlp_down_grid_scope.py`, `dflash_combined_request.py`, `full_dflash_request.py`
+(all under `scripts/ci`). Existing T16 reports must not be relabelled T32.
+
+Execution order: finish the queued MLP qualification, close the GDN/window/down
+width gaps, then integrate and run one matched full-request comparison. Report
+actual optimized-layer hits and fallbacks, not merely enabled flags.
+At 200 TG, an average of 11 committed tokens permits **55 ms per whole cycle**;
+20 permits **100 ms**. Wider drafts only help if measured acceptance and total
+cycle latency satisfy that budget; a simulator pass cannot establish either.
+
 Report SHA256 (31):
 `aeb9e55a2426c31ea695bd191124abb233ca652dc6252bccc8c4e1cf858b8408`.
 Report SHA256 (2048):
