@@ -96,8 +96,14 @@ direct reads only when source/destination offsets match modulo 64. Otherwise,
 it reads into aligned scratch, waits, performs local L1 DMA into the output,
 and waits before scratch reuse. No scalar valid-row copies are introduced.
 Host tests cover all face segments, 16-byte-aligned buffer offsets, scratch
-bounds and the exact failing addresses. Simulator qualification remains pending;
-the extra transfers and barriers may negate any performance benefit.
+bounds and the exact failing addresses. Simulator run **35320765158** passed
+all 120 exact comparisons and clean shutdown on source `9cf68f7`. Its report
+SHA256 is `221d4e5fc003f55a690cd583e3a4ea55d5269bec611b47dc21fb2fbfcf087c6e`;
+the candidate kernel hash is `1679bbd779add56b4bd445a6b4c51bd3e49c39a8a520dfaddfc3bd9f36667d47`.
+An explicit `--direct-dma` stage selects this kernel and separately pinned report
+for the same combined publication comparison. The original scalar-copy route is
+unchanged. Hardware performance remains unqualified: extra transfers and barriers
+may negate any benefit.
 
 This is a different mechanism, not an unchanged retry of the first fusion.
 More small NoC transfers could offset the saved scalar copies, so no benefit is
