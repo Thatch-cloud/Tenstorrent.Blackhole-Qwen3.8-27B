@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import serving_fast_policy
-from serving_plugin_patch import patch_capacity, patch_platform, patch_worker
+from serving_plugin_patch import patch_capacity, patch_entrypoints, patch_platform, patch_worker
 from test_serving_fast_policy import FastPolicyTests
 
 
@@ -102,6 +102,18 @@ class PluginPatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 patch_capacity(source)
 
+    def test_explicit_dflash_registration_preserves_existing_hooks(self):
+        source = ('def register():\n    register_tt_models_from_plugin()\n'
+            '    register_parsers()\n')
+        result = patch_entrypoints(source)
+        self.assertIn('register_tt_models_from_plugin()', result)
+        self.assertIn('register_parsers()', result)
+        self.assertIn('register_dflash2()', result)
+        with self.assertRaises(ValueError):
+            patch_entrypoints(result)
+        with self.assertRaises(ValueError):
+            patch_entrypoints(source.replace('register_tt_models_from_plugin', 'changed'))
+
     @unittest.skipUnless(os.environ.get('QWEN_PLUGIN_SOURCE'), 'Pinned source available in installed-vLLM CI')
     def test_actual_pinned_plugin_source(self):
         package = Path(os.environ['QWEN_PLUGIN_SOURCE']) / 'src/vllm_tt_plugin'
@@ -109,3 +121,4 @@ class PluginPatchTests(unittest.TestCase):
         self.check_source(source.read_text(encoding='utf-8'))
         patch_platform((package / 'platform.py').read_text(encoding='utf-8'))
         patch_worker((package / 'worker.py').read_text(encoding='utf-8'))
+        patch_entrypoints((package / 'entrypoints.py').read_text(encoding='utf-8'))

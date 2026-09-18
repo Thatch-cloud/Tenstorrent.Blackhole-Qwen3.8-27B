@@ -84,17 +84,43 @@ def patch_worker(source):
     return result
 
 
+def patch_entrypoints(source):
+    if 'qwen_dflash_registry' in source:
+        raise ValueError('Model registry already patched')
+    tree = ast.parse(source)
+    matches = [node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == 'register']
+    if len(matches) != 1:
+        raise ValueError('Pinned general plugin registration changed')
+    function = matches[0]
+    calls = [node for node in function.body if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == 'register_tt_models_from_plugin']
+    if len(calls) != 1:
+        raise ValueError('Pinned TT model registration call changed')
+    lines = source.splitlines(keepends=True)
+    lines.insert(calls[0].end_lineno,
+        '    from vllm_tt_plugin.qwen_dflash_registry import register as register_dflash2\n'
+        '    register_dflash2()\n')
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
 def stage(root):
     revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     if revision != PLUGIN_REVISION:
         raise ValueError('Exact pinned plugin checkout required')
     package = Path(root) / 'src' / 'vllm_tt_plugin'
     policy = package / 'qwen_fast_policy.py'
-    if policy.exists():
+    registry = package / 'qwen_dflash_registry.py'
+    if policy.exists() or registry.exists():
         raise ValueError('Refusing to overwrite an existing fast policy')
     edits = {package / name: operation((package / name).read_text(encoding='utf-8'))
-        for name, operation in (('config.py', patch_capacity), ('platform.py', patch_platform), ('worker.py', patch_worker))}
+        for name, operation in (('config.py', patch_capacity), ('platform.py', patch_platform),
+            ('worker.py', patch_worker), ('entrypoints.py', patch_entrypoints))}
     shutil.copyfile(Path(__file__).with_name('serving_fast_policy.py'), policy)
+    shutil.copyfile(Path(__file__).with_name('serving_dflash_registry.py'), registry)
     for path, source in edits.items():
         path.write_text(source, encoding='utf-8')
 

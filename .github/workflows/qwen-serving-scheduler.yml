@@ -26,12 +26,14 @@ jobs:
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_scheduler.py:/canary-tests/test_serving_scheduler.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_vllm_installed.py:/canary-tests/test_serving_vllm_installed.py:ro" \
             -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_fast_policy.py:/canary-tests/serving_fast_policy.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_dflash_registry.py:/canary-tests/serving_dflash_registry.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_dflash_registry_installed.py:/canary-tests/test_serving_dflash_registry_installed.py:ro" \
             -e PYTHONPATH=/canary-tests:/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal \
             -e VLLM_PLUGINS= -e VLLM_USE_V2_MODEL_RUNNER=0 -e HF_HUB_OFFLINE=1 \
             -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 \
             --entrypoint python3 \
             sha256:6d517e1f202d72d9ba0482d551cb126a3f4e7b92d21c5ab53fd34e7f2084534d \
-            -B -m unittest -v test_serving_scheduler test_serving_vllm_installed 2>&1 | tee serving-scheduler-check/experiment-results/scheduler.log
+            -B -m unittest -v test_serving_scheduler test_serving_vllm_installed test_serving_dflash_registry_installed 2>&1 | tee serving-scheduler-check/experiment-results/scheduler.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

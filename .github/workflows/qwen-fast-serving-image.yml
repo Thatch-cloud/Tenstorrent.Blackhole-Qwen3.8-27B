@@ -48,7 +48,7 @@ jobs:
           cp serving-build-orchestrator/docker/qwen-fast-serving.Dockerfile "$context/docker/"
           cp serving-build-orchestrator/scripts/ci/serving_native_install.py "$context/scripts/ci/"
           cp serving-build-orchestrator/scripts/ci/serving_image_preflight.py "$context/scripts/ci/"
-          for name in serving_fast_policy.py serving_lifecycle.py serving_request_factory.py; do
+          for name in serving_fast_policy.py serving_lifecycle.py serving_request_factory.py serving_plugin_patch.py serving_dflash_registry.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           cp serving-build-orchestrator/scripts/ci/test_serving_*.py "$context/scripts/ci/"
