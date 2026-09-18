@@ -14,6 +14,7 @@ void kernel_main() {
     const uint32_t worker = get_arg_val<uint32_t>(7);
     const uint32_t head = worker / 4;
     const uint32_t column = worker % 4;
+    const uint32_t scratch = (get_write_ptr(0) + 63) & ~63u;
     const uint32_t output = get_write_ptr(0) + 6144;
     for (uint32_t tile = 0; tile < 64; ++tile) {
         uint32_t row = 0;
@@ -41,10 +42,22 @@ void kernel_main() {
             if (count > rows - destination_row) { count = rows - destination_row; }
             const uint32_t page = historical ? (head * 64 + source_row / 32) * 4 + column : head * 4 + column;
             const uint64_t source = historical ? get_noc_addr(page, active) : get_noc_addr(page, delta);
+            const uint32_t source_start = ((source_row % 32) / 16) * 1024 + (source_row % 16) * 32;
+            const uint32_t destination_start = (row / 16) * 1024 + (row % 16) * 32;
+            const uint32_t source_alignment = static_cast<uint32_t>(source + source_start) & 63;
+            const bool staged = source_alignment != ((output + destination_start) & 63);
             for (uint32_t face = 0; face < 2; ++face) {
-                const uint32_t source_offset = ((source_row % 32) / 16) * 1024 + face * 512 + (source_row % 16) * 32;
-                const uint32_t destination_offset = (row / 16) * 1024 + face * 512 + (row % 16) * 32;
-                noc_async_read(source + source_offset, output + destination_offset, count * 32);
+                const uint32_t destination = staged ? scratch + face * 1024 + source_alignment
+                    : output + destination_start + face * 512;
+                noc_async_read(source + source_start + face * 512, destination, count * 32);
+            }
+            if (staged) {
+                noc_async_read_barrier();
+                for (uint32_t face = 0; face < 2; ++face) {
+                    noc_async_read(get_noc_addr(scratch + face * 1024 + source_alignment),
+                        output + destination_start + face * 512, count * 32);
+                }
+                noc_async_read_barrier();
             }
             row += count;
         }

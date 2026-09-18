@@ -1,7 +1,7 @@
 import unittest
 
 from draft_kv_slide import row_source
-from draft_kv_slide_direct import segments
+from draft_kv_slide_direct import segments, transfers
 
 
 class DirectSlideTests(unittest.TestCase):
@@ -22,3 +22,27 @@ class DirectSlideTests(unittest.TestCase):
         for tile in (-1, 64, True):
             with self.assertRaises(ValueError):
                 segments(2048, 16, tile)
+
+    def test_every_face_segment_dma_alignment_and_scratch_bounds(self):
+        for base in (0, 16, 32, 48):
+            for source in range(32):
+                for destination in range(32):
+                    for count in range(1, min(16 - source % 16, 16 - destination % 16) + 1):
+                        for face in (0, 1):
+                            hops = transfers(source, destination, count, face, base, 0x594000)
+                            for kind, read, write, length in hops:
+                                alignment = 64 if kind == 'dram' else 16
+                                self.assertEqual(read % alignment, write % alignment)
+                                self.assertEqual(length, count * 32)
+                                self.assertGreaterEqual(write, base)
+                                self.assertLessEqual(write + length, base + 8192)
+                            if len(hops) == 2:
+                                self.assertEqual(hops[0][2], hops[1][1])
+                                self.assertLessEqual(hops[0][2] + count * 32, base + 6144)
+                            self.assertGreaterEqual(hops[-1][2], base + 6144)
+
+    def test_simulator_regression_requires_two_hops(self):
+        hops = transfers(4, 3, 1, 0, 0x1B100, 0x594E00)
+        self.assertEqual(hops[0][1], 0x594E80)
+        self.assertEqual(hops[-1][2], 0x1D160)
+        self.assertEqual(len(hops), 2)

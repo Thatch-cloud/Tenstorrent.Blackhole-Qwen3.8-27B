@@ -82,11 +82,22 @@ checked source hashes; this is not reuse of the old append kernel's qualificatio
 
 The first fused writer still assembles every output row with scalar 32-bit loads
 and stores on its data-movement processor. `draft_kv_slide_direct.cpp` instead
-issues 32-byte-aligned NoC reads directly into the output tile, splitting only at
+issues face-segment NoC reads into the output tile, splitting only at
 source/destination face boundaries and the historical/accepted frontier. Reads
 complete before the output write; writes complete before reusing scratch.
 Only invalid tail rows use scalar zeroing. The original qualified kernel remains
 unchanged, and the direct-DMA candidate requires its own simulator evidence.
+
+Simulator run 35319847641 rejected the initial direct path: DRAM source
+`0x594e80` and L1 destination `0x1d160` differ modulo 64. This was a real
+alignment bug, not a timeout. Blackhole's pinned `noc_parameters.h` specifies
+64-byte DRAM-read and 16-byte L1-read alignment. The revised candidate uses
+direct reads only when source/destination offsets match modulo 64. Otherwise,
+it reads into aligned scratch, waits, performs local L1 DMA into the output,
+and waits before scratch reuse. No scalar valid-row copies are introduced.
+Host tests cover all face segments, 16-byte-aligned buffer offsets, scratch
+bounds and the exact failing addresses. Simulator qualification remains pending;
+the extra transfers and barriers may negate any performance benefit.
 
 This is a different mechanism, not an unchanged retry of the first fusion.
 More small NoC transfers could offset the saved scalar copies, so no benefit is
