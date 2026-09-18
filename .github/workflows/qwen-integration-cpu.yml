@@ -50,6 +50,7 @@ jobs:
           python -B -m unittest test_serving_native_install
           python -B -m unittest test_serving_image_preflight
           python -B -m unittest test_serving_canary_client
+          python -B -m unittest test_serving_canary_runner
           python -B -m unittest test_draft_kv_slide_adapter
           python -B -m unittest test_draft_kv_slide_scope
           python -B -m unittest test_draft_kv_slide_hardware_stage

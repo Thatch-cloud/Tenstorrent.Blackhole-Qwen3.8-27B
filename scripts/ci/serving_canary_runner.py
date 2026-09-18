@@ -10,10 +10,26 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
+REQUIRED_ENVIRONMENT = dict(QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1',
+    QWEN_MLP_BLOCK_STREAM_EXPERIMENT='1', QWEN_DRAFT_KV_SLIDE_EXPERIMENT='1',
+    QWEN_PROJECTION_LINKS='4', QWEN_FABRIC_LINK_PROBE='1', QWEN_SDPA_BF8='1',
+    QWEN_SDPA_TREE_SCRATCH_ROUNDS='1', QWEN_FROZEN_COMBINED_RUNTIME='1',
+    QWEN_DSPARK_REQUEST_CONTEXT='4096', QWEN_GDN_SHARED_QK_EXPERIMENT='1',
+    QWEN_SKIP_UNUSED_SINGLETON_POSITIONS='1')
+
+
+def validate_environment(environment):
+    missing = [name for name, value in REQUIRED_ENVIRONMENT.items() if environment.get(name) != value]
+    incompatible = [name for name in ('TT_METAL_SIMULATOR', 'TT_METAL_DEVICE_PROFILER',
+        'TT_METAL_SLOW_DISPATCH_MODE', 'TT_METAL_MOCK_CLUSTER_DESC_PATH') if environment.get(name)]
+    if environment.get('QWEN_SIM_ONLY') == '1':
+        incompatible.append('QWEN_SIM_ONLY')
+    if missing or incompatible:
+        raise ValueError(f'Canary environment rejected before loading: missing={missing}, incompatible={incompatible}')
+
+
 def main():
-    if (os.environ.get('QWEN_HARDWARE_TESTS') != '1' or os.environ.get('QWEN_CARDS_ALLOCATED') != '1'
-            or os.environ.get('TT_METAL_SIMULATOR')):
-        raise ValueError('Explicit hardware canary allocation required')
+    validate_environment(os.environ)
     target = '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
     results = Path('/experiment/results')
     results.mkdir(parents=True, exist_ok=True)
