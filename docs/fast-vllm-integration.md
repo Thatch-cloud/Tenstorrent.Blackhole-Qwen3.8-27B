@@ -108,6 +108,13 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+The benchmark now enters `dflash_combined_request.combined_runtime`, a reusable
+context manager containing the same source-admitted target, draft-attention,
+weight-streaming and optional KV-publication scopes. Serving can hold these scopes
+across its request lifecycle without invoking benchmark generation. Tests cover
+both the original complete-request wrapper and direct runtime entry/cleanup on
+failure. This refactor does not create new hardware performance evidence.
+
 `FastServingLifecycle` provides the worker-level sequence: capture the native
 prefill, return its seed once, construct/attach the fast bridge, publish drafts,
 return committed decode blocks, and release traces before processing a finished
