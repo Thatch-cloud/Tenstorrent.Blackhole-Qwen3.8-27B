@@ -6,13 +6,32 @@ SCHEDULE = (('dspark', True), ('dflash2', True), ('dspark', False),
             ('dflash2', False), ('dflash2', False), ('dspark', False))
 
 
-def summarize(requests):
-    from dspark_request_experiment import summarize as summarize_dspark
-    from full_dflash_request import summarize_dflash_requests
+def validate_target_components(request):
     from cumulative_fusion_validation import validate_fusion_policy
     from shared_qk_norm_scatter_gate import REPORT_SHA256 as NORM_SHA256
     from gdn_direct_window_gate import REPORT_SHA256 as WINDOW_SHA256
     from mlp_down_grid_gate import REPORT_SHA256 as DOWN_SHA256
+
+    validate_fusion_policy(request, 'register')
+    norm, windows, down = (request.get(key, {}) for key in ('norm_reader', 'gdn_direct_window', 'mlp_down_grid'))
+    shared = request.get('gdn_shared_qk', {})
+    loads = shared.get('loads', [])
+    if (shared.get('restored') is not True or shared.get('released') is not True
+            or shared.get('admission', {}).get('report_sha256') != NORM_SHA256
+            or len(loads) < 48 or len(loads) % 48
+            or norm.get('policy') != 'scatter' or norm.get('report_sha256') != NORM_SHA256
+            or norm.get('restored') is not True or norm.get('builds') != len(loads)
+            or windows.get('direct') is not True or windows.get('restored') is not True
+            or windows.get('report_sha256') != WINDOW_SHA256 or windows.get('hits') != len(loads)
+            or down.get('wider_down') is not True or down.get('restored') is not True
+            or down.get('report_sha256') != DOWN_SHA256
+            or down.get('hits') != request['fused_t16_mlp']['hits']):
+        raise ValueError('Both drafters must execute the same promoted target components')
+
+
+def summarize(requests):
+    from dspark_request_experiment import summarize as summarize_dspark
+    from full_dflash_request import summarize_dflash_requests
 
     if [(value.get('comparison_drafter'), value.get('instrumented_timing')) for value in requests] != list(SCHEDULE):
         raise ValueError('Fresh per-drafter audits and complete ABBA schedule required')
@@ -32,21 +51,7 @@ def summarize(requests):
         if drafter in signatures and signature != signatures[drafter]:
             raise ValueError('Each drafter must reproduce its own audited proposals and acceptance')
         signatures[drafter] = signature
-        validate_fusion_policy(request, 'register')
-        norm, windows, down = (request.get(key, {}) for key in ('norm_reader', 'gdn_direct_window', 'mlp_down_grid'))
-        shared = request.get('gdn_shared_qk', {})
-        loads = shared.get('loads', [])
-        if (shared.get('restored') is not True or shared.get('released') is not True
-                or shared.get('admission', {}).get('report_sha256') != NORM_SHA256
-                or len(loads) < 48 or len(loads) % 48
-                or norm.get('policy') != 'scatter' or norm.get('report_sha256') != NORM_SHA256
-                or norm.get('restored') is not True or norm.get('builds') != len(loads)
-                or windows.get('direct') is not True or windows.get('restored') is not True
-                or windows.get('report_sha256') != WINDOW_SHA256 or windows.get('hits') != len(loads)
-                or down.get('wider_down') is not True or down.get('restored') is not True
-                or down.get('report_sha256') != DOWN_SHA256
-                or down.get('hits') != request['fused_t16_mlp']['hits']):
-            raise ValueError('Both drafters must execute the same promoted target components')
+        validate_target_components(request)
         if any(type(request.get(key)) not in (int, float) or not math.isfinite(request[key]) or request[key] <= 0
                for key in ('decode_ms', 'prefill_ms')):
             raise ValueError('Finite positive complete request timings required')

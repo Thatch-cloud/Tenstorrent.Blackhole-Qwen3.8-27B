@@ -69,6 +69,14 @@ remain active. The default comparison driver does not select this candidate;
 candidate CI staging and combined acceptance are still pending. No hardware
 dispatch is authorized while the pause remains in force.
 
+The separate `dflash_native_comparison_experiment.py` driver prepares two fresh
+target audits followed by composed/native/native/composed complete requests in
+one loaded session. It stops before timings if either audit fails. Its report
+validator checks target components, exact committed output, source/cache policy,
+per-arm proposal repeatability, acceptance accounting and stage costs. Different
+draft proposals between arms are allowed; different committed output is not.
+This driver is CPU-tested but not yet selected by a hardware workflow.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.
