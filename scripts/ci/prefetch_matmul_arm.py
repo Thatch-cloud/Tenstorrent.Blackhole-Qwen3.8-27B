@@ -12,6 +12,7 @@ worker grid, and must be divisible by the sender bank count. For gate/up
 import argparse
 import json
 import sys
+import time
 import traceback
 
 BEGIN = '<<<PREFETCH_ARM_JSON_BEGIN>>>'
@@ -78,15 +79,56 @@ def run_one(ttnn, common, torch, mesh, name, rows, dtype_name, report):
             fuse_batch=True, fused_activation=None, mcast_in0=True)
         entry['program_config_built'] = True
         in0 = ttnn.from_torch(pt_in0, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh)
+        # Control: the same 1D matmul on the same grid, weights read from DRAM the
+        # ordinary way. Isolates what the prefetcher itself contributes.
+        plain_weight = ttnn.from_torch(pt_weight, dtype=dtype, layout=ttnn.TILE_LAYOUT,
+                                       device=mesh)
+        expected = (pt_in0.float() @ pt_weight.float())
+
+        def timed(call, iterations):
+            call()
+            ttnn.synchronize_device(mesh)
+            samples = []
+            for _ in range(iterations):
+                start = time.perf_counter()
+                result = call()
+                ttnn.synchronize_device(mesh)
+                samples.append(time.perf_counter() - start)
+                ttnn.deallocate(result)
+            samples.sort()
+            return samples[len(samples) // 2]
+
         with common.tensor_prefetcher_session(mesh):
             out = ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
                 in0, weight, global_cb=global_cb, program_config=program_config)
             entry['matmul_ran'] = True
             got = ttnn.to_torch(out)
-        expected = (pt_in0.float() @ pt_weight.float())
-        passed, message = common.comp_pcc(expected, got.float(), 0.97)
-        entry['pcc_passed'] = bool(passed)
-        entry['pcc_message'] = str(message)[:200]
+            passed, message = common.comp_pcc(expected, got.float(), 0.97)
+            entry['pcc_passed'] = bool(passed)
+            entry['pcc_message'] = str(message)[:200]
+            ttnn.deallocate(out)
+            if entry['pcc_passed']:
+                # Interleave the arms rather than blocking them: host contention on
+                # this rig inflates host-dispatch-bound phases far more than
+                # device-bound ones, so blocked arms can mislead badly.
+                prefetch_ms, plain_ms = [], []
+                for _ in range(3):
+                    prefetch_ms.append(1000.0 * timed(
+                        lambda: ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
+                            in0, weight, global_cb=global_cb,
+                            program_config=program_config), 10))
+                    plain_ms.append(1000.0 * timed(
+                        lambda: ttnn.linear(in0, plain_weight,
+                                            program_config=program_config), 10))
+                prefetch_ms.sort()
+                plain_ms.sort()
+                entry['prefetch_ms_median'] = round(prefetch_ms[1], 4)
+                entry['plain_ms_median'] = round(plain_ms[1], 4)
+                entry['prefetch_ms_all'] = [round(v, 4) for v in prefetch_ms]
+                entry['plain_ms_all'] = [round(v, 4) for v in plain_ms]
+                entry['ratio_prefetch_over_plain'] = round(
+                    prefetch_ms[1] / plain_ms[1], 4) if plain_ms[1] else None
+                entry['timing_is_indicative_only'] = True
     except BaseException:
         entry['error'] = traceback.format_exc(limit=8)[-2200:]
 

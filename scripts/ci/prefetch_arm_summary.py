@@ -31,6 +31,12 @@ def main():
         print('    reached: %s' % (', '.join(reached) or 'nothing'))
         if arm.get('pcc_message'):
             print('    pcc: %s' % arm['pcc_message'])
+        if arm.get('prefetch_ms_median') is not None:
+            print('    prefetch %.4f ms  plain %.4f ms  ratio %.3f (indicative only)' % (
+                arm['prefetch_ms_median'], arm['plain_ms_median'],
+                arm.get('ratio_prefetch_over_plain') or float('nan')))
+            print('    prefetch runs %s' % arm.get('prefetch_ms_all'))
+            print('    plain    runs %s' % arm.get('plain_ms_all'))
         if arm.get('error'):
             print('    error tail: %s' % arm['error'][-700:])
 
