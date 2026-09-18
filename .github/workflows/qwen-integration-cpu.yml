@@ -38,6 +38,7 @@ jobs:
           python -B -m unittest test_serving_vllm_state
           python -B -m unittest test_serving_page_binding
           python -B -m unittest test_serving_runner_bridge
+          python -B -m unittest test_serving_fast_policy
           python -B -m unittest test_draft_kv_slide_adapter
           python -B -m unittest test_draft_kv_slide_scope
           python -B -m unittest test_draft_kv_slide_hardware_stage

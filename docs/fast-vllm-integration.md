@@ -30,6 +30,15 @@ registry manifest digest. No portable fast-serving image is qualified yet.
 
 ## Initial supported serving scope
 
+Configuration compatibility is explicit: the offline verifier requires native
+GDN B8 state, while initial serving admission is one request. The pinned plugin's
+`get_tt_max_batch_size` currently returns scheduler `max_num_seqs`, including in
+the model loader. `serving_fast_policy.py` defines an opt-in internal capacity of
+eight without increasing scheduler concurrency; the upstream function is not yet
+patched. Its initial qualification profile is greedy DFlash T16, 64-token pages,
+4K input/256 output, synchronous execution and no unsupported sampling features.
+Configuration unit tests do not qualify loading or serving this layout.
+
 Greedy generation, one active request, explicit T16 fast mode, target and drafter
 revisions pinned. Begin at the measured 4K context. Larger contexts, sampling,
 logprobs, structured-output constraints, prefix caching and multi-user concurrency
