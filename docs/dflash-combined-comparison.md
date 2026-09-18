@@ -16,7 +16,7 @@ cycle, even 16 committed tokens would yield only about 170 TG; 200 requires
 lower latency and/or more useful committed tokens per cycle. T32 is not an
 assured improvement: historical eager DFlash T32 accepted only 8.82 committed
 tokens/block. A simulator-only full-32-query native-attention helper is prepared;
-cached history, target T32 recipe parity and combined acceptance remain ungated.
+learned cached drafting, target T32 recipe parity and combined acceptance remain ungated.
 
 T32 native proposal attention run **35299919048** passed its mask-isolation and
 changed-input replay gate in **2m13s** on the exact combined runtime binary.
@@ -38,9 +38,24 @@ Cached T32 source preparation now has a simulator-only adapter, leaving the
 admitted T8/T16 source files unchanged. Seven local host tests pass, including
 cache publication and rollback across every accepted prefix length from 1 to
 32. These are host regression checks, not a device cache-replay qualification.
-The adapter rejects hardware execution; cached proposal replay and matching
-T32 target validation are still required before combined hardware testing.
+Run **35301426428, attempt 2** passed the combined synthetic cache/native-attention
+replay check in **3m39s**. Both simulated chips passed initial replay, discard
+and commit for prefixes 1, 16 and 32; unpublished cache updates correctly
+blocked replay. All 17 checks passed and the simulator closed cleanly.
+The first attempt stopped at the storage gate (23.8% full I/O stall), before
+any simulation. The successful rerun passed that same unchanged gate.
+
+The probe uses synthetic K/V projection, not learned drafting. It validates
+cache publication together with actual captured T32 native attention, but
+does not establish learned acceptance or target-state correctness. The adapter
+still rejects hardware execution. Matching T32 target validation remains pending.
+Its next prepared MLP probe retains the register arithmetic and block-stream
+reader, changing only token width and simulator routing. Eight host regression
+tests passed; that T32 MLP candidate has not executed on simulator or hardware.
 Hardware selection remains rejected until the complete request route is admitted.
+
+Cache replay report SHA256:
+`2ad1b72e02ab978b82cfc252d8226a98a2c1d9a3296a15c13b85da418164e7a6`.
 
 Report SHA256 (31):
 `aeb9e55a2426c31ea695bd191124abb233ca652dc6252bccc8c4e1cf858b8408`.
