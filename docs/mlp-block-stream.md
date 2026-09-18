@@ -43,6 +43,28 @@ the packer nor reader transform is connected to serving or the combined runtime.
 
 ## Current evidence
 
+Full T16 MLP simulator run **35297164881** passed in **4m25s**, using
+source `b5103f746befd67964893fc0f826ff142c0eefd4`. Downloaded evidence was
+independently checked for the complete eager/replay matrix, weight comparisons,
+stream integrity, staged projection identity and successful container cleanup.
+
+| Check | Result |
+|---|---|
+| Eager T16 output | Exact on both chips |
+| Changed-input replay (0, 1, 0) | All 12 control/candidate checks exact |
+| Stale-input negative controls | All four detected |
+| Native paired BF4 weights | Zero mismatches, 43,520 pages per projection/chip |
+| Packed stream after eager/capture/replay | Both raw-byte hashes unchanged |
+| Extra stream memory | 50,319,360 bytes per chip/layer |
+
+Numerical report SHA256:
+`548805b4bc3b64c1441f59c6a7f887ec35df40308f9c10cdbaa57cd4aa62a138`.
+This uses pinned DFlash2 layer-zero weights as geometry-matched operands and the
+existing simulator packer graft. It is **not** target-model quality validation,
+physical-hardware correctness or a throughput measurement. Next is guarded
+integration into the combined candidate, including memory admission and exact
+runtime/source binding before paired hardware requests.
+
 Run **35296716954** passed: **40 seconds for the job**, including the 15-second
 storage gate; the transport simulator step took **18 seconds**. All eight checks
 passed (two geometries, two patterns, both chips), with exact raw words,
@@ -52,8 +74,9 @@ passed both in CI and against the downloaded artifact locally.
 Report SHA256:
 `1febb741244d258ba603694dabf0168ec0a61fa010d8b09e2611a0839c93007d`.
 Source commit: `578cc1e7293a71b451ad8c1a09d2ea8491a70df5`.
-This qualifies the packer transport only. The generated bulk MLP reader,
-arithmetic, changed-input trace replay and combined performance remain unqualified.
+This first run qualifies the packer transport only. The subsequent replay run
+above covers the generated bulk reader and arithmetic in simulation; combined
+performance remains unqualified.
 
 Run **35295292083** stopped at Docker preflight creation (exit 124 after
 30 seconds), before simulator startup. Retained host telemetry recorded
@@ -71,7 +94,8 @@ The simulator-only projection adapter is prepared and host-tested. It changes
 the weight accessor and reader source, retaining the constructor, fused compute,
 input distribution and output publication. It rejects hardware, aliased buffers,
 partial streams and changed bindings/arithmetic. Caller ownership of the extra
-stream remains explicit. Full MLP device qualification is still pending.
+stream remains explicit. Full MLP simulation passed as recorded above;
+physical-hardware qualification is still pending.
 Its manifest identifies the generated bulk reader rather than incorrectly
 retaining the original reader's hash. Host tests also preserve the register
 epilogue's constructor/compute source and reject changed reader metadata.
