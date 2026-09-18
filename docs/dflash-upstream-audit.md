@@ -38,3 +38,18 @@ and compare complete proposal tapes before claiming equivalence.
 
 No new runtime candidate is qualified by this source review. The existing compact
 CPU selector experiment must be checked before implementing a duplicate.
+
+## Bounded host attribution helper
+
+`scripts/ci/dflash_host_attribution.py` provides an opt-in context manager around
+one already-prepared proposal capture. It records preparation, combined candidate
+readback/merge/selection, and the remaining replay/bookkeeping interval. It adds
+no device operations, fences, model loads or tensor copies. At most 64 proposal
+records are retained; subsequent proposals execute normally without timing.
+
+It rejects audit mode and nested scopes, checks operation coverage, and restores
+instance methods even after failure. The remainder is host wall time around
+blocking replay, not a device-kernel breakdown or a claimed optimization.
+CPU tests cover timing accounting, unchanged outputs/order, bounds, restoration,
+invalid clocks and missing stage coverage. Hardware staging is not wired yet;
+this helper alone does not provide new measured attribution.
