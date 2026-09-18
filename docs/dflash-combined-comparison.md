@@ -81,6 +81,30 @@ downloads the pinned simulator artifact, validates it before and after staging,
 and selects the independent native-comparison report validator. No such tag
 has been published; hardware remains paused until the user releases it.
 
+### CPU selector preparation candidate
+
+`dflash_compact_selector.py` gathers the same active codebook entries, validates
+all query rows together, and converts them to FP64 once rather than once per
+eight-query chunk. The sequential greedy arithmetic and first-candidate tie
+rule are unchanged. The existing selector remains the runtime default.
+
+CPU tests match every score and selected token bitwise for 1/7/8/15/16/31
+queries, batches one/two and two seeds. They also check ties, input immutability,
+late-row NaNs, duplicate/out-of-range IDs and arithmetic overflow.
+
+Local Windows synthetic T16 measurement, PyTorch 2.14.0+cpu, two threads,
+five warmups and 40 alternating samples per arm:
+
+| Selector | Median ms | 90th-percentile sample ms |
+| --- | ---: | ---: |
+| Existing | 12.549 | 22.335 |
+| Single preparation | 9.868 | 33.849 |
+
+The median improved but the tail worsened on the shared desktop. This is not
+an AMD-runner result or combined TG gain, and is insufficient for promotion.
+Keep it separate from the pending native-attention comparison so gains or
+regressions can be attributed before combining candidates.
+
 ## Comparison contract
 
 - Start at CTX4096, one stream, the same coding fixture and output budget.
