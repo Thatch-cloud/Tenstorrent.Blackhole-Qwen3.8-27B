@@ -82,7 +82,10 @@ jobs:
               fi
               timeout -k 5 30 "$staging/venv/bin/tt-flash" --version 2>&1 || echo 'version query failed'
               printf '\n=== flasher dependency set ===\n'
-              timeout -k 5 30 "$staging/venv/bin/pip" list 2>&1 | head -20
+              # Write in full first: piping pip straight into head closes the pipe
+              # early, and under pipefail that SIGPIPE fails the whole step.
+              timeout -k 5 30 "$staging/venv/bin/pip" list > "$staging/pip-list.txt" 2>&1 || true
+              head -25 "$staging/pip-list.txt"
             else
               echo 'no flasher staged for this host release'
             fi
