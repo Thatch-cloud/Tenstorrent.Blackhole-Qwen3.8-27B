@@ -30,11 +30,15 @@ phases:
     variable: none (measurement only)
     decision_needed: fabric >= x4 sustained
     gates:
-      - id: repeats
+      - id: repeats_uni
         rule: at_least_repeats
-        params: {count: 9}
+        params: {count: 9, key: repeats_uni}
+      - id: repeats_bidi
+        rule: at_least_repeats
+        params: {count: 9, key: repeats_bidi}
       - id: fabric_ge_pcie_x4
-        rule: candidate_not_worse_than
+        rule: candidate_at_least
+        desc: higher-is-better bandwidth comparison against the P0.1 card-1 x4 baseline; evaluate {uni, bidi} x {p50, p95}, all must pass
         params: {compare: P0.1, margin: 0.0}
     metrics: [uni_GiB_s, bidi_GiB_s, p50_ms, p95_ms]
     records: baseline

@@ -8,7 +8,7 @@ import statistics
 
 
 def at_least_repeats(evidence, params):
-    count = len(evidence.get("repeats", []))
+    count = len(evidence.get(params.get("key", "repeats"), []))
     return count >= params["count"], f"{count} repeats recorded"
 
 
@@ -24,6 +24,16 @@ def candidate_not_worse_than(evidence, params):
     if control is None or candidate is None:
         return False, "control/candidate metric missing"
     ok = candidate <= control * (1.0 + params.get("margin", 0.0))
+    return ok, f"candidate={candidate} control={control} margin={params.get('margin', 0.0)}"
+
+
+def candidate_at_least(evidence, params):
+    """Higher-is-better comparison (e.g. bandwidth): candidate >= control * (1 - margin)."""
+    control = evidence.get("control_metric")
+    candidate = evidence.get("candidate_metric")
+    if control is None or candidate is None:
+        return False, "control/candidate metric missing"
+    ok = candidate >= control * (1.0 - params.get("margin", 0.0))
     return ok, f"candidate={candidate} control={control} margin={params.get('margin', 0.0)}"
 
 
@@ -87,6 +97,7 @@ RULES = {
     "at_least_repeats": at_least_repeats,
     "abba_ordering": abba_ordering,
     "candidate_not_worse_than": candidate_not_worse_than,
+    "candidate_at_least": candidate_at_least,
     "all_stages_present": all_stages_present,
     "sum_matches_total": sum_matches_total,
     "all_cards_present": all_cards_present,
