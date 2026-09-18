@@ -108,6 +108,14 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+`FastWorkerHook` routes a prepared single-request bridge through the worker's
+existing `execute_model` delegation and exposes actual draft IDs through
+`take_draft_token_ids`. It returns committed blocks directly, never queues the
+baseline single-token sampler, rejects a busy sampler queue or second owner, and
+restores the original methods only after trace/request cleanup succeeds. This
+request-scoped hook still needs the production prefill/request factory to attach
+it; no startup registration or platform speculative gate has been enabled.
+
 Installed-vLLM CPU contract run **35325017284 passed** against vLLM 0.25.1.
 This validates real scheduler/output data types, not the complete engine loop or
 device execution. `serving_plugin_patch.py` stages the native batch-capacity hook
