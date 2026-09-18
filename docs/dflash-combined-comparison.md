@@ -18,6 +18,28 @@ assured improvement: historical eager DFlash T32 accepted only 8.82 committed
 tokens/block. A simulator-only full-32-query native-attention helper is prepared;
 cached history, target T32 recipe parity and combined acceptance remain ungated.
 
+T32 native proposal attention run **35299919048** passed its mask-isolation and
+changed-input replay gate in **2m13s** on the exact combined runtime binary.
+Downloaded reports were independently revalidated against generated probe/gate
+sources and native fingerprints. Each context covers six eager outputs, eight
+replays, 56 input-preservation checks, two stale-input controls and four
+masked-key invariance checks across both simulated chips.
+
+| Draft history | Replay/mask gate | Legacy `.01/.01` numerical diagnostic | Maximum absolute error |
+|---|---|---|---:|
+| 31 | Pass | All six comparisons fail | 0.0268841 |
+| 2048 | Pass | All six comparisons pass | 0.00525287 |
+
+This is **approximate proposal attention**, not an exact target replacement.
+The short-history diagnostic is retained, not relaxed or relabelled. There is
+no learned acceptance, target-state or throughput result for this new T32 path.
+Hardware selection remains rejected until the complete request route is admitted.
+
+Report SHA256 (31):
+`aeb9e55a2426c31ea695bd191124abb233ca652dc6252bccc8c4e1cf858b8408`.
+Report SHA256 (2048):
+`3e4e153046d2ebcebb3f9d822b081a04b1e8453a2890cee8499c6644d1bc6857`.
+
 | Attention | CTX | Streams | PP tok/s | Committed TG tok/s |
 | --- | ---: | ---: | ---: | ---: |
 | Composed control | 4096 | 1 | 3271.03 | 93.53 |
