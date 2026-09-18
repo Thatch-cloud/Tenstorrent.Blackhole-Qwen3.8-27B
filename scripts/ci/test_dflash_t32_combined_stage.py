@@ -48,6 +48,8 @@ class T32CombinedStageTests(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[2] / '.github/workflows/qwen-cumulative-t16.yml'
         text = workflow.read_text()
         self.assertIn('actions/artifacts/10531081390/zip', text)
+        self.assertIn('python3 -B -m zipfile -e "$evidence/t32-stream.zip" "$evidence/t32/stream"', text)
+        self.assertNotIn('unzip ', text)
         self.assertIn('t32-preflight-block-stream-dflash-native', text)
 
 

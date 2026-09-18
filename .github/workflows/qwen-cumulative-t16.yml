@@ -106,7 +106,7 @@ jobs:
             gh run download 35305677689 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35305677689-1 --dir "$evidence/t32/down"
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10531081390/zip" > "$evidence/t32-stream.zip"
             mkdir -p "$evidence/t32/stream"
-            unzip -q "$evidence/t32-stream.zip" -d "$evidence/t32/stream"
+            python3 -B -m zipfile -e "$evidence/t32-stream.zip" "$evidence/t32/stream"
             python3 -B read-orchestrator/scripts/ci/dflash_t32_combined_stage.py --checkout read-combined \
               --evidence "$evidence/t32" --manifest read-combined/experiment-results/t32-combined-sources.json
             git -C read-combined diff --check
