@@ -80,6 +80,26 @@ class GateTests(unittest.TestCase):
         evidence = {"per_stage_s": {s: 1.0 for s in load_timeline.REQUIRED_STAGES}, "total_s": 5.0}
         self.assertTrue(gates.evaluate_phase(self.phase("P0.3"), evidence)["all_passed"])
 
+    def test_bandwidth_gate_is_higher_is_better(self):
+        # P0.2 audit finding: raw GiB/s must NOT pass through the
+        # lower-is-better candidate_not_worse_than rule.
+        report = gates.evaluate_phase(self.phase("P0.2"), {
+            "repeats_uni": list(range(9)),
+            "repeats_bidi": list(range(9)),
+            "control_metric": 2.0, "candidate_metric": 2.0,
+        })
+        self.assertTrue(report["all_passed"])
+        slower = gates.evaluate_phase(self.phase("P0.2"), {
+            "repeats_uni": list(range(9)), "repeats_bidi": list(range(9)),
+            "control_metric": 2.0, "candidate_metric": 1.0,
+        })
+        self.assertFalse(slower["all_passed"])
+
+    def test_repeats_gate_per_direction_keys(self):
+        phase = self.phase("P0.2")
+        uni_only = gates.evaluate_phase(phase, {"repeats_uni": list(range(9))})
+        self.assertFalse(uni_only["all_passed"])  # bidi missing -> FAIL, never skipped
+
 
 class InventoryTests(unittest.TestCase):
     def test_reclaimable_counts_card1_reserved(self):
