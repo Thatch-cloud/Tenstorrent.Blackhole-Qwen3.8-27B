@@ -43,6 +43,22 @@ def tile_bytes(common, ttnn, dtype_name, dtype):
         return TILE_BYTES[dtype_name]
 
 
+def bank_receivers_row_major(ttnn, bank_idx, recv_per_bank, ring_cols):
+    """Verbatim from upstream's test_prefetcher_BH_tensor_large.
+
+    Bank b owns ring positions [b*recv_per_bank, (b+1)*recv_per_bank), each as its
+    own single-core CoreRange. Laying them out column-major instead yields a set the
+    GCB factory counts as one receiver per bank.
+    """
+    cores = []
+    for k in range(recv_per_bank):
+        ring_pos = bank_idx * recv_per_bank + k
+        col = ring_pos % ring_cols
+        row = ring_pos // ring_cols
+        cores.append(ttnn.CoreRange(ttnn.CoreCoord(col, row), ttnn.CoreCoord(col, row)))
+    return ttnn.CoreRangeSet(cores)
+
+
 def legal_rings(k_tiles, n_tiles, banks, max_rows):
     """Rings are banks x rows; K and N must both divide the ring for integral shards."""
     out = []
@@ -143,39 +159,10 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     entry['gcb_depth_pages'] = depth
     entry['gcb_size'] = gcb_size
     entry['gcb_size_mb'] = round(gcb_size / (1024 * 1024), 3)
-    # Build the mapping explicitly: the grid is ring_cols wide by ring_rows tall and
-    # bank b feeds column b, so bank b owns exactly ring_rows receivers. Going through
-    # bank_receivers_strided produced one receiver per bank and tripped
-    # "num_senders * num_recv_per_bank == ring_size".
-    bank_to_receivers = [
-        (b, ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(b, 0),
-                                              ttnn.CoreCoord(b, ring_rows - 1))}))
-        for b in range(banks)]
+    bank_to_receivers = [(b, bank_receivers_row_major(ttnn, b, ring_rows, ring_cols))
+                         for b in range(banks)]
     entry['receivers_per_bank'] = ring_rows
-    # Report what was actually constructed: the C++ check disagreed with the intent.
-    probe = {}
-    first = bank_to_receivers[0][1]
-    for attribute in ('num_cores', 'size', 'ranges', 'bounding_box'):
-        value = getattr(first, attribute, None)
-        if value is None:
-            continue
-        try:
-            probe[attribute] = str(value() if callable(value) else value)[:200]
-        except BaseException as error:
-            probe[attribute] = 'error: %s' % str(error)[:120]
-    probe['repr'] = str(first)[:300]
-    probe['receivers_repr'] = str(receivers)[:300]
-    try:
-        probe['contiguous_helper'] = str(
-            common.bank_receivers_contiguous(0, ring_rows, ring_cols))[:300]
-    except BaseException as error:
-        probe['contiguous_helper'] = 'error: %s' % str(error)[:160]
-    try:
-        probe['strided_helper'] = str(
-            common.bank_receivers_strided(0, ring_rows, banks, ring_cols))[:300]
-    except BaseException as error:
-        probe['strided_helper'] = 'error: %s' % str(error)[:160]
-    entry['receiver_set_probe'] = probe
+    entry['bank0_receivers'] = str(bank_to_receivers[0][1])[:120]
     global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
         device, [program_config], [weight], bank_to_receivers=bank_to_receivers, size=gcb_size)
     entry['gcb_built'] = True
