@@ -52,6 +52,41 @@ the packer nor reader transform is connected to serving or the combined runtime.
 
 ## Current evidence
 
+### Combined hardware result
+
+Run **35298946581** passed in **6m18s**, source
+`487d878fe243f18efb618c6889ae3b2399bd3ad1`. The downloaded full-request report
+also passed independent local validation. Both arms use native DFlash proposals,
+the same five-component target stack, CTX4096 and one coding stream.
+
+| Weight transport | PP tok/s | CTX | Committed TG tok/s | Verify/readback ms/block |
+|---|---:|---:|---:|---:|
+| Original reader | 3330.57 | 4096 | 113.89 | 62.99 |
+| Contiguous stream | 3374.50 | 4096 | 116.97 | 60.27 |
+
+Observed TG improvement: **2.71%**; verifier time fell **2.72 ms/block**.
+Two timed requests per arm, 242 committed tokens and 22 blocks per arm;
+proposals, acceptance, target output/state and audited features matched.
+This is one ABBA pilot, not a statistically established general speedup.
+
+Packing all 64 layers took **423.25 ms** before request timing. Bank-rounded
+storage adds **3,227,516,928 bytes/card** (about 3.01 GiB); buffers were released
+and native weight bindings remained unchanged. Neither precision nor serving
+defaults changed. Candidate request setup-inclusive latency did not improve:
+mean prefill/setup/decode was 7060.43 ms versus 6577.05 ms control, excluding
+the separate pool setup above. Do not label the steady-state TG gain an
+end-to-end request-latency win.
+
+At 11 committed tokens/block, 200 TG requires a **55 ms** cycle; this candidate
+still takes **93.92 ms**, including 60.27 ms verification alone. The target is
+not reached and this candidate is not promoted. Further work must materially
+reduce verifier time and/or increase useful committed tokens per cycle.
+
+Raw report SHA256:
+`ff0a18aeb38ac694e810b01bffe1a503d09f992818144925ad06dad7abc91c41`.
+
+### Simulator evidence
+
 Full T16 MLP simulator run **35297164881** passed in **4m25s**, using
 source `b5103f746befd67964893fc0f826ff142c0eefd4`. Downloaded evidence was
 independently checked for the complete eager/replay matrix, weight comparisons,
