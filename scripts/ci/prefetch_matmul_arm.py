@@ -100,10 +100,26 @@ def main():
     report = dict(scope=__doc__, arms=[], speedup_claimed=False)
     try:
         sys.path.insert(0, '/opt/tt-metal')
+        import time
         import torch
         import ttnn
         from tests.ttnn.unit_tests.operations import prefetcher_common as common
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        # A cluster open straight after another process released the cards can hit
+        # "Setting power state failed ... Input/output error" from the ARC. Give the
+        # device a moment and retry rather than reporting a false negative.
+        mesh = None
+        report['open_attempts'] = []
+        for attempt in range(1, 4):
+            try:
+                mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+                report['open_attempts'].append(dict(attempt=attempt, ok=True))
+                break
+            except BaseException as error:
+                report['open_attempts'].append(dict(attempt=attempt, ok=False,
+                                                    error=str(error)[:300]))
+                if attempt == 3:
+                    raise
+                time.sleep(15)
         try:
             report['supported'] = ttnn.experimental.is_tensor_prefetcher_supported(mesh)
             for name in options.projections.split(','):
