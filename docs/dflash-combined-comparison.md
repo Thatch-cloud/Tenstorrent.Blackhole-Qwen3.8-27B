@@ -1,7 +1,43 @@
 # DFlash2 versus the promoted combined runtime
 
-Status: matched combined comparison passed in run 35287866254; DFlash2 is not promoted.
-Control is the user-promoted T16/DSpark stack, not the older DFlash2 recipe.
+Status: native-attention combined comparison passed in run **35293989426**
+in 6m7s. DFlash2 is not promoted; serving defaults are unchanged.
+
+## Latest matched DFlash2 result
+
+| Attention | CTX | Streams | PP tok/s | Committed TG tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Composed control | 4096 | 1 | 3271.03 | 93.53 |
+| Native candidate | 4096 | 1 | 3332.93 | **112.09** |
+
+Two audited arms followed by composed/native/native/composed timed requests.
+Native attention improves complete-request TG **19.84%**. Both arms commit
+242 decode tokens over two timed requests, accept 222/330 proposed tokens,
+and preserve exact target output/state. This remains a coding-fixture pilot,
+not held-out coding quality or serving certification.
+
+Evidence: run 35293989426, `cumulative-validation.json` and independently
+revalidated `dspark-captured-publication-request-hardware.json`, SHA256
+`f6bb5cca6cfba301a8a726de3f6bb1f425369028d01aace89b520985338b7b03`.
+
+| Mean block cost | Composed ms | Native ms |
+| --- | ---: | ---: |
+| Draft | 40.48 | 21.11 |
+| Verify/readback | 62.64 | 62.99 |
+| Select/commit | 11.99 | 11.61 |
+| Complete cycle | 117.48 | 98.01 |
+
+**Next priority: target verification, alongside acceptance.** At the measured
+11 committed tokens/block, 200 TG requires a 55-ms whole cycle. Verification
+alone is approximately 63 ms: even eliminating all drafting/publication costs
+would only reach a conditional 174.63 TG. Another selector-only tweak cannot
+meet the goal. The native candidate still needs roughly 44% less total decode
+time, or substantially better acceptance combined with lower verification cost.
+
+## Earlier matched DSpark control
+
+Run 35287866254 compared the user-promoted T16/DSpark stack with composed
+DFlash2. It was a different run, not a paired control for the new candidate.
 
 | Drafter | CTX | Streams | PP tok/s | Committed TG tok/s |
 | --- | ---: | ---: | ---: | ---: |
@@ -15,8 +51,7 @@ slower here; target optimizations are shared but drafter optimizations are not.
 
 ## DFlash2 optimization sequence
 
-Hardware is paused at the user's request. Do not dispatch hardware jobs or
-reset cards until explicitly released. Continue CPU and bounded simulator work.
+The user released hardware after the CPU/simulator preparation phase.
 
 1. Qualify a separate T16 native proposal-attention candidate. Preserve the
    existing T8 gates and pinned shared sources. Check all 16 live queries,
@@ -28,11 +63,11 @@ reset cards until explicitly released. Continue CPU and bounded simulator work.
 3. Reduce DFlash2 history-publication and selection overhead, measuring each
    change in combination rather than substituting kernel timing for TG.
 
-`dflash_t16_native_attention.py` is an opt-in experimental adapter only; no
-runtime calls it yet. CPU tests cover mask rejection, second-half live-row
+`dflash_t16_native_attention.py` remains an opt-in experimental adapter.
+CPU tests cover mask rejection, second-half live-row
 diagnostics, dispatch configuration and reference masked-key isolation. They
 do not certify device numerics, trace replay, performance or coding quality.
-The next simulator probe must use T16 operands, not relabel T8 learned fixtures.
+Its simulator probes use actual T16 operands, not relabelled T8 learned fixtures.
 
 Simulator run 35289299758 failed during checkout, before any probe execution:
 the shared workspace root was not a Git repository during checkout cleanup.
@@ -56,9 +91,9 @@ validation against current source hashes.
 This qualifies mask/replay behavior only. Native proposal arithmetic is **not
 numerically equivalent** to the reference at short history; tolerances were not
 relaxed. Do not replace target attention or declare coding-quality acceptance.
-Next is an explicitly approximate proposal-only combined candidate, requiring
-fresh exact target-output/state audits and measured acceptance/TG when hardware
-is released. The current combined runtime remains unchanged.
+The subsequent exact-runtime simulator qualification and combined hardware
+audits are recorded below. Native arithmetic remains proposal-only; target
+attention and the promoted DSpark runtime are unchanged.
 
 The combined request API now has an opt-in `native_attention_evidence` argument.
 It requires both pinned simulator reports and matching source/native hashes,
@@ -66,8 +101,7 @@ then enables the T16-specific mask validator and native proposal operation.
 The admission is rechecked on exit and recorded with each request; summary
 validation rejects missing admission. All existing target optimization scopes
 remain active. The default comparison driver does not select this candidate;
-candidate CI staging and combined acceptance are still pending. No hardware
-dispatch is authorized while the pause remains in force.
+the explicit native-comparison driver produced the latest measured result.
 
 The separate `dflash_native_comparison_experiment.py` driver prepares two fresh
 target audits followed by composed/native/native/composed complete requests in
@@ -78,8 +112,8 @@ draft proposals between arms are allowed; different committed output is not.
 This driver is CPU-tested. The existing combined workflow selects it only for
 an explicit `experiment/cumulative-t16-full-v*-dflash-native` tag. That route
 downloads the pinned simulator artifact, validates it before and after staging,
-and selects the independent native-comparison report validator. No such tag
-has been published; hardware remains paused until the user releases it.
+and selects the independent native-comparison report validator. The successful
+hardware tag is `experiment/cumulative-t16-full-v8-dflash-native`.
 
 ### CPU selector preparation candidate
 
