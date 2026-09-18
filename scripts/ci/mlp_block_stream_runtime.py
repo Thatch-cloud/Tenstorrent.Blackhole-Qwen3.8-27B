@@ -30,11 +30,29 @@ def validate_stream(operations, stream):
         raise ValueError('Complete interleaved raw stream required')
 
 
+def t32_hardware_projection(source):
+    from frozen_recipe_context import replace_once
+
+    source = replace_once(source, 'from mlp_block_stream_t32_projection import validate_binding',
+        'from mlp_block_stream_projection import validate_binding')
+    return replace_once(source,
+        '        from mlp_block_stream_t32_stage import require_simulator\n        require_simulator()\n',
+        '        require_hardware(os.environ)\n')
+
+
 @contextmanager
-def scoped_block_stream(directory, evidence, *, runtime_root, operations, weights, streams):
+def scoped_block_stream(directory, evidence, *, runtime_root, operations, weights, streams, token_rows=16):
     import fused_t16_scope
 
-    require_hardware(os.environ)
+    if type(token_rows) is not int or token_rows not in (16, 32):
+        raise ValueError('Explicit supported block-stream runtime width required')
+
+    def require_runtime(environment):
+        require_hardware(environment)
+        if token_rows == 32 and environment.get('QWEN_T32_COMBINED_EXPERIMENT') != '1':
+            raise ValueError('Explicit T32 combined experiment required')
+
+    require_runtime(os.environ)
     if getattr(fused_t16_scope.FusedProjection, '_block_stream_experiment', False):
         raise ValueError('Nested block-stream scopes are unsupported')
     directory = Path(directory)
@@ -48,24 +66,37 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
     for stream in streams:
         validate_stream(operations, stream)
     register = qualify_register(directory, directory / 'register-epilogue-evidence', runtime_root=runtime_root)
-    admission = qualify(directory, evidence, register)
+    qualify_stream = qualify
+    candidate_hash = CANDIDATE_SHA256
+    if token_rows == 32:
+        from mlp_block_stream_t32_gate import qualify as qualify_stream, candidate_sources
+        from mlp_block_stream_t32_gate import CANDIDATE_SHA256 as candidate_hash
+    admission = qualify_stream(directory, evidence, register)
     baseline, = register['kernels']
+    if token_rows == 32:
+        baseline = dict(copy.deepcopy(baseline), token_rows=32)
     expected, = admission['kernels']
     source_path = directory / 'mlp-register-epilogue-candidate/fused_1d.py'
-    source = adapt_projection(source_path.read_text())
-    if hashlib.sha256(source.encode()).hexdigest() != CANDIDATE_SHA256:
+    source = (candidate_sources(directory)['fused_1d.py'] if token_rows == 32
+        else adapt_projection(source_path.read_text()))
+    if hashlib.sha256(source.encode()).hexdigest() != candidate_hash:
         raise ValueError('Executed projection source differs from simulator candidate')
+    if token_rows == 32:
+        source = t32_hardware_projection(source)
     candidate = ModuleType('block_stream_hardware_candidate')
     candidate.__file__ = str(source_path)
+    candidate.require_hardware, candidate.os = require_runtime, os
     exec(compile(source, str(source_path), 'exec'), candidate.__dict__)
     mapping = dict(zip(native_bindings, streams, strict=True))
-    audit = dict(report_sha256=REPORT_SHA256, constructions=0, calls=0, restored=False,
+    audit = dict(report_sha256=admission.get('report_sha256', REPORT_SHA256), constructions=0, calls=0, restored=False,
         constructed_layers=[], stream_allocations=64, serving_defaults_changed=False)
+    if token_rows == 32:
+        audit.update(rows=32, hardware_projection_sha256=hashlib.sha256(source.encode()).hexdigest())
     constructed = set()
     active = True
 
     def validate(projection, current_operations):
-        require_hardware(os.environ)
+        require_runtime(os.environ)
         if not active or current_operations is not operations:
             raise ValueError('Projection escaped its hardware scope')
         stream, native_address, stream_address = projection._hardware_stream_binding
@@ -120,6 +151,6 @@ def scoped_block_stream(directory, evidence, *, runtime_root, operations, weight
             and fused_t16_scope.qualify_simulator is original_qualification)
         if (not audit['restored'] or bindings(operations, weights) != native_bindings
                 or bindings(operations, streams) != stream_bindings
-                or qualify(directory, evidence, register) != admission
+                or qualify_stream(directory, evidence, register) != admission
                 or qualify_register(directory, directory / 'register-epilogue-evidence', runtime_root=runtime_root) != register):
             raise ValueError('Hardware scope did not restore bindings or admission changed')

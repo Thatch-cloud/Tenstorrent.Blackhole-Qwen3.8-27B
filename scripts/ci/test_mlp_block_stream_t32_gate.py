@@ -6,6 +6,7 @@ import unittest
 from mlp_block_stream_gate import validate_report
 from mlp_block_stream_t32_gate import CANDIDATE_SHA256, candidate_sources, qualify
 from mlp_register_epilogue import adapt_projection
+from mlp_block_stream_runtime import t32_hardware_projection
 from test_mlp_block_stream_gate import BlockStreamGateTests
 
 
@@ -36,6 +37,14 @@ class T32StreamAdmissionTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(generated['fused_1d.py'].encode()).hexdigest(), CANDIDATE_SHA256)
             self.assertIn('token_rows != 32', generated['fused_1d.py'])
             self.assertIn('require_simulator()', generated['fused_1d.py'])
+            hardware = t32_hardware_projection(generated['fused_1d.py'])
+            restored = hardware.replace('from mlp_block_stream_projection import validate_binding',
+                'from mlp_block_stream_t32_projection import validate_binding').replace(
+                '        require_hardware(os.environ)\n',
+                '        from mlp_block_stream_t32_stage import require_simulator\n        require_simulator()\n')
+            self.assertEqual(restored, generated['fused_1d.py'])
+            with self.assertRaises(ValueError):
+                t32_hardware_projection(hardware)
 
     def test_report_pin_precedes_runtime_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
