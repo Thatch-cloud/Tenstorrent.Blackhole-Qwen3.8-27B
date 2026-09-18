@@ -11,6 +11,12 @@ from dflash_proposal_trace import PreparedDFlashProposal
 
 class CachedProposalTests(unittest.TestCase):
     def test_update_follows_committed_bank_swaps_without_copying_feature_history(self):
+        self.exercise_update(8, False)
+
+    def test_t16_native_update_validates_all_live_rows_and_bank_swaps(self):
+        self.exercise_update(16, True)
+
+    def exercise_update(self, block_rows, native):
         operations = SimpleNamespace(ReplicateTensorToMesh=lambda mesh: mesh,
             from_torch=lambda value, **kwargs: value.clone(),
             copy_host_to_device_tensor=Mock(side_effect=lambda source, destination: destination.copy_(source)),
@@ -20,11 +26,12 @@ class CachedProposalTests(unittest.TestCase):
             v=torch.full((1, 4, 2048, 128), 3, dtype=torch.bfloat16))]
         cache = SimpleNamespace(position=4093, history_rows=2048, active=active, pending=None,
             owned=list(active[0].values()))
-        device = SimpleNamespace(operations=operations, mesh=object(), position=4093, history_rows=2048, block_rows=8,
+        device = SimpleNamespace(operations=operations, mesh=object(), position=4093, history_rows=2048, block_rows=block_rows,
+            native_proposal_attention=native, validated_native_proposal_masks=set(),
             history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16),
             spare_history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16), progress=None)
         device.temporaries = MethodType(DFlashDevice.temporaries, device)
-        host = proposal_inputs(17, 4093, 2048, 8, 2048)
+        host = proposal_inputs(17, 4093, 2048, block_rows, 2048)
         bucket = SimpleNamespace(context=2048, identifiers=host['identifiers'].clone(), mask=host['mask'].clone(),
             rope={name: tuple(value.clone() for value in host['rope'][name]) for name in ('q', 'k')},
             history=torch.full((1, 1, 2080, 5120), 9, dtype=torch.bfloat16),
@@ -37,6 +44,7 @@ class CachedProposalTests(unittest.TestCase):
         prepared.operations, prepared.device, prepared.mesh = operations, device, device.mesh
         prepared.kv_history, prepared.owned = cache, bucket.inputs
         with patch('dflash_proposal_trace.addresses', side_effect=address), \
+                patch('dflash_t16_native_scope.require_active', return_value={}) as admission, \
                 patch('dflash_device.addresses', side_effect=address), patch('dflash_proposal_trace.release_owned'):
             for position, scalar in ((4093, 5), (4100, 7)):
                 device.position = cache.position = position
@@ -47,6 +55,18 @@ class CachedProposalTests(unittest.TestCase):
                     self.assertTrue(torch.equal(bucket.cached_history[0][name], cache.active[0][name]))
                 self.assertTrue(torch.all(bucket.history == 9))
                 self.assertEqual(bucket.addresses, [address(operations, value) for value in bucket.inputs])
+                if native:
+                    self.assertIn(address(operations, bucket.mask), device.validated_native_proposal_masks)
+            self.assertEqual(admission.call_count, 2 if native else 0)
+            if native:
+                poisoned = proposal_inputs(17, device.position, 2048, block_rows, 2048)
+                poisoned['mask'][..., 15, :] = float('-inf')
+                operations.copy_host_to_device_tensor.reset_mock()
+                with patch('dflash_proposal_trace.proposal_inputs', return_value=poisoned):
+                    with self.assertRaisesRegex(ValueError, 'live T16'):
+                        prepared.update(bucket, 17)
+                operations.copy_host_to_device_tensor.assert_not_called()
+                self.assertNotIn(address(operations, bucket.mask), device.validated_native_proposal_masks)
             operations.copy_host_to_device_tensor.reset_mock()
             cache.pending = object()
             with self.assertRaisesRegex(ValueError, 'fully committed'):
