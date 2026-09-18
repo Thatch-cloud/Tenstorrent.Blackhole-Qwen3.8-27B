@@ -1,0 +1,52 @@
+name: Qwen fast path installed vLLM CPU contract
+on:
+  push:
+    tags: ['experiment/fast-vllm-cpu-v*']
+permissions:
+  contents: read
+jobs:
+  installed-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      VLLM_PLUGINS: ''
+      VLLM_TARGET_DEVICE: empty
+      HF_HUB_OFFLINE: '1'
+      PYTHONPATH: scripts/ci
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: tenstorrent/vllm-tt-plugin
+          ref: bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c
+          path: upstream-plugin
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned empty-target vLLM through upstream recipe
+        run: |
+          python -m pip install uv
+          python -m venv "$RUNNER_TEMP/qwen-vllm-contract"
+          source "$RUNNER_TEMP/qwen-vllm-contract/bin/activate"
+          uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+          cd upstream-plugin
+          source docs/install-vllm-tt.sh
+      - name: Test installed output and scheduler types without devices or weights
+        run: |
+          source "$RUNNER_TEMP/qwen-vllm-contract/bin/activate"
+          python -c 'import vllm, torch; assert vllm.__version__ == "0.25.1"; assert "+cpu" in torch.__version__; print(vllm.__version__, torch.__version__)'
+          python -B -m unittest test_serving_vllm_installed
+          python -B -m unittest test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state test_serving_runner_bridge
+          mkdir -p experiment-results
+          python -c 'import json; print(json.dumps(dict(installed_vllm="0.25.1", passed=True, device_execution=False, engine_loop_tested=False, serving_qualified=False, performance_qualified=False)))' > experiment-results/installed-vllm-contract.json
+          uv pip freeze > experiment-results/python-environment.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-installed-vllm-contract-${{ github.run_id }}
+          path: experiment-results/

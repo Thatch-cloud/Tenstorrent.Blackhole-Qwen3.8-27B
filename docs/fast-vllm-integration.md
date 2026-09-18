@@ -52,6 +52,14 @@ Tests currently use doubles for vLLM output types, not an installed engine.
 Production runner hooks, request-state/token-count updates, page-binding admission
 and real pinned-vLLM scheduler tests remain required before enabling this path.
 
+The pinned TT platform also explicitly rejects any `speculative_config`. Enabling
+the fast path therefore requires a narrow opt-in platform gate plus worker/runner
+hooks; removing that assertion alone is not a solution. The dedicated
+`qwen-fast-vllm-cpu.yml` workflow installs vLLM 0.25.1 with the upstream plugin's
+empty-target recipe on a GitHub-hosted CPU runner. It tests real `SchedulerOutput`,
+`DraftTokenIds` and `ModelRunnerOutput` objects with the request bridge; device
+execution and the complete scheduler/engine loop are still outside that test.
+
 `serving_vllm_state.py` implements the bounded committed-block token update for
 the pinned TT runner's existing fields. It checks captured request identity,
 output-list aliasing, pre-step computed frontier, vocabulary and storage bounds;

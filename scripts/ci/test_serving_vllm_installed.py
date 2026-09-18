@@ -1,0 +1,45 @@
+import unittest
+
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+
+import test_serving_vllm_contract
+from serving_vllm_contract import draft_token_ids, execute_scheduled, model_runner_output
+
+
+class InstalledVllmContractTests(unittest.TestCase):
+    def fixture(self):
+        request, events, reference = test_serving_vllm_contract.SchedulerContractTests().fixture()
+        scheduled = SchedulerOutput.make_empty()
+        scheduled.scheduled_cached_reqs.req_ids = ['request']
+        scheduled.scheduled_cached_reqs.num_computed_tokens = [2]
+        scheduled.num_scheduled_tokens = reference.num_scheduled_tokens
+        scheduled.total_num_scheduled_tokens = reference.total_num_scheduled_tokens
+        scheduled.scheduled_spec_decode_tokens = reference.scheduled_spec_decode_tokens
+        return request, events, scheduled
+
+    def test_real_vllm_draft_and_multi_token_output_types(self):
+        request, _, scheduled = self.fixture()
+        drafts = draft_token_ids(request)
+        self.assertIsInstance(drafts, DraftTokenIds)
+        self.assertEqual(drafts.req_ids, ['request'])
+        self.assertEqual(drafts.draft_token_ids, [list(range(11, 26))])
+        output = execute_scheduled(request, scheduled, cancelled=lambda: False)
+        result = model_runner_output(output)
+        self.assertIsInstance(result, ModelRunnerOutput)
+        self.assertEqual(result.sampled_token_ids, [list(range(11, 27))])
+        self.assertEqual(result.req_id_to_index, {'request': 0})
+
+    def test_real_scheduler_output_rejects_rewritten_drafts(self):
+        request, _, scheduled = self.fixture()
+        scheduled.scheduled_spec_decode_tokens['request'][0] = 99
+        with self.assertRaises(ValueError):
+            execute_scheduled(request, scheduled, cancelled=lambda: False)
+        request.engine.verify.assert_not_called()
+
+    def test_real_output_cancellation_exposes_no_draft_tokens(self):
+        request, _, scheduled = self.fixture()
+        polls = iter((False, True))
+        output = execute_scheduled(request, scheduled, cancelled=lambda: next(polls))
+        self.assertEqual(model_runner_output(output).sampled_token_ids, [[]])
+        self.assertEqual(request.session.position, 2)
