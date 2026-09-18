@@ -41,7 +41,12 @@ def internal_batch_capacity(config):
     return int(config.scheduler_config.max_num_seqs)
 
 
-def validate_request_sampling(parameters, *, prompt_tokens):
+def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
+    primary_eos = getattr(parameters, '_eos_token_id', None)
+    if (any(type(token) is not int or token < 0 for token in eos_ids)
+            or any(type(token) is not int or token not in eos_ids for token in (parameters.stop_token_ids or ()))
+            or (primary_eos is not None and primary_eos not in eos_ids)):
+        raise ValueError('Only target-snapshot EOS stop tokens are supported')
     if (type(prompt_tokens) is not int or prompt_tokens != 4096
             or parameters.temperature != 0 or parameters.n != 1
             or parameters.max_tokens != 256 or parameters.min_tokens != 0
@@ -49,7 +54,7 @@ def validate_request_sampling(parameters, *, prompt_tokens):
             or parameters.logprobs is not None or parameters.prompt_logprobs is not None
             or parameters.presence_penalty != 0 or parameters.frequency_penalty != 0
             or parameters.repetition_penalty != 1
-            or parameters.stop or parameters.stop_token_ids
+            or parameters.stop
             or getattr(parameters, 'structured_outputs', None) is not None
             or getattr(parameters, 'logit_bias', None)
             or getattr(parameters, 'allowed_token_ids', None)

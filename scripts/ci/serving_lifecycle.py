@@ -66,7 +66,7 @@ class FastServingLifecycle:
                     or scheduled.num_scheduled_tokens != {new.req_id: len(new.prompt_token_ids)}
                     or scheduled.total_num_scheduled_tokens != len(new.prompt_token_ids)):
                 raise ValueError('Text-only uncached complete prompt required')
-            validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids))
+            validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids), eos_ids=self.eos_ids)
             self.request_id = new.req_id
             self.capture = self.capture_factory(len(new.prompt_token_ids))
             with self.capture.capture():

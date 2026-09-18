@@ -24,7 +24,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     from dflash_request_runtime import TARGET_TAPS
 
     prompt = tuple(state.prompt_token_ids)
-    validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt))
+    validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt), eos_ids=eos_ids)
     if (len(state.output_token_ids) != 1 or state.num_computed_tokens != len(prompt)
             or not isinstance(state.req_id, str) or not state.req_id
             or len(helpers) != 48):

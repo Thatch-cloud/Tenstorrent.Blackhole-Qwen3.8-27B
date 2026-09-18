@@ -8,6 +8,19 @@ from serving_vllm_contract import draft_token_ids, execute_scheduled, model_runn
 
 
 class InstalledVllmContractTests(unittest.TestCase):
+    def test_target_generation_eos_is_not_rejected_as_custom_stopping(self):
+        from vllm.sampling_params import SamplingParams
+        from serving_fast_policy import validate_request_sampling
+
+        parameters = SamplingParams(temperature=0, max_tokens=256)
+        eos_ids = (248046, 248044)
+        parameters.update_from_generation_config({'eos_token_id': list(eos_ids)}, 248046)
+        self.assertEqual(parameters.stop_token_ids, [248044])
+        validate_request_sampling(parameters, prompt_tokens=4096, eos_ids=eos_ids)
+        parameters.stop_token_ids.append(13)
+        with self.assertRaises(ValueError):
+            validate_request_sampling(parameters, prompt_tokens=4096, eos_ids=eos_ids)
+
     def fixture(self):
         request, events, reference = test_serving_vllm_contract.SchedulerContractTests().fixture()
         scheduled = SchedulerOutput.make_empty()
