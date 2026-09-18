@@ -65,12 +65,13 @@ def acceptance(entry, *, max_rows=16):
         fully_accepted_blocks=sum(block['rows'] > 1 and block['accepted'] == block['rows'] - 1 for block in blocks))
 
 
-def summarize(requests, *, weight_transport=False, bulk_pipeline=False):
+def summarize(requests, *, weight_transport=False, bulk_pipeline=False, kv_publication=False):
     from full_dflash_request import summarize_dflash_requests
 
-    if type(bulk_pipeline) is not bool or (bulk_pipeline and weight_transport):
-        raise ValueError('One explicit weight-transport comparison policy required')
-    transport = weight_transport or bulk_pipeline
+    policies = (weight_transport, bulk_pipeline, kv_publication)
+    if any(type(policy) is not bool for policy in policies) or sum(policies) > 1:
+        raise ValueError('One explicit transport comparison policy required')
+    transport = any(policies)
     if (not isinstance(requests, list) or len(requests) != 6
             or [entry.get('native_proposal_attention') for entry in requests] !=
                 ([True] * 6 if transport else [False, True, False, True, True, False])
@@ -82,6 +83,21 @@ def summarize(requests, *, weight_transport=False, bulk_pipeline=False):
             or [entry['block_stream'].get('bulk_pipeline', False) for entry in requests]
                 != [False, True, False, True, True, False]):
         raise ValueError('Serial/pipeline audits and ABBA on the same bulk streams required')
+    if kv_publication:
+        if (any('block_stream' not in entry or entry['block_stream'].get('bulk_pipeline', False)
+                for entry in requests)
+                or [entry.get('draft_kv_slide', {}).get('enabled') for entry in requests]
+                    != [False, True, False, True, True, False]):
+            raise ValueError('K/V publication ABBA requires unchanged serial bulk weights in both arms')
+        for entry in requests:
+            audit = entry['draft_kv_slide']
+            if audit.get('restored') is not True or audit.get('serving_defaults_changed') is not False:
+                raise ValueError('K/V publication scope must restore without changing serving')
+            if audit['enabled'] and (type(audit.get('prepare_calls')) is not int
+                    or audit['prepare_calls'] != len(entry.get('blocks', []))
+                    or type(audit.get('tensor_copies')) is not int
+                    or audit['tensor_copies'] != 10 * audit['prepare_calls']):
+                raise ValueError('Every five-layer K/V publication must use the candidate')
     if any(len(entry.get('prompt_tokens', [])) != 4096 or entry.get('max_new_tokens') != 256 for entry in requests):
         raise ValueError('Matched CTX4096 and 256-output T16 comparison required')
     reference = requests[0]
@@ -129,7 +145,8 @@ def summarize(requests, *, weight_transport=False, bulk_pipeline=False):
         candidate_over_control=output['candidate']['committed_tokens_per_second'] / output['control']['committed_tokens_per_second'],
         target_reached=output['candidate']['target_reached'], proposal_trajectories_may_differ=not transport,
         performance_promoted=False, serving_qualified=False, held_out_coding_quality=False,
-        scope=('Only target MLP weight transport changes; exact proposals and target tokens/state; not serving certification'
+        scope=('Only draft K/V publication transport changes; exact proposals and target tokens/state; not serving certification'
+            if kv_publication else 'Only target MLP weight transport changes; exact proposals and target tokens/state; not serving certification'
             if transport else 'Different draft arithmetic with exact native target tokens/state; not held-out quality or serving certification'))
 
 
