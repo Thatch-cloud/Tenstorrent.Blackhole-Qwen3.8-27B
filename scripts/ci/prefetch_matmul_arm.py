@@ -227,21 +227,36 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
             act, weight, global_cb=global_cb, program_config=program_config,
             memory_config=out_mem, compute_kernel_config=compute_kernel_config, dtype=dtype)
 
-    # The control cannot reuse the receiver-contiguous weight: without a global_cb the
-    # matmul requires a width-sharded or interleaved-DRAM in1. Give it ordinary
-    # interleaved tensors and let ttnn pick the schedule - that is what this workload
-    # does today without a prefetcher.
-    control_weight = ttnn.from_torch(pt_weight, device=device, dtype=dtype,
-                                     layout=ttnn.TILE_LAYOUT,
-                                     memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    control_act = ttnn.from_torch(pt_act, device=device, dtype=ttnn.bfloat16,
-                                  layout=ttnn.TILE_LAYOUT,
-                                  memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    entry['control_layout'] = 'interleaved_dram'
+    # The control is the path this workload actually uses today:
+    # dram_sharded_projection at its native T16 and native (unpadded) width. Charging
+    # the padding to the prefetched arm is the point - that is the real trade.
+    control = None
+    try:
+        import dram_sharded_projection as projection
+        control_config = projection.configurations(ttnn, device, name)
+        control_plan = control_config['plan']
+        entry['control'] = dict(path='dram_sharded_projection',
+                                width=control_plan['width'],
+                                workers=control_plan['workers'],
+                                per_core_N=control_plan['per_core_N'],
+                                in0_block_w=control_plan['in0_block_w'])
+        pt_control_weight = pt_weight[:, :, :, :native_width].contiguous()
+        control_weight = ttnn.as_tensor(
+            pt_control_weight, device=device, dtype=dtype, layout=ttnn.TILE_LAYOUT,
+            memory_config=control_config['weights'])
+        # execute() validates a T16 BF16 source.
+        pt_control_act = pt_act[:, :16, :].contiguous() if pt_act.shape[1] >= 16 else pt_act
+        pt_control_act = torch.randn(1, 1, 16, inner, dtype=torch.bfloat16)
+        control_act = ttnn.from_torch(pt_control_act, device=device, dtype=ttnn.bfloat16,
+                                      layout=ttnn.TILE_LAYOUT,
+                                      memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-    def control():
-        return ttnn.linear(control_act, control_weight,
-                           compute_kernel_config=compute_kernel_config, dtype=dtype)
+        def control():
+            kept = []
+            return projection.execute(ttnn, control_act, control_weight, control_config,
+                                      compute_kernel_config, lambda t: (kept.append(t), t)[1])
+    except BaseException as error:
+        entry['control_unavailable'] = '%s: %s' % (type(error).__name__, str(error)[:400])
 
     with common.tensor_prefetcher_session(device):
         out = prefetched()
@@ -277,7 +292,12 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
         prefetch_ms, control_ms = [], []
         for _ in range(3):
             prefetch_ms.append(timed(prefetched, 10))
-            control_ms.append(timed(control, 10))
+            if control is not None:
+                control_ms.append(timed(control, 10))
+        if not control_ms:
+            entry['prefetch_ms_median'] = round(sorted(prefetch_ms)[1], 4)
+            entry['prefetch_ms_all'] = [round(v, 4) for v in sorted(prefetch_ms)]
+            return
         prefetch_ms.sort()
         control_ms.sort()
         entry['prefetch_ms_median'] = round(prefetch_ms[1], 4)
@@ -304,6 +324,7 @@ def main():
     device = None
     try:
         sys.path.insert(0, '/opt/tt-metal')
+        sys.path.insert(0, '/source/scripts/ci')
         import torch
         import ttnn
         from tests.ttnn.unit_tests.operations import prefetcher_common as common
