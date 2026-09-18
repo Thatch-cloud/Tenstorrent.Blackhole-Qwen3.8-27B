@@ -1,13 +1,45 @@
 import ast
+import hashlib
+import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from gdn_shared_qk_t32_adapter import adapt_probe, payloads, require_simulator
+from gdn_shared_qk_t32_stage import stage
 
 
 class T32SharedQKAdapterTests(unittest.TestCase):
+    def test_stage_retains_baseline_builders_and_records_generated_sources(self):
+        directory = Path(__file__).parent
+        names = ('gdn_shared_qk_program.py', 'gdn_shared_qk_pipeline.py', 'gdn-shared-recurrence-probe.py')
+        originals = {name: (directory / name).read_text() for name in names}
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            scripts = checkout / 'scripts/ci'
+            scripts.mkdir(parents=True)
+            for name, source in originals.items():
+                (scripts / name).write_text(source)
+            (scripts / 'simulator-suite.sh').write_text((directory / 'simulator-suite.sh').read_text())
+            manifest = checkout / 'candidate.json'
+            with patch('gdn_shared_qk_t32_stage.subprocess.check_output',
+                    side_effect=lambda command: originals[command[-1].rsplit('/', 1)[1]].encode()):
+                stage(checkout, manifest)
+                with self.assertRaises(ValueError):
+                    stage(checkout, manifest)
+            report = json.loads(manifest.read_text())
+            self.assertEqual(report['rows'], 32)
+            self.assertFalse(report['simulator_qualified'])
+            for name in names[:2]:
+                self.assertEqual((scripts / name).read_text(), originals[name])
+            for name, digest in report['after'].items():
+                self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), digest)
+                if name.endswith('.py'):
+                    compile((scripts / name).read_text(), name, 'exec')
+            self.assertIn('then limit=420', (scripts / 'simulator-suite.sh').read_text())
+
     def test_probe_checks_all_states_and_changing_inputs(self):
         source = Path(__file__).with_name('gdn-shared-recurrence-probe.py').read_text()
         probe = adapt_probe(source)
