@@ -11,9 +11,11 @@ LOCAL_SOURCES = {'gdn-output-grid-probe.py': 'mlp-down-grid-probe.py',
     'mlp_down_grid.py': 'mlp_down_grid.py', 'attention_batch.py': 'attention_batch.py'}
 
 
-def validate_report(report):
+def validate_report(report, *, rows=16):
+    if type(rows) is not int or rows not in (16, 32):
+        raise ValueError('Explicit supported MLP-down report width required')
     expected = dict(passed=True, closed_cleanly=True, backend='simulator', stage='complete',
-        hardware_qualified=False, timing_qualified=False, projection='mlp_down', rows=16,
+        hardware_qualified=False, timing_qualified=False, projection='mlp_down', rows=rows,
         k=8704, n=5120, grids=dict(control=[11, 3], candidate=[11, 8]),
         output_placement='L1', weights='bfloat8_b')
     if (any(report.get(key) != value or type(report.get(key)) is not type(value)
