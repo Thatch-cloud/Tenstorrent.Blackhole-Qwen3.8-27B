@@ -1,0 +1,53 @@
+name: Qwen fast serving source and binary bundle
+on:
+  push:
+    tags: ['experiment/serving-bundle-v*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: serving-bundle-orchestrator
+          persist-credentials: false
+      - name: Package inventoried runtime without model or card access
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          output=$(mktemp -d "$RUNNER_TEMP/qwen-serving-bundle.XXXXXX")
+          echo "QWEN_SERVING_BUNDLE=$output" >> "$GITHUB_ENV"
+          gh run download 35328435640 --repo "$GITHUB_REPOSITORY" \
+            --name qwen-serving-image-inventory-35328435640 --dir "$output/inventory"
+          echo "9a812503335cf2792e08b70e9aaf3e46c32bf66cfbf5a4d54cc1016533455ee3  $output/inventory/serving-image-inventory.json" | sha256sum -c -
+          python3 -B serving-bundle-orchestrator/scripts/ci/serving_bundle.py \
+            --staged "$GITHUB_WORKSPACE/read-combined" --updates serving-bundle-orchestrator \
+            --inventory "$output/inventory/serving-image-inventory.json" --output "$output/bundle"
+          volume=qwen-experiments-f1e9b1a64b4f
+          docker volume inspect "$volume" >/dev/null
+          timeout -k 10 90 docker run --rm --pull never --network none --read-only \
+            --cpus 2 --memory 1g --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --mount "type=volume,src=$volume,dst=/cache,readonly" \
+            --mount "type=bind,src=$output/bundle,dst=/bundle" \
+            --entrypoint python3 sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465 \
+            -c 'import hashlib,pathlib,shutil; source=pathlib.Path("/cache/dspark-native-v1/b501e1084c8fdb949b203b8ede33bf0049f45686a80944ca8ceab532f3a02c90/_ttnncpp.so"); assert hashlib.sha256(source.read_bytes()).hexdigest()=="4b7299c1c9233b25aad310bc9a9d751a0631c6af0602cb1a151f934b4bfa07ea"; shutil.copyfile(source,"/bundle/_ttnncpp.so")'
+          tar -C "$output/bundle" -cf "$output/fast-serving-bundle.tar" .
+          cp "$output/bundle/serving-bundle.json" "$output/serving-bundle.json"
+          sha256sum "$output/fast-serving-bundle.tar" > "$output/bundle.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fast-serving-bundle-${{ github.run_id }}
+          compression-level: 0
+          path: |
+            ${{ env.QWEN_SERVING_BUNDLE }}/fast-serving-bundle.tar
+            ${{ env.QWEN_SERVING_BUNDLE }}/serving-bundle.json
+            ${{ env.QWEN_SERVING_BUNDLE }}/bundle.sha256

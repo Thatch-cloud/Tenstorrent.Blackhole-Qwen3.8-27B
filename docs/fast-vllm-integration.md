@@ -108,6 +108,20 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+Inventory **35328435640 passed**: the retained 52,480,392-byte runtime binary
+matches `4b7299c1c9233b25aad310bc9a9d751a0631c6af0602cb1a151f934b4bfa07ea`,
+and the staged direct-DMA kernel matches its qualified source. Docker reports
+`zot.thatch.local:5000/tt-vllm@sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465`
+as a RepoDigest; a clean registry pull is still unverified. The image contains
+PyTorch 2.11.0+cpu and vLLM 0.25.1+empty, distinct from the hosted CPU test environment.
+
+`serving_bundle.py` checks the inventoried staged files before packaging them.
+It overlays only serving helpers, the shared runtime wrapper and the singleton
+page-table exposure; it does not overwrite the frozen verifier/geometry with
+branch copies. The bundle job exports the hash-checked cached binary without
+devices or model mounts. Native runtime source restoration and a built serving
+image remain required; the bundle itself is not deployment acceptance.
+
 The source-staging patch now wires explicit `qwen_fast_t16` opt-in through the
 pinned platform guard and worker warmup entrypoint, and closes fast resources
 before the worker deletes its model. Unselected configurations retain the original
