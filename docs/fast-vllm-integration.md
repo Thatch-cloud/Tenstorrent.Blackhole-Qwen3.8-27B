@@ -108,6 +108,15 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+The explicit startup entrypoint is `serving_startup.start(worker)`. It requires
+absolute recipe paths, verifies the pinned four-link descriptor/sampling sources,
+loads DFlash fixtures once, owns the 64-layer serial weight-stream pool, and
+attaches the combined runtime. Startup currently remains unregistered in the
+plugin; the old platform rejection therefore still prevents accidental enabling.
+The new sampler retains the four-link override for the attachment lifetime.
+CPU attachment testing initially failed because a mocked module registry removed
+PyTorch after first import; the fixture now imports it before registry patching.
+
 `serving_runtime.attach_combined_runtime` composes the loaded worker, shared
 admitted recipe, prefill feature capture, request factory, scheduler page binder
 and worker lifecycle. It requires the native-draft, serial weight-stream and KV
