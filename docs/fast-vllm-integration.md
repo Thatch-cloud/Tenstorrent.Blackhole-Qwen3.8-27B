@@ -46,6 +46,31 @@ evidence instead of exit code alone and passes those checks. Nanobind instance
 warnings still appear at interpreter exit; this is not a leak-free soak test.
 Nothing is deployed or production-qualified.
 
+### Where the time goes
+
+Combined HTTP diagnostic `35340958705` passes both exact requests and explicit
+worker/device shutdown. It adds host timestamps, not Tracy or device fences.
+Each request commits 121 decode tokens in 11 blocks after its prefill seed.
+
+| Mean per block | First request | Second request |
+|---|---:|---:|
+| Draft | 22.63 ms | 21.15 ms |
+| Verify, including staging/readback | 63.18 ms | 63.38 ms |
+| Commit and publication | 21.65 ms | 9.74 ms |
+| Scheduling and other gaps | 1.11 ms | 1.26 ms |
+| Complete measured cycle | 108.56 ms | 95.53 ms |
+| Blocking verifier trace, nested in verify | 59.13 ms | 59.11 ms |
+
+The 200 TG budget at this yield is **55 ms/block**. The verifier trace alone
+already exceeds it. Removing all measured scheduling gaps cannot solve this;
+even eliminating drafting leaves about 74.38 ms in the second request. Keeping
+other phases unchanged would require verification below about **22.85 ms**, not
+another sub-millisecond host tweak. Target execution and useful accepted tokens
+per verification are therefore the next performance priorities. Earlier rejected
+GDN read-order/double-buffer and bulk-pipeline candidates stay rejected; these
+measurements do not justify rerunning them unchanged. Request construction and
+prefill remain separate TTFT work, not hidden inside claimed decode speedups.
+
 The DFlash2 registry fix is metadata-only: it preserves `DFlash2DraftModel`
 through vLLM configuration and rejects standard model construction. Actual draft
 execution remains in the explicit combined TT worker, not an aliased upstream
