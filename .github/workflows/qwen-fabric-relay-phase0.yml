@@ -1,7 +1,7 @@
 name: Qwen fabric-relay Phase-0 identity capture
 on:
   push:
-    tags: ['experiment/fabric-relay-phase0-v1', 'experiment/fabric-relay-phase0-v2']
+    tags: ['experiment/fabric-relay-phase0-v1', 'experiment/fabric-relay-phase0-v2', 'experiment/fabric-relay-phase0-v3']
 permissions:
   contents: read
 concurrency:

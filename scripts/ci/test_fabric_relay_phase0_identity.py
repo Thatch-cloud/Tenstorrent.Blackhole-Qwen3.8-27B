@@ -37,10 +37,11 @@ class CaptureTests(unittest.TestCase):
         def read_text(path):
             return proc[path]
 
-        def run_command(cmd, timeout=0):
+        def run_command(cmd, timeout=0, **_):
             class Result:
                 returncode = 0
                 stdout = "board state ok"
+                stderr = ""
             return Result()
 
         snapshot = capture(read_text=read_text, run_command=run_command)
@@ -48,13 +49,14 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("MemTotal", snapshot["meminfo_total_line"])
         self.assertEqual(snapshot["host_pressure"]["cpu"], "some avg10=1.0")
         self.assertEqual(snapshot["tt_smi_state"]["returncode"], 0)
+        self.assertEqual(snapshot["tt_smi_state"]["output"], "board state ok")
 
     def test_missing_smi_is_captured_not_fatal(self):
         snapshot = capture(read_text=lambda p: "", run_command=self._raise_oserror)
         self.assertIn("error", snapshot["tt_smi_state"])
 
     @staticmethod
-    def _raise_oserror(cmd, timeout=0):
+    def _raise_oserror(cmd, timeout=0, **_):
         raise OSError("no such file")
 
 

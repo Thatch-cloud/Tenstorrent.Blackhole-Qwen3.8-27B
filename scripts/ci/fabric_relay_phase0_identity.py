@@ -61,8 +61,9 @@ def capture(read_text=_read_text, run_command=subprocess.run):
     meminfo = read_optional("/proc/meminfo")
     pressure = {name: read_optional(f"/proc/pressure/{name}") for name in ("cpu", "memory", "io")}
     try:
-        smi = run_command(["/home/thatch/.local/bin/tt-smi", "-s"], timeout=30)
-        smi_state = {"returncode": smi.returncode, "output": smi.stdout[-4000:]}
+        smi = run_command(["/home/thatch/.local/bin/tt-smi", "-s"],
+                          timeout=30, capture_output=True, text=True)
+        smi_state = {"returncode": smi.returncode, "output": (smi.stdout or "")[-4000:]}
     except (OSError, subprocess.TimeoutExpired) as error:
         smi_state = {"error": repr(error)}
     return {
