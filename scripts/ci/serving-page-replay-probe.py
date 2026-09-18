@@ -48,8 +48,8 @@ def main():
             grouped_readers=[reader], readers=[reader], writers=[SimpleNamespace(pages=[singleton])])
         engine = SimpleNamespace(phase='idle', pages=pages_host.clone(), mesh=mesh, operations=ttnn,
             buckets={16: dict(fixture=fixture)})
-        binding = VerifierPageBinding(engine, (3,), physical_pages=8)
-        expected = torch.zeros((8, 2, 64, 256), dtype=torch.bfloat16)
+        binding = VerifierPageBinding(engine, (3,), physical_pages=68)
+        expected = torch.zeros((68, 2, 64, 256), dtype=torch.bfloat16)
         cache = upload(expected, ttnn.bfloat8_b)
         position = upload(torch.tensor([0], dtype=torch.int32), ttnn.int32)
         source = upload(torch.ones((1, 1, 32, 256), dtype=torch.bfloat16), ttnn.bfloat16)
