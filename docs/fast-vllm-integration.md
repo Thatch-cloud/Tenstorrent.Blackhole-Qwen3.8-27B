@@ -12,19 +12,18 @@ HTTP serving is not qualified; nothing has been published or deployed.**
 |---|---|---|
 | Pinned vLLM contracts | CPU 35327950138 | Real data types and pinned worker delegation pass; no complete engine loop |
 | Source regression | CPU 35329738162 | Passed |
-| Serving image | Build 35334618239 | Passed; includes EOS admission and runtime path fixes; superseding DFlash2 registration build pending |
+| Serving image | Build 35336103126 | Passed; includes EOS admission, runtime path and explicit DFlash2 registration fixes |
 | Startup dependencies | Image 35330608987 | Real imports, request components and topology source fingerprints pass |
 | Real scheduler and allocator | CPU image 35332493127 | 4K prompt, 256 output budget, mixed acceptance, tail buckets, append-only page growth, completion, replacement and abort pass |
 | Page uploads and captured cache writes | Simulator 35333075458 | 40 exact checks across two chips, stable page-buffer addresses and clean close |
 | Page-updated T16 attention | Simulator 35333588113 | Exact native-serial equality on both chips at positions 4096 and 4160; stale-output controls and clean close pass |
-| DFlash2 metadata | CPU image 35335959408 | Real speculative configuration passes without weights; separate guard test had an API-signature error, fixed in c3e60dc and awaiting image checks |
+| DFlash2 metadata | Image 35336103126 | Real speculative configuration preserves DFlash2 architecture; standard model construction fails closed; all 8 installed-vLLM tests pass |
 | Two-card HTTP lifecycle | Hardware 35335212616 | Failed before weight loading: missing DFlash2 registry entry; no throughput result |
 | Registry / Thatch deployment | Pending | Existing serving unchanged |
 
-Build source: `555e0cfd841fb90a94889876774c44067df5b15f`.
-Local runner tag: `qwen-fast-serving:ci-555e0cfd841fb90a94889876774c44067df5b15f`.
+Build source: `c3e60dc` (tag `experiment/fast-serving-image-v7`).
 Local Docker ID:
-`sha256:42390dc83917d0c95cafbf43c1bc4c2367eef7feb3465c8b19711042004eacdd`.
+`sha256:1b33b800d32b95a9b81b819e6a006f419fa7bb7f3bb5d763fa30ef3da29ca0c7`.
 This ID is not a registry manifest digest or proof of a clean pull elsewhere.
 The build accessed neither cards nor weights.
 
