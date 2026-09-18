@@ -19,6 +19,7 @@ def evidence_paths(directory):
 
 def preload(directory, runtime):
     directory = Path(directory)
+    validate_fusion_routes(directory)
     evidence = evidence_paths(directory)
     register = qualify_register(directory, directory / 'register-epilogue-evidence', runtime_root=runtime)
     admissions = dict(proposals=admit(evidence['attention'], evidence['cache'], directory, runtime),
@@ -28,6 +29,17 @@ def preload(directory, runtime):
         stream=qualify_stream(directory, evidence['stream'], register))
     return dict(passed=True, stage='preload', weights_loaded=False, device_execution=False,
         hardware_qualified=False, performance_qualified=False, admissions=admissions)
+
+
+def validate_fusion_routes(directory):
+    import fused_t16_scope
+
+    control = getattr(fused_t16_scope, 'FusedT16Arm', None)
+    candidate = getattr(fused_t16_scope, 'FusedT32Arm', None)
+    if (Path(fused_t16_scope.__file__).resolve() != (Path(directory) / 'fused_t16_scope.py').resolve()
+            or not isinstance(control, type) or not isinstance(candidate, type)
+            or not issubclass(candidate, control) or control.token_rows != 16 or candidate.token_rows != 32):
+        raise ValueError('Staged width-aware T16/T32 fusion routes required before loading weights')
 
 
 if __name__ == '__main__':

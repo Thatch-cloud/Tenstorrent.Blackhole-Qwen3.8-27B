@@ -53,6 +53,7 @@ class T32CombinedStageTests(unittest.TestCase):
             report = json.loads(manifest.read_text())
             self.assertIs(report['preflight_only'], preflight_only)
             self.assertFalse(report['hardware_qualified'])
+            self.assertEqual((scripts / 'fused_t16_scope.py').read_bytes(), (source / 'fused_t16_scope.py').read_bytes())
             self.assertEqual((scripts / 'frozen_context_geometry.py').read_text(), 'pinned context geometry')
             for name, expected in report['sources'].items():
                 self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), expected)
