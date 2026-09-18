@@ -3,6 +3,8 @@
 
 def fast_requested(config):
     extra = config.additional_config
+    if extra is None:
+        return False
     if not isinstance(extra, dict):
         raise ValueError('Explicit additional_config mapping required')
     enabled = extra.get('qwen_fast_t16', False)

@@ -108,6 +108,14 @@ OpenAI proxy and describe it as vLLM integration.
 
 ## Image and platform requirements
 
+The source-staging patch now wires explicit `qwen_fast_t16` opt-in through the
+pinned platform guard and worker warmup entrypoint, and closes fast resources
+before the worker deletes its model. Unselected configurations retain the original
+warmup and speculative rejection. Staging verifies the exact plugin revision and
+validates all three edits before writing. This is source integration, not a built
+image or hardware/API acceptance; recipe directories and the complete admitted
+runtime must still be packaged before launch.
+
 The explicit startup entrypoint is `serving_startup.start(worker)`. It requires
 absolute recipe paths, verifies the pinned four-link descriptor/sampling sources,
 loads DFlash fixtures once, owns the 64-layer serial weight-stream pool, and

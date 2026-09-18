@@ -44,6 +44,7 @@ jobs:
           QWEN_PLUGIN_SOURCE=upstream-plugin python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
           python -B -m unittest test_serving_lifecycle
+          python -B -m unittest test_serving_cache_owner test_serving_runtime test_serving_startup
           QWEN_PLUGIN_SOURCE=upstream-plugin python -B -m unittest test_serving_plugin_patch test_serving_fast_policy
           python scripts/ci/serving_plugin_patch.py upstream-plugin
           python -m compileall -q upstream-plugin/src/vllm_tt_plugin
