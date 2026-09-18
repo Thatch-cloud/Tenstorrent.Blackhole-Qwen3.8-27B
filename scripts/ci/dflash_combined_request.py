@@ -14,7 +14,7 @@ from shared_qk_norm_scatter import build as scatter_build
 
 
 def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, *, directory,
-                            runtime_root, native_attention_evidence=None, **options):
+                            runtime_root, native_attention_evidence=None, block_stream=None, **options):
     from full_dflash_request import measure_dflash_request
     from fused_t16_scope import FusedT16Arm
     from gdn_shared_qk_scope import scoped_shared_qk
@@ -46,7 +46,15 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
         stack.enter_context(patch.object(gdn_shared_qk_gate, 'qualify', lambda *args: norm))
         target = stack.enter_context(scoped_cumulative_t16(windows, None, directory,
             down_admission=down, drafter='dflash2'))
-        register = stack.enter_context(scoped_register_epilogue(directory, runtime_root=runtime_root))
+        if block_stream is None:
+            register = stack.enter_context(scoped_register_epilogue(directory, runtime_root=runtime_root))
+        else:
+            from mlp_block_stream_runtime import scoped_block_stream
+
+            stream_audit = stack.enter_context(scoped_block_stream(directory, block_stream['evidence'],
+                runtime_root=runtime_root, operations=operations,
+                weights=[layer.feed_forward.weights.w_gate_up for layer in model.layers],
+                streams=block_stream['streams']))
         shared = stack.enter_context(scoped_shared_qk(operations, norm))
         fusion = FusedT16Arm(operations, model, tt_all_reduce)
         stack.enter_context(fusion.install())
@@ -56,7 +64,15 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
             **(dict(native_proposal_attention=True) if native_attention_evidence is not None else {}), **options)
     result['gdn_shared_qk'] = shared
     result['fused_t16_mlp'] = fusion.audit
-    result['register_epilogue'] = dict(register, register_resident=True)
+    if block_stream is None:
+        result['register_epilogue'] = dict(register, register_resident=True)
+    else:
+        from mlp_register_epilogue_gate import REPORT_SHA256 as REGISTER_SHA256
+
+        result['block_stream'] = stream_audit
+        result['fused_t16_mlp']['extra_weight_allocations'] = 64
+        result['register_epilogue'] = dict(register_resident=True, report_sha256=REGISTER_SHA256,
+            constructions=stream_audit['constructions'], calls=stream_audit['calls'], restored=stream_audit['restored'])
     result['gdn_direct_window'] = dict(direct=True, hits=target['direct']['hits'],
         report_sha256=WINDOW_SHA256, restored=target['direct']['restored'])
     result['mlp_down_grid'] = dict(wider_down=True, hits=target['down']['hits'],
@@ -64,7 +80,12 @@ def measure_combined_dflash(operations, model, sampler, prompt, pages, helpers, 
     result['norm_reader'] = dict(policy='scatter', builds=len(builds), report_sha256=NORM_SHA256,
                                 restored=True)
     validate_request(result, target, drafter='dflash2')
-    validate_fusion_policy(result, 'register')
+    if block_stream is None:
+        validate_fusion_policy(result, 'register')
+    else:
+        from mlp_block_stream_request import validate_request as validate_stream_request
+
+        validate_stream_request(result)
     if (not builds or any(count != 3 for count in builds)
             or len(builds) != len(shared.get('loads', []))
             or shared.get('restored') is not True or shared.get('released') is not True

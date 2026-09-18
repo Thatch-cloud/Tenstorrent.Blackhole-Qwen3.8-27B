@@ -28,12 +28,12 @@ def validate_route(request, arm):
         raise ValueError('Winning norm prefetch and incremental publication required in both arms')
 
 
-def validate_fusion(request, expected_sha256=BASELINE_SHA256):
+def validate_fusion(request, expected_sha256=BASELINE_SHA256, *, expected_extra_weight_allocations=0):
     fusion = request.get('fused_t16_mlp', {})
     if (fusion.get('passed_simulator') != expected_sha256
             or fusion.get('rows') != 16 or fusion.get('layers') != 64
             or fusion.get('restored') is not True or fusion.get('native_bindings_unchanged') is not True
-            or fusion.get('extra_weight_allocations') != 0 or len(fusion.get('hits', [])) != 64
+            or fusion.get('extra_weight_allocations') != expected_extra_weight_allocations or len(fusion.get('hits', [])) != 64
             or any(type(count) is not int or count < 1 for count in fusion['hits'])
             or len(set(fusion['hits'])) != 1):
         raise ValueError('Restored all-layer T16 fusion and retained weights required')

@@ -8,7 +8,7 @@ import dflash_combined_request as combined
 
 
 class CombinedDFlashTests(unittest.TestCase):
-    def exercise(self, fail=False, native=False):
+    def exercise(self, fail=False, native=False, block_stream=False):
         active = []
         audits = []
 
@@ -27,9 +27,12 @@ class CombinedDFlashTests(unittest.TestCase):
         shared = dict(loads=[{}] * 48, released=True, admission=dict(report_sha256=combined.NORM_SHA256))
         fusion = SimpleNamespace(audit=dict(hits=[1] * 64), install=lambda: scoped('fusion', {}))
         module = SimpleNamespace(build=object(), scoped_shared_qk=lambda *args: scoped('shared', shared))
+        model = SimpleNamespace(layers=[SimpleNamespace(feed_forward=SimpleNamespace(
+            weights=SimpleNamespace(w_gate_up=index))) for index in range(64)])
 
         def measure(*args, **kwargs):
-            self.assertEqual(active, (['native'] if native else []) + ['target', 'register', 'shared', 'fusion'])
+            self.assertEqual(active, (['native'] if native else []) +
+                ['target', 'stream' if block_stream else 'register', 'shared', 'fusion'])
             self.assertIs(kwargs.get('native_proposal_attention', False), native)
             for key in ('proposal_capture', 'commit_only_gdn', 'fused_convolution', 'cache_history', 'target_attention_t16'):
                 self.assertIs(kwargs[key], True)
@@ -47,6 +50,9 @@ class CombinedDFlashTests(unittest.TestCase):
                 'models.tt_transformers.tt.ccl': SimpleNamespace(tt_all_reduce=object())}), \
                 patch('full_dflash_request.measure_dflash_request', measure), \
                 patch('dflash_t16_native_scope.scoped_native_t16', side_effect=lambda *args: scoped('native', {})), \
+                patch('mlp_block_stream_runtime.scoped_block_stream',
+                    side_effect=lambda *args, **kwargs: scoped('stream', dict(constructions=64, calls=64))), \
+                patch('mlp_block_stream_request.validate_request') as stream_validation, \
                 patch.object(combined, 'qualify_windows', return_value={}), \
                 patch.object(combined, 'qualify_down', return_value={}), \
                 patch.object(combined, 'qualify_norm', return_value={}), \
@@ -55,9 +61,12 @@ class CombinedDFlashTests(unittest.TestCase):
                 patch.object(combined, 'scatter_build', return_value=[1, 2, 3]), \
                 patch.object(combined, 'validate_request'), patch.object(combined, 'validate_fusion_policy'):
             try:
-                return combined.measure_combined_dflash(None, None, None, [1] * 4096, None, None,
+                result = combined.measure_combined_dflash(None, model, None, [1] * 4096, None, None,
                     directory='.', runtime_root='.', max_new_tokens=256,
+                    **(dict(block_stream=dict(evidence='evidence', streams=tuple(range(64)))) if block_stream else {}),
                     **(dict(native_attention_evidence='evidence') if native else {}))
+                self.assertEqual(stream_validation.call_count, int(block_stream))
+                return result
             finally:
                 self.assertEqual(active, [])
                 self.assertTrue(all(audit['restored'] for audit in audits))
@@ -75,3 +84,10 @@ class CombinedDFlashTests(unittest.TestCase):
     def test_failure_unwinds_every_target_route(self):
         with self.assertRaisesRegex(RuntimeError, 'device request failed'):
             self.exercise(fail=True)
+
+    def test_block_stream_keeps_native_draft_and_other_target_routes(self):
+        result = self.exercise(native=True, block_stream=True)
+        self.assertEqual(result['fused_t16_mlp']['extra_weight_allocations'], 64)
+        self.assertTrue(result['block_stream']['restored'])
+        with self.assertRaisesRegex(RuntimeError, 'device request failed'):
+            self.exercise(native=True, block_stream=True, fail=True)
