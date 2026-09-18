@@ -7,6 +7,15 @@ from serving_canary_runner import REQUIRED_ENVIRONMENT, shutdown_evidence, valid
 
 
 class CanaryEnvironmentTests(unittest.TestCase):
+    def test_gate_exp_admission_runs_before_model_process(self):
+        source = Path(__file__).with_name('serving_canary_runner.py').read_text()
+        self.assertLess(source.index("admission = qualify('/canary/gate-exp-evidence'"),
+                        source.index('process = subprocess.Popen('))
+        workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/qwen-fast-serving-canary.yml').read_text()
+        self.assertIn('gdn_gate_exp_scope.py', workflow)
+        self.assertIn('dst=/experiment-scripts/ci/$helper,readonly', workflow)
+        self.assertIn('--candidate gate_exp', workflow)
+
     def test_api_exit_does_not_prove_worker_cleanup(self):
         evidence = shutdown_evidence('Application shutdown complete. force killing remaining processes count=1')
         self.assertEqual(evidence, dict(worker_closed=False, devices_closed=False, engine_forced=True))

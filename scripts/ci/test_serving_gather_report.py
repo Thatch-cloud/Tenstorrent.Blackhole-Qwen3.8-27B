@@ -5,6 +5,22 @@ from serving_gather_report import ARMS, REPORT_SHA256, records, summarize
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_gate_exp_requires_pinned_evidence_and_full_layer_coverage(self):
+        from gdn_gate_exp_gate import REPORT_SHA256 as gate_sha
+        from gdn_gate_exp_report import KERNEL
+
+        canary, http, events, _ = self.fixture()
+        for event in events:
+            if event.get('arm') == 'grouped':
+                event['arm'] = 'gate_exp'
+                event['audit'].update(report_sha256=gate_sha, kernels=[dict(KERNEL) for _ in range(96)])
+        result = summarize(canary, http, events, KERNEL, candidate_arm='gate_exp', report_sha256=gate_sha)
+        self.assertEqual(set(result['measured']), {'control', 'gate_exp'})
+        self.assertEqual(result['cycle_speedup'], 1.0)
+        events[7]['audit']['kernels'].pop()
+        with self.assertRaises(ValueError):
+            summarize(canary, http, events, KERNEL, candidate_arm='gate_exp', report_sha256=gate_sha)
+
     def fixture(self):
         canary = dict(passed=True, server_exit_code=0,
             shutdown=dict(worker_closed=True, devices_closed=True, engine_forced=False))

@@ -26,7 +26,12 @@ jobs:
           mkdir -p experiment-results canary/draft-config
           python3 -B scripts/ci/runner_io_gate.py --attempts 4 --output experiment-results/runner-io-admission.json
           docker image inspect sha256:29153355a914393e98345ff77c5bd3619943f1d93b6fd0042d7fe538665c2ff1 --format '{{json .Id}}' > experiment-results/image-id.json
-          gh run download 35341952099 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-grouped-gather-35341952099-1 --dir canary/grouped-gather-evidence
+          if [[ "$GITHUB_REF_NAME" == *-gate-exp ]]; then
+            gh run download 35347681287 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-gate-exp-35347681287-1 --dir canary/gate-exp-evidence
+            python3 -B scripts/ci/gdn_gate_exp_report.py --evidence canary/gate-exp-evidence > experiment-results/gate-exp-simulator-admission.json
+          else
+            gh run download 35341952099 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-grouped-gather-35341952099-1 --dir canary/grouped-gather-evidence
+          fi
           gh run download 35321449903 --repo "$GITHUB_REPOSITORY" --name qwen-cumulative-t16-35321449903 --dir canary/reference
           cp canary/reference/dspark-captured-publication-request-hardware.json canary/reference.json
           echo '0be812cceaf6f91686570bb02a9991cc5a58d8aaa95e05d0633388802799a2bc  canary/reference.json' | sha256sum -c -
@@ -49,6 +54,16 @@ jobs:
           cache=/home/thatch/.cache/qwen-experiments
           revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
           mounts=()
+          grouped=1
+          gate_exp=0
+          if [[ "$GITHUB_REF_NAME" == *-gate-exp ]]; then
+            grouped=0
+            gate_exp=1
+            for helper in serving_gather_experiment.py gdn_gate_exp_fusion.py gdn_gate_exp_stage.py gdn_gate_exp_report.py gdn_gate_exp_gate.py gdn_gate_exp_scope.py; do
+              sha256sum "scripts/ci/$helper" >> experiment-results/gate-exp-overlay.sha256
+              mounts+=(--mount "type=bind,src=$PWD/scripts/ci/$helper,dst=/experiment-scripts/ci/$helper,readonly")
+            done
+          fi
           for component in attention convolution mlp projection selector; do
             source="$cache/dflash2-$component-$revision"
             test -f "$source/manifest.json"
@@ -87,7 +102,7 @@ jobs:
             -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
             -e QWEN_GDN_DIRECT_WINDOW=1 \
             -e QWEN_FAST_PHASE_TIMING=1 \
-            -e QWEN_GDN_GROUPED_GATHER_ABBA=1 \
+            -e QWEN_GDN_GROUPED_GATHER_ABBA="$grouped" -e QWEN_GDN_GATE_EXP_ABBA="$gate_exp" \
             -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
             -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=4096 \
             -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 -e QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1 \
@@ -101,7 +116,11 @@ jobs:
       - name: Validate warm combined comparison
         working-directory: fast-serving-canary
         run: |
-          python3 -B scripts/ci/serving_gather_report.py --results experiment-results --evidence canary/grouped-gather-evidence
+          if [[ "$GITHUB_REF_NAME" == *-gate-exp ]]; then
+            python3 -B scripts/ci/serving_gather_report.py --results experiment-results --evidence canary/gate-exp-evidence --candidate gate_exp
+          else
+            python3 -B scripts/ci/serving_gather_report.py --results experiment-results --evidence canary/grouped-gather-evidence
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

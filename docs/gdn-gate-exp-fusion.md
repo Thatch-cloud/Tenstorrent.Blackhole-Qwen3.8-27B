@@ -15,7 +15,16 @@ status was zero, and container cleanup passed.
 Report SHA256: `ce1be67c12fc03a6514fca5e69882f9642d7ec902ebd5446123991cec4dc55c2`.
 The admission gate pins this artifact and reconstructs the generated kernel;
 the optional scope changes only recurrence compute and restores the loader.
-Next: wire the admission and scope into a matched combined hardware comparison.
+The `fast-serving-canary-v*-gate-exp` tag selects a matched combined HTTP
+comparison using the cached image with six explicitly listed, read-only helper
+overlays. Their hashes are recorded. Admission runs before model loading, then
+again before attaching the worker runtime. Both compilation warmups are excluded;
+four timed requests run control/candidate/candidate/control after one model load.
+All three candidate requests must record 96 admitted recurrence constructions.
+The comparison retains native DFlash, serial BF4 weights, direct DMA draft KV,
+four fabric links, CTX4096 and one stream in both arms. HTTP token identity is
+checked against the retained native-reference request. This is a performance
+screen, not held-out coding quality or a full hardware state-parity qualification.
 No throughput result exists for this candidate yet.
 
 ## Change

@@ -9,8 +9,11 @@ ARMS = ('control', 'grouped', 'control', 'grouped', 'grouped', 'control')
 
 
 class GatherExperiment:
-    def __init__(self, admission, scope):
+    def __init__(self, admission, scope, *, candidate_arm='grouped'):
+        if candidate_arm not in ('grouped', 'gate_exp'):
+            raise ValueError('Known isolated recurrence candidate required')
         self.admission, self.scope = admission, scope
+        self.arms = tuple(candidate_arm if arm == 'grouped' else arm for arm in ARMS)
         self.ordinal = 0
         self.active = False
 
@@ -18,8 +21,8 @@ class GatherExperiment:
         if self.active or self.ordinal >= len(ARMS):
             raise ValueError('Exclusive bounded grouped-gather comparison required')
         ordinal = self.ordinal
-        arm = ARMS[ordinal]
-        context = self.scope(self.admission) if arm == 'grouped' else nullcontext(None)
+        arm = self.arms[ordinal]
+        context = self.scope(self.admission) if arm != 'control' else nullcontext(None)
         audit = context.__enter__()
         self.active = True
         try:
@@ -51,9 +54,12 @@ class GatherExperiment:
 
 def from_environment(directory, runtime):
     flag = os.environ.get('QWEN_GDN_GROUPED_GATHER_ABBA', '0')
-    if flag == '0':
+    gate_flag = os.environ.get('QWEN_GDN_GATE_EXP_ABBA', '0')
+    if flag not in ('0', '1') or gate_flag not in ('0', '1') or (flag == gate_flag == '1'):
+        raise ValueError('At most one explicit recurrence comparison required')
+    if flag == gate_flag == '0':
         return None
-    if flag != '1' or any(os.environ.get(name) != '1' for name in
+    if any(os.environ.get(name) != '1' for name in
             ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED', 'QWEN_FAST_PHASE_TIMING')):
         raise ValueError('Explicit allocated instrumented canary comparison required')
     from mlp_block_stream_runtime import require_hardware
@@ -61,4 +67,10 @@ def from_environment(directory, runtime):
     from gdn_grouped_gather_scope import scoped_gather
 
     require_hardware(os.environ)
+    if gate_flag == '1':
+        from gdn_gate_exp_gate import qualify as qualify_gate_exp
+        from gdn_gate_exp_scope import scoped_gate_exp
+
+        return GatherExperiment(qualify_gate_exp('/canary/gate-exp-evidence', directory, runtime),
+                                scoped_gate_exp, candidate_arm='gate_exp')
     return GatherExperiment(qualify('/canary/grouped-gather-evidence', directory, runtime), scoped_gather)

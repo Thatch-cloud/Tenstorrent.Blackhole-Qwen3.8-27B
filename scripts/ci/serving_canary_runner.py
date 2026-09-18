@@ -47,6 +47,13 @@ def main():
     target = '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'
     results = Path('/experiment/results')
     results.mkdir(parents=True, exist_ok=True)
+    if os.environ.get('QWEN_GDN_GATE_EXP_ABBA') == '1':
+        from gdn_gate_exp_gate import qualify
+
+        if os.environ.get('QWEN_GDN_GROUPED_GATHER_ABBA', '0') != '0':
+            raise ValueError('Only one canary candidate may be enabled')
+        admission = qualify('/canary/gate-exp-evidence', '/experiment-scripts/ci', '/opt/tt-metal')
+        (results / 'gate-exp-preload-admission.json').write_text(json.dumps(admission, indent=2) + '\n')
     subprocess.run([sys.executable, '/experiment-scripts/ci/device-owners.py'], check=True, timeout=20)
     recipe = additional_config(target)
     speculative = dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
@@ -81,7 +88,8 @@ def main():
             print(json.dumps(report), flush=True)
             subprocess.run([sys.executable, '/canary/serving_canary_client.py',
                 '--reference', '/canary/reference.json', '--output', str(results / 'http-reference.json'),
-                '--requests', '6' if os.environ.get('QWEN_GDN_GROUPED_GATHER_ABBA') == '1' else '2'],
+                '--requests', '6' if any(os.environ.get(flag) == '1' for flag in
+                    ('QWEN_GDN_GROUPED_GATHER_ABBA', 'QWEN_GDN_GATE_EXP_ABBA')) else '2'],
                 check=True, timeout=360)
             report.update(passed=True, stage='http_checks_complete')
     except BaseException as error:

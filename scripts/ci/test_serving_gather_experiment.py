@@ -7,6 +7,19 @@ from serving_gather_experiment import ARMS, GatherExperiment, from_environment
 
 
 class GatherExperimentTests(unittest.TestCase):
+    def test_gate_exp_is_explicit_and_mutually_exclusive(self):
+        for environment in ({'QWEN_GDN_GATE_EXP_ABBA': '1'},
+                {'QWEN_GDN_GATE_EXP_ABBA': 'invalid'},
+                {'QWEN_GDN_GATE_EXP_ABBA': '1', 'QWEN_GDN_GROUPED_GATHER_ABBA': '1'}):
+            with patch.dict('os.environ', environment, clear=True), self.assertRaises(ValueError):
+                from_environment('.', '.')
+
+    def test_gate_exp_schedule_and_candidate_label(self):
+        experiment = GatherExperiment({}, MagicMock(), candidate_arm='gate_exp')
+        self.assertEqual(experiment.arms, ('control', 'gate_exp', 'control', 'gate_exp', 'gate_exp', 'control'))
+        with self.assertRaises(ValueError):
+            GatherExperiment({}, MagicMock(), candidate_arm='unknown')
+
     def test_default_is_disabled(self):
         with patch.dict('os.environ', {}, clear=True):
             self.assertIsNone(from_environment('.', '.'))
