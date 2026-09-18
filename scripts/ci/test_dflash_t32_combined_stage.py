@@ -21,6 +21,7 @@ class T32CombinedStageTests(unittest.TestCase):
             for name in names:
                 (scripts / name).write_bytes((source / name).read_bytes())
             (scripts / 'simulator-suite.sh').write_text('unchanged simulator launcher')
+            (scripts / 'frozen_context_geometry.py').write_text('pinned context geometry')
             (scripts / 'run-dspark-hardware.sh').write_text('    -e "QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1"\n')
             (scripts / 'dspark-hardware-suite.sh').write_text(
                 '> /experiment/results/block-stream-preload-admission.json\nset +e\nload-model\n')
@@ -32,6 +33,7 @@ class T32CombinedStageTests(unittest.TestCase):
             report = json.loads(manifest.read_text())
             self.assertTrue(report['preflight_only'])
             self.assertFalse(report['hardware_qualified'])
+            self.assertEqual((scripts / 'frozen_context_geometry.py').read_text(), 'pinned context geometry')
             for name, expected in report['sources'].items():
                 self.assertEqual(hashlib.sha256((scripts / name).read_bytes()).hexdigest(), expected)
             suite = (scripts / 'dspark-hardware-suite.sh').read_text()

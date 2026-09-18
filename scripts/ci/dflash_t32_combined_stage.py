@@ -15,7 +15,7 @@ from gdn_direct_window_t32_hardware_sources import payloads as window_payloads
 
 FILES = ('full_dflash_request.py', 'mlp_block_stream_runtime.py', 'mlp_block_stream_gate.py',
     'mlp_weight_pipeline_report.py', 'mlp_down_grid_gate.py', 'frozen_recipe_context.py',
-    'frozen_context_geometry.py', 'frozen_mlp_buffer_trial.py', 'mlp_register_epilogue_stage.py')
+    'frozen_mlp_buffer_trial.py', 'mlp_register_epilogue_stage.py')
 
 
 def stage(checkout, evidence, manifest):
