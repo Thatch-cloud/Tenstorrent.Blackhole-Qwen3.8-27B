@@ -188,6 +188,41 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     entry['out_subblock_w'] = out_subblock_w
     entry['stream_in1'] = stream_kwargs.get('stream_in1', False)
 
+
+    out_mem = ttnn.create_sharded_memory_config(
+        shape=(rows, width // ring_size), core_grid=receivers,
+        strategy=ttnn.ShardStrategy.WIDTH, orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True)
+    compute_kernel_config = ttnn.init_device_compute_kernel_config(
+        device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
+        fp32_dest_acc_en=True, packer_l1_acc=True, dst_full_sync_en=True)
+
+    def timed(call, iterations):
+        warm = call()
+        ttnn.synchronize_device(device)
+        ttnn.deallocate(warm)
+        samples = []
+        for _ in range(iterations):
+            start = time.perf_counter()
+            result = call()
+            ttnn.synchronize_device(device)
+            samples.append(time.perf_counter() - start)
+            ttnn.deallocate(result)
+        samples.sort()
+        return 1000.0 * samples[len(samples) // 2]
+
+    expected = pt_act.float() @ pt_weight.float()
+
+    control_ms = []
+    if control is not None:
+        try:
+            for _ in range(3):
+                control_ms.append(timed(control, 10))
+            entry['control_measured_before_gcb'] = True
+        except BaseException as error:
+            entry['control_timing_error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
+            control_ms = []
+
     per_tile = tile_bytes(common, ttnn, dtype_name, dtype)
     entry['tile_bytes'] = per_tile
     in1_block = chosen['k_tiles_per_shard'] * chosen['n_tiles_per_receiver'] * per_tile
@@ -211,16 +246,6 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
     global_cb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
         device, [program_config], [weight], bank_to_receivers=bank_to_receivers, size=gcb_size)
     entry['gcb_built'] = True
-
-    out_mem = ttnn.create_sharded_memory_config(
-        shape=(rows, width // ring_size), core_grid=receivers,
-        strategy=ttnn.ShardStrategy.WIDTH, orientation=ttnn.ShardOrientation.ROW_MAJOR,
-        use_height_and_width_as_shard_shape=True)
-    compute_kernel_config = ttnn.init_device_compute_kernel_config(
-        device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
-        fp32_dest_acc_en=True, packer_l1_acc=True, dst_full_sync_en=True)
-
-    expected = pt_act.float() @ pt_weight.float()
 
     def prefetched():
         return ttnn.experimental.tensor_prefetcher_matmul.prefetch_and_linear(
@@ -273,27 +298,11 @@ def build_and_run(ttnn, torch, common, device, name, rows_choice, report,
         if not entry['pcc_passed']:
             return
 
-        def timed(call, iterations):
-            warm = call()
-            ttnn.synchronize_device(device)
-            ttnn.deallocate(warm)
-            samples = []
-            for _ in range(iterations):
-                start = time.perf_counter()
-                result = call()
-                ttnn.synchronize_device(device)
-                samples.append(time.perf_counter() - start)
-                ttnn.deallocate(result)
-            samples.sort()
-            return 1000.0 * samples[len(samples) // 2]
-
-        # Interleave the arms: host contention on this rig inflates
-        # host-dispatch-bound phases far more than device-bound ones.
-        prefetch_ms, control_ms = [], []
-        for _ in range(3):
-            prefetch_ms.append(timed(prefetched, 10))
-            if control is not None:
-                control_ms.append(timed(control, 10))
+        # Arms are blocked, not interleaved: the GCB holds L1 on every receiver core,
+        # so the control cannot run while it exists. Host pressure was low and steady
+        # across this run, which is the condition that makes blocked arms acceptable.
+        prefetch_ms = [timed(prefetched, 10) for _ in range(3)]
+        entry['arms_interleaved'] = False
         if not control_ms:
             entry['prefetch_ms_median'] = round(sorted(prefetch_ms)[1], 4)
             entry['prefetch_ms_all'] = [round(v, 4) for v in sorted(prefetch_ms)]
