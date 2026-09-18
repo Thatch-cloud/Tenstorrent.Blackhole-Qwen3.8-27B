@@ -1,4 +1,4 @@
-name: Qwen block-stream T16 MLP replay
+name: Qwen block-stream T16 or T32 MLP replay
 on:
   push:
     tags: ['experiment/mlp-block-stream-replay-v*']
@@ -40,7 +40,13 @@ jobs:
             --transport-report stream-transport/mlp-block-stream.json \
             --manifest stream-candidate/experiment-results/block-stream-candidate.json
           git -C stream-candidate diff --check
-      - name: Exact T16 eager outputs changed-input replay and stream integrity
+      - name: Select separately gated T32 width without changing arithmetic
+        if: endsWith(github.ref_name, '-t32')
+        run: |
+          python3 -B stream-orchestrator/scripts/ci/mlp_block_stream_t32_stage.py --checkout stream-candidate \
+            --manifest stream-candidate/experiment-results/block-stream-t32-candidate.json
+          git -C stream-candidate diff --check
+      - name: Exact eager outputs changed-input replay and stream integrity
         timeout-minutes: 8
         working-directory: stream-candidate
         env:
