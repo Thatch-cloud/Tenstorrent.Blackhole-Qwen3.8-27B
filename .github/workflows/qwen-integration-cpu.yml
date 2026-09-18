@@ -123,7 +123,7 @@ jobs:
           python -B -m unittest test_dflash_native_comparison test_dflash_native_comparison_driver
           python -B -m unittest test_dflash_compact_selector test_dflash_combined_sim_runtime test_dflash_t32_native_attention test_mlp_block_stream test_mlp_block_stream_projection test_mlp_block_stream_admission test_mlp_block_stream_probe test_mlp_block_stream_gate test_mlp_block_stream_pool test_mlp_block_stream_runtime test_mlp_block_stream_request test_mlp_block_stream_comparison test_mlp_block_stream_hardware_stage
           python -B -m unittest test_dflash_t32_native_stage test_dflash_t32_cached_adapter test_draft_kv_history test_dflash_t32_cache_stage test_mlp_block_stream_t32_stage test_gdn_shared_qk_t32_adapter
-          python -B -m unittest test_mlp_block_stream_pipeline test_mlp_weight_pipeline
+          python -B -m unittest test_mlp_block_stream_pipeline test_mlp_block_stream_pipeline_gate test_mlp_weight_pipeline
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
           bash -n scripts/ci/run-simulator.sh
