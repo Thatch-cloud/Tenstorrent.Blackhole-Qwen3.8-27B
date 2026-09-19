@@ -184,8 +184,12 @@ def main():
         # reported zero tokens with no reason. Undershooting costs a little KV
         # occupancy and keeps the request servable, and the usage field now reports
         # what the prompt actually came to.
-        prompt = 'def solve(n):\n    # ' + ('compute the answer carefully. ' *
-                                            max(1, options.prompt_tokens // 8))
+        # An EXACT token count, as a token-id array rather than text. The text
+        # form was an approximation: run 35473721637 asked for 32768 and the
+        # server reported position=20488. Every qualification gate on this path
+        # compares position for EQUALITY, so an approximate prompt can never
+        # satisfy one, at any user count.
+        prompt = [1000 + (index % 64) for index in range(options.prompt_tokens)]
         # ignore_eos is what makes this a latency measurement rather than a content
         # one. Run 35418922350 accepted a 79,368-token prompt, spent 33.4 s on it and
         # returned zero tokens with no error: the stream completed normally because
