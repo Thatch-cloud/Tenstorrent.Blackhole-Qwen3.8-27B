@@ -19,6 +19,13 @@ export MESH_DEVICE=P300
 git -C /opt/tt-metal rev-parse HEAD > /experiment/results/simulator-runtime.txt
 test "$(cat /experiment/results/simulator-runtime.txt)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
 cd /opt/tt-metal
+if [ "${QWEN_SIM_CASE:-stack}" = gdn-slot-copy ]; then
+    status=0
+    timeout -k 10 360 python3 -u /experiment-scripts/ci/gdn-slot-copy-probe.py \
+        --output /experiment/results/gdn-slot-copy.json || status=$?
+    printf '%s\n' "$status" > /experiment/results/gdn-slot-copy.exit-status
+    exit "$status"
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
     ln -s /experiment-scripts /scripts
     export TT_METAL_SLOW_DISPATCH_MODE=1
