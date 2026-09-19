@@ -37,6 +37,17 @@ a hypothesis this programme tests first, not an assumption it builds on.
 Each task states its gate. A task is not done until its gate produces evidence.
 
 ### T1 — Map every pin to the assumption behind it
+
+| Pin | Verdict | Evidence |
+| --- | --- | --- |
+| `max_num_seqs == 1` | **Load-bearing** | serving_lifecycle.py:20 holds one request_id and one capture; line 57 rejects a second scheduled request; FastRunnerBridge binds one request's runner state; serving_runtime.py:39 sets trace bucket 1 |
+| `max_model_len == 4352` | **Conservative** | capture_plan is parameterised by position with a general 256-capacity loop; coding_context_request.py already contemplates 8192 and 65536 |
+| `async_scheduling is False` | Load-bearing | FastRunnerBridge requires non_dp_async_scheduling false |
+| `tensor_parallel_size == 1` | Conservative label | TP2 comes from the TT mesh, not vLLM's parallel config |
+
+A further ceiling sits behind the concurrency pin: capture_plan caps max_verify_rows
+at 32 while four T16 users need 64, and capture buckets are prepared fixtures rather
+than runtime-computed.
 Read the fast-path runtime and find what actually depends on `scheduler_requests=1`,
 `verifier_rows=16`, `context_tokens=4096` and `max_model_len=4352`. Classify each pin:
 **conservative** (nothing downstream assumes it) or **load-bearing** (something breaks).
@@ -44,12 +55,28 @@ Read the fast-path runtime and find what actually depends on `scheduler_requests
 *Risk:* if most are load-bearing this is a much larger job and the programme re-scopes.
 
 ### T2 — Lift the context pin
+
+**Code done; hardware gate outstanding.** The equality became a floor (any whole
+number of 64-token pages at or above 4352) and context_tokens is derived as
+max_model_len - 256. Eight tests pass: 163840 accepted, 4353 and 8100 rejected as
+partial pages, concurrency pin asserted to still hold, canary's 4352 unchanged.
+
+serving_plugin_patch.stage() copies the policy into src/vllm_tt_plugin at image build
+time and the plugin imports from there, so mounting scripts/ci does not override it.
+The gate needs an image graft - the delivery path Lever N uses.
 Allow `max_model_len` above 4352 where nothing depends on it. The plain path already
 serves 163,840, so the model handles the positions; the question is whether the fast
 path's capture planning does.
 *Gate:* fast path starts at a context above 4352 and serves one correct request.
 
 ### T3 — Lift the concurrency pin
+
+**Re-scoped by T1: this is not a pin lift.** Session state is singular from
+serving_lifecycle down, so it means per-session capture and bridge state, a trace
+bucket sized for N, and a verify-row budget above 32 with capture buckets prepared for
+the wider rows. Shares its core with **Lever N milestone M2** (alternation policy in
+the plugin scheduler) - extend that rather than designing a second one, and sequence
+after Lever N M1 since resumable prefill is what lets a second session start.
 Allow `max_num_seqs` up to `native_gdn_slots` (8). The verifier processes 16 rows at
 T16 for one request; establish what it does for N.
 *Gate:* fast path starts with `max_num_seqs=4` and serves 4 concurrent correct requests.
