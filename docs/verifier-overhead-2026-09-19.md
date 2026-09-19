@@ -232,3 +232,67 @@ be made row-parallel.
 **Fix the profile job regardless.** It works, and CI calls it a failure. It needs the
 tracy finalisation to stop trying to launch a web GUI, so the artifact is produced under
 a green tick rather than rescued from a red one.
+
+## REFINEMENT: the 99-core group is MLP gate/up, and weight streaming is near-optimal
+
+Identifying operations by core count alone was not enough. Dumping one replay in
+execution order shows a repeating per-layer block:
+
+```
+AllGatherAsync (10c, 13 us)  ->  LayerNorm (32c, 6 us)  ->  ShardedToInterleaved
+  ->  GenericOp cores=99  178.5 us      MLP gate/up, bfloat4_b
+  ->  Matmul    cores=32  122.1 us      MLP down, bfloat8_b
+  ->  ReduceScatterMinimalAsync (10c, 11 us)  ->  BinaryNg residual (110c, 2 us)
+```
+
+So the 11.40 ms 99-core group is the **MLP gate/up projection**, which is weight-bearing,
+not GDN. The previous section assigned it to "all-layer work" and implied it was
+overhead. It is not. Corrected split:
+
+| Component | ms | share |
+| --- | ---: | ---: |
+| weight-bearing (gate/up + all matmuls) | 31.64 | 49% |
+| **GDN machinery** | **20.08** | **31%** |
+| collectives | 3.44 | 5% |
+| SDPA | 3.49 | 5% |
+| everything else | 6.25 | 10% |
+
+**Weight streaming is near-optimal.** 9.96 GB per card in 31.64 ms is **315 GB/s, 78% of
+the measured 405 GB/s**, consistent with the 87% the older T8 profile showed for its
+matmul groups. There is no 2.7x hiding in the weight path; the original reading of this
+document was wrong and both corrections point the same way.
+
+The GDN block, per GDN layer:
+
+```
+GenericOp 48c 18.0 us -> Matmul 43c 118.6 us -> GenericOp 48c 72.8 us
+ -> GdnConvGates 81c 35.4 us -> Slice 96c -> GenericOp 8c 17.9 us
+ -> GenericOp 96c 197.3 us   <- the recurrence
+ -> GenericOp 24c 70.5 us -> Matmul 32c 46.2 us
+```
+
+**GDN recurrence is 197 us per layer, the most expensive single operation in the
+verifier**, ahead of MLP gate/up at 178 us, and it runs on all 48 GDN layers for 9.53 ms.
+
+### What is actually on the table
+
+| Scenario | verifier | cycle | tok/s/user |
+| --- | ---: | ---: | ---: |
+| today | 64.9 | 97.6 | 123 |
+| halve the GDN machinery | 54.9 | 87.5 | 137 |
+| every non-weight op vanishes (unreachable) | 31.6 | 64.3 | 187 |
+
+Even the unreachable bound is **187 tok/s at single-user 4096**, below the 200 target.
+Verifier optimisation alone does not reach it; it has to be combined with higher
+acceptance, which is the term that multiplies the budget.
+
+### On the row-scaling claim
+
+The earlier "1.52x for 2x rows" compares 6.29 ms at T8 from run 34298049648 on
+2026-09-09 against 9.53 ms at T16 from run 35185624322 on 2026-09-17, which used a
+different option set. Within this CSV only trace 24 has enough replays for a steady-state
+median; the t2 and t4 verifier traces have a single session each and still include
+compilation. **Treat the scaling as suggestive, not established.** A dedicated T4/T8/T16
+sweep in one run, with several replays at each width, is what would settle it - and it
+matters, because a recurrence that grows with verify rows taxes the exact mechanism
+speculation relies on.
