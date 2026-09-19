@@ -23,10 +23,11 @@ jobs:
           # 4352 tokens exactly - so the fast path's page cap and the T16 target
           # attention path's 32768 qualification cannot both hold. Both pins are
           # pre-existing context pins and neither is a packing problem.
-          # ONE user first. Every two-user failure so far has been read as a
-          # concurrency problem without establishing that this workflow produces
-          # tokens at all with a single user. If one user hits the same gate, the
-          # gate has nothing to do with packing.
+          # Run 35472072127 proved ONE user hits the same gate as two, so this
+          # workflow had never produced tokens. QWEN_FROZEN_COMBINED_RUNTIME made
+          # the T16 gate demand position 32768 while serving_runtime builds a
+          # 68-page table, which is 4352 tokens - the two could never agree. Without
+          # it the gate wants position 4096, and 4096/64 = 64 pages fits in 68.
           - {users: 1, context: 4352, product: 8704, prompt: 4096, stagger: 0}
     timeout-minutes: 45
     steps:
@@ -144,7 +145,7 @@ jobs:
             --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
             "${mounts[@]}" \
             -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
-            -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 \
+            -e QWEN_FABRIC_LINK_PROBE=1 \
             -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
             -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
             -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
