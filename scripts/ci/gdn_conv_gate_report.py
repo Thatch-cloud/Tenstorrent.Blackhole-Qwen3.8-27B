@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--baseline', required=True)
     parser.add_argument('--fixed', required=True)
     parser.add_argument('--fixed-log', required=True)
+    parser.add_argument('--marker', default='full=True',
+                        help='string whose presence in the fixed log proves the lever moved')
     parser.add_argument('--json')
     options = parser.parse_args()
 
@@ -42,11 +44,10 @@ def main():
     report = {'baseline_arm': base.get('arm'), 'fixed_arm': fixed.get('arm')}
 
     # 1. the lever moved
-    full_true = log.count('full=True')
-    full_false = log.count('full=False')
-    report['marker_full_true'] = full_true
-    report['marker_full_false'] = full_false
-    lever_moved = full_true > 0
+    hits = log.count(options.marker)
+    report['marker'] = options.marker
+    report['marker_hits'] = hits
+    lever_moved = hits > 0
 
     # 2. tokens identical, per length
     checked = []
