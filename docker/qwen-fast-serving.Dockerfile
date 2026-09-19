@@ -15,6 +15,7 @@ COPY scripts/ci/serving_fast_policy.py scripts/ci/serving_lifecycle.py scripts/c
 COPY scripts/ci/serving_plugin_patch.py scripts/ci/serving_dflash_registry.py /experiment-scripts/ci/
 COPY scripts/ci/serving_canary_runner.py /experiment-scripts/ci/
 COPY scripts/ci/serving_fast_request.py /experiment-scripts/ci/
+COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_runtime.py scripts/ci/serving_gather_experiment.py scripts/ci/gdn_grouped_gather.py scripts/ci/gdn_grouped_gather_gate.py scripts/ci/gdn_grouped_gather_scope.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
