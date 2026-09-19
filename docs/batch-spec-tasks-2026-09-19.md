@@ -313,3 +313,64 @@ batch dim - then widen the admission contract to match. It is a device-side chan
 
 The one-in-flight rule from Lever N section 3.3 item 1, because the fast prefill path
 takes one capture and executes one prompt, and simultaneous arrivals are batched.
+
+## Batched verifier: what is built, and what the arithmetic says it buys
+
+### Built and proved on the host (no device)
+
+| Piece | Module | Gate |
+| --- | --- | --- |
+| Block-diagonal mask | `dflash_batched_mask.batched_attention_mask` | at one user byte-identical to the shipped T16 mask at seven context lengths; at two users each user's rows restricted to its own segment ARE its single-user mask |
+| Packed RoPE | `packed_rope_tables`, `live_key_rope` | at one user byte-identical to today's `rope_tables(position, 32)` and to `rope['k'][context:key_rows]` |
+| Key assembly plan | `key_value_plan` | packed attention equals separate attention in float32 at four context pairs; overwriting a neighbour's keys with values 100x larger leaves a user bit-identical |
+| Device branch | `draft_attention_branch.execute_attention_branch(pack=...)` | mock-operations test asserts the key and value axes are assembled cached/live/pad per user with live windows (0,16) then (16,32); `pack=None` keeps all eight existing branch tests green |
+| Proposal layout | `dflash_packed_proposal` | anchors land at rows 0 and 16; user u's drafts are merged indices `[u*16 : u*16+15]` after `merge_chunk_candidates` drops the anchor row |
+
+The draft block was already 32 rows with 16 live (`mask[..., 16:, :] = -inf`), so a
+second T16 user costs no extra proposal pass. `shared_head_candidates` and
+`merge_chunk_candidates` already accept 32 rows, so the vocabulary head needed no
+change at all.
+
+### The target side is already per-row paged
+
+The 66.63 ms verifier half runs `ttnn.transformer.paged_scaled_dot_product_attention_decode`
+with a `page_table_tensor` and a batch dimension, and `attention_replay.ReplayAttentionReader`
+already accepts `rows in (8, 16, 32)`. What pins it to one user is narrower than a
+kernel: `pages_host.shape[0] != 1` ("One complete native cache page table required"),
+one `start` word staged into `self.positions`, and `pages_host.repeat(len(bundle), 1)`
+repeating a single user's table across the bundle. Per-user page tables and per-user
+starts are the change; no new attention kernel is needed.
+
+### What batching actually buys, from the goal's own figures
+
+Batching amortises the WEIGHT pass across users. It does not amortise KV, which is
+per user and grows with context. Per card per step at 161k, from
+`memory/goal-200tps-concurrent.md`: 19.92 GB of weights over two cards is 9.96 GB,
+and 5.37 GB of KV per user is 2.69 GB.
+
+| Users | Weights/card | KV/card | Total | At 512 GB/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 9.96 GB | 2.69 | 12.6 GB | 24.6 ms |
+| 2 | 9.96 | 5.37 | 15.3 GB | 29.9 ms |
+| 4 | 9.96 | 10.74 | 20.7 GB | 40.4 ms |
+
+Four users stay inside the 60 ms budget with about a third to spare, so the target
+is bandwidth-feasible - but only batched. Alternation divides the achieved per-user
+rate by the user count whatever the cycle time is.
+
+**Batching is necessary, not sufficient.** The measured cycle is 97.55 ms against a
+24.6 ms single-user bandwidth floor, so roughly three quarters of the cycle is not
+bandwidth. Adding users batched costs only the extra KV - about 5.2 ms per extra
+user per card - so four users should land near 113 ms rather than the 390 ms
+alternation would cost. Reaching 200 tok/s per user still needs the documented
+37.98% cycle reduction on top of the pack.
+
+### Not yet built
+
+- `DFlashDevice` holds one `history`, `position` and `history_rows`. Packed proposal
+  needs N slot states feeding `execute_proposal(pack=...)`, which now accepts them.
+- Per-user page tables and starts in `ReplayAttentionReader` for the target verify.
+- `serving_vllm_contract.admit_scheduler_output` still asserts
+  `list(cached.req_ids) != [request_id]`, and `FastWorkerHook` still binds one
+  request to the worker.
+- The one-in-flight prefill rule, which is required independently.
