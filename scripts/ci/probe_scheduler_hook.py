@@ -79,6 +79,21 @@ def main():
             except BaseException:
                 pass
 
+    # The rule will hide extra waiting requests before delegating, so the exact
+    # shape of the method and of the waiting container decide whether that is safe.
+    for name in ('_schedule_prefill_only', '_has_pending_prefill'):
+        try:
+            print('----- %s -----' % name)
+            print(inspect.getsource(getattr(TTScheduler, name)))
+        except BaseException as error:
+            show('source of %s' % name, 'unavailable: %s' % error)
+    try:
+        from vllm.v1.core.sched.request_queue import create_request_queue
+        show('request queue factory', create_request_queue)
+    except BaseException as error:
+        show('request queue factory', 'unavailable: %s' % error)
+    show('Scheduler.waiting annotation', getattr(Scheduler, '__annotations__', {}).get('waiting'))
+
     print()
     print('VERDICT')
     if 'scheduler_cls' in fields:
