@@ -88,3 +88,59 @@ batching working perfectly, because batching amortises the **weight** pass and t
 already inside the floor. Reaching 150 needs bf4 KV *and* roughly all 20.1 ms of GDN
 machinery removed, on top of everything above. This sheet is necessary for the target and
 nowhere near sufficient, and that should stay visible while working through it.
+
+## T1 result, and a re-scope of T5
+
+**T1 is answered, and it is not `dflash_device`.** Run 35434220264, with a prompt
+finally above the 2048-token history window, reached `serving_lifecycle._execute` and
+raised there:
+
+```python
+if (self.request_id is not None or len(scheduled.scheduled_new_reqs) != 1
+        or scheduled.scheduled_cached_reqs.req_ids ...):
+    raise ValueError('Fast serving requires one complete fresh prefill')
+```
+
+Two clauses fire: the single slot is occupied once user 1 is admitted, and vLLM
+schedules both new requests in **one** step so `scheduled_new_reqs` has two.
+`from_prefill` and `dflash_device` are downstream and were never reached, so earlier
+claims that the device rejected the second request were wrong.
+
+### Two earlier runs were invalid, and said so only after the prompt was fixed
+
+`from_prefill` computes `feature_start = len(prompt) - 2048`. The bench builder emits
+one phrase per eight units at a real **5.021 tokens per repetition**, so `prompt: 3072`
+produced 1928 tokens and `feature_start = -120`. Runs 35433428038 and 35433989496 both
+failed on that arithmetic and **would have failed identically at one user**. `prompt:
+4800` gives about 3012 tokens and `feature_start = +964`.
+
+### T5 is bigger than this sheet estimated
+
+The sheet called T5 "contained; the module is 6 KB and has a CPU test". That was wrong,
+and an attempt at it was reverted rather than left half-finished. Three separate
+problems hide behind "make the slot a dict":
+
+1. **`_execute` needs N simultaneous captures.** It currently does
+   `with self.capture.capture():` around one. Whether the capture machinery supports two
+   concurrent captures is **unknown and unverified** - it is exactly the kind of
+   assumption that has been wrong repeatedly here.
+2. **`_sample` assumes one seed**: `result.req_ids != [self.request_id]` and
+   `len(result.sampled_token_ids) != 1`. With two prefills it receives two.
+3. **`FastWorkerHook` binds to `self.worker`.** Once `self.hook` is set, `_execute`
+   simply delegates. A second hook on the same worker is the real architectural
+   boundary, and it is not bookkeeping.
+
+Several per-request validations also assume a single request arithmetically, not just
+structurally: `scheduled.num_scheduled_tokens != {new.req_id: len(prompt)}` is an
+equality against a one-entry dict, and `total_num_scheduled_tokens != len(prompt)` is a
+sum over one.
+
+**Revised order**, smallest verifiable step first:
+
+- **T5a** Can the capture factory produce two concurrent captures at all? A CPU test
+  against the real factory, no device. *This gates everything else and is currently
+  assumed.*
+- **T5b** Per-request bookkeeping with the hook still singular, failing by name when a
+  second would be needed. CPU-testable.
+- **T5c** `_sample` for N seeds and N bridges.
+- **T6** The hook. Unscoped until T5a says whether captures can coexist.

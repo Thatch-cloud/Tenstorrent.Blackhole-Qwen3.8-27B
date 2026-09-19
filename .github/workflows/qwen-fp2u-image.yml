@@ -153,7 +153,7 @@ jobs:
             > experiment-results/server-tail.log || true
           for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
             > experiment-results/host-pressure-after.txt
-          python3 -B -c "import json,io,sys; d=json.load(io.open('experiment-results/cycle.json',encoding='utf-8')); s=(d.get('streams') or [{}])[0]; t=s.get('prompt_tokens') or d.get('prompt_tokens') or 0; print('realised prompt tokens:', t); sys.exit(0 if t>=2048 else 1)" || { echo 'Prompt below the 2048-token DFlash history window: feature_start would be negative, so this run cannot speak to concurrency.'; exit 1; }
+          python3 -B -c "import json,io,sys; d=json.load(io.open('experiment-results/cycle.json',encoding='utf-8')); ss=d.get('streams') or []; errs=[s.get('error') for s in ss if s.get('error')]; toks=[s.get('prompt_tokens') for s in ss if s.get('prompt_tokens')]; print('stream errors:', len(errs), '| realised prompt tokens:', toks); sys.exit(1 if (toks and min(toks) < 2048) else 0)" || { echo 'A stream reported a prompt under the 2048-token DFlash history window, so feature_start would be negative and this run cannot speak to concurrency.'; exit 1; }
           python3 -B scripts/ci/cycle_bench_report.py \
             --report experiment-results/cycle.json \
             --log experiment-results/cycle-stdout.log
