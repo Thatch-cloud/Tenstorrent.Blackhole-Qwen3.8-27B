@@ -184,7 +184,29 @@ class LifecycleTests(unittest.TestCase):
         build.assert_not_called()
         capture.close.assert_called_once()
         self.assertIsNone(lifecycle.hook)
+        self.assertIsNone(lifecycle.request_id,
+                          'a request finishing at its first token must free the prefill slot')
         lifecycle.close()
+
+    def test_a_terminal_first_token_does_not_block_the_next_request(self):
+        """Run 35441524535 refused the second request with the prefill slot still
+        naming the first, which had finished at its first token. Invisible with one
+        user, because that user is done; fatal with two."""
+        lifecycle, worker, bridge, capture, build, prefill, _ = self.fixture()
+        bridge.state.output_token_ids[:] = [99]
+        worker.model_runner.sample_tokens.return_value.sampled_token_ids = [[99]]
+        worker.execute_model(prefill)
+        worker.sample_tokens(None)
+
+        second = SimpleNamespace(req_id='second', prompt_token_ids=[1] * 4096,
+            num_computed_tokens=0, mm_features=[], prompt_embeds=None, lora_request=None,
+            sampling_params=prefill.scheduled_new_reqs[0].sampling_params)
+        step = SimpleNamespace(finished_req_ids=set(), scheduled_new_reqs=[second],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]), scheduled_spec_decode_tokens={},
+            num_scheduled_tokens={'second': 4096}, total_num_scheduled_tokens=4096)
+        self.assertIsNone(worker.execute_model(step))
+        self.assertEqual(lifecycle.request_id, 'second')
+        self.assertTrue(lifecycle.prefill_pending)
 
     def test_partial_prefill_rejected_without_device_execution(self):
         lifecycle, worker, _, capture, build, prefill, _ = self.fixture()

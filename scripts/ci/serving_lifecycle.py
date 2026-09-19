@@ -129,8 +129,15 @@ class FastServingLifecycle:
             if state.output_token_ids != result.sampled_token_ids[0]:
                 raise ValueError('Native prefill output and runner state disagree')
             if state.output_token_ids[0] in self.eos_ids:
+                # Finished at its first token: no bridge, no hook. The prefill slot
+                # MUST be freed here - leaving it held is invisible with one user,
+                # because that user is done, and fatal with two: run 35441524535
+                # refused the second request with prefill_slot still naming the
+                # first. A synthetic prompt that repeats one phrase invites exactly
+                # this, so it is the common case on the bench rather than a corner.
                 self.capture.close()
                 self.capture = None
+                self.request_id = None
                 return result
             bridge = self.bridge_factory(state, self.capture)
             try:
