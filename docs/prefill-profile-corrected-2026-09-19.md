@@ -134,7 +134,7 @@ The real shape of prefill is that **arithmetic occupies only about 40% of device
 
 | group | share | is it a target? |
 | --- | ---: | --- |
-| arithmetic | 39-43% | **REOPENED** - the 62-67% MFU figure is withdrawn, see grid occupancy below |
+| arithmetic | 39-43% | closed again, on better evidence: prefill runs **1.75x a naive `ttnn.matmul`**, so its matmuls are well tuned. The 62-67% MFU figure stays withdrawn. |
 | layout | 17.2% | **yes** - 6,643 Slice calls, pure shuffling |
 | GDN family | 14.3% | maybe - it is real work, but 48 layers of it |
 | communication | 11-15% | no - fabric measured, bounded at ~1% of prefill |
@@ -232,3 +232,70 @@ What is not yet known, and must be measured before any claim: how much of the
 low-occupancy time is structural. Communication ops legitimately use few cores, and
 `ReduceScatterMinimalAsync` at a mean of 6.7 cores may be correct by design. The
 149 ms of single-core time inside a *matmul* op is the part that looks wrong.
+
+## Peak FLOPS: measured, and the measurement did not answer the question
+
+Run 35429739377. All 24 configurations passed the compute-bound guard, so these are
+arithmetic rates and not DRAM in disguise.
+
+| shape | weights | LoFi | HiFi2 | HiFi3 | HiFi4 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 8192^3 | bfloat8_b | **252.6** | 218.6 | 159.4 | 125.4 |
+| 8192^3 | bfloat16 | 252.2 | 219.2 | 159.1 | 125.2 |
+| 2048x5120x17408 (the MLP shape) | bfloat8_b | 219.9 | 192.6 | 143.0 | 113.4 |
+| 4096^3 | bfloat8_b | 215.6 | 192.5 | 145.1 | 116.6 |
+
+Two things fall out immediately, and both are solid:
+
+- **Fidelity is a 2x lever.** LoFi to HiFi4 is 252.6 to 125.4. model_config.py sets no
+  explicit MathFidelity, so whatever the matmuls inherit matters by a factor of two.
+- **bfloat8_b buys no speed at all.** 252.6 against 252.2 for bfloat16 weights, and the
+  same at every fidelity and shape. The narrower weight dtype is a memory economy here,
+  not an arithmetic one. Any reasoning that assumed an fp8 *rate* was wrong on that
+  ground alone.
+
+### The number cannot be used as a peak, because prefill beats it
+
+| | TFLOPS/card |
+| --- | ---: |
+| naive `ttnn.matmul`, best measured | 252.6 |
+| **prefill's own arithmetic** (0.76 PFLOP/card in 1719 ms) | **442** |
+| prefill, matmul portion only | ~507 |
+
+Prefill runs at **1.75x the benchmark**. A model cannot exceed the hardware peak, so
+252.6 is a **floor** on the peak and not the peak: the probe measured an untuned
+`ttnn.matmul`, while the model uses tuned program configs. The benchmark was built to
+supply a denominator and instead demonstrated it was the wrong instrument.
+
+**So MFU still has no valid denominator**, and the honest position on prefill
+arithmetic is:
+
+- the 62-67% MFU figure stays **withdrawn**; it rested on an assumed 774
+- the 774 figure is **neither confirmed nor refuted** - a naive benchmark being far
+  below peak refutes nothing
+- but prefill's matmuls achieve 1.75x what a default matmul does, which is direct
+  evidence they are **well tuned**, arrived at without needing any peak at all
+
+That last line reinstates this morning's conclusion - arithmetic is not the prefill
+lever - on evidence that does not depend on a spec sheet. It was the right answer for
+the wrong reason.
+
+### What this leaves of the occupancy finding
+
+Prefill's arithmetic averages 55.8 cores and achieves 442 TFLOPS/card, which is about
+**7.9 TFLOPS per core in use**. The naive benchmark, left to choose its own grid, got
+252.6 overall. Nothing here shows the busy cores are underperforming.
+
+So the occupancy number stands as measured - 33.6% of prefill runs on 32 cores or
+fewer - but it can no longer be read as "half the chip is being wasted on the
+arithmetic". The arithmetic ops are dense and fast. The low-occupancy time is
+concentrated in **communication and the serialised single-core step inside the fused
+all-gather-matmul, 148.8 ms over 109 calls**, and that remains the one piece that
+looks wrong rather than structural.
+
+### Getting a real peak, if it is ever needed
+
+It would take a tuned matmul: an explicit program config with the full core grid and
+blocking chosen for the shape, not the library default. That is a real piece of work
+and, given prefill already exceeds the default by 1.75x, it would only refine a number
+that is no longer blocking any decision.
