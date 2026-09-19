@@ -72,6 +72,26 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('NOT PASSED', out)
 
+    def test_a_silent_fallback_to_the_one_shot_path_fails_the_build(self):
+        """Identical output means nothing if the resumable arm never ran the new path."""
+        code, out = run(dict(gate_passed=False, lengths_checked=3, lengths_required=3,
+                             controls=dict(baseline_took_one_shot=True,
+                                           resumable_took_range=False,
+                                           resumable_did_not_fall_back=False),
+                             comparisons=[comparison(True)] * 3))
+        self.assertEqual(code, 1)
+        self.assertIn('resumable_took_range', out)
+        self.assertIn('FAILED', out)
+
+    def test_controls_are_reported_when_the_gate_passes(self):
+        code, out = run(dict(gate_passed=True, lengths_checked=3, lengths_required=3,
+                             controls=dict(baseline_took_one_shot=True,
+                                           resumable_took_range=True,
+                                           resumable_did_not_fall_back=True),
+                             comparisons=[comparison(True)] * 3))
+        self.assertEqual(code, 0)
+        self.assertIn('control', out)
+
     def test_a_missing_report_fails_the_build(self):
         code, out = run(None)
         self.assertEqual(code, 1)

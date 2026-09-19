@@ -161,6 +161,14 @@ def run_arm(port, context, chunked, prompts, max_tokens, results, log_name, fast
         arm['error'] = '%s: %s' % (type(error).__name__, str(error)[:500])
     finally:
         stop_server(process, handle)
+    # Positive control. The patched entry logs which prefill path it took. If the
+    # plugin never supplies start_pos the resumable arm quietly serves the one-shot
+    # path and an equality comparison between the arms passes having tested nothing.
+    path = results / log_name
+    if path.is_file():
+        text = path.read_text(errors='replace')
+        arm['one_shot_path_seen'] = '[M1] prefill path: one-shot' in text
+        arm['range_path_seen'] = '[M1] prefill path: resumable' in text
     return arm
 
 
@@ -230,8 +238,14 @@ def main():
         checked = [c for c in comparisons if c.get('both_present')]
         # Every length must actually run. Scoring only the lengths that happened to
         # succeed is how a gate passes while silently testing less than it claims.
+        base_arm, test_arm = report.get('baseline') or {}, report.get('resumable') or {}
+        controls = dict(baseline_took_one_shot=bool(base_arm.get('one_shot_path_seen')),
+                        resumable_took_range=bool(test_arm.get('range_path_seen')),
+                        resumable_did_not_fall_back=not test_arm.get('one_shot_path_seen'))
+        report['controls'] = controls
         report['gate_passed'] = (len(checked) == len(prompts)
-                                 and all(c['identical'] for c in checked))
+                                 and all(c['identical'] for c in checked)
+                                 and all(controls.values()))
         report['lengths_checked'] = len(checked)
         report['lengths_required'] = len(prompts)
     except BaseException as error:

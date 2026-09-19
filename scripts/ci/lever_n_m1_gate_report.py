@@ -38,6 +38,10 @@ def main():
             print('        first divergence at char %s' % entry.get('first_divergence'))
             print('        baseline  %r' % (entry.get('baseline_at') or '')[:60])
             print('        resumable %r' % (entry.get('resumable_at') or '')[:60])
+    controls = report.get('controls')
+    if controls:
+        for name in sorted(controls):
+            print('control  %-28s %s' % (name, 'ok' if controls[name] else 'FAILED'))
     passed = bool(report.get('gate_passed'))
     print('\nM1 GATE %s  (%s lengths checked)'
           % ('PASSED' if passed else 'NOT PASSED', report.get('lengths_checked')))

@@ -230,6 +230,11 @@ def patch_vllm_entry(source):
     vLLM hands the model a chunk window per step once chunked prefill is on. The entry
     passes it through unchanged; the batched path turns it into per-request starts and
     ends and calls prefill_paged_slots_range instead of prefill_paged_slots.
+
+    Both branches log which path ran. If the plugin never supplies start_pos the else
+    branch is dead, the resumable arm silently serves the one-shot path, and an equality
+    gate comparing the two arms passes while testing nothing. The marker is the positive
+    control that rules that out.
     """
     lines = source.splitlines(keepends=True)
     span = function_span(source, VLLM_ENTRY)
@@ -255,6 +260,7 @@ def patch_vllm_entry(source):
         lines, span,
         '        host_logits = model.prefill_paged_slots(token_ids_list, pt, empty_slots, valid_lens=plens)',
         '        if start_pos is None:\n'
+        '            logger.info("[M1] prefill path: one-shot prefill_paged_slots")\n'
         '            host_logits = model.prefill_paged_slots(token_ids_list, pt, empty_slots, valid_lens=plens)\n'
         '        else:\n'
         '            # Chunked prefill: this step covers [start_pos[u], plens[u]) of each row.\n'
@@ -262,6 +268,10 @@ def patch_vllm_entry(source):
         '            # from the runner intermediate_prefill_mask rather than being re-derived.\n'
         '            starts = [int(s) for s in start_pos]\n'
         '            lasts = [bool(v) for v in is_last] if is_last is not None else [True] * N\n'
+        '            logger.info(\n'
+        '                f"[M1] prefill path: resumable prefill_paged_slots_range "\n'
+        '                f"starts={starts} ends={list(plens)} is_last={lasts}"\n'
+        '            )\n'
         '            host_logits = model.prefill_paged_slots_range(\n'
         '                token_ids_list, pt, empty_slots, starts, plens, lasts, valid_lens=plens\n'
         '            )',

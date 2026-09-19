@@ -51,14 +51,27 @@ jobs:
         run: |
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
-          # Device-level reset only, on the board UMD reported hung (PCIe ID 2).
-          # No firmware is written and no host reboot is performed.
-          prefix=()
-          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
-          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          # Reset EVERY board, not just the hung one. Run 35414390308 reset only
+          # /dev/tenstorrent/2 and the ethernet links to its partner never retrained:
+          # auto-discovery then downgraded the mesh to 1x1 and every two-card job died
+          # in set_fabric_config with TT_FATAL topology_mapper mapping_result.success.
+          # Both link ends have to come back together. No firmware is written and no
+          # host reboot is performed.
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
-          timeout -k 20 300 "${prefix[@]}" "$smi" -r /dev/tenstorrent/2 \
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" \
             > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" \
+              >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" \
+                >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
           echo "reset_exit=$status" | tee experiment-results/reset.status
           tail -40 experiment-results/reset.log || true
       - name: Confirm the board answers again
@@ -124,6 +137,11 @@ jobs:
             > experiment-results/verify.log 2>&1 || true
           grep -E '"supported"|Established firmware|hung|0xffffffff' experiment-results/verify.log | tail -10 || true
           tail -5 experiment-results/verify.log || true
+          if grep -q "Downgrading to mesh shape" experiment-results/verify.log; then
+            echo "Fabric links did not come up; the mesh is below the two-card shape."
+            grep -E "Downgrading to mesh shape|degree histogram" experiment-results/verify.log | tail -5
+            exit 1
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
