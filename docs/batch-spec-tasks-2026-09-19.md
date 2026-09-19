@@ -496,3 +496,59 @@ width - plus that unpacked decode takes the identical path it did before.
 3. `admit_scheduler_output`, the one-hook-per-request binding, and the
    one-in-flight prefill rule.
 4. Hardware qualification of the whole chain.
+
+## Two users on hardware: six boundaries, five of them real bugs (2026-09-20)
+
+The chain was driven on the rig until it stopped, six times, each time with the
+failure naming itself. Every run is two users arriving SIMULTANEOUSLY at context
+4352, which is the case the whole one-in-flight argument is about.
+
+| Run | Stopped at | What it was |
+| --- | --- | --- |
+| 35436193682 | `len(scheduled_new_reqs) != 1` | the scheduler batching simultaneous prefills |
+| 35441222051 | same, clause unknown | the message did not say which term fired |
+| 35441524535 | `prefill_slot='cmpl-9cf6...' new=[one] cached=[]` | a request finishing at its first token never freed the prefill slot |
+| 35441818361 | `prefill_slot=None new=[] cached=[BOTH] spec={both}` | **both users prefilled**; neither had a bridge, because both took the terminal branch under ignore_eos |
+| 35442208627 | `Terminal prefill must finish without allocating a verifier` | the same ignore_eos assumption one layer down |
+| 35442532141 | `Qualified 32K T16 replay ... required` | a context pin: the T16 target attention path is qualified at position 32768 exactly |
+| 35442719988 | `Unique physical pages from the admitted cache required` | at 32768, `serving_runtime.bridge_factory` caps a request at 68 KV pages |
+
+### The milestone
+
+Run 35441818361 is the one that matters: `prefill_slot=None`, `new=[]`,
+`cached=['cmpl-8e11...', 'cmpl-b76d...']`, proposals present for both. **Two users
+both prefilled on hardware**, and the scheduler then presented exactly the packed
+two-user decode step probe 35436807668 predicted on CPU. Every previous attempt
+refused the second request at admission.
+
+### The three bugs, all invisible with one user
+
+- The EOS branch of `serving_lifecycle._sample` returned without clearing
+  `request_id`. With one user that is harmless, since that user is done. With two
+  it holds the prefill slot forever.
+- That branch fires on a terminal first token, but under `ignore_eos` the request
+  does NOT stop - vLLM keeps scheduling it - so the short circuit left it decoding
+  with no bridge. A synthetic prompt that repeats one phrase invites a terminal
+  first token, so this is the common case on the bench, not a corner.
+- `serving_request_factory` refused to allocate a verifier for a terminal seed,
+  the same assumption one layer down.
+
+### Two pre-existing pins in tension
+
+`frozen_combined_runtime.validate_target_option` qualifies the T16 replay path at
+`rows == 16 and position == 32768` exactly. `serving_runtime.bridge_factory` caps
+a request at 68 KV pages, and 68 x 64 = 4352 tokens exactly. **Both cannot hold at
+once**, so whichever context is chosen, one of them fires. Neither is a packing
+problem and neither is in scope to lift, but the next person to run two users at
+any context will meet one of them, so it is written down here rather than
+rediscovered.
+
+The open question is why `target_attention_t16` is enabled in this configuration
+at all, since single-user runs at 4352 do not hit its pin.
+
+### Still not built
+
+The packed device step - the callable that drives the packed `ModelBatch` fixture
+and returns one committed output per user. `serving_packed_bridge` takes it as a
+parameter and refuses by name without it, so the serving chain is complete up to
+that call and no further.
