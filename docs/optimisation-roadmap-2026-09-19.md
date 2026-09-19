@@ -160,9 +160,13 @@ should be added to the next graft extraction, because it changes how much is on 
    (run 35426279454). The model is 25.36 B counted, weights `bfloat8_b`, activations
    `bfloat16`, and prefill is **3.77x off compute-bound with matmuls at 62-67% of peak** -
    not the 11.7x and not inefficient. See `prefill-profile-corrected-2026-09-19.md`.
-2. **Prefill layout, 17.2%, and elementwise at ~16%.** Now the leading prefill target by
-   default, because arithmetic is closed and communication is closed. A third of prefill
-   between them, and it is a fusion and data-movement problem.
+2. **Prefill layout, 17.2%.** Still the leading target, but narrowed by measurement. The
+   GDN causal conv owns 473 ms of it, 12.8% of prefill, and run 35428550094 showed the
+   two *available* implementations land within 2.5% of each other: the MAC FIR pays three
+   untilize/slice/tilize round-trips, `ttnn.conv1d` pays one plus a slower kernel. The
+   dispatch fix was correct - identical tokens - and 2.5% slower, so it was not adopted.
+   What is left is a **tiled-layout fused causal conv**, a kernel build on the pattern of
+   the existing `GdnConvGatesDeviceOperation`, which does this for decode already.
 3. **T4/T8/T16 recurrence sweep in one run.** Settles whether GDN cost scales with verify
    rows, which decides whether attacking the recurrence helps speculation or merely
    shifts it.

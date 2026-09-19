@@ -88,3 +88,69 @@ That call site is correct and is not the one serving uses. Reading the source su
 the wrong conclusion; only logging the branch at runtime settled it. The fourth
 never-firing condition found this month, after the chunk-size default, the deprecated
 `num_links`, and the M1 dispatch.
+
+## RESULT: correct, and 2.5% slower. Do not adopt
+
+Run 35428550094. All three controls held and the gate passed on correctness:
+
+| control | |
+| --- | --- |
+| lever moved | 96 markers `full=True`, 96 `full=False` - native conv1d ran for full chunks, FIR for tails |
+| tokens identical | `[279, 3841, 13477, 37550, ...]` byte-for-byte across both arms |
+| both arms complete | yes, two generates each |
+
+And the measurement, now prefill-only rather than diluted by sixteen decode steps:
+
+| arm | 2062 tokens | tok/s |
+| --- | ---: | ---: |
+| baseline (MAC FIR) | 0.967 s | 2133.2 |
+| fixed (native conv1d) | 0.991 s | **2080.0** |
+
+**Speedup 0.975. The fix is a 2.5% regression**, against a predicted 9.6% gain.
+
+### Why the prediction was wrong
+
+The estimate priced what the FIR costs and never priced what replaces it.
+`_conv1d_prefill` is not layout-free:
+
+```python
+xin = ttnn.concat([conv_state, qkv], dim=1)
+xin = ttnn.to_layout(xin, ttnn.ROW_MAJOR_LAYOUT)   # a full untilize
+xin = ttnn.reshape(xin, (1, Lin, 1, C))
+...                                                 # ttnn.conv1d
+out = ttnn.reshape(out, (1, T, C))
+out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)        # a full tilize
+```
+
+It removes two of the three layout round-trips and then spends the saving inside
+the conv kernel, which costs more than three elementwise macs. Net: slightly
+negative.
+
+This is the same error family as the 9.3 GB/s: a number derived from one side of
+a trade, used as if it were the trade. **Measuring the cost of what you remove
+tells you nothing until you measure the cost of what you put in its place.**
+
+### What survives
+
+The 473 ms is still real, and still 12.8% of prefill. What is now known is that
+**neither available implementation is cheap**: the FIR pays three untilize/slice/
+tilize round-trips, `ttnn.conv1d` pays one round-trip plus a slower kernel, and
+they land within 2.5% of each other. The cost is the layout conversion itself,
+which both paths accept as unavoidable.
+
+So the remedy is the one this project already has a pipeline for: a **tiled-layout
+fused causal conv**, doing the K=4 FIR over the time axis without ever leaving
+TILE layout. `GdnConvGatesDeviceOperation` is exactly that for decode and is
+already in the build; prefill has no equivalent. That is a kernel build at
+roughly two minutes per iteration through the graft, not a dispatch change.
+
+Upper bound on the prize stays ~10% of prefill, and it is now bounded from below
+too: anything that still untilizes will land where these two did.
+
+### Retracted
+
+The baseline had failed on its second prefill twice, at 6144 and 4096, with an
+MMIO timeout inside 3 us of the same value, and that was flagged as possibly the
+FIR path corrupting device state. **It is not.** Both arms here ran two generates
+at the same length with no MMIO error at all. The earlier failures changed prompt
+length between calls; the crash follows the shape change, not the conv path.
