@@ -78,7 +78,7 @@ jobs:
           # The serving image, not the experiment image the probes used.
           # Image built from this branch by qwen-fast-serving-image.yml, so it carries the
           # lifted context pin. The pinned canary image does not.
-          image=sha256:4942871e27f68277eae874d12cd7b9295cfdc5f8e083766c8839984e76ed511f
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           cache=/home/thatch/.cache/qwen-experiments
           revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
