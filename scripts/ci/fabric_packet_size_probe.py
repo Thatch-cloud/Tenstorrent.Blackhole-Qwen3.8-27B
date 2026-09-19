@@ -1,28 +1,33 @@
-"""Does raising the fabric packet size recover the missing inter-card bandwidth?
+"""Does raising the fabric packet payload size recover the missing bandwidth?
 
-Established: four ethernet links are up between the pair (run 35425330364), and
-the user confirms two cables, so the ceiling is 200 GB/s. Measured all-gather is
-83.74 GB/s, 41.9% of it. About 116 GB/s is unaccounted for.
+Four ethernet links are up between the pair (run 35425330364) and the user
+confirms two QSFP-DD800 cables, so the ceiling is 200 GB/s. Measured all-gather
+is 83.74 GB/s, 41.9% of it.
 
-The runtime names a suspect itself:
+ccl_common.cpp says why that might be. Blackhole allows a 15232 B packet payload
+and scatter-write caps a packet at 4 chunks, so for the 2048 B page of a bf16
+32x32 tile the ideal packet is 4 x 2048 = 8192 B. The configured 4352 B fits only
+two pages and wastes 256 B on top. Two pages per packet where four should fit is
+a factor of two, and a factor of two is what the measurement is missing.
 
-    Fabric packet size 4352 B is suboptimal for transporting 2048 B pages.
-    Configure 8192 B packet size to maximize throughput.
+The knob is `FabricContext::validate_and_apply_packet_size`, fed from
+`router_config_.max_packet_payload_size_bytes`, and ttnn exposes it:
 
-One 2048-byte page per 4352-byte packet is 47% payload efficiency, against a
-measured 41.9%. Close enough to be worth testing and nowhere near close enough
-to believe without one.
+    ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D,
+                           router_config=ttnn.FabricRouterConfig(...))
 
-THE CONTROL MATTERS MORE THAN THE MEASUREMENT. Three levers this month produced
-arms that agreed to within 2% because the lever never moved - a default never
-overridden, a deprecated argument ignored, a code path never entered. So this
-probe reads the payload size back from the runtime and checks whether the
-warning still appears, and reports the arm as INVALID if the knob did not take.
-A bandwidth number from an arm whose lever did not move is worse than no number,
-because it reads as a physical result.
+THE CONTROL IS THE POINT. Three levers this month were inert - a default never
+overridden, a deprecated argument accepted and ignored, a code path never
+entered - and each produced arms agreeing to within 2%, which reads as a
+physical result. Here `get_tt_fabric_max_payload_size_bytes()` reports the value
+the runtime actually adopted, so the arm can state whether the lever moved
+instead of inviting the reader to assume it did.
 
-Environment variables must be set before ttnn is imported, because fabric
-configuration is read at initialisation, so the import is deliberately deferred.
+Prediction, recorded before the run: if packing is the whole story, four pages
+per packet against two should take 83.74 GB/s towards 160-170 GB/s. If the
+readback changes to 8192 and bandwidth does not move, packing was not the
+constraint and the remaining suspect is how many of the four links the
+collective uses.
 """
 
 import argparse
@@ -38,15 +43,49 @@ CEILING_GB_S = 200.0
 SHAPES = ((512, 5120), (2048, 5120), (8192, 5120))
 
 
-def measure(ttnn, mesh, gather, sync, rows, cols, iters):
-    """All-gather a column-sharded tensor and time the steady state.
+def configure_fabric(ttnn, report, packet_size):
+    """Bring the fabric up, optionally requesting a packet payload size."""
+    config = None
+    for name in ('FABRIC_1D', 'FABRIC_1D_RING'):
+        config = getattr(ttnn.FabricConfig, name, None)
+        if config is not None:
+            report['fabric'] = name
+            break
+    if config is None:
+        report['fabric'] = 'ABSENT'
+        return
 
-    Sharder, sync and gather are passed in from the proven setup in
-    fabric_bandwidth_probe rather than rebuilt here. Run 35425588508 failed every
-    shape with "Trying to get un-initialized fabric context" because this probe
-    rebuilt that setup from memory and dropped set_fabric_config; reusing the
-    working path is why that cannot recur.
-    """
+    if not packet_size:
+        ttnn.set_fabric_config(config)
+        return
+
+    # FabricRouterConfig carries exactly one field. Try the constructor first,
+    # then attribute assignment, and record which worked rather than assuming.
+    builder = getattr(ttnn, 'FabricRouterConfig', None)
+    if builder is None:
+        report['router_config'] = 'ABSENT'
+        ttnn.set_fabric_config(config)
+        return
+    router = None
+    try:
+        router = builder(max_packet_payload_size_bytes=packet_size)
+        report['router_config'] = 'constructor kwarg'
+    except BaseException:
+        try:
+            router = builder()
+            router.max_packet_payload_size_bytes = packet_size
+            report['router_config'] = 'attribute assignment'
+        except BaseException as error:
+            report['router_config'] = '%s: %s' % (type(error).__name__, str(error)[:200])
+    if router is None:
+        ttnn.set_fabric_config(config)
+        return
+    ttnn.set_fabric_config(config, router_config=router)
+    report['requested_packet_size'] = packet_size
+
+
+def measure(ttnn, mesh, gather, sync, rows, cols, iters):
+    """All-gather a column-sharded tensor and time the steady state."""
     import torch
 
     host = torch.randn(1, 1, rows, cols, dtype=torch.bfloat16)
@@ -66,7 +105,6 @@ def measure(ttnn, mesh, gather, sync, rows, cols, iters):
     ttnn.deallocate(out)
     ttnn.deallocate(sharded)
 
-    # Each card receives the half it does not hold.
     moved = rows * (cols // 2) * 2 * iters
     return {'rows': rows, 'cols': cols,
             'bytes_per_call': rows * (cols // 2) * 2,
@@ -78,35 +116,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--iters', type=int, default=30)
-    parser.add_argument('--set', action='append', default=[],
-                        help='NAME=VALUE applied before ttnn is imported')
+    parser.add_argument('--packet-size', type=int, default=0,
+                        help='request this payload size; 0 leaves the default')
     parser.add_argument('--json')
     options = parser.parse_args()
 
     report = {'baseline_gb_s': BASELINE_GB_S, 'ceiling_gb_s': CEILING_GB_S,
-              'links': 4, 'cables': 2, 'applied': {}}
-
-    for pair in options.set:
-        if '=' not in pair:
-            continue
-        name, value = pair.split('=', 1)
-        os.environ[name] = value
-        report['applied'][name] = value
-    report['arm'] = 'tuned' if report['applied'] else 'baseline'
-
+              'links': 4, 'cables': 2,
+              'arm': 'tuned' if options.packet_size else 'baseline',
+              'page_size_bytes': 2048, 'ideal_packet_size_bytes': 8192,
+              'hw_max_payload_blackhole': 15232}
     try:
         from feature_projection import require_projection_environment
         require_projection_environment(os.environ, True)
         import ttnn
 
-        # Collectives need the fabric up. Omitting this in run 35425588508 made
-        # every shape fail on an un-initialized fabric context.
-        for name in ('FABRIC_1D', 'FABRIC_1D_RING'):
-            config = getattr(ttnn.FabricConfig, name, None)
-            if config is not None:
-                ttnn.set_fabric_config(config)
-                report['fabric'] = name
-                break
+        configure_fabric(ttnn, report, options.packet_size)
 
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         try:
@@ -117,14 +142,24 @@ def main():
                       or getattr(getattr(ttnn, 'experimental', None), 'all_gather_async', None))
             report['all_gather_api'] = gather.__name__ if gather else None
 
-            # Payload size is only readable once the fabric context exists.
-            for name in ('get_tt_fabric_max_payload_size_bytes',
-                         'get_tt_fabric_packet_header_size_bytes'):
+            # The control. Readable only once the fabric context exists.
+            for key, name in (('packet_size_actual', 'get_tt_fabric_max_payload_size_bytes'),
+                              ('packet_header_bytes', 'get_tt_fabric_packet_header_size_bytes')):
                 accessor = getattr(ttnn, name, None)
                 try:
-                    report[name] = accessor() if accessor else 'ABSENT'
+                    report[key] = accessor() if accessor else 'ABSENT'
                 except BaseException as error:
-                    report[name] = '%s: %s' % (type(error).__name__, str(error)[:120])
+                    report[key] = '%s: %s' % (type(error).__name__, str(error)[:120])
+
+            actual = report.get('packet_size_actual')
+            if options.packet_size and isinstance(actual, int):
+                report['lever_moved'] = (actual == options.packet_size)
+                if not report['lever_moved']:
+                    report['INVALID'] = (
+                        'requested %d B but the runtime reports %s B, so this arm says '
+                        'nothing about packing' % (options.packet_size, actual))
+            if isinstance(actual, int) and actual:
+                report['pages_per_packet'] = actual // 2048
 
             results = []
             for rows, cols in SHAPES:
@@ -145,7 +180,6 @@ def main():
             best = max(r['gb_s'] for r in good)
             report['best_gb_s'] = best
             report['percent_of_ceiling'] = round(100 * best / CEILING_GB_S, 1)
-            report['change_vs_baseline'] = round(best - BASELINE_GB_S, 2)
             report['ratio_vs_baseline'] = round(best / BASELINE_GB_S, 3)
     except BaseException as error:
         report['error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
