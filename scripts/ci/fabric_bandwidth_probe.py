@@ -83,12 +83,27 @@ def main():
                                           layout=ttnn.TILE_LAYOUT, device=mesh,
                                           memory_config=ttnn.DRAM_MEMORY_CONFIG,
                                           mesh_mapper=shard)
-                def call(t=sharded, n=links):
+                # Record which call actually ran. A silent fallback to the one-link
+                # form made runs 35424031813 and 35424304568 report identical
+                # bandwidth at one, two and four links, which is what a lever that
+                # never moved looks like rather than a fabric that does not scale.
+                accepted = {'num_links': None}
+
+                def call(t=sharded, n=links, state=accepted):
+                    if state['num_links'] is False:
+                        return gather(t, dim=3)
                     try:
-                        return gather(t, dim=3, num_links=n)
-                    except TypeError:
+                        result = gather(t, dim=3, num_links=n)
+                        state['num_links'] = True
+                        return result
+                    except TypeError as error:
+                        state['num_links'] = False
+                        state['why'] = str(error)[:160]
                         return gather(t, dim=3)
                 out = call()
+                entry['num_links_accepted'] = accepted['num_links']
+                if accepted.get('why'):
+                    entry['num_links_rejected_because'] = accepted['why']
                 sync()
                 elapsed = timed(call, options.iters, sync)
                 # each device receives the other's half
@@ -131,10 +146,17 @@ def main():
                 base = same.get(1)
                 if base:
                     report['link_scaling'] = {k: round(v / base, 2) for k, v in sorted(same.items())}
-            report['reading'] = (
-                'links scale: production num_links=4 should already get the multiple'
-                if report.get('link_scaling', {}).get(4, 1) > 1.5 else
-                'extra links do not add bandwidth for this shape')
+            honoured = {r.get('num_links_accepted') for r in good}
+            report['num_links_honoured'] = (True in honoured)
+            if True not in honoured:
+                report['reading'] = ('num_links was NOT accepted by this API, so every '
+                                     'arm ran one link and the sweep proves nothing '
+                                     'about link scaling')
+            else:
+                report['reading'] = (
+                    'links scale: production num_links=4 should already get the multiple'
+                    if report.get('link_scaling', {}).get(4, 1) > 1.5 else
+                    'extra links do not add bandwidth for this shape')
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:400])
     finally:
