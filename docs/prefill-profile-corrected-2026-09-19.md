@@ -360,3 +360,31 @@ moved the matmuls further from being the problem.
 a stall is pure loss. But it is inside a tt-metal CCL op, so the lever is upstream
 rather than local, and the honest size is 4% of prefill, which is under 1% of the
 end-to-end target. **Report it upstream; do not build anything for it.**
+
+## The link fix works, and the stall is not bandwidth starvation
+
+Run 35430783967. The gate passed on all three controls, with the marker carrying the
+value rather than just firing:
+
+```
+[CCLLINKS] cluster descriptor reports 4 links
+[CCLLINKS] overriding P300 (2, 2) with 4 discovered links
+```
+
+Tokens identical, both arms complete, and **speedup 0.999** - 2096.5 against 2094.8
+tok/s. Doubling the links the CCL layer believes it has changes prefill by nothing.
+
+That is the answer to the question the patch was built to ask. The 280 ms of collective
+wait is **not** a consequence of collectives being starved at half their links: given
+four, they do not go faster. It is an independent defect, and the upstream report is
+stronger for having eliminated the obvious explanation.
+
+It also agrees with the earlier fabric sweep, where `num_links` at 1, 2 and 4 gave
+76.44 / 77.63 / 77.43 GB/s. Two independent routes to the link count, the same answer:
+this fabric does not go faster with more links asked for.
+
+**Whether to ship it is now a decode question, not a prefill one.** Issue 55125 recorded
++2.4% decode when the override was first measured; this gate measured prefill and found
+nothing. The two are not in conflict - decode is weight-bound with 5% collectives,
+prefill is not - but it means the case for bundling rests on a decode measurement that
+should be repeated rather than on this one.
