@@ -41,7 +41,8 @@ def stream_once(port, prompt, max_tokens, results, index):
     payload = json.dumps(dict(model='qwen-longctx', prompt=prompt,
                               max_tokens=max_tokens, temperature=0.0,
                               stream=True,
-                              stream_options=dict(include_usage=True))).encode()
+                              stream_options=dict(include_usage=True),
+                              ignore_eos=True)).encode()
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})
     gaps, tokens, started = [], 0, time.perf_counter()
@@ -176,6 +177,12 @@ def main():
         # what the prompt actually came to.
         prompt = 'def solve(n):\n    # ' + ('compute the answer carefully. ' *
                                             max(1, options.prompt_tokens // 8))
+        # ignore_eos is what makes this a latency measurement rather than a content
+        # one. Run 35418922350 accepted a 79,368-token prompt, spent 33.4 s on it and
+        # returned zero tokens with no error: the stream completed normally because
+        # the model emitted EOS as its first token. A prompt that repeats one phrase
+        # ten thousand times invites exactly that, and a fixed decode count is what
+        # the inter-token latency needs regardless.
         results = [None] * options.users
         threads = [threading.Thread(target=stream_once,
                                     args=(options.port, prompt, options.max_tokens,
