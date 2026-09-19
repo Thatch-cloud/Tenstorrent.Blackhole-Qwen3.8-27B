@@ -110,3 +110,55 @@ The dedicated profile bounds prefill with signposts per prompt length and will g
 clean answer. If it confirms this, the revised hypothesis is the projection path and the
 fused collective-matmul, and the remedy is matmul efficiency or fusion rather than
 anything to do with the recurrence.
+
+## RESULT: the prediction was wrong. Collectives dominate, GDN does not
+
+Run 35422536834, 16 MB device report, three prefills of 2,568 / 10,248 / 20,488 tokens.
+Chip 0, all operations, 37,203 calls over 36 op types, 3,697 ms of device time.
+
+| Group | ms | share |
+| --- | ---: | ---: |
+| **collectives** (AllGatherMinimalMatmul, ReduceScatter, AllGather) | **1374.3** | **37.2%** |
+| layout (Slice, Tilize, Untilize, Reshape, Sharded/Interleaved, Concat, Pad) | 636.1 | 17.2% |
+| GDN family (ChunkGdnScan, ChunkGdnPrep, GdnConvGates) | 528.9 | 14.3% |
+| elementwise and norm | 511.8 | 13.8% |
+| plain Matmul | 488.7 | 13.2% |
+| SDPA / attention | 136.5 | 3.7% |
+
+**The hypothesis said GDN above 50%. It is 14.3%.** The preliminary evidence from the
+untraced rows of the decode profile pointed this way and was right to.
+
+**Actual arithmetic is 16.9% of device time** - matmul plus SDPA together. That is the
+9x MFU gap, stated exactly: the chips spend about one sixth of prefill doing the model's
+maths, and the rest moving data.
+
+The single largest operation is `AllGatherMinimalMatmulAsyncOp` at 74 cores: 565 ms
+across 467 calls, 15.5% on its own. It is already a fused collective-and-matmul, so the
+obvious fusion has been done and this is what remains after it.
+
+### What this inverts
+
+Decode and prefill are opposites on this axis, which nothing in the earlier analysis
+predicted:
+
+| | collectives | arithmetic |
+| --- | ---: | ---: |
+| decode (T16 verifier) | 5% | 49% weight-bearing |
+| prefill | **37%** | **17%** |
+
+Decode is bandwidth-bound and communication is negligible. Prefill is communication-bound
+and arithmetic is a minority of its time. An optimisation aimed at one is close to
+useless for the other, and the intuition carried over from decode - that collectives are
+cheap here - is exactly wrong for prefill.
+
+### Where prefill work should go
+
+1. **Collectives, 37.2%.** The fused all-gather-matmul is the biggest single item. Fewer,
+   larger collectives, or a sharding that needs less of them.
+2. **Layout, 17.2%.** 2,556 Slice calls and 636 ms of tilize/untilize/reshape is pure
+   data shuffling. Candidate for fusion into neighbouring ops.
+3. **Not GDN**, at 14.3%, and not attention at 3.7%.
+
+The caveat from the original profiling work still applies: these are observed intervals,
+durations include waits and can overlap, and they are not a dependency-graph critical
+path.
