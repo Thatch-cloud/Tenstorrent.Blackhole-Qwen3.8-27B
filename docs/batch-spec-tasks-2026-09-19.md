@@ -257,3 +257,59 @@ prefill and decode can interleave at all - which is the same question Lever N's 
 
 The CPU lane attaches no device, loads no weights, and sits outside the exclusive
 concurrency group so it cannot queue behind hardware work.
+
+## T6 redefined: the fix is a batched verifier, not a second hook (2026-09-19)
+
+Three probes settled what two-user serving actually requires. All are CPU-only,
+driving the real `Scheduler` and the plugin's `TTScheduler`, ~50 s per lane.
+
+| Question | Run | Measured |
+| --- | --- | --- |
+| Two prompts arriving together | 35436384975 | TTScheduler batches them: `new=['A','B']` in one step |
+| A prompt arriving during decode | 35435453374 | Serialised: `new=['B'] cached=[]` |
+| Two established requests decoding | 35436807668 | Batched every step: `cached=['B','A']`, `counts={'B':16,'A':16}`, `total=32`, both proposal sets in `scheduled_spec_decode_tokens` |
+
+Run 35436193682 on hardware admitted both requests and got both into `_execute`,
+which no previous run managed, then failed on `len(scheduled_new_reqs) != 1`. That
+is the first row, not the routing the previous commit fixed.
+
+### What this means
+
+The decode step carries **two requests at once**, not alternating ones. So the two
+candidate designs are:
+
+**Alternation** (Lever N section 3.3 item 2) - one decode per step, each device
+execution stays batch 1, every existing shape is reused. **Arithmetically ruled out
+for this goal.** Decode is weight-bandwidth bound: 19.92 GB of dense projections per
+step against 512 GB/s per card is a ~19.5 ms floor per weight pass, and alternation
+spends one weight pass per user per round. Per-user cycle becomes N x the single-user
+cycle, so per-user rate is the single-user rate divided by N. Even at the optimised
+60 ms cycle that is 100 tok/s at two users and 50 at four, against a 200 tok/s target.
+Alternation is a correctness fallback, never a path to the goal.
+
+**Batched verify** - one weight pass serves every user's verifier rows, which is the
+only reason the 60 ms budget can hold for four users simultaneously. This is the fix.
+
+### What blocks the batched verify, read from the code
+
+- `dflash_device` already accepts `block_rows in (8, 16, 32)`, so a 32-row block
+  exists. It is **one request's 31 proposals** (`max_drafts = block_rows - 1`), not
+  two requests' 16 + 16.
+- `self.position`, `self.history_rows`, `feature_start` and `window` are all
+  single-valued, and the feature tensors are checked as
+  `value.shape[2] != window['rows']`. One contiguous captured KV window is shared by
+  every row. Two users at different positions need two windows.
+- The verifier mask is `(1, 1, 32, K)` with `32 <= K <= 2080`. A block-diagonal mask
+  over two users needs both windows in K, and the capture window is up to 2048 rows,
+  so two users need up to 4096 against a 2080 cap.
+- `serving_vllm_contract.admit_scheduler_output` asserts
+  `list(cached.req_ids) != [request_id]`, single resident decode.
+
+So T6 is: give the verifier a batch dimension over independent KV windows - per-row
+window tables, a block-diagonal mask wider than 2080, and feature tensors gaining a
+batch dim - then widen the admission contract to match. It is a device-side change.
+
+### Still required regardless
+
+The one-in-flight rule from Lever N section 3.3 item 1, because the fast prefill path
+takes one capture and executes one prompt, and simultaneous arrivals are batched.
