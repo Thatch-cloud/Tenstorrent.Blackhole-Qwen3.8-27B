@@ -93,9 +93,22 @@ class FastWorkerHook:
             raise ValueError('Live fast worker owner required')
         if len(self.bridges) == 1 and self.packed_step is None:
             return self.bridge.drafts()
-        from serving_vllm_packed import packed_draft_token_ids
+        # Each bridge's own drafts(), not a direct read of the tickets: drafts() is
+        # where a request PREPARES its ticket when none is pending. Reading the
+        # tickets directly skipped that and every packed step was refused with
+        # 'Live prepared request ticket required' (run 35475786321).
+        from vllm.v1.outputs import DraftTokenIds
 
-        return packed_draft_token_ids([bridge.request for bridge in self.bridges.values()])
+        request_ids, tokens = [], []
+        for bridge in self.bridges.values():
+            drafts = bridge.drafts()
+            if drafts is None:
+                continue
+            request_ids.extend(drafts.req_ids)
+            tokens.extend(drafts.draft_token_ids)
+        if not request_ids:
+            return None
+        return DraftTokenIds(req_ids=request_ids, draft_token_ids=tokens)
 
     def close(self):
         if self.closed:
