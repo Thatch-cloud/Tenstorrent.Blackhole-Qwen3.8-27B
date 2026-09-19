@@ -71,14 +71,14 @@ class PackedBranchTests(unittest.TestCase):
                 patch('draft_attention_branch.split_projected_heads',
                       side_effect=lambda *a, **k: {name: object() for name in ('q', 'k', 'v')}), \
                 patch('draft_kv_projection.project_key_value', return_value=live) as projection, \
-                patch('dflash_t16_native_attention.attention', return_value=object()), \
+                patch('dflash_t16_native_attention.attention', return_value=object()) as native, \
                 patch('dflash_t16_native_scope.require_active', return_value=None):
             parameters = prepare_attention_branch(operations, mesh, weights, convolution, lambda value: value)
             parameters.update(block_rows=16, native_head_layout=True, native_proposal_attention=True)
             execute_attention_branch(operations, mesh, collective, tensors.hidden, None,
                 tensors.mask, rope, lambda value: value, parameters=parameters, context=None,
                 pack=self.users(), cached_history=caches, native_proposal_mask_validated=True)
-        return projection, caches, live
+        return projection, caches, live, native
 
     def test_key_axis_is_assembled_exactly_as_the_plan_says(self):
         plan, spans, key_rows = key_value_plan(list(self.contexts), block_rows=16)
@@ -98,7 +98,7 @@ class PackedBranchTests(unittest.TestCase):
     def test_the_live_block_is_not_padded_and_uses_the_supplied_block_rope(self):
         plan, spans, key_rows = key_value_plan(list(self.contexts), block_rows=16)
         operations, weights, convolution, tensors, rope, pieces = self.fixture(key_rows)
-        projection, caches, live = self.run_packed(operations, weights, convolution, tensors, rope)
+        projection, caches, live, native = self.run_packed(operations, weights, convolution, tensors, rope)
         self.assertIs(projection.call_args.args[3], rope['live_k'],
                       'the packed path must rotate the block with the caller-supplied table')
         operations.pad.assert_not_called()
@@ -140,3 +140,24 @@ class PackedBranchTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PackedKeyBoundTests(unittest.TestCase):
+    """The T16 native attention bound is per user, and the branch must say so.
+
+    dflash_t16_native_attention.attention refuses a key axis above users x 2080.
+    Packed at two 2048-row users the axis is 4160, so a branch that forgot to pass
+    users would be refused at the kernel boundary with the mask already uploaded.
+    """
+
+    def test_the_branch_declares_the_packed_user_count(self):
+        from dflash_batched_mask import segments
+
+        tests = PackedBranchTests()
+        spans, key_rows = segments(list(tests.contexts), 16)
+        self.assertEqual(key_rows, 4160)
+        operations, weights, convolution, tensors, rope, pieces = tests.fixture(key_rows)
+        _, _, _, native = tests.run_packed(operations, weights, convolution, tensors, rope)
+        native.assert_called_once()
+        self.assertEqual(native.call_args.kwargs.get('users'), 2,
+                         'the packed user count must reach the kernel bound')

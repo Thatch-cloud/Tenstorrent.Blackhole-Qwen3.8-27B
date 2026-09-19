@@ -209,7 +209,10 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             else:
                 from proposal_native_attention import attention as native_proposal
 
-            attention = native_proposal(operations, heads['q'], heads['k'], heads['v'], mask, mask_validated=True)
+            # Packed, the key axis is the sum of the users' segments, so the T16
+            # bound of one 2048 history plus its block does not apply.
+            attention = native_proposal(operations, heads['q'], heads['k'], heads['v'], mask,
+                mask_validated=True, **(dict(users=len(spans)) if spans is not None else {}))
             attention_owned.append(attention)
         elif parameters.get('native_kernel'):
             attention = draft_sdpa(operations, heads['q'], heads['k'], heads['v'], mask)
