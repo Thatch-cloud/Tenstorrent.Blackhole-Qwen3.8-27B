@@ -52,6 +52,24 @@ jobs:
         with:
           name: qwen-gdn-conv-graft-${{ github.run_id }}
           path: gc/graft/
+      - name: Reset the boards before opening the mesh
+        working-directory: gc
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
       - name: Confirm no process holds a card
         working-directory: gc
         timeout-minutes: 3
@@ -95,6 +113,10 @@ jobs:
             tail -60 experiment-results/baseline.log || true
             exit 1
           fi
+          if grep -qi 'Downgrading to mesh shape' experiment-results/baseline.log; then
+            echo 'Mesh downgraded: one board did not come back from reset. Not a result.'
+            exit 1
+          fi
           cat experiment-results/baseline.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -119,6 +141,24 @@ jobs:
         with:
           name: qwen-gdn-baseline-${{ github.run_id }}
           path: gc/peer/
+      - name: Reset the boards before opening the mesh
+        working-directory: gc
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
       - name: Confirm no process holds a card
         working-directory: gc
         timeout-minutes: 3
@@ -160,6 +200,10 @@ jobs:
           if [ ! -s experiment-results/fixed.json ]; then
             echo 'No structured result; tail of stdout:'
             tail -60 experiment-results/fixed.log || true
+            exit 1
+          fi
+          if grep -qi 'Downgrading to mesh shape' experiment-results/fixed.log; then
+            echo 'Mesh downgraded: one board did not come back from reset. Not a result.'
             exit 1
           fi
           cat experiment-results/fixed.json
