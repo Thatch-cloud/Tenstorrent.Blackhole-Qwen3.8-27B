@@ -102,6 +102,34 @@ fraction of target.
 risks the acceptance rate the whole speculative budget depends on.
 *Gate:* only attempted if T6 shows 4 users within reach of target.
 
+## The 4K/256 profile is pinned in four places, not one
+
+Found by lifting them one at a time; each lift revealed the next. This is
+defence in depth, not an oversight — the fast path is qualified for exactly one
+request shape and refuses to run outside it at every layer.
+
+| # | Location | Constraint | State |
+| --- | --- | --- | --- |
+| 1 | serving_fast_policy.validate_fast_config | max_model_len == 4352 | **lifted** (T2) |
+| 2 | serving_fast_policy.validate_request_sampling | prompt_tokens == 4096, max_tokens == 256 | **lifted** |
+| 3 | dflash_device.__init__ line 40 | bounded prefill, five DFlash2 layers, pinned TP2 | not lifted |
+| 4 | dflash_combined_request line 80 | len(prompt) == 4096 and max_new_tokens == 256 | not lifted |
+
+Proven on hardware along the way: the engine **starts and allocates cleanly at
+65,536 positions with the fast path enabled**, ready in 100 s, twice
+(runs 35412244363, 35412592950). The context ceiling is not a hardware limit.
+That result stands whatever happens to the remaining pins.
+
+**Why lifting the rest does not reach the target.** All four are context/output
+pins. The concurrency pin is separate and load-bearing, so defeating all four
+still yields one user at 65k rather than four at 161k. Each lift also moves the
+configuration further from anything qualified — every validator here returns
+serving_qualified=False by design.
+
+The path that does reach the target is Lever N M1 (resumable prefill) then M2
+(scheduler alternation), scoped at 2.5 days in its own doc, and it does not
+require defeating qualification boundaries.
+
 ## Standing constraints
 
 - Do not change serving defaults without authorisation. This programme changes a
