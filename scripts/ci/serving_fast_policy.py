@@ -24,6 +24,23 @@ output bit-comparable is untouched.
 
 OUTPUT_BUDGET = 256
 NATIVE_GDN_SLOTS = 8
+# The proposal and verify blocks are 32 rows. capture_widths caps a bucket at 32 and
+# dflash_device accepts block_rows in (8, 16, 32), so a packed block divides those 32
+# rows among its users: two T16 users, or four T8 users. FOUR T16 USERS DO NOT FIT -
+# they need 64 rows - and dropping to T8 to fit four cuts each user from 15 proposals
+# to 7, which is a direct cut to committed tokens per cycle.
+PACKED_BLOCK_ROWS = 32
+
+
+def packed_geometry(users):
+    """Rows per user in the shared 32-row block, and the proposals that buys."""
+    if type(users) is not int or users < 1 or PACKED_BLOCK_ROWS % users:
+        raise ValueError('Packed users must divide the %d-row block' % PACKED_BLOCK_ROWS)
+    rows = PACKED_BLOCK_ROWS // users
+    if rows not in (8, 16, 32):
+        raise ValueError('Each packed user needs a supported T8/T16/T32 share of the block')
+    return dict(users=users, block_rows=rows, verifier_rows=PACKED_BLOCK_ROWS,
+                proposals_per_user=rows - 1)
 MINIMUM_MODEL_LEN = 4352
 # Prompts are bounded by the served context rather than pinned to 4096; the server
 # still rejects anything past max_model_len before a request reaches this check.

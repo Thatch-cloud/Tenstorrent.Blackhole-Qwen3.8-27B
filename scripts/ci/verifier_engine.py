@@ -192,9 +192,12 @@ class VerifierEngine:
             self.close()
             raise
 
-    def fixture(self, rows, checkpoints, *, retain, position=None):
+    def fixture(self, rows, checkpoints, *, retain, position=None, pack=None):
+        # Packed, the rows belong to several requests: ModelBatch takes their
+        # frontiers, page tables and per-layer GDN state from the pack, and the
+        # position and pages below apply only to the unpacked case.
         return ModelBatch(self.model, [1] * rows, self.position if position is None else position, self.pages, self.helpers, checkpoints,
-            0 if rows == 1 else rows, serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
+            0 if rows == 1 else rows, pack=pack, serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
             norm_batch=self.norm_batch, attention_replay=getattr(self, 'attention_replay', False),
