@@ -74,12 +74,20 @@ def main():
                         help='enable speculation against this draft config path')
     parser.add_argument('--readiness-seconds', type=int, default=900)
     options = parser.parse_args()
-    options.results.mkdir(parents=True, exist_ok=True)
+    try:
+        options.results.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
     plan = kv_plan(options.users, options.context)
     report = dict(scope=__doc__, plan=plan, throughput_measured=False,
                   stage='starting', ready=False)
-    (options.results / 'bringup.json').write_text(json.dumps(report, indent=2) + '\n')
+    # Best-effort only: a host-owned bind mount is not writable from inside the
+    # container, and the delimited stdout below is the real channel.
+    try:
+        (options.results / 'bringup.json').write_text(json.dumps(report, indent=2) + '\n')
+    except OSError:
+        pass
 
     # Speculation is off by default here: this branch has no draft-config, and KV
     # allocation - the thing being falsified - does not depend on it. The draft model
@@ -156,10 +164,22 @@ def main():
                 except BaseException:
                     pass
         report['log'] = scrape(log_path)
-        (options.results / 'bringup.json').write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps({k: v for k, v in report.items() if k != 'log'}, indent=2)[:4000])
-        print('KV plan: %d users x %d ctx = %d blocks, %.2f GiB'
-              % (plan['users'], plan['context'], plan['blocks'], plan['kv_gib']))
+        try:
+            (options.results / 'bringup.json').write_text(
+                json.dumps(report, indent=2) + '\n')
+        except OSError as error:
+            report['results_write_error'] = str(error)[:200]
+        # Delimited stdout is the real channel: the container cannot write to a
+        # host-owned bind mount, which is how the first two attempts died.
+        print(BEGIN)
+        print(json.dumps(report, indent=2))
+        print(END)
+        print(LOG_BEGIN)
+        if log_path.is_file():
+            for line in log_path.read_text(errors='replace').splitlines()[-120:]:
+                print(line[:300])
+        print(LOG_END)
+        sys.stdout.flush()
     return 0 if report.get('ready') else 1
 
 
