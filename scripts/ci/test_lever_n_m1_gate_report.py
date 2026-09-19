@@ -64,6 +64,14 @@ class ExitCodeTests(unittest.TestCase):
         code, _ = run(dict(gate_passed=False, lengths_checked=0, comparisons=[]))
         self.assertEqual(code, 1)
 
+    def test_a_partial_run_is_not_a_pass(self):
+        """Two of three lengths compared equal is still a gate that did not run."""
+        code, out = run(dict(gate_passed=False, lengths_checked=2, lengths_required=3,
+                             comparisons=[comparison(True), comparison(True),
+                                          dict(name='approx_5000', both_present=False)]))
+        self.assertEqual(code, 1)
+        self.assertIn('NOT PASSED', out)
+
     def test_a_missing_report_fails_the_build(self):
         code, out = run(None)
         self.assertEqual(code, 1)

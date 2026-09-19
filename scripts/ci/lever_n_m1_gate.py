@@ -170,6 +170,12 @@ def main():
     parser.add_argument('--max-tokens', type=int, default=32)
     parser.add_argument('--results', type=Path, default=Path('/tmp/m1-gate'))
     parser.add_argument('--lengths', default='400,3000,5000')
+    parser.add_argument('--arm', choices=('baseline', 'resumable', 'both'),
+                        default='both',
+                        help='which arm to serve; one per CI job, because each server '
+                             'start opens the mesh and two opens in one job wedges a card')
+    parser.add_argument('--peer', type=Path,
+                        help='the other arm report to compare against')
     parser.add_argument('--fast-path', action='store_true',
                         help='route through the T16 fast runtime; its 4096-token prompt '
                              'pins apply and will reject shorter prompts')
@@ -185,12 +191,20 @@ def main():
                   targets=targets, max_tokens=options.max_tokens)
     try:
         report['fast_path'] = options.fast_path
-        report['baseline'] = run_arm(8000, options.context, False, prompts,
-                                     options.max_tokens, options.results, 'baseline.log',
-                                     options.fast_path)
-        report['resumable'] = run_arm(8001, options.context, True, prompts,
-                                      options.max_tokens, options.results, 'resumable.log',
-                                      options.fast_path)
+        report['arm'] = options.arm
+        if options.peer and options.peer.is_file():
+            peer = json.loads(options.peer.read_text())
+            for name in ('baseline', 'resumable'):
+                if peer.get(name):
+                    report[name] = peer[name]
+        if options.arm in ('baseline', 'both'):
+            report['baseline'] = run_arm(8000, options.context, False, prompts,
+                                         options.max_tokens, options.results,
+                                         'baseline.log', options.fast_path)
+        if options.arm in ('resumable', 'both'):
+            report['resumable'] = run_arm(8001, options.context, True, prompts,
+                                          options.max_tokens, options.results,
+                                          'resumable.log', options.fast_path)
         comparisons = []
         base = {c['name']: c for c in report['baseline'].get('completions', [])}
         test = {c['name']: c for c in report['resumable'].get('completions', [])}
@@ -214,8 +228,12 @@ def main():
             comparisons.append(entry)
         report['comparisons'] = comparisons
         checked = [c for c in comparisons if c.get('both_present')]
-        report['gate_passed'] = bool(checked) and all(c['identical'] for c in checked)
+        # Every length must actually run. Scoring only the lengths that happened to
+        # succeed is how a gate passes while silently testing less than it claims.
+        report['gate_passed'] = (len(checked) == len(prompts)
+                                 and all(c['identical'] for c in checked))
         report['lengths_checked'] = len(checked)
+        report['lengths_required'] = len(prompts)
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     print(BEGIN)
@@ -224,10 +242,19 @@ def main():
     print(LOG_BEGIN)
     for name in ('baseline.log', 'resumable.log'):
         path = options.results / name
-        if path.is_file():
-            print('--- %s ---' % name)
-            for line in path.read_text(errors='replace').splitlines()[-120:]:
+        if not path.is_file():
+            continue
+        lines = path.read_text(errors='replace').splitlines()
+        first = next((i for i, l in enumerate(lines)
+                      if 'ERROR' in l or 'Traceback' in l), None)
+        print('--- %s (%d lines) ---' % (name, len(lines)))
+        if first is not None and first < len(lines) - 200:
+            print('--- first error at line %d ---' % first)
+            for line in lines[first:first + 80]:
                 print(line[:260])
+            print('--- tail ---')
+        for line in lines[-200:]:
+            print(line[:260])
     print(LOG_END)
     sys.stdout.flush()
     return 0 if report.get('gate_passed') else 1
