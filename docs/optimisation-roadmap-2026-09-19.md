@@ -88,17 +88,41 @@ speculation itself.
 
 ### 2. The draft, 24.62 ms
 
-15 sequential steps at 1.64 ms each. At 405 GB/s that implies roughly 0.66 GB per card
-per step, which is a plausible size for five DFlash2 layers, so the draft appears to run
-near its own bandwidth floor and is unlikely to yield much. Reducing the **number** of
+**Corrected by the profile.** The draft trace (trace 2 in run 35185624322: 23.05 ms
+median over nine replays, against 24.62 ms measured) is **63% matmul and 37% other**, so
+roughly 8.5 ms of it is not weight streaming. The earlier claim here that the draft "runs
+near its own bandwidth floor" came from an arithmetic estimate, not a measurement, and it
+was wrong in the same way the first verifier reading was wrong: dividing bytes by a
+wall-clock interval that contained other work.
+
+The trace identification rests on the timing match rather than a signpost, so treat the
+mapping as probable rather than certain. Reducing the **number** of
 proposals is the available lever, and T32 was already tried: it committed fewer tokens
 (11.0) at higher latency, so more proposals is the wrong direction. Fewer proposals
 lowers both draft time and committed tokens, which roughly cancels.
 
-### 3. The unattributed 6.25 ms
+### 3. The residue, and why it is NOT a target
 
-Small, but it is the part nobody has looked at at all. Cheap to investigate from the
-profile already in hand.
+Now attributed from the profile, and it is a dead end: **3.44 ms spread across fifteen op
+types**, the largest being AttnPrep at 0.895 ms and LayerNorm at 0.780 ms over 129 calls.
+There is no single item to attack and no fusion that would collect a meaningful amount.
+
+Recording it because a diffuse residue is a genuine finding: it means the verifier is
+fully accounted for, and the remaining opportunity really is concentrated in the GDN
+machinery rather than hiding in unexamined overhead.
+
+The verifier now attributes to 64.91 ms against the 64.90 ms measured, so the accounting
+is complete:
+
+| | ms |
+| --- | ---: |
+| GenericOp (MLP gate/up + GDN family) | 32.59 |
+| Matmul | 20.25 |
+| decode SDPA | 3.49 |
+| residue, 15 op types | 3.44 |
+| all-gather | 2.01 |
+| GDN conv gates | 1.70 |
+| reduce-scatter | 1.43 |
 
 ## Prefill, separately
 
