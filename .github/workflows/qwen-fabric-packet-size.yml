@@ -40,6 +40,15 @@ jobs:
           docker cp "$name:/opt/tt-metal/tt_metal/fabric/fabric_context.hpp"             experiment-results/source/fabric_context.hpp 2>/dev/null || true
           grep -rn 'max_payload_size\|set_.*packet\|CHANNEL_BUFFER'             experiment-results/source/*.hpp 2>/dev/null | head -30             > experiment-results/header-refs.txt || true
           cat experiment-results/header-refs.txt || true
+          echo '=== who requests a packet size ==='
+          for f in tt_metal/fabric/fabric_context.cpp                    tt_metal/fabric/erisc_datamover_builder.hpp                    tt_metal/fabric/erisc_datamover_builder.cpp; do
+            docker cp "$name:/opt/tt-metal/$f" experiment-results/source/ 2>/dev/null || true
+          done
+          grep -rn 'validate_and_apply_packet_size\|compute_max_payload_size_bytes\|requested_size\|max_packet_payload_size_bytes'             experiment-results/source/ 2>/dev/null | head -40             > experiment-results/request-path.txt || true
+          cat experiment-results/request-path.txt || true
+          echo '=== what ttnn exposes, no device attached ==='
+          timeout -k 20 240 docker run --rm --network none --cap-drop ALL             --cpus 4 --memory 8g --tmpfs /tmp:rw,size=256m             --mount "type=bind,src=$PWD,dst=/source,readonly"             -e TT_METAL_HOME=/opt/tt-metal -e PYTHONDONTWRITEBYTECODE=1             --entrypoint python3 "$image" -B /source/scripts/ci/fabric_api_dump.py             > experiment-results/ttnn-fabric-api.json 2>&1 || true
+          cat experiment-results/ttnn-fabric-api.json || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
