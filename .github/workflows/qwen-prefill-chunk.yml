@@ -68,20 +68,21 @@ jobs:
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           docker cp "$name:$root/qwen36_vllm.py" graft/qwen36_vllm.py.orig
+          docker cp "$name:$root/model.py" graft/model.py.orig
           python3 -B - <<'PY'
           import ast, io, os, sys
           sys.path.insert(0, 'scripts/ci')
-          from lever_n_model_patch import patch_prefill_chunk
+          from lever_n_model_patch import patch_prefill_chunk_fallback
           size = int(os.environ['CHUNK'])
-          source = io.open('graft/qwen36_vllm.py.orig', encoding='utf-8').read()
-          patched = patch_prefill_chunk(source, size)
+          source = io.open('graft/model.py.orig', encoding='utf-8').read()
+          patched = patch_prefill_chunk_fallback(source, size)
           ast.parse(patched)
-          io.open('graft/qwen36_vllm.py', 'w', encoding='utf-8',
+          io.open('graft/model.py', 'w', encoding='utf-8',
                   newline=chr(10)).write(patched)
           print('chunk -> %d' % size)
           PY
-          grep -n '_PREFILL_WARMUP_CHUNK' graft/qwen36_vllm.py
-          sha256sum graft/qwen36_vllm.py >> experiment-results/graft.sha256
+          grep -n 'chunked_chunk_size or' graft/model.py
+          sha256sum graft/model.py >> experiment-results/graft.sha256
         env:
           CHUNK: ${{ matrix.chunk }}
       - name: Reset the boards before measuring
@@ -164,7 +165,7 @@ jobs:
             --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
             --mount "type=bind,src=$PWD/draft-config,dst=/draft-config,readonly" \
             --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
-            --mount "type=bind,src=$PWD/graft/qwen36_vllm.py,dst=/opt/tt-metal/models/demos/blackhole/qwen36/tt/qwen36_vllm.py,readonly" \
+            --mount "type=bind,src=$PWD/graft/model.py,dst=/opt/tt-metal/models/demos/blackhole/qwen36/tt/model.py,readonly" \
             --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
             "${mounts[@]}" \
             -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \

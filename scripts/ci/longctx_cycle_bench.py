@@ -217,7 +217,7 @@ def main():
         # what a lever that did not move looks like.
         try:
             text = log_path.read_text(errors='replace')
-            found = re.findall(r'chunk=(\d+)', text) + re.findall(r'chunk_size=(\d+)', text)
+            found = re.findall(r'\[CHUNK\] prefill chunk_size=(\d+)', text)
             report['prefill_chunk_observed'] = sorted({int(v) for v in found}) or None
         except BaseException as error:
             report['prefill_chunk_observed'] = '%s' % type(error).__name__

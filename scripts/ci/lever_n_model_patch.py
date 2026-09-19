@@ -357,6 +357,30 @@ def patch_prefill_chunk(source, size):
     return source.replace(old, '_PREFILL_WARMUP_CHUNK = %d' % size)
 
 
+def patch_prefill_chunk_fallback(source, size):
+    """Retune the chunk size prefill actually uses on an untraced path.
+
+    _PREFILL_WARMUP_CHUNK only reaches the model through the chunked-trace capture in
+    warmup_model_prefill, and serving runs trace_mode='decode_only', so that capture is
+    skipped and the constant is dead. prefill_traced_chunked then falls back to
+    'self._chunked_chunk_size or 2048', and that literal is the value in force.
+
+    Run 35423537994 patched the constant at 2048 and 4096 and measured 32.64 s against
+    32.61 s, because both arms ran the same 2048 fallback. The lever has to be here.
+    """
+    if type(size) is not int or size % 128 or not 128 <= size <= 16384:
+        raise ValueError('chunk must be a multiple of 128 within 128..16384, got %r' % (size,))
+    old = 'chunk_size = self._chunked_chunk_size or 2048'
+    if source.count(old) != 1:
+        raise ValueError('expected one chunk-size fallback, found %d' % source.count(old))
+    # Emit the value in force, so the experiment's control reads a marker the patch
+    # itself produces rather than scraping for an incidental 'chunk=' elsewhere in the
+    # log. Scraping reported 32, from an unrelated operation, in run 35423537994.
+    marker = ('chunk_size = self._chunked_chunk_size or %d' % size + chr(10)
+              + '        logger.info("[CHUNK] prefill chunk_size=%d" % chunk_size)')
+    return source.replace(old, marker)
+
+
 def patch_model(source):
     patched = patch_tp_replay(source)
     patched = patch_chunked_entry(patched)
