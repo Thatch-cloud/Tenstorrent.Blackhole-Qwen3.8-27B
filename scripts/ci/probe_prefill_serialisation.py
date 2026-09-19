@@ -91,9 +91,15 @@ def main():
         from vllm_tt_plugin.scheduler import TTScheduler
     except BaseException:
         TTScheduler = None
-    for label, kind in (('stock', None), ('TTSched', TTScheduler)):
-        if kind is None and label == 'TTSched':
-            print('TTScheduler unavailable')
+    try:
+        from serving_one_in_flight import one_in_flight_scheduler
+        OneInFlight = one_in_flight_scheduler(TTScheduler) if TTScheduler else None
+    except BaseException as error:
+        print('one-in-flight subclass unavailable: %s' % error)
+        OneInFlight = None
+    for label, kind in (('stock', None), ('TTSched', TTScheduler), ('OneFlight', OneInFlight)):
+        if kind is None and label != 'stock':
+            print('%s unavailable' % label)
             continue
         for seqs in (2, 1):
             with TemporaryDirectory() as directory:
@@ -124,6 +130,14 @@ def main():
     for key in sorted(findings):
         if 'both_queued' in key:
             print('  %-28s new=%s' % (key, findings[key]['new']))
+    capped = findings.get('OneFlight_both_queued_seqs_2')
+    if capped is not None:
+        print('  one-in-flight at two queued -> new=%s' % capped['new'])
+        if len(capped['new']) == 1:
+            print('  THE RULE HOLDS: the subclass admits one fresh prompt per step, which is')
+            print('  what the fast prefill path can serve. No plugin source was patched.')
+        else:
+            print('  THE RULE DOES NOT HOLD: the cap did not reach the waiting loop')
     plugin2 = findings.get('TTSched_both_queued_seqs_2')
     if plugin2 and len(plugin2['new']) > 1:
         print('  TTScheduler batches SIMULTANEOUS prefills, so _execute sees two new')
