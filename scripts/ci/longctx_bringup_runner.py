@@ -72,6 +72,8 @@ def main():
         '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'))
     parser.add_argument('--draft-config', default=os.environ.get('QWEN_DRAFT_CONFIG'),
                         help='enable speculation against this draft config path')
+    parser.add_argument('--l1-small-size', type=int, default=24576)
+    parser.add_argument('--trace-region-size', type=int, default=1073741824)
     parser.add_argument('--chunked-prefill', action='store_true')
     parser.add_argument('--batched-tokens', type=int, default=None)
     parser.add_argument('--readiness-seconds', type=int, default=900)
@@ -110,6 +112,15 @@ def main():
         command += ['--enable-chunked-prefill']
     else:
         command += ['--no-enable-chunked-prefill']
+    # Without this the plugin opens the mesh with l1_small_size=0 and the first
+    # L1_SMALL allocation dies with "bank size is 0 B". The canary supplies it via
+    # additional_config; dropping that was why v4 and v5 failed. Only the tt block is
+    # carried here - the fast-path keys need fixtures this job does not mount.
+    command += ['--additional-config', json.dumps(dict(tt=dict(
+        trace_mode='decode_only', trace_region_size=options.trace_region_size,
+        l1_small_size=options.l1_small_size)))]
+    report['additional_config'] = dict(l1_small_size=options.l1_small_size,
+                                       trace_region_size=options.trace_region_size)
     if options.draft_config:
         command += ['--speculative-config', json.dumps(dict(
             model=options.draft_config, method='dflash', num_speculative_tokens=15,
