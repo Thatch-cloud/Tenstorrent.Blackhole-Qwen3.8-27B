@@ -20,6 +20,7 @@ CPU only: no device, no weights.
 """
 
 import inspect
+import io
 import os
 import re
 import sys
@@ -38,14 +39,30 @@ def main():
     except BaseException as error:
         show('request_context()', 'failed: %s' % error)
 
-    source = None
-    try:
-        from target_t16_attention_gate import validate_request_option
-        source = inspect.getsource(validate_request_option)
-        print('----- target_t16_attention_gate.validate_request_option -----')
-        print(source)
-    except BaseException as error:
-        show('gate source', 'unavailable: %s' % error)
+    # Read the IMAGE's copies by PATH, not by import. The probe lane mounts the
+    # repo at /probe and puts it FIRST on PYTHONPATH, so importing measures the
+    # repo's files and says nothing about what the server actually runs.
+    source = ''
+    for name in ('target_t16_attention_gate.py', 'dspark_context_selection.py'):
+        path = '/experiment-scripts/ci/' + name
+        try:
+            text = io.open(path, encoding='utf-8').read()
+        except BaseException as error:
+            show('image %s' % name, 'unreadable: %s' % error)
+            continue
+        show('image %s' % name, '%d bytes, frozen-adapted=%s'
+             % (len(text), 'frozen_combined_runtime' in text))
+        if name.startswith('target_t16'):
+            source = text
+            start = text.find('def validate_request_option')
+            print('----- image target_t16_attention_gate.validate_request_option -----')
+            print(text[start:text.find('
+def ', start + 1)])
+        else:
+            start = text.find('def request_context')
+            print('----- image request_context -----')
+            print(text[start:text.find('
+def ', start + 1)])
 
     positions = sorted(set(int(value) for value in re.findall(r'position != (\d+)', source or '')))
     show('positions this gate accepts', positions)
