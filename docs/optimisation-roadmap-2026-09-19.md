@@ -165,8 +165,12 @@ should be added to the next graft extraction, because it changes how much is on 
    two *available* implementations land within 2.5% of each other: the MAC FIR pays three
    untilize/slice/tilize round-trips, `ttnn.conv1d` pays one plus a slower kernel. The
    dispatch fix was correct - identical tokens - and 2.5% slower, so it was not adopted.
-   What is left is a **tiled-layout fused causal conv**, a kernel build on the pattern of
-   the existing `GdnConvGatesDeviceOperation`, which does this for decode already.
+   A tiled-layout fused causal conv was proposed and then **abandoned before being
+   built**: run 35429279459 measured shift-by-matmul at **0.222x**, and the arithmetic
+   explains why - a 32x32 matmul used only to move rows costs 32x the multiply-accumulate
+   it enables. All three reachable approaches now measure at or below the FIR, so the
+   473 ms is the cost of a K=4 causal conv on tiled hardware, not headroom. **Leave it
+   alone** unless a sub-tile row-shift primitive is shown to exist.
 3. **T4/T8/T16 recurrence sweep in one run.** Settles whether GDN cost scales with verify
    rows, which decides whether attacking the recurrence helps speculation or merely
    shifts it.

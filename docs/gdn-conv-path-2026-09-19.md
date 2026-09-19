@@ -196,3 +196,61 @@ they landed within 2.5% of each other.
 pattern through the same graft pipeline that produced the decode five, operating
 in TILE layout throughout. It is the only approach measured to be capable of
 taking the 473 ms, because it is the only one that does not untilize.
+
+## VERDICT: shift-by-matmul is 4.5x slower. The kernel is not built
+
+Run 35429279459, before any kernel work, exactly to test the premise the build
+rested on.
+
+| arm, [1, 2048, 5120] bf16, 4 taps | ms |
+| --- | ---: |
+| slice FIR, what the model runs today | 2.377 |
+| shift by batched 32x32 matmul, never leaving TILE | **10.706** |
+
+**PCC 1.0, max absolute difference 0.0.** The arms agree exactly, so the
+composition is right and the timing means what it says: the approach is
+**4.5x slower**, not faster.
+
+### It could never have won, and arithmetic says so without the run
+
+Per 32x32 output tile, for one tap:
+
+| | MACs |
+| --- | ---: |
+| the elementwise multiply-accumulate a FIR tap actually needs | 1,024 |
+| a 32x32 matmul used to shift the rows for it | **32,768** |
+
+The matmul exists only to *move* rows and costs **32x the arithmetic of the
+multiply it enables**; across four taps and both the self and previous tile it is
+256x. No amount of kernel polish recovers a factor of 256 in issued work - the
+measured 4.5x is the composition being partly amortised, not the cost being
+avoidable.
+
+**This should have been computed before the probe was written, and certainly
+before a kernel was proposed.** The proposal was made on the strength of the
+pattern existing elsewhere in the codebase - chunk_gdn_prep's eye/tril/ones - and
+"someone else uses this primitive" was allowed to stand in for "this primitive is
+cheap for this purpose". chunk_gdn_prep matmuls because it genuinely needs a row
+mixing; a conv does not.
+
+### What this closes, and what it leaves
+
+The prefill conv line of attack is closed at the ttnn level, and the three
+approaches now measured all land in the same place:
+
+| approach | result |
+| --- | --- |
+| slice FIR (current) | baseline, 3 untilize/slice/tilize per layer-chunk |
+| native `ttnn.conv1d` | 0.975x, run 35428550094 |
+| shift-by-matmul | **0.222x**, this run |
+
+The 473 ms is real, and nothing reachable through composed ttnn ops takes it. A
+kernel would need a genuine sub-tile row-shift primitive - addressing rows
+*within* a tile in the compute kernel - and no evidence has been gathered that
+Tensix exposes one. Until someone establishes that it does, **the prefill conv
+should be left alone**, and the 12.8% treated as the cost of a K=4 causal
+convolution on tiled hardware rather than as available headroom.
+
+The cost of finding this out was one probe and roughly ten minutes of hardware,
+against a kernel build estimated in days. That trade is the only part of this
+worth repeating.
