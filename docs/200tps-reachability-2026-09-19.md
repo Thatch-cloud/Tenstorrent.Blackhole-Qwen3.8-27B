@@ -121,3 +121,35 @@ Assumptions 1 and 4 both make the verdict *softer* if they break favourably, and
 
 Reproduced by the arithmetic in this document; no serving defaults were changed and no
 hardware was used to produce it.
+
+## MEASURED, run 35416870419: 405 GB/s per card, 79-80% of spec
+
+The assumption this document called its weakest link is now measured.
+
+| Regime | Shape | GB/s | % of 512 spec |
+| --- | --- | ---: | ---: |
+| stream, read+write | 4096^2 / 8192^2 / 16384^2 | 402.3 / 404.6 / 407.3 | ~79 |
+| weights, read-dominated | 8192^2 | **410.2** | **80.1** |
+| weights | 5120x8704, 8704x5120 (real MLP shapes) | 405.1 / 407.8 | ~79 |
+
+Both regimes agree within 2% and the figure is flat across sizes, which is what a
+saturated memory system looks like rather than a launch-bound one. Take 405 GB/s.
+
+That is *below* the 85% this document assumed, so every floor moves the wrong way:
+
+| 4 users @161k | Floor ms | Budget ms | Ceiling tok/s | |
+| --- | ---: | ---: | ---: | --- |
+| bf8 KV, acceptance 12.1 *(the target config)* | 81.1 | 60.5 | 149 | impossible |
+| bf8 KV, acceptance 16 | 81.1 | 80.0 | 197 | impossible |
+| bf4 KV, acceptance 12.1 | 67.9 | 60.5 | 178 | impossible |
+| **bf4 KV, acceptance 16** | **67.9** | **80.0** | **236** | **feasible** |
+
+`bf8 KV + acceptance 16` was feasible under the 85% assumption and is not under
+measurement. **Exactly one configuration reaches 200 tok/s per user**: bf4 KV together
+with near-perfect T16 acceptance, and it leaves 12.1 ms for everything that is not DRAM
+traffic against roughly 47 ms of verifier overhead today.
+
+So the target needs three things at once, not one: bf4 KV, acceptance at or very near
+16/16, and a roughly 74% cut in verifier overhead. The ceiling for the configuration as
+originally scoped - 4 users, 161k, bf8 - is **149 tok/s per user**, and no amount of
+scheduling or pin-lifting moves it.
