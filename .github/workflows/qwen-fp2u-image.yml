@@ -23,7 +23,11 @@ jobs:
           # 4352 tokens exactly - so the fast path's page cap and the T16 target
           # attention path's 32768 qualification cannot both hold. Both pins are
           # pre-existing context pins and neither is a packing problem.
-          - {users: 2, context: 4352, product: 8704, prompt: 4800, stagger: 0}
+          # ONE user first. Every two-user failure so far has been read as a
+          # concurrency problem without establishing that this workflow produces
+          # tokens at all with a single user. If one user hits the same gate, the
+          # gate has nothing to do with packing.
+          - {users: 1, context: 4352, product: 8704, prompt: 4096, stagger: 0}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
