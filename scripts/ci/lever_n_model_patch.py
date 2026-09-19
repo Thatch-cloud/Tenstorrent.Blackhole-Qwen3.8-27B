@@ -335,6 +335,28 @@ def function_span_module(source, name):
         return start, end
     raise ValueError('no module-level function named %s' % name)
 
+
+def patch_prefill_chunk(source, size):
+    """Retune the serving prefill chunk from its default 2048 tokens.
+
+    Total attention work does not change with chunk size: a chunk of C tokens attends to
+    everything before it, and summing over N/C chunks still comes to N squared over two.
+    What does change is fixed per-chunk cost, which divides by the chunk size. So this is
+    a direct test of whether the per-token prefill gap is fixed overhead or real work,
+    and it needs no profiler to answer.
+
+    model.py asserts chunk_size % 128 == 0. Larger chunks also need larger activation and
+    page-table buffers, so this can fail on memory rather than on merit.
+    """
+    if type(size) is not int or size % 128 or not 128 <= size <= 16384:
+        raise ValueError('chunk must be a multiple of 128 within 128..16384, got %r' % (size,))
+    old = '_PREFILL_WARMUP_CHUNK = 2048'
+    if source.count(old) != 1:
+        raise ValueError('expected one _PREFILL_WARMUP_CHUNK assignment, found %d'
+                         % source.count(old))
+    return source.replace(old, '_PREFILL_WARMUP_CHUNK = %d' % size)
+
+
 def patch_model(source):
     patched = patch_tp_replay(source)
     patched = patch_chunked_entry(patched)

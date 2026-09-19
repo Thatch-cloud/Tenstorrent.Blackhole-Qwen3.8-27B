@@ -9,8 +9,8 @@ import ast
 import unittest
 
 from lever_n_model_patch import (function_span, patch_chunked_entry, patch_model,
-                                 patch_platform, patch_tp_replay, patch_vllm_entry,
-                                 replace_once)
+                                 patch_platform, patch_prefill_chunk, patch_tp_replay,
+                                 patch_vllm_entry, replace_once)
 
 # A miniature stand-in with the same ambiguity as the real source: the decoy methods
 # carry identical reset calls and chunk loops.
@@ -203,6 +203,31 @@ class PlatformTests(unittest.TestCase):
     def test_a_source_without_the_policy_raises(self):
         with self.assertRaises(ValueError):
             patch_platform('import os' + chr(10))
+
+
+
+class PrefillChunkTests(unittest.TestCase):
+    SOURCE = ('_PREFILL_WARMUP_CHUNK = 2048' + chr(10)
+              + '_PREFILL_WARMUP_BUCKET = 4096' + chr(10))
+
+    def test_retunes_only_the_chunk(self):
+        out = patch_prefill_chunk(self.SOURCE, 4096)
+        self.assertIn('_PREFILL_WARMUP_CHUNK = 4096', out)
+        self.assertIn('_PREFILL_WARMUP_BUCKET = 4096', out)
+
+    def test_rejects_sizes_model_py_would_assert_on(self):
+        """model.py asserts chunk_size % 128 == 0, so catch it here rather than on device."""
+        for bad in (2000, 100, 0, -2048, 32768, '4096', 4096.0):
+            with self.assertRaises(ValueError):
+                patch_prefill_chunk(self.SOURCE, bad)
+
+    def test_a_source_without_the_constant_raises(self):
+        with self.assertRaises(ValueError):
+            patch_prefill_chunk('nothing here', 4096)
+
+    def test_refuses_an_ambiguous_source(self):
+        with self.assertRaises(ValueError):
+            patch_prefill_chunk(self.SOURCE + self.SOURCE, 4096)
 
 
 if __name__ == '__main__':

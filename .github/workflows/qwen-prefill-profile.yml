@@ -47,6 +47,28 @@ jobs:
             cat experiment-results/holders.txt || true
             exit 1
           fi
+      - name: Reset the boards before profiling
+        working-directory: pp
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Every profiling attempt so far has left the board unable to open its mesh:
+          # runs 35421783196 and 35422202251 both died in open_mesh_device waiting for an
+          # ethernet core to return to base firmware. The twelve-cell decode ladder never
+          # did this, so it is the profiler path rather than the workload. Reset first,
+          # so a run measures the model instead of the wreckage of the previous attempt.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}"             > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
       - name: Profile prefill at several prompt lengths
         working-directory: pp
         timeout-minutes: 65
