@@ -47,6 +47,7 @@ jobs:
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
           mkdir -p experiment-results/profile
+          chmod g+rwx experiment-results/profile
           mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
