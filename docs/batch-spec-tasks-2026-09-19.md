@@ -552,3 +552,47 @@ The packed device step - the callable that drives the packed `ModelBatch` fixtur
 and returns one committed output per user. `serving_packed_bridge` takes it as a
 parameter and refuses by name without it, so the serving chain is complete up to
 that call and no further.
+
+## Correction: the fast path in this image could not decode at ANY context (2026-09-20)
+
+Six two-user boundaries were read as concurrency problems. Run **35472072127** ran
+ONE user and hit the same `Qualified 32K T16 replay` gate, so from that boundary on
+the reading was wrong: this workflow had never produced a token.
+
+What it actually is, measured by probe 35473235186 reading the IMAGE's files by
+path rather than importing them:
+
+- The image's `target_t16_attention_gate.py` is frozen-adapted to
+  `if request_context() == selected_geometry()['context']: -> frozen validator`.
+- `frozen_context_geometry.selected_geometry()` reads the SAME
+  `QWEN_DSPARK_REQUEST_CONTEXT` as `request_context()`, so that condition is
+  **always true**. The gate always delegates to the 32K validator, which demands
+  `position == 32768`.
+- `serving_runtime.bridge_factory` built a fixed `(1, 68)` page table: 68 x 64 =
+  **4352 tokens**.
+
+So the image's target attention wanted 32768 and the serving runtime offered 4352.
+Irreconcilable, at any user count. Setting `QWEN_DSPARK_REQUEST_CONTEXT=4096`
+changed nothing (run 35473307362) because both sides of the comparison move
+together, and removing `QWEN_FROZEN_COMBINED_RUNTIME` changed nothing because the
+adapters are applied when the image is BUILT - that variable only ever selected
+which context the frozen geometry used.
+
+**Probe gotcha worth keeping:** the CPU probe lane bind-mounts the repo at `/probe`
+FIRST on `PYTHONPATH`, so importing a module there measures the REPO's copy, not
+the image's. The first version of this probe reported `request_context() == 4096`
+from the repo while the image's own default is `'8192'`. Read image files by path.
+
+**Fix applied:** the page table width now derives from the admitted context,
+`max(68, ceil(max_model_len / 64))`, with 68 kept as the floor because
+`ServingCacheOwner` requires at least that many physical pages.
+
+### What this does and does not change about the packing work
+
+Nothing measured about packing is affected. The scheduler probes, the mask and key
+equivalence proofs, the convolution seam, the GDN state swap and the packed
+contract were all established on CPU or in the image's own libraries, not through
+this serving path. What changes is the claim about hardware: the only thing the rig
+has demonstrated is run 35441818361, where **both users prefilled and the scheduler
+presented the packed two-user decode step**. No decode of any kind has run through
+the fast path in this image, at one user or two.

@@ -45,15 +45,22 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         owner.validate()
         return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
 
+    # The page table has to cover the admitted context. It was a fixed 68 pages,
+    # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
+    # 32768 - so the fast path could not decode at ANY context, at one user or two
+    # (runs 35472072127, 35473307362). 68 stays the floor because
+    # ServingCacheOwner requires at least that many physical pages.
+    page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
+
     def bridge_factory(state, capture):
         owner.validate()
         if len(state.block_ids) != 1:
             raise ValueError('One scheduler KV group required')
         blocks = tuple(state.block_ids[0])
-        if (not blocks or len(blocks) > 68 or len(set(blocks)) != len(blocks)
+        if (not blocks or len(blocks) > page_width or len(set(blocks)) != len(blocks)
                 or any(type(block) is not int or not 0 <= block < owner.physical_pages for block in blocks)):
             raise ValueError('Unique physical pages from the admitted cache required')
-        pages = torch.full((1, 68), blocks[0], dtype=torch.int32)
+        pages = torch.full((1, page_width), blocks[0], dtype=torch.int32)
         pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
         def create_request():
             return from_prefill(operations, model, sampler, pages, helpers,
