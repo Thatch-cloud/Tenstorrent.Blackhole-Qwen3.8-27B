@@ -57,6 +57,9 @@ jobs:
           # in set_fabric_config with TT_FATAL topology_mapper mapping_result.success.
           # Both link ends have to come back together. No firmware is written and no
           # host reboot is performed.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
           mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
