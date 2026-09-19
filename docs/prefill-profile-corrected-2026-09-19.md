@@ -134,7 +134,7 @@ The real shape of prefill is that **arithmetic occupies only about 40% of device
 
 | group | share | is it a target? |
 | --- | ---: | --- |
-| arithmetic | 39-43% | no - already at 62-67% MFU |
+| arithmetic | 39-43% | **REOPENED** - the 62-67% MFU figure is withdrawn, see grid occupancy below |
 | layout | 17.2% | **yes** - 6,643 Slice calls, pure shuffling |
 | GDN family | 14.3% | maybe - it is real work, but 48 layers of it |
 | communication | 11-15% | no - fabric measured, bounded at ~1% of prefill |
@@ -168,3 +168,67 @@ than sharpening it. The matmuls are not the problem, so the order is:
 These are observed intervals. Durations include waits, can overlap, and are not a
 dependency-graph critical path. The traffic split is an estimate bounded at both ends, not
 an observation.
+
+## Grid occupancy: a third of prefill runs on under a third of the chip
+
+Found by circling back rather than by a new run - the column was in the profile all
+along. `AVAILABLE WORKER CORE COUNT` is **110 for all 37,203 calls**, so the whole
+grid is available at every moment.
+
+| cores used | ms | % of prefill | biggest contributor |
+| --- | ---: | ---: | --- |
+| **exactly 1** | 204.0 | **5.5%** | AllGatherMinimalMatmul, 149 ms |
+| 2-8 | 294.2 | 8.0% | AllGatherMinimalMatmul, 90 ms |
+| 9-32 | 745.7 | 20.2% | ReduceScatterMinimalAsync, 151 ms |
+| 33-64 | 486.2 | 13.2% | AllGatherMinimalMatmul, 118 ms |
+| 65-99 | 1292.5 | 35.0% | AllGatherMinimalMatmul, 656 ms |
+| 100-110 | 674.2 | 18.2% | Matmul, 156 ms |
+
+**33.6% of prefill device time, 1,244 ms, runs on 32 cores or fewer.** Only 18.2%
+uses 100 or more. Core-weighted occupancy over the whole of prefill is **52.8%**.
+
+The single largest operation is the worst offender twice over: it averages 51.3
+cores, and **13.6% of its time - 148.8 ms over 109 calls at 1.37 ms each - runs on
+exactly one core**. A millisecond and a third on 1 of 110 cores is a serialised
+step, not a small tensor.
+
+### This puts a recorded conclusion in doubt
+
+Earlier today this document recorded prefill matmuls at 62-67% MFU and closed
+arithmetic as a target on that basis. That figure is a ratio of an assumed
+full-grid peak to measured time, and it does not survive contact with occupancy:
+
+```
+arithmetic ops: 1719 ms, mean 55.8 cores = 50.7% grid occupancy
+MFU = occupancy x per-core efficiency
+65% / 51% = 127% per-core efficiency
+```
+
+Over 100% is impossible. Occupancy is **measured**, from the profiler's own
+`CORE COUNT`; the 774 TFLOPS per card peak was **assumed** and never verified. So
+the peak is the suspect input, and **"the matmuls are fine" is no longer
+established**. It is withdrawn pending a measured peak, not replaced with a
+contrary claim.
+
+This is the third time today an assumed constant has produced a confident wrong
+reading, after the 400 GB/s fabric aggregate and the model-name FLOP count. The
+pattern is specific enough to name: **a derived percentage is only as good as its
+denominator, and a spec-sheet denominator has been wrong every time it has been
+checked on this rig.**
+
+### Why this is a different lever from everything closed today
+
+Sharding, communication, the causal conv and layout were all about *what work is
+done*. Occupancy is about *how much of the chip does it*. Nothing measured so far
+touches it, and it is not bounded by the same arguments:
+
+- the conv verdict said anything leaving TILE layout lands where the FIR does -
+  irrelevant to spreading work across cores
+- the arithmetic verdict said the matmuls are efficient - which is exactly what is
+  now in doubt
+- a matmul's core grid is a **program-config choice**, not a property of the maths
+
+What is not yet known, and must be measured before any claim: how much of the
+low-occupancy time is structural. Communication ops legitimately use few cores, and
+`ReduceScatterMinimalAsync` at a mean of 6.7 cores may be correct by design. The
+149 ms of single-core time inside a *matmul* op is the part that looks wrong.
