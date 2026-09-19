@@ -20,6 +20,7 @@ COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_packed.py /experiment-scripts/ci/
 COPY scripts/ci/serving_packed_bridge.py /experiment-scripts/ci/
 COPY scripts/ci/serving_sequential_step.py /experiment-scripts/ci/
+COPY scripts/ci/serving_vllm_state.py /experiment-scripts/ci/
 COPY scripts/ci/serving_runtime.py scripts/ci/serving_gather_experiment.py scripts/ci/gdn_grouped_gather.py scripts/ci/gdn_grouped_gather_gate.py scripts/ci/gdn_grouped_gather_scope.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
