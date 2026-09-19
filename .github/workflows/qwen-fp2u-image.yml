@@ -18,7 +18,11 @@ jobs:
           # stagger 0 on purpose: simultaneous arrival is the case the
           # one-in-flight scheduler exists to fix, and the case run
           # 35436193682 died on at len(scheduled_new_reqs) != 1
-          - {users: 2, context: 4352, product: 8704, prompt: 4800, stagger: 0}
+          # position 32768 exactly: frozen_combined_runtime.validate_target_option
+          # pins the qualified T16 replay profile to that frontier, and run
+          # 35442532141 stopped there. The pin is a context pin, not a packing
+          # one, so the bench moves to the qualified profile rather than lifting it.
+          - {users: 2, context: 33024, product: 66048, prompt: 32768, stagger: 0}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
