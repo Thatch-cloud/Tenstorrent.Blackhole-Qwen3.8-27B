@@ -43,7 +43,7 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 
-def build(directory, max_num_seqs):
+def build(directory, max_num_seqs, scheduler_type=None):
     GPT2Config(n_positions=8192, n_embd=256, n_layer=1, n_head=4).save_pretrained(directory)
     model = ModelConfig(model=directory, dtype='float32', max_model_len=4352,
                         skip_tokenizer_init=True, seed=0)
@@ -62,7 +62,8 @@ def build(directory, max_num_seqs):
         KVCacheGroupSpec(['layer'], FullAttentionSpec(block_size=64, num_kv_heads=2,
                                                       head_size=256, dtype=torch.bfloat16))])
     register_all_kvcache_specs(config)
-    scheduler = Scheduler(config, cache, StructuredOutputManager(config), block_size=64)
+    kind = scheduler_type or Scheduler
+    scheduler = kind(config, cache, StructuredOutputManager(config), block_size=64)
     scheduler.use_v2_model_runner = False
     return scheduler
 
@@ -84,42 +85,54 @@ def show(label, scheduled):
     return new, list(getattr(cached, 'req_ids', []) or [])
 
 
-def main():
+def scenario(label, scheduler_type):
+    """A prefills, A speculates, B arrives mid-speculation."""
     parameters = SamplingParams(temperature=0, max_tokens=256)
     with TemporaryDirectory() as directory:
-        scheduler = build(directory, 2)
+        scheduler = build(directory, 2, scheduler_type)
         scheduler.add_request(Request('A', [42] * 3000, parameters, None))
         first = scheduler.schedule()
-        show('A prefill', first)
+        show('%s A prefill' % label, first)
         scheduler.update_from_output(first, output(['A'], 100))
-
-        # A now holds proposals, which is what the verifier block is made of
         proposals = list(range(101, 116))
         scheduler.update_draft_token_ids(DraftTokenIds(['A'], [proposals]))
         decode = scheduler.schedule()
-        show('A speculative decode', decode)
+        show('%s A spec decode' % label, decode)
         scheduler.update_from_output(decode, output(['A'], 200))
-
-        # B arrives while A is mid-speculation
         scheduler.update_draft_token_ids(DraftTokenIds(['A'], [proposals]))
         scheduler.add_request(Request('B', [42] * 3000, parameters, None))
         mixed = scheduler.schedule()
-        new, cached = show('B arrives mid-spec', mixed)
+        new, cached = show('%s B arrives' % label, mixed)
+        return new, cached, dict(mixed.num_scheduled_tokens)
 
-        print()
-        print('VERDICT')
-        if new and cached:
-            counts = dict(mixed.num_scheduled_tokens)
-            print("  ONE step carries B's prefill AND A's decode: counts=%s" % counts)
-            print('  execute_scheduled runs request.step() for ONE ticket, and a prefill')
-            print('  and a verify are different device shapes, so widening the contract is')
-            print('  NOT sufficient - the step must be split or B deferred.')
-        elif new and not cached:
-            print("  the scheduler holds A back and runs B's prefill alone, so relaxing")
-            print('  the contract to allow a prefill step between decodes is enough.')
-        else:
-            print('  B was not scheduled at all while A holds proposals: the scheduler')
-            print('  already serialises, and only the lifecycle contract needs to change.')
+
+def main():
+    stock = scenario('stock ', None)
+    try:
+        from vllm_tt_plugin.scheduler import TTScheduler
+    except BaseException as error:
+        print('TTScheduler unavailable: %s' % error)
+        TTScheduler = None
+    plugin = scenario('TTSched', TTScheduler) if TTScheduler else None
+
+    print()
+    print('VERDICT')
+    print('  stock vllm Scheduler mixes: new=%s cached=%s counts=%s' % stock)
+    if plugin is None:
+        print('  TTScheduler could not be imported, so the serving behaviour is UNKNOWN')
+        return 0
+    new, cached, counts = plugin
+    print('  TTScheduler:                new=%s cached=%s counts=%s' % (new, cached, counts))
+    if new and cached:
+        print('  the PLUGIN scheduler also mixes, so the contract faces a mixed step and')
+        print('  widening it is not enough - the step must be split or B deferred')
+    elif new and not cached:
+        print('  the plugin runs B prefill-only, which is the one-in-flight rule Lever N')
+        print('  section 3.3 describes; relaxing the contract to admit a prefill-only')
+        print('  step between decodes is then the whole change')
+    else:
+        print('  the plugin defers B entirely while A holds proposals: serialisation is')
+        print('  already the behaviour and only the lifecycle contract needs to change')
     return 0
 
 
