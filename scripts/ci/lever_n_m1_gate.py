@@ -88,6 +88,13 @@ def start_server(port, context, chunked, results, log_name, fast=False, seqs=4):
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
                '--shutdown-timeout', '30',
+               # The batched path asserts text-only serving, and the grafted chunked
+               # policy sets disable_chunked_mm_input like the gemma4 branch does, so
+               # vLLM otherwise demands max_num_batched_tokens >= max_tokens_per_mm_item
+               # (16384) and refuses a 2048 chunk budget. Declaring no multimodal items
+               # is what this gate actually does; both arms carry it so they differ only
+               # in chunking.
+               '--limit-mm-per-prompt', json.dumps(dict(image=0, video=0)),
                '--additional-config', json.dumps(recipe)]
     if fast:
         command += ['--speculative-config', json.dumps(
