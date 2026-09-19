@@ -211,8 +211,12 @@ class DFlashDevice:
         self.pending = None
 
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
-                         audit_convolution=False, cached_history=None):
+                         audit_convolution=False, cached_history=None, pack=None):
         operations = self.operations
+        # Packed, several users share the block and every one of its 32 rows is a
+        # live proposal, so there is nothing to pad away and nothing to trim off the
+        # end before the vocabulary head.
+        rows = 32 if pack is not None else self.block_rows
         live_query_qk = getattr(self, 'live_query_qk', False)
         native_proposal_attention = getattr(self, 'native_proposal_attention', False)
         if live_query_qk and addresses(operations, mask) not in self.validated_live_masks:
@@ -225,15 +229,15 @@ class DFlashDevice:
             raise ValueError('Convolution audit requires the explicit fused candidate')
         stage('borrowed-embedding')
         local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
-        local = retain(operations.reshape(local, (1, 1, self.block_rows, 2560)))
+        local = retain(operations.reshape(local, (1, 1, rows, 2560)))
         stage('embedding-all-gather')
         hidden = retain(operations.experimental.all_gather_async(local, persistent_output_buffer=None, dim=3,
             multi_device_global_semaphore=self.collectives.get_and_cycle_ag_semaphore_handles(),
             barrier_semaphore=self.collectives.get_and_cycle_barrier_semaphore_handle(), num_links=projection_links(),
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
-        if self.block_rows != 32:
-            hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - self.block_rows), (0, 0)], 0.0))
+        if rows != 32:
+            hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0))
         for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
             convolution_options = {}
             if getattr(self, 'fused_convolution', False):
@@ -247,10 +251,11 @@ class DFlashDevice:
             operation_audit = audit_operations(operations, self.mesh, self.progress) if audit and self.progress is not None and layer == 0 and self.proposal_calls else nullcontext()
             with operation_audit:
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
-                    retain, parameters=attention, context=context, **convolution_options,
+                    retain, parameters=attention, context=context, pack=pack, **convolution_options,
                     **(dict(live_query_mask_validated=True) if live_query_qk else {}),
                     **(dict(native_proposal_mask_validated=True) if native_proposal_attention else {}),
-                    **(dict(cached_history=cached_history[layer]) if cached_history is not None else {}))
+                    **(dict(cached_history=[cache[layer] for cache in cached_history] if pack is not None
+                    else cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
                 retain, parameters=mlp, trace_safe=True, **convolution_options)['output']
@@ -263,7 +268,7 @@ class DFlashDevice:
         projected = retain(operations.matmul(normalized, self.selector_projection, dtype=operations.float32,
             program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
         projected = retain(operations.typecast(projected, operations.bfloat16))
-        block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, self.block_rows, 5120)))
+        block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120)))
         stage('shared-full-vocabulary-head')
         chunks = shared_head_candidates(operations, self.model, block, owned)
         return SimpleNamespace(projected=projected, chunks=chunks)
