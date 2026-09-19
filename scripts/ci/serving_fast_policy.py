@@ -11,6 +11,9 @@ than one in-flight request needs code, not a wider contract.
 
 OUTPUT_BUDGET = 256
 MINIMUM_MODEL_LEN = 4352
+# Prompts are bounded by the served context rather than pinned to 4096; the server
+# still rejects anything past max_model_len before a request reaches this check.
+MAXIMUM_PROMPT_TOKENS = 1 << 20
 
 
 def fast_requested(config):
@@ -63,9 +66,17 @@ def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
             or any(type(token) is not int or token not in eos_ids for token in (parameters.stop_token_ids or ()))
             or (primary_eos is not None and primary_eos not in eos_ids)):
         raise ValueError('Only target-snapshot EOS stop tokens are supported')
-    if (type(prompt_tokens) is not int or prompt_tokens != 4096
+    # The 4096/256 equalities were the initial coding profile, not a correctness
+    # requirement: they became bounds so longer contexts can be exercised. Everything
+    # below them stays exact - temperature, n, penalties, logprobs, stop and the
+    # structured-output hooks are what make output bit-comparable against a reference,
+    # and every claim downstream of this module depends on that comparability.
+    if (type(prompt_tokens) is not int or prompt_tokens < 1
+            or prompt_tokens > MAXIMUM_PROMPT_TOKENS
             or parameters.temperature != 0 or parameters.n != 1
-            or parameters.max_tokens != 256 or parameters.min_tokens != 0
+            or type(parameters.max_tokens) is not int
+            or not 1 <= parameters.max_tokens <= OUTPUT_BUDGET
+            or parameters.min_tokens != 0
             or parameters.ignore_eos is not False
             or parameters.logprobs is not None or parameters.prompt_logprobs is not None
             or parameters.presence_penalty != 0 or parameters.frequency_penalty != 0
@@ -75,4 +86,5 @@ def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
             or getattr(parameters, 'logit_bias', None)
             or getattr(parameters, 'allowed_token_ids', None)
             or getattr(parameters, 'bad_words', None)):
-        raise ValueError('Initial serving qualification requires the unmodified greedy 4K/256 coding profile')
+        raise ValueError('Fast serving requires a greedy single-sequence request with an '
+                         'unpenalised sampler and at most %d output tokens' % OUTPUT_BUDGET)

@@ -52,6 +52,44 @@ class FastPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_fast_config(config)
 
+    def sampling(self, **overrides):
+        base = dict(temperature=0, n=1, max_tokens=256, min_tokens=0, ignore_eos=False,
+                    logprobs=None, prompt_logprobs=None, presence_penalty=0,
+                    frequency_penalty=0, repetition_penalty=1, stop=None,
+                    stop_token_ids=None, structured_outputs=None, logit_bias=None,
+                    allowed_token_ids=None, bad_words=None)
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_prompt_length_is_a_bound_not_an_equality(self):
+        """The 4096 pin was the initial coding profile, not a correctness requirement."""
+        for prompt_tokens in (1, 4096, 30000, 65536, 163840):
+            validate_request_sampling(self.sampling(), prompt_tokens=prompt_tokens)
+
+    def test_output_tokens_bounded_by_the_budget(self):
+        for max_tokens in (1, 64, 256):
+            validate_request_sampling(self.sampling(max_tokens=max_tokens), prompt_tokens=4096)
+        for max_tokens in (0, 257, 1024):
+            with self.assertRaises(ValueError):
+                validate_request_sampling(self.sampling(max_tokens=max_tokens), prompt_tokens=4096)
+
+    def test_determinism_constraints_stay_exact(self):
+        """These are what make output bit-comparable; loosening them invalidates every
+        correctness claim downstream."""
+        for field, value in (('temperature', 0.7), ('n', 2), ('min_tokens', 1),
+                             ('ignore_eos', True), ('presence_penalty', 0.1),
+                             ('frequency_penalty', 0.1), ('repetition_penalty', 1.1),
+                             ('logprobs', 5), ('prompt_logprobs', 5), ('stop', ['x']),
+                             ('structured_outputs', object()), ('logit_bias', {1: 1.0}),
+                             ('allowed_token_ids', [1]), ('bad_words', ['x'])):
+            with self.assertRaises(ValueError):
+                validate_request_sampling(self.sampling(**{field: value}), prompt_tokens=4096)
+
+    def test_invalid_prompt_lengths_rejected(self):
+        for prompt_tokens in (0, -1, 'x', None):
+            with self.assertRaises(ValueError):
+                validate_request_sampling(self.sampling(), prompt_tokens=prompt_tokens)
+
     def test_unsupported_configs_rejected(self):
         for group, field, value in (('scheduler_config', 'max_num_seqs', 2),
                 ('scheduler_config', 'async_scheduling', True), ('parallel_config', 'tensor_parallel_size', 2),
