@@ -158,3 +158,54 @@ out of a 113.1 ms cycle, the only pool large enough is the 33.26 ms of non-weigh
 work, and that would mean eliminating essentially all of it. The target is not reachable
 by tuning alone at 4 users and 131k. It is reachable at lower user counts or shorter
 context - the decode cost model says exactly where, and that arithmetic is now reliable.
+
+## Sharding: a trade, not a win, and probably the wrong lever
+
+Prompted by the prefill profile putting collectives at 37.2% of device time.
+
+### What TP2 buys and what it costs
+
+TP2 exists to halve the decode weight pass, which is the dominant decode cost:
+
+| | weights read per card per pass | at 405 GB/s |
+| --- | ---: | ---: |
+| TP2 (current) | 9.96 GB | 24.6 ms |
+| data parallel (weights replicated) | 19.92 GB | 49.2 ms |
+
+So dropping TP2 adds about 24.6 ms to a 97.6 ms decode cycle. In exchange it removes
+all 37.2% of prefill collectives.
+
+**Data parallel would fit.** Replicated weights plus KV comes to 22.6 GB at 65k context
+and 25.2 GB at 131k, against 33.1 GB usable per card.
+
+So the two regimes want opposite sharding, which is the same inversion the collectives
+finding showed. **TP2 is a decode optimisation that prefill pays for.**
+
+### Why it is probably still the wrong lever
+
+The links are four QSFP-DD at 800 Gb/s, so 100 GB/s per port and **400 GB/s aggregate**
+in theory. The rate implied by the prefill profile is **9.3 GB/s**, which is 2.3% of
+aggregate and 9.3% of a single port. DRAM on the same cards achieves 79-80% of its spec,
+which is what a saturated resource looks like.
+
+A resource running at 2% of capability is not saturated. That points at a fixed cost per
+collective rather than a bandwidth limit, and the remedy for that is **fewer and larger
+collectives, which costs decode nothing**, rather than a sharding change that costs
+decode 24.6 ms per step.
+
+Two measurements decide it, both queued:
+
+1. **Inter-card collective bandwidth**, swept by size. Rising GB/s with size means a
+   fixed per-collective cost and confirms the reading above. Flat near 400 means the
+   link really is the limit and sharding becomes the only remedy.
+2. **The prefill chunk sweep**, which halves the number of collectives by doubling the
+   chunk. If prefill time falls roughly in proportion, the cost is per-collective and
+   the fix is a constant rather than an architecture.
+
+### Caveat on the 9.3 GB/s
+
+It is derived, not measured: expected all-gather traffic computed as
+`layers x chunks x tokens x (hidden/2) x 2 bytes`, divided by the profiled collective
+time. If the traffic model is wrong the ratio moves with it. That is precisely why the
+probe exists; the DRAM figure was assumed at 85% of spec and measured at 79%, and the
+gap here is 43x rather than a few percent.
