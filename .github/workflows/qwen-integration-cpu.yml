@@ -45,6 +45,7 @@ jobs:
           python -B -m unittest test_serving_runner_bridge
           python -B -m unittest test_serving_fast_policy
           python -B -m unittest test_lever_n_prefill_range
+          python -B -m unittest test_lever_n_model_patch
           python -B -m unittest test_serving_plugin_patch
           python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
