@@ -4,7 +4,7 @@ from types import MethodType
 
 
 class FastWorkerHook:
-    def __init__(self, worker, bridge, *, cancelled):
+    def __init__(self, worker, bridge, *, cancelled, packed_step=None):
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner is not bridge.runner
                 or runner.non_dp_async_scheduling or runner.tt_data_parallel_size != 1
@@ -13,6 +13,12 @@ class FastWorkerHook:
         if getattr(runner, '_qwen_fast_hook', None) is not None:
             raise ValueError('A fast request already owns this runner')
         self.worker, self.runner, self.bridge = worker, runner, bridge
+        # One hook, several requests. The hook used to BE the binding of one request
+        # to the worker, which is why a second arrival could not decode; probe
+        # 35436807668 showed TTScheduler scheduling every live decode in one step,
+        # so the worker has to serve them together or not at all.
+        self.bridges = {bridge.request.session.request_id: bridge}
+        self.packed_step = packed_step
         self.cancelled = cancelled
         self.closed = False
         self.saved = []
@@ -28,6 +34,23 @@ class FastWorkerHook:
         self.saved.append((owner, name, name in vars(owner), vars(owner).get(name)))
         setattr(owner, name, value)
 
+    def attach(self, bridge):
+        """Admit another request to this worker's packed block."""
+        if self.closed or bridge.runner is not self.runner or self.packed_step is None:
+            raise ValueError('An open hook on the same runner with a packed step is required')
+        request_id = bridge.request.session.request_id
+        if request_id in self.bridges:
+            raise ValueError('That request already decodes on this worker')
+        self.bridges[request_id] = bridge
+        return self
+
+    def detach(self, request_id):
+        bridge = self.bridges.pop(request_id, None)
+        if bridge is None:
+            raise ValueError('That request does not decode on this worker')
+        bridge.close()
+        return self.bridges
+
     def _execute(self, runner, scheduled):
         if self.closed or runner is not self.runner or runner._pending_samples:
             raise ValueError('Fast worker ownership or sampler queue changed')
@@ -39,7 +62,12 @@ class FastWorkerHook:
         # and a second arrival cannot prefill while the first decodes.
         if getattr(scheduled, 'scheduled_new_reqs', None):
             return self.original_execute(scheduled)
-        return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
+        if len(self.bridges) == 1 and self.packed_step is None:
+            return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
+        from serving_packed_bridge import execute_packed_decode
+
+        return execute_packed_decode(self.bridges, scheduled, cancelled=self.cancelled,
+                                     packed_step=self.packed_step)
 
     def _sample(self, runner, grammar_output):
         raise RuntimeError('Fast execution returns committed output directly; deferred sampling is forbidden')
@@ -47,12 +75,18 @@ class FastWorkerHook:
     def _drafts(self, worker):
         if self.closed or worker is not self.worker:
             raise ValueError('Live fast worker owner required')
-        return self.bridge.drafts()
+        if len(self.bridges) == 1 and self.packed_step is None:
+            return self.bridge.drafts()
+        from serving_vllm_packed import packed_draft_token_ids
+
+        return packed_draft_token_ids([bridge.request for bridge in self.bridges.values()])
 
     def close(self):
         if self.closed:
             return
-        self.bridge.close()
+        for bridge in list(self.bridges.values()):
+            bridge.close()
+        self.bridges.clear()
         for owner, name, existed, value in reversed(self.saved):
             if existed:
                 setattr(owner, name, value)
