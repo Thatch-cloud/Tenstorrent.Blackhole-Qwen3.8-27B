@@ -79,6 +79,10 @@ def stream_once(port, prompt, max_tokens, results, index):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--users', type=int, default=4)
+    parser.add_argument('--plain', action='store_true',
+                        help='serve without the T16 fast runtime or speculation. The fast '
+                             'path admits one request, so this is the only way to measure '
+                             'how decode cost scales with concurrent users on this stack')
     parser.add_argument('--context', type=int, default=163840)
     parser.add_argument('--prompt-tokens', type=int, default=512)
     parser.add_argument('--max-tokens', type=int, default=64)
@@ -97,19 +101,22 @@ def main():
 
     blocks = -(-(options.users * options.context) // BLOCK_SIZE)
     report = dict(scope=__doc__, users=options.users, context=options.context,
+                  plain=options.plain,
                   blocks=blocks, target_tokens_per_user=TARGET_TOKS_PER_USER,
                   target_itl_ms=1000.0 / TARGET_TOKS_PER_USER, ready=False)
 
-    speculative = dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
-                       draft_sample_method='greedy', rejection_sample_method='standard')
-    recipe = dict(qwen_fast_t16=True,
-                  tt=dict(trace_mode='decode_only',
+    # The tt block is load-bearing on both paths: without it the plugin opens the
+    # mesh with l1_small_size=0 and the first L1_SMALL allocation dies at 'bank size
+    # is 0 B'. Only the fast-path keys are conditional.
+    recipe = dict(tt=dict(trace_mode='decode_only',
                           trace_region_size=options.trace_region_size,
-                          l1_small_size=options.l1_small_size),
-                  qwen_fast_runtime=dict(directory='/experiment-scripts/ci',
-                                         runtime_root='/opt/tt-metal',
-                                         fixtures='/experiment-dflash-fixture',
-                                         target_snapshot=options.model))
+                          l1_small_size=options.l1_small_size))
+    if not options.plain:
+        recipe['qwen_fast_t16'] = True
+        recipe['qwen_fast_runtime'] = dict(directory='/experiment-scripts/ci',
+                                           runtime_root='/opt/tt-metal',
+                                           fixtures='/experiment-dflash-fixture',
+                                           target_snapshot=options.model)
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
                '--model', options.model, '--served-model-name', 'qwen-longctx',
                '--host', '127.0.0.1', '--port', str(options.port), '--dtype', 'bfloat16',
@@ -119,8 +126,11 @@ def main():
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
                '--no-enable-chunked-prefill', '--shutdown-timeout', '30',
-               '--speculative-config', json.dumps(speculative),
                '--additional-config', json.dumps(recipe)]
+    if not options.plain:
+        command += ['--speculative-config', json.dumps(
+            dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
+                 draft_sample_method='greedy', rejection_sample_method='standard'))]
     report['command'] = command
     log_path = options.results / 'server.log'
     process = None
