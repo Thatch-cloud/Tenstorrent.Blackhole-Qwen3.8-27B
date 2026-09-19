@@ -28,7 +28,7 @@ jobs:
           # QWEN_DSPARK_REQUEST_CONTEXT, which defaults to 8192. So the context is
           # selected explicitly and the prompt matches it exactly. qualify() also
           # wants QWEN_FROZEN_COMBINED_RUNTIME=1 with that same 32768 geometry.
-          - {users: 1, context: 33024, product: 66048, prompt: 32768, stagger: 0}
+          - {users: 2, context: 33024, product: 66048, prompt: 32768, stagger: 0}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
