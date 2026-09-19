@@ -68,18 +68,29 @@ def main():
                   or getattr(getattr(ttnn, 'experimental', None), 'all_gather_async', None))
         report['all_gather_api'] = gather.__name__ if gather else None
 
-        # Shapes chosen to bracket a prefill activation: 2048 tokens x 5120 hidden bf16.
-        for rows, cols in ((512, 5120), (2048, 5120), (8192, 5120)):
-            entry = dict(rows=rows, cols=cols, dtype='bfloat16')
+        # Shapes bracket a prefill activation (2048 tokens x 5120 hidden bf16), and the
+        # link count is swept because the runtime uses num_links=4 throughout while
+        # ttnn.all_gather defaults to one. A first pass at one link measured 83 GB/s,
+        # which is 83% of a single 100 GB/s port, so the question is whether four links
+        # scale it and whether production is already getting that.
+        for rows, cols, links in ((512, 5120, 1), (2048, 5120, 1), (8192, 5120, 1),
+                                  (2048, 5120, 2), (2048, 5120, 4),
+                                  (8192, 5120, 4)):
+            entry = dict(rows=rows, cols=cols, links=links, dtype='bfloat16')
             try:
                 host = torch.zeros(1, 1, rows, cols, dtype=torch.bfloat16)
                 sharded = ttnn.from_torch(host, dtype=ttnn.bfloat16,
                                           layout=ttnn.TILE_LAYOUT, device=mesh,
                                           memory_config=ttnn.DRAM_MEMORY_CONFIG,
                                           mesh_mapper=shard)
-                out = gather(sharded, dim=3)
+                def call(t=sharded, n=links):
+                    try:
+                        return gather(t, dim=3, num_links=n)
+                    except TypeError:
+                        return gather(t, dim=3)
+                out = call()
                 sync()
-                elapsed = timed(lambda: gather(sharded, dim=3), options.iters, sync)
+                elapsed = timed(call, options.iters, sync)
                 # each device receives the other's half
                 moved = rows * (cols // 2) * 2 * options.iters
                 entry.update(bytes_per_call=rows * (cols // 2) * 2,
@@ -91,7 +102,8 @@ def main():
             except BaseException as error:
                 entry['error'] = '%s: %s' % (type(error).__name__, str(error)[:200])
             report['results'].append(entry)
-            print('all_gather %5dx%d -> %s GB/s' % (rows, cols, entry.get('gb_s')), flush=True)
+            print('all_gather %5dx%d links=%d -> %s GB/s'
+                  % (rows, cols, links, entry.get('gb_s')), flush=True)
 
         good = [r for r in report['results'] if r.get('gb_s')]
         if good:
@@ -109,12 +121,20 @@ def main():
             report['link_spec_gb_s_aggregate'] = 400.0
             report['percent_of_link_aggregate'] = round(100 * report['best_gb_s'] / 400.0, 2)
             report['prefill_percent_of_link_aggregate'] = round(100 * 9.3 / 400.0, 2)
-            if len(good) > 1:
-                small, large = good[0], good[-1]
-                report['scales_with_size'] = round(large['gb_s'] / small['gb_s'], 2)
-                report['reading'] = ('latency-bound, fewer or larger collectives should win'
-                                     if large['gb_s'] > small['gb_s'] * 1.5
-                                     else 'close to saturated, only a sharding change helps')
+            one = [r for r in good if r.get('links') == 1]
+            if len(one) > 1:
+                report['scales_with_size'] = round(one[-1]['gb_s'] / one[0]['gb_s'], 2)
+            # Does adding links add bandwidth? Compare the same shape across link counts.
+            same = {r['links']: r['gb_s'] for r in good if r.get('rows') == 2048}
+            if len(same) > 1:
+                report['by_links_2048x5120'] = same
+                base = same.get(1)
+                if base:
+                    report['link_scaling'] = {k: round(v / base, 2) for k, v in sorted(same.items())}
+            report['reading'] = (
+                'links scale: production num_links=4 should already get the multiple'
+                if report.get('link_scaling', {}).get(4, 1) > 1.5 else
+                'extra links do not add bandwidth for this shape')
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:400])
     finally:
