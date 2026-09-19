@@ -25,6 +25,12 @@ The environment setting `TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES=1`
 is a force-enable override, **not** an ordinary safe feature opt-in. Leave it
 unset. Do not modify firmware, spoof topology or remove capability checks.
 
+> **Resolved 19 September — see [dram-prefetch-verdict-2026-09-19.md](dram-prefetch-verdict-2026-09-19.md).**
+> All four gates below were run. The first three cleared: firmware is 19.12.0.0, no
+> DRAM harvesting, capability native, upstream validator 30/30. The fourth failed —
+> the prefetched path measured 24.7% slower than the native 1D control at matched
+> core count, so this route is not being pursued.
+
 | Next gate | Required evidence |
 |---|---|
 | Maintenance feasibility | Supported P150A bundle, runtime/KMD compatibility, recovery procedure and user-approved window |
