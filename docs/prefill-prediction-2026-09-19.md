@@ -76,3 +76,37 @@ shown that **prefill does not amortise across users while decode does** - aggreg
 prefill throughput is constant in user count. So prefill cost is paid per request in
 full, and at 2,400 tok/s a 30k prompt costs 12.5 s of time-to-first-token that
 concurrency cannot reduce.
+
+## Preliminary evidence, and it argues against the hypothesis above
+
+Found in the untraced rows of the existing decode profile (run 35185624322) before the
+dedicated prefill profile ran. Recorded here rather than quietly dropped, because the
+prediction was made in public and this is evidence against it.
+
+| Op | ms | calls | per call |
+| --- | ---: | ---: | ---: |
+| `ChunkGdnScanOperation` | 200.6 | 192 | 1.04 ms |
+| `MatmulDeviceOperation` | 2651.5 | 24,412 | 43.9% of the window |
+| `AllGatherMinimalMatmulAsyncOp` | 700.5 | 512 | 1.37 ms |
+| `DecodeGatedDeltaRuleDeviceOperation` | 143.1 | 3,072 | |
+| `GdnConvGatesDeviceOperation` | 115.4 | 3,264 | |
+
+`ChunkGdnScanOperation` is the GDN prefill scan, and 192 calls is 48 layers x 4 chunks.
+At 1.04 ms per call that is about **50 ms of GDN scan per 2048-token chunk**, against a
+measured 833 ms per chunk - roughly **6%**, not the more than 50% the hypothesis
+requires. On this evidence the GDN layers are not what makes prefill slow.
+
+`AllGatherMinimalMatmulAsyncOp` is new here: a fused collective-and-matmul, 512 calls,
+which is 64 layers x 8, so it runs per layer per chunk and belongs to the projection
+path rather than the GDN path.
+
+**Why this is indicative rather than conclusive.** The window mixes prefill with every
+other untraced operation in the run - setup, capture, untraced decode - so the totals are
+not a prefill attribution. And the 833 ms per chunk comes from the plain path at 79k
+context, where attention over a long cache is expensive, while this profile served a 4k
+request whose chunks are cheaper. The two are not like for like.
+
+The dedicated profile bounds prefill with signposts per prompt length and will give a
+clean answer. If it confirms this, the revised hypothesis is the projection path and the
+fused collective-matmul, and the remedy is matmul efficiency or fusion rather than
+anything to do with the recurrence.
