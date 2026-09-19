@@ -299,3 +299,64 @@ It would take a tuned matmul: an explicit program config with the full core grid
 blocking chosen for the shape, not the library default. That is a real piece of work
 and, given prefill already exceeds the default by 1.75x, it would only refine a number
 that is no longer blocking any decision.
+
+## The 109 single-core calls: chip 0 waiting for chip 1
+
+Answered from the profile alone, no new run. They are **not work**. They are a
+synchronisation stall, and the thing being waited for is identifiable.
+
+### They are serial, and they are asymmetric
+
+| | |
+| --- | --- |
+| count, duration | 109 calls, median **1.58 ms**, total **148.8 ms** = 4.0% of prefill |
+| overlap with the op's own >=64-core work | **0 of 109** - checked on FW start/end cycles, so the time is additive, not concurrent fabric work |
+| always preceded by | `LayerNormPostAllGather`, itself on only 6-13 cores |
+| **on chip 1** | **16.7 ms over 12 calls** - nine times less |
+
+The asymmetry settles what they are. One core busy for 1.58 ms on a
+layernorm-sized tensor would be absurd as computation, and if it were computation
+both cards would do it. Chip 1 does not.
+
+### What chip 0 is waiting for
+
+The two chips diverge in exactly two operations, and the divergence nearly cancels:
+
+| op | chip 0 | chip 1 | |
+| --- | ---: | ---: | --- |
+| `ReduceScatterMinimalAsync` | 260.7 ms | **397.7 ms** | chip 1 is **+137.1 ms behind** |
+| `AllGatherMinimalMatmulAsync` | **1096.7 ms** | 976.8 ms | chip 0 is +119.9 ms, of which 148.8 is the stall |
+
+Chip 1 falls about 137 ms behind inside the reduce-scatter, and chip 0 then blocks
+at the next collective waiting for it to arrive. **The stall is that imbalance,
+observed one collective downstream.** Total device time stays almost equal - 3697
+against 3738 ms - because the waiting is counted as device time, which is why
+neither chip looks idle in any aggregate.
+
+Why the reduce-scatter is asymmetric is not established here. Harvesting is
+identical on both boards (`harvest_mask` 192, `eth_harvesting_mask` 288), so it is
+not a core-count difference, and PCIe width should not reach a device-to-device
+collective. It is a question for the CCL implementation, alongside
+[#55125](https://github.com/tenstorrent/tt-metal/issues/55125) and
+[#57083](https://github.com/tenstorrent/tt-metal/issues/57083).
+
+### This revises the fused op's split, in the direction that matters
+
+The stall had been charged to matmul, since it sits inside `AllGatherMinimalMatmul`:
+
+| component of the 1096.7 ms | ms |
+| --- | ---: |
+| synchronisation stall | 148.8 |
+| communication | 130-260 |
+| matmul | **688-818** |
+
+So prefill arithmetic is nearer **1376 ms** than 1719, which is **552 TFLOPS/card**
+- **2.2x** the 252.6 a naive `ttnn.matmul` achieves. Every correction so far has
+moved the matmuls further from being the problem.
+
+### Worth, and what to do
+
+4.0% of prefill, and unlike the conv it is not bounded by an arithmetic argument -
+a stall is pure loss. But it is inside a tt-metal CCL op, so the lever is upstream
+rather than local, and the honest size is 4% of prefill, which is under 1% of the
+end-to-end target. **Report it upstream; do not build anything for it.**
