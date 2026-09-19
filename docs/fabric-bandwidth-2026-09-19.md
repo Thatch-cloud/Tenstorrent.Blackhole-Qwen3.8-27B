@@ -62,24 +62,60 @@ it decides whether there is a factor of two waiting or nothing at all.
 The earlier reasoning in this document assumed a single cable and treated 83.74 GB/s as
 saturation. That assumption is now explicitly unresolved rather than quietly load-bearing.
 
-## A candidate explanation, and it is testable
+## RESULT: packet size was real but small, and the prediction was wrong
 
-If the ceiling is 200 GB/s, the shortfall wants an explanation, and the runtime supplies a
-suspect in its own warning:
+Runs 35425948829 and 35426073865. Three arms, one device open each.
 
-```
-Fabric packet size 4352 B is suboptimal for transporting 2048 B pages.
-Configure 8192 B packet size to maximize throughput.
-```
+| arm | packet | pages/packet | warnings | 512 | 2048 | 8192 | % of 200 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 4352 | 2 | 6 | 61.06 | 76.04 | 83.28 | 41.6% |
+| packet 8192 | **8192** | **4** | **0** | 75.00 | 84.51 | **90.43** | 45.2% |
+| + 4 planes | 8192 | 4 | 0 | 64.78 | 82.84 | 91.15 | 45.6% |
 
-One 2048-byte page per 4352-byte packet is **47% payload efficiency**, against a measured
-**41.9% of a 200 GB/s ceiling**. Those two numbers being close is suggestive and nothing
-more - it is exactly the shape of coincidence that produced the 9.3 GB/s error, so it is
-recorded as a hypothesis with a test attached, not as a finding.
+**The lever demonstrably moved.** `get_tt_fabric_max_payload_size_bytes()`
+returned 8192 in the tuned arm against 4352 in the baseline, and the runtime's own
+`suboptimal for transporting` warning went from 6 occurrences to 0. This is the first
+lever this month that can be shown to have moved rather than assumed to have.
 
-**The test:** raise the fabric packet size to 8192 B and re-measure the same three shapes.
-If throughput rises towards 170-180 GB/s, packing was the whole story. If it does not
-move, the collective is using two of the four links and the lever is elsewhere.
+**The pre-registered prediction was 160-170 GB/s and it was wrong.** The result is
+90.43 GB/s, +8.6% at the large shape. Packing was not the constraint.
+
+The shape of the gain says what it actually was: **+22.8% at 512 rows, +11.1% at 2048,
++8.6% at 8192**. Largest where per-packet overhead dominates and smallest at the
+asymptote is a fixed-cost reduction - it shaved the ~10 us per collective - not a raised
+ceiling.
+
+### The planes arm is inconclusive, and that was predicted too
+
+`num_planes=4` moved the large shape from 90.43 to 91.15, which is 0.8% and inside noise,
+and it made the small shape worse. There is **no getter for plane count**, so this arm
+cannot distinguish "four planes do not help" from "num_planes was ignored", and the
+0.8% agreement is the same signature that three inert levers produced this month. The
+weakness of the control was recorded before the run rather than discovered after it.
+
+Treat the planes question as **open**, not as answered in the negative.
+
+### Where that leaves the fabric
+
+Four links are up, two cables, 200 GB/s ceiling. Best measured is **90.43 GB/s, 45%**.
+And 90 GB/s is about 90% of *one* cable, which continues to point at the collective using
+half the fabric - but `num_links` is deprecated and ignored, and `num_planes` produced no
+measurable change, so nothing reachable from the ttnn API has moved it. The next step is
+an upstream question rather than another sweep here.
+
+### Is it worth taking the 8.6%?
+
+Honestly: barely, and it is not free to adopt.
+
+| | share | after an 8.6% fabric gain |
+| --- | ---: | ---: |
+| prefill communication | 408-538 ms of 3697 | saves ~35-46 ms, **~1% of prefill** |
+| decode collectives | 3.44 ms of 64.90 | saves 0.27 ms, **0.4% of the cycle** |
+
+Against a 32.4 ms gap in the decode cycle this is under 1% of what is needed. The packet
+size is also a **serving default**, so changing it needs authorisation rather than being
+applied quietly. Recommend recording it as a known-good setting and revisiting it if the
+fabric ever becomes load-bearing, which on these numbers it is not.
 
 ## num_links is deprecated, so the link sweep proves nothing
 
