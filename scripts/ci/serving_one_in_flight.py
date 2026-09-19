@@ -93,4 +93,12 @@ def install(vllm_config, scheduler=None):
     if getattr(scheduler_config, 'scheduler_cls', None) not in (None, ''):
         raise ValueError('A scheduler class is already selected for this config')
     scheduler_config.scheduler_cls = SCHEDULER_PATH if scheduler is None else scheduler
+    try:
+        from loguru import logger
+        # loguru formats with {}, not %. A marker logged with % prints the literal
+        # and proves nothing, which has happened before in this work.
+        logger.info('[PINDIAG] one-in-flight scheduler installed: {}',
+                    scheduler_config.scheduler_cls)
+    except BaseException:
+        pass
     return scheduler_config.scheduler_cls

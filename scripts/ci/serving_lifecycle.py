@@ -86,7 +86,16 @@ class FastServingLifecycle:
                     or scheduled.scheduled_spec_decode_tokens
                     or getattr(scheduled, 'has_structured_output_requests', False)
                     or getattr(scheduled, 'scheduled_encoder_inputs', {})):
-                raise ValueError('Fast serving requires one complete fresh prefill')
+                # Carrying the values, because run 35436193682 and 35441222051 both
+                # died here and the clause had to be guessed from outside.
+                raise ValueError('Fast serving requires one complete fresh prefill: '
+                                 'prefill_slot=%r new=%r cached=%r spec=%r structured=%r encoder=%r'
+                                 % (self.request_id,
+                                    [getattr(value, 'req_id', None) for value in scheduled.scheduled_new_reqs],
+                                    list(scheduled.scheduled_cached_reqs.req_ids),
+                                    dict(scheduled.scheduled_spec_decode_tokens),
+                                    getattr(scheduled, 'has_structured_output_requests', False),
+                                    getattr(scheduled, 'scheduled_encoder_inputs', {})))
             new = scheduled.scheduled_new_reqs[0]
             if (new.prompt_token_ids is None or new.num_computed_tokens != 0
                     or new.mm_features or new.prompt_embeds is not None or new.lora_request is not None
