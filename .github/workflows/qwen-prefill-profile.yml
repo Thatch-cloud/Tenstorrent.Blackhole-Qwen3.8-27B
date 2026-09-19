@@ -12,6 +12,17 @@ jobs:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 75
     steps:
+      - name: Clear root-owned artifacts a previous profiled run left behind
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          stale="$GITHUB_WORKSPACE/pp/experiment-results/profile"
+          if [ -e "$stale" ]; then
+            sudo -n rm -rf "$stale" 2>/dev/null || rm -rf "$stale" || true
+          fi
+          test ! -e "$stale"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: pp
@@ -74,6 +85,7 @@ jobs:
             /bench/prefill_profile.py --model "$model" --context 65536 \
             --lengths 4096,16384,32768 --signpost \
             > experiment-results/pp-stdout.log 2>&1 || true
+          sudo -n chown -R "$(id -u):$(id -g)" experiment-results/profile 2>/dev/null || true
           sed -n '/PREFILL_PROFILE_JSON_BEGIN/,/PREFILL_PROFILE_JSON_END/p' \
             experiment-results/pp-stdout.log | sed '1d;$d' \
             > experiment-results/prefill-profile.json || true
