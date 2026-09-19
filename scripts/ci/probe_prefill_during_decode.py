@@ -110,12 +110,12 @@ def main():
         print('VERDICT')
         if new and cached:
             counts = dict(mixed.num_scheduled_tokens)
-            print('  ONE step carries B\\'s prefill AND A\\'s decode: counts=%s' % counts)
+            print("  ONE step carries B's prefill AND A's decode: counts=%s" % counts)
             print('  execute_scheduled runs request.step() for ONE ticket, and a prefill')
             print('  and a verify are different device shapes, so widening the contract is')
             print('  NOT sufficient - the step must be split or B deferred.')
         elif new and not cached:
-            print('  the scheduler holds A back and runs B\\'s prefill alone, so relaxing')
+            print("  the scheduler holds A back and runs B's prefill alone, so relaxing")
             print('  the contract to allow a prefill step between decodes is enough.')
         else:
             print('  B was not scheduled at all while A holds proposals: the scheduler')
