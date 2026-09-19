@@ -14,24 +14,29 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
+        # Every cell carries a prompt that fills its context. --context alone only sizes
+        # the KV allocation: run 35418378519 measured 1 user at 131072 with the default
+        # 512-token prompt and reported ttft 1.57 s, which is decode against an almost
+        # empty cache, so KV traffic never entered the measurement.
+        #
         # Iso-product lines: predicted cycle depends only on users x context, because
         # that is the KV traffic. Cells on one line should therefore measure the same
         # rate if the stack is purely KV-bandwidth-bound. If per-sequence work scales
         # with users, the higher-user cell on a line is slower, and by how much is the
         # number that decides whether four or eight users is reachable at all.
         include:
-          - {users: 1, context: 131072, product: 131072}
-          - {users: 2, context: 65536,  product: 131072}
-          - {users: 4, context: 32768,  product: 131072}
-          - {users: 1, context: 262144, product: 262144}
-          - {users: 2, context: 131072, product: 262144}
-          - {users: 4, context: 65536,  product: 262144}
-          - {users: 8, context: 32768,  product: 262144}
-          - {users: 2, context: 262144, product: 524288}
-          - {users: 4, context: 131072, product: 524288}
-          - {users: 8, context: 65536,  product: 524288}
-          - {users: 4, context: 163840, product: 655360}
-          - {users: 8, context: 131072, product: 1048576}
+          - {users: 1, context: 131072, product: 131072, prompt: 126976}
+          - {users: 2, context: 65536, product: 131072, prompt: 61440}
+          - {users: 4, context: 32768, product: 131072, prompt: 28672}
+          - {users: 1, context: 262144, product: 262144, prompt: 258048}
+          - {users: 2, context: 131072, product: 262144, prompt: 126976}
+          - {users: 4, context: 65536, product: 262144, prompt: 61440}
+          - {users: 8, context: 32768, product: 262144, prompt: 28672}
+          - {users: 2, context: 262144, product: 524288, prompt: 258048}
+          - {users: 4, context: 131072, product: 524288, prompt: 126976}
+          - {users: 8, context: 65536, product: 524288, prompt: 61440}
+          - {users: 4, context: 163840, product: 655360, prompt: 159744}
+          - {users: 8, context: 131072, product: 1048576, prompt: 126976}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -141,7 +146,7 @@ jobs:
             -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B /bench/longctx_cycle_bench.py \
-            --plain --users ${{ matrix.users }} --context ${{ matrix.context }} --max-tokens 64 \
+            --plain --users ${{ matrix.users }} --context ${{ matrix.context }} --prompt-tokens ${{ matrix.prompt }} --max-tokens 64 \
             > experiment-results/cycle-stdout.log 2>&1 || true
           sed -n '/CYCLE_BENCH_JSON_BEGIN/,/CYCLE_BENCH_JSON_END/p' \
             experiment-results/cycle-stdout.log | sed '1d;$d' \
