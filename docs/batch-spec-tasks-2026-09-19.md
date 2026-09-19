@@ -448,3 +448,51 @@ Ordered by what blocks what:
    production sets `fused_convolution=True`.
 3. `admit_scheduler_output`, the one-hook-per-request binding, and the one-in-flight
    prefill rule.
+
+## GDN state swap: done, and it keeps the weight amortisation (2026-09-19)
+
+The blocker named above is cleared. `DeviceLoopState.decode` takes segment spans
+plus one carried recurrent state per user, restores the layer's active state to
+that user immediately before its segment runs, and advances only that user by its
+own rows.
+
+The reason this works without touching a kernel is where the weights sit:
+
+| Stage | Packed behaviour | Weights |
+| --- | --- | --- |
+| `_project_qkvzab_raw` | once, across all 32 rows | the input projection, amortised |
+| recurrence (`run_batched_projected`) | once per segment, on a slice of that projection | none, elementwise |
+| `finish_output` / `_row_proj` | once, over the concatenated block | the output projection, amortised |
+
+So packing N users costs the same weight traffic as one, which is the entire
+argument for the batched verifier. The recurrence runs the same total number of
+rows either way, split across N launches instead of one.
+
+`ModelBatch` threads a pack carrying, per user: frontier, page table, accepted
+prefix, and a per-layer GDN checkpoint and carried state. Positions and page rows
+come from `target_packed_pages`, and the per-row page list replaces
+`[singleton_pages] * rows` so a packed row reads its own user's blocks. A pack
+missing any per-user GDN state is refused rather than run.
+
+One hazard is recorded in the code: the layer's active state is left holding the
+last segment's user. That is safe only because every packed segment restores its
+own slot before running, so packed and unpacked blocks must not be mixed within a
+request.
+
+**Not validated on device.** The tests are mock-based and assert the call
+structure - one projection across 32 rows, two recurrences of 16, each preceded by
+its own user's restore, each checkpointing its own prefix and advancing its own
+width - plus that unpacked decode takes the identical path it did before.
+
+### Remaining
+
+1. The fused draft convolution kernel taking segment spans.
+   `draft_convolution_fused_compute.cpp` has only `rows` as a runtime argument and
+   production sets `fused_convolution=True`, so `checked_convolution` refuses a
+   packed call today.
+2. `VerifierEngine` building a pack: it holds one page table and caps widths at
+   `min(verifier_rows, max_verify_rows)`, so two T16 users need `verifier_rows=32`
+   and per-user page tables and checkpoints threaded into `fixture`.
+3. `admit_scheduler_output`, the one-hook-per-request binding, and the
+   one-in-flight prefill rule.
+4. Hardware qualification of the whole chain.
