@@ -155,3 +155,54 @@ on the **managed endpoint**, which already runs 8 scheduler slots without the fa
 This programme addresses the **fast path** refusing more than one slot. They meet at the
 same place — a scheduler that interleaves several streams against one weight pass — and
 T3 should not invent an alternation policy that Lever N's M2 already designs.
+
+## Where the programme actually stands, 2026-09-19 late
+
+Three findings close off routes that looked open. All three are read from the image's
+own sources, see [lever-n-plugin-contract-2026-09-19.md](lever-n-plugin-contract-2026-09-19.md).
+
+**Lever N M1 is done and gated.** Run 35416319586: resumable prefill is byte-identical
+to the one-shot path at 460, 3,524 and 5,918 tokens, with the baseline provably on the
+original code path. It took a three-file graft, not two - the plugin refuses chunked
+prefill for `model_type=qwen3_5` at config time.
+
+**Lever N does not move the per-user decode rate, and never could.** Its own design says
+so (section 4: decode ITL unchanged, decode path untouched; section 7: speculation not
+considered). It buys non-blocking prefill and nothing else toward 200 tok/s.
+
+**T3 does not share a core with M2.** This sheet claimed it does; that is wrong. M2's
+alternation is in the plugin's `LaneScheduler._negotiate_forced_mode`
+(`/opt/qwen-fast-plugin/src/vllm_tt_plugin`). The fast path's singular session state is
+in our own `scripts/ci/serving_lifecycle.py`, which holds one `request_id` and one
+`capture` and rejects a second scheduled request at line 57, plus `FastRunnerBridge`,
+trace bucket 1, and the 32-row verify cap. Different codebases, different layers. T3 is
+its own build and is not made cheaper by M2.
+
+**There is no plain-path bypass.** The obvious shortcut - run speculation on the plain
+path, which already serves 4 users at 161k - does not exist:
+
+```python
+class DFlash2DraftModel(nn.Module):
+    """Registry metadata only; execution belongs to the combined TT runtime."""
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError('DFlash2 execution requires the explicit TT combined fast runtime')
+```
+
+Every method raises. Speculation is available only through the fast path, and the fast
+path admits one request. So speculation and concurrency remain mutually exclusive, and
+T3 is the only thing that changes that.
+
+### What reaching the target now requires, in order
+
+1. **T3** - multi-session fast runtime: per-session capture and bridge state, trace
+   bucket sized N, verify rows 32 -> 64 with prepared capture buckets. Not started, and
+   larger than this sheet previously implied.
+2. **The bandwidth levers**, because T3 alone is not enough. Per
+   [200tps-reachability-2026-09-19.md](200tps-reachability-2026-09-19.md), 4 users at
+   161k with bf8 KV is short by 17 ms per cycle on DRAM traffic before any overhead, and
+   caps near 156 tok/s even with a perfectly bandwidth-bound verifier. bf4 KV plus an
+   acceptance rate at or near 16/16 is the only combination that leaves headroom.
+
+Lever N M2 remains worth finishing for prefill behaviour under concurrency, but it should
+not be described as being on the path to 200 tok/s. It is not.
+
