@@ -160,3 +160,75 @@ Ruled out by measurement: DRAM bandwidth itself. 405 GB/s is 79-80% of the 512 G
 spec, which is a normal sustained figure for GDDR6, consistent across access sizes and
 across read-only and read-write regimes. There is no meaningful win there; a physically
 impossible 100% of spec would save 5.1 ms against the 41.5 ms above.
+
+## DEVICE ATTRIBUTION, T16: it is the GDN machinery, not matmuls or collectives
+
+No new hardware run was needed. Run 35185624322 - one of four "winning verifier profile"
+attempts that CI recorded as failures - completed its request and audits in full and
+failed only in profiler finalisation, where `python3 -m tracy` tried to copy a host
+`.tracy` file that did not exist and then launch a Tracy WASM web GUI. The
+`preserve_metadata` EXIT trap in `dspark-combined-device-profile.sh` had already written
+an 81 MB `cpp_device_perf_report.csv`, 355,461 rows, both chips. The data was there the
+whole time behind a red tick.
+
+Trace 24 is the T16 verifier (`qwen_request_verify_4_pos4137_t16_trace24`). Chip 0,
+median of the four steady replays with the first discarded:
+
+| Operation | ms | calls | share |
+| --- | ---: | ---: | ---: |
+| **GenericOpDeviceOperation** | **32.59** | 496 | **50%** |
+| MatmulDeviceOperation | 20.25 | 193 | 31% |
+| SdpaDecodeDeviceOperation | 3.49 | 32 | 5% |
+| AllGatherAsyncDeviceOperation | 2.01 | 130 | 3% |
+| GdnConvGatesDeviceOperation | 1.70 | 48 | 3% |
+| ReduceScatterMinimalAsyncDeviceOperation | 1.43 | 128 | 2% |
+| everything else | 3.43 | | 5% |
+| **total** | **64.90** | | |
+
+64.90 ms against the 66.09 ms the host observes blocking on the trace, so the attribution
+is essentially complete.
+
+**The collectives hypothesis was wrong.** All-gather plus reduce-scatter is 3.44 ms,
+5% of the verifier. TP2 communication is not the problem.
+
+`GenericOpDeviceOperation` is the project's own kernels, and splitting it by core count
+separates them by which layers they run on:
+
+| cores | ms | calls | |
+| ---: | ---: | ---: | --- |
+| 99 | 11.40 | 64 | one per layer, all 64 |
+| 96 | 9.53 | 48 | GDN recurrence, per the T8 profile's labelling |
+| 48 | 4.61 | 112 | |
+| 24 | 3.38 | 48 | GDN-shaped |
+| 16 | 2.48 | 112 | |
+| 8 | 0.86 | 48 | GDN-shaped |
+| 32 | 0.33 | 64 | |
+
+The 48-call groups track the 48 GDN layers and total **13.77 ms**; the 64-call groups
+track all layers and total 11.73 ms. So the GDN path, not weight streaming, is the
+largest identifiable cost in the verifier.
+
+### The scaling result that matters most
+
+GDN recurrence was **6.29 ms at T8** and is **9.53 ms at T16**: 1.52x for twice the
+verify rows. It is not free per row. Speculation buys committed tokens by widening the
+verifier, and this term grows as it does, so it taxes exactly the mechanism the 60 ms
+budget depends on - and it would be taxed again by any batched multi-session work.
+
+### Where this leaves the target
+
+Matmul is 20.25 ms of a 64.90 ms verifier. Even eliminating every non-matmul operation
+entirely - collectives, SDPA, the whole GDN path - would leave a verifier near 20 ms and
+a cycle near 52 ms, which is 231 tok/s per user at single-user 4096. That is the
+optimistic ceiling of this direction, and the realistic target is the 13.77 ms of
+GDN-layer work plus the 11.73 ms of all-layer work, both of which are project-owned
+kernels rather than vendor ops.
+
+**Next, in order:** identify the 99-core 64-call group, which is the single largest
+sub-group at 11.40 ms and is currently unnamed; confirm the GDN recurrence row-scaling
+with a T4/T8/T16 sweep from the same CSV family; then decide whether the recurrence can
+be made row-parallel.
+
+**Fix the profile job regardless.** It works, and CI calls it a failure. It needs the
+tracy finalisation to stop trying to launch a web GUI, so the artifact is produced under
+a green tick rather than rescued from a red one.
