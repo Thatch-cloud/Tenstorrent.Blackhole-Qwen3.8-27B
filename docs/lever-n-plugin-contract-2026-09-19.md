@@ -234,3 +234,48 @@ Also settled: the 5,000-token engine crash that wedged a card twice was confined
 `_prefill_forward_tp`, the single-sequence path. `prefill_paged_slots` and
 `prefill_paged_slots_range` are only reachable when `model.args.max_batch_size > 1`, so
 every run before this one at `max_num_seqs=1` was exercising neither.
+
+## T3 scope, read from the verifier rather than guessed
+
+Earlier notes called multi-session support "a batch axis through the whole speculative
+engine". Reading `verifier_engine.verify`, `verifier_inputs.stage_inputs` and
+`attention_request_plan` narrows it considerably, and moves the difficulty somewhere
+different from where the task sheet puts it.
+
+**Already per-row and already runtime.** `stage_inputs(fixture, tokens, start)` uploads
+`fixture.positions`, `fixture.cos`, `fixture.sin` on every verify call, and
+`fixture.singleton_positions` is a per-row position buffer whose length must equal
+`fixture.rows`. Positions and RoPE are therefore not baked into the captured trace, and
+per-row positions already exist as a concept.
+
+**Also already batched: the kernels.** `layer.B` is a real batch dimension on the GDN
+layers. `_bind_gdn_prefill_scratch` forces `dn.B = 1` for prefill and restores the
+batched value afterwards, and the plain path serves four users at 161k today, so
+batched GDN decode at B=4 demonstrably runs on this hardware.
+
+**Single-sequence, and this is the actual work:**
+
+| Piece | Today | Needed |
+| --- | --- | --- |
+| `fixture.pages` | `[1, 68]`, and `validate_tokens` takes capacity from `pages.shape[1] * 64` | per-row page tables |
+| attention mask | one `capacity` family, `validate_ticket(start, rows, capacity)` binds one `start` for all rows | per-row masks over each sequence's own KV extent |
+| capture buckets | keyed `(rows, capacity)`, so a trace serves one position family | shapes covering N sequences |
+| `serving_lifecycle` | one `request_id`, one `capture` | N sessions |
+| `sampler.set_trace_bucket(1)` | 1 | N |
+
+The first three are one problem wearing three hats: **the verifier does single-sequence
+attention against a baked mask family, and needs paged attention across N sequences at
+independent positions**. That is not a new capability for this stack - the plain decode
+path already does exactly that - so the design direction is to reuse the batched paged
+attention the decode path uses rather than to generalise the capture-bucket machinery.
+
+Note also that `68 x 64 = 4352`. The bridge's page table is itself the 4352-token context
+pin, which the programme's table of four pins does not list, and which means the fast
+path cannot serve long context at one user either, not merely at four.
+
+**What still gates the decision.** None of the above is worth building if per-sequence
+device work does not amortise: the T16 attribution puts 23.57 ms of the 64.90 ms verifier
+in GDN recurrence and SDPA, both per-sequence. If that cost scales with users, four users
+lands near 73 tok/s and eight near 47, whatever the plumbing looks like. The decode
+scaling ladder measures precisely this on the plain path, where the same batched GDN and
+SDPA code runs.
