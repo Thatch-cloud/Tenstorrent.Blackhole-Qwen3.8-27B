@@ -1,0 +1,31 @@
+name: Qwen saved DMA combined report revalidation
+on:
+  push:
+    tags: ['experiment/dma-report-revalidation-v*']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  saved-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate existing report against executed DMA source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: scripts/ci
+        run: |
+          gh run download 35321449903 --repo "$GITHUB_REPOSITORY" --name qwen-cumulative-t16-35321449903 --dir evidence
+          echo '0be812cceaf6f91686570bb02a9991cc5a58d8aaa95e05d0633388802799a2bc  evidence/dspark-captured-publication-request-hardware.json' | sha256sum -c -
+          python3 -B -m unittest test_draft_kv_slide_gate
+          cp scripts/ci/draft_kv_slide_direct.cpp scripts/ci/draft_kv_slide.cpp
+          echo '1679bbd779add56b4bd445a6b4c51bd3e49c39a8a520dfaddfc3bd9f36667d47  scripts/ci/draft_kv_slide.cpp' | sha256sum -c -
+          python3 -B scripts/ci/mlp_block_stream_report.py evidence/dspark-captured-publication-request-hardware.json > evidence/dma-revalidation.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-dma-report-revalidation-${{ github.run_id }}
+          path: evidence/dma-revalidation.json

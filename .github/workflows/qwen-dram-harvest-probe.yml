@@ -1,0 +1,390 @@
+name: Qwen DRAM harvest mask and firmware upgrade recon
+on:
+  push:
+    tags: ['experiment/dram-harvest-probe-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: dram-harvest-probe
+          persist-credentials: false
+      - name: Enumerate every card and confirm no process holds a device
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          # Enumerate whatever is present; the pair-only assumption is deliberately not made.
+          python3 -B - <<'PY'
+          import json, stat
+          from pathlib import Path
+          root = Path('/dev/tenstorrent')
+          nodes = sorted(path.name for path in root.iterdir() if stat.S_ISCHR(path.stat().st_mode))
+          by_id = {}
+          link_root = root / 'by-id'
+          if link_root.is_dir():
+              for link in sorted(link_root.iterdir()):
+                  try:
+                      by_id[link.name] = link.resolve(strict=True).name
+                  except OSError as error:
+                      by_id[link.name] = 'unresolved: %s' % error
+          driver = Path('/sys/module/tenstorrent/version')
+          Path('experiment-results/identity.json').write_text(json.dumps(dict(
+              device_nodes=nodes, node_count=len(nodes), by_id=by_id,
+              driver_version=driver.read_text().strip() if driver.is_file() else None,
+              firmware_modified=False, devices_reset=False, model_loaded=False), indent=2))
+          print(json.dumps(dict(device_nodes=nodes, by_id=by_id), indent=2))
+          PY
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          holders=$(command -v fuser)
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" "$holders" -v "${paths[@]}" > experiment-results/open-holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/open-holders.txt ]; then
+            echo 'Device ownership not clear; no telemetry or probe command launched'
+            cat experiment-results/open-holders.txt || true
+            exit 1
+          fi
+      - name: Snapshot telemetry for every card without changing firmware
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || true)
+          if [ -z "$smi" ] && [ -x /home/thatch/.local/bin/tt-smi ]; then smi=/home/thatch/.local/bin/tt-smi; fi
+          test -n "$smi"
+          timeout -k 5 15 "$smi" --version > experiment-results/tt-smi-version.txt
+          timeout -k 5 45 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-snapshot.json" \
+            > experiment-results/tt-smi.log 2>&1
+          python3 -B scripts/ci/dram_eligibility_inventory.py \
+            --snapshot experiment-results/tt-smi-snapshot.json \
+            --output experiment-results/eligibility-observations.json > /dev/null
+      - name: Record firmware upgrade prerequisites read-only
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Inventory only. This step must never flash, reset or power-cycle a card.
+          {
+            printf '=== tt-flash on PATH ===\n'
+            command -v tt-flash || echo 'tt-flash: not installed'
+            for candidate in /home/thatch/.local/bin/tt-flash /usr/local/bin/tt-flash; do
+              [ -x "$candidate" ] && echo "present: $candidate"
+            done
+            printf '\n=== tt-flash version ===\n'
+            if command -v tt-flash >/dev/null 2>&1; then timeout -k 5 20 tt-flash --version 2>&1 || true
+            elif [ -x /home/thatch/.local/bin/tt-flash ]; then timeout -k 5 20 /home/thatch/.local/bin/tt-flash --version 2>&1 || true
+            else echo 'unavailable'; fi
+            printf '\n=== python tooling ===\n'
+            timeout -k 5 30 python3 -m pip list 2>/dev/null | grep -iE 'tt-flash|tt-firmware|tt-smi|tt-tools' || echo 'none reported'
+            printf '\n=== firmware bundles on disk ===\n'
+            find /home/thatch /opt /var/lib/firmware -maxdepth 4 \( -iname '*.fwbundle' -o -iname '*.tar.gz' -path '*firmware*' \) 2>/dev/null | head -40 || true
+            printf '\n=== driver / kmd ===\n'
+            cat /sys/module/tenstorrent/version 2>/dev/null || echo 'no version file'
+            printf '\n=== pci devices ===\n'
+            lspci -nn -d 1e52: 2>/dev/null || echo 'lspci unavailable or no match'
+            printf '\n=== pci link status ===\n'
+            for slot in $(lspci -D -d 1e52: 2>/dev/null | cut -d' ' -f1); do
+              printf -- '--- %s ---\n' "$slot"
+              lspci -s "$slot" -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:' || true
+            done
+            printf '\n=== recovery path ===\n'
+            [ -e /dev/ipmi0 ] && echo 'bmc: /dev/ipmi0 present' || echo 'bmc: /dev/ipmi0 absent'
+            printf '\n=== containers holding cards ===\n'
+            timeout -k 5 15 docker ps --format '{{.ID}} {{.Image}} {{.Names}} {{.Status}}' 2>&1 | head -30 || true
+            printf '\n=== host pressure ===\n'
+            for metric in cpu memory io; do cat "/proc/pressure/$metric" 2>/dev/null || true; done
+          } > experiment-results/firmware-prereqs.txt 2>&1
+          cat experiment-results/firmware-prereqs.txt
+      - name: Read DRAM harvesting masks through the pinned runtime
+        working-directory: dram-harvest-probe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          docker image inspect "$image" --format '{{.Id}}' > experiment-results/image-id.txt
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-dram-harvest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 10 240 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 2 --memory 4g \
+            -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=256m \
+            "${devices[@]}" \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/dram_harvest_probe.py \
+            --source-root /opt/tt-metal --source-root /tmp \
+            --output /tmp/harvest.json > experiment-results/dram-harvest-probe.json 2>experiment-results/dram-harvest-probe.err || status=$?
+          echo "probe_exit=$status" > experiment-results/dram-harvest-probe.status
+          tail -40 experiment-results/dram-harvest-probe.err || true
+          cat experiment-results/dram-harvest-probe.json || true
+      - name: Capture harvesting from the runtime init log
+        working-directory: dram-harvest-probe
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The ownership gate in the first step already proved no process holds a card.
+          # Opening a device here is a read; it loads no model and writes no firmware.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-harvest-log-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          # Device open needs the 1G hugepage mount; without it UMD reports no host
+          # channels and command queue init fails. Mirrors the serving canary recipe.
+          timeout -k 10 300 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_LOGGER_LEVEL=Debug -e TT_LOGGER_LEVEL=Debug \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/dram_harvest_runtime.py \
+            > experiment-results/runtime-init.log 2>&1 || status=$?
+          echo "runtime_exit=$status" > experiment-results/runtime-init.status
+          grep -inE 'harvest|dram.*mask|num_dram|dram_chan' experiment-results/runtime-init.log \
+            > experiment-results/runtime-harvest-lines.txt || true
+          echo '--- harvesting lines ---'
+          head -60 experiment-results/runtime-harvest-lines.txt || true
+      - name: Ask the runtime whether the prefetcher is natively available
+        working-directory: dram-harvest-probe
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # is_tensor_prefetcher_supported() is the runtime's own verdict: it folds in
+          # the firmware floor and the harvesting condition. The force-enable override
+          # is deliberately left unset, so a true here is native.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(python3 -B -c "import json;print('\n'.join(json.load(open('experiment-results/identity.json'))['device_nodes']))")
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-prefetch-cap-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 10 300 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/source/scripts/ci \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/tensor-prefetch-capability.py \
+            --hardware --output /tmp/capability.json \
+            > experiment-results/prefetch-capability.log 2>&1 || status=$?
+          echo "capability_exit=$status" > experiment-results/prefetch-capability.status
+          tail -30 experiment-results/prefetch-capability.log || true
+      - name: Survey the prefetcher API surface
+        working-directory: dram-harvest-probe
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Introspection only: no device is opened and no kernel is launched.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          timeout -k 10 180 docker run --rm --network none             --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g             -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=128m             --mount "type=bind,src=$PWD,dst=/source,readonly"             --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_api_survey.py             > experiment-results/prefetcher-api.log 2>&1 || true
+          sed -n '/<<<PREFETCHER_API_JSON_BEGIN>>>/,/<<<PREFETCHER_API_JSON_END>>>/p'             experiment-results/prefetcher-api.log             | sed '1d;$d' > experiment-results/prefetcher-api.json || true
+          python3 -B -c "import json;d=json.load(open('experiment-results/prefetcher-api.json'));print('symbols:',d['match_count']);[print(' ',k) for k in d['matches']]"
+      - name: Attempt the first prefetch kernel run
+        working-directory: dram-harvest-probe
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Checkpoint 2. The override stays unset; capability must be native.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-prefetch-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 10 400 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/source/scripts/ci \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_first_kernel.py \
+            --run > experiment-results/prefetch-run.log 2>&1 || true
+          sed -n '/PREFETCH_RUN_JSON_BEGIN/,/PREFETCH_RUN_JSON_END/p' \
+            experiment-results/prefetch-run.log | sed '1d;$d' \
+            > experiment-results/prefetch-run.json || true
+          python3 -B scripts/ci/prefetcher_run_summary.py \
+            --report experiment-results/prefetch-run.json \
+            --log experiment-results/prefetch-run.log
+      - name: Find upstream prefetcher reference tests
+        working-directory: dram-harvest-probe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Read-only grep of the image; opens no device.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          timeout -k 10 240 docker run --rm --network none \
+            --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g \
+            -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,size=128m \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/prefetcher_reference_tests.py \
+            > experiment-results/prefetch-tests.log 2>&1 || true
+          sed -n '/PREFETCH_TESTS_JSON_BEGIN/,/PREFETCH_TESTS_JSON_END/p' \
+            experiment-results/prefetch-tests.log | sed '1d;$d' \
+            > experiment-results/prefetch-tests.json || true
+          python3 -B -c "import json;d=json.load(open('experiment-results/prefetch-tests.json'));print('hits:',d['hit_count']);[print('  ',h['path'],h['needles']) for h in d['hits'][:40]]" \
+            || tail -20 experiment-results/prefetch-tests.log
+      - name: Run upstream's prefetcher validator and bandwidth tests
+        working-directory: dram-harvest-probe
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Checkpoints 2 and 3 via upstream's own harness: the validator receiver
+          # memcmps every pushed page against the source tensor. Override stays unset,
+          # so the tests skip rather than pass if capability is not native.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-prefetch-upstream-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          base=tests/ttnn/unit_tests/operations/transformers
+          timeout -k 20 1000 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 12 --memory 48g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_HOME=/opt/tt-metal \
+            --tmpfs /tmp:rw,size=1g "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            -w /opt/tt-metal \
+            --entrypoint bash "$image" -c \
+            "python3 -m pytest -x -q --no-header -rs $base/test_prefetcher_BH_validator.py 2>&1 | tail -60" \
+            > experiment-results/upstream-validator.log 2>&1 || true
+          tail -45 experiment-results/upstream-validator.log || true
+          if grep -qE '^[0-9]+ passed' experiment-results/upstream-validator.log; then
+            echo 'CHECKPOINT 3 EVIDENCE: upstream validator passed'
+          elif grep -qiE 'skipped' experiment-results/upstream-validator.log; then
+            echo 'validator SKIPPED - capability not native on this device'
+          else
+            echo 'validator did not pass; see log'
+          fi
+      - name: Checkpoint 4 feasibility for Qwen MLP shapes
+        working-directory: dram-harvest-probe
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Geometry sweep plus upstream helper signatures. Claims no speedup.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-prefetch-feas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 5 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 10 400 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_HOME=/opt/tt-metal \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --entrypoint python3 "$image" -B /source/scripts/ci/prefetch_matmul_feasibility.py \
+            --projection gate > experiment-results/prefetch-feasibility.log 2>&1 || true
+          sed -n '/PREFETCH_FEAS_JSON_BEGIN/,/PREFETCH_FEAS_JSON_END/p' \
+            experiment-results/prefetch-feasibility.log | sed '1d;$d' \
+            > experiment-results/prefetch-feasibility.json || true
+          python3 -B -c "import json;d=json.load(open('experiment-results/prefetch-feasibility.json'));print('supported:',d.get('supported'));print('grid:',d.get('grid_probe'));print('gather rings:',d.get('gather_legal_receivers'));print('mcast rings:',d.get('mcast_legal_receivers'));print('helpers:',sorted((d.get('helpers') or {}).keys()))" \
+            || tail -25 experiment-results/prefetch-feasibility.log
+      - name: Diagnose the missing third card on the PCIe switch
+        working-directory: dram-harvest-probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Read-only. A device reset cannot restore a card absent from PCI
+          # enumeration, so establish first whether the bus sees it at all.
+          {
+            printf '=== all tenstorrent endpoints ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || echo 'lspci unavailable'
+            printf '\n=== full bridge tree ===\n'
+            lspci -Dt 2>&1 || true
+            printf '\n=== switch at f2 and its downstream ports ===\n'
+            lspci -D 2>/dev/null | grep -iE '^0000:f2:|bridge' | head -30 || true
+            printf '\n=== downstream port link status ===\n'
+            for slot in $(lspci -D 2>/dev/null | awk "/^0000:f2:/ {print \$1}"); do
+              printf -- '--- %s ---\n' "$slot"
+              lspci -s "$slot" -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:|SltSta:|DevSta:|^\s+Kernel' || true
+            done
+            printf '\n=== expected slots ===\n'
+            for slot in 0000:d1:00.0 0000:f3:00.0 0000:f4:00.0; do
+              if [ -e "/sys/bus/pci/devices/$slot" ]; then
+                printf '%s PRESENT\n' "$slot"
+              else
+                printf '%s ABSENT from /sys/bus/pci/devices\n' "$slot"
+              fi
+            done
+            printf '\n=== pci removal/rescan capability ===\n'
+            [ -w /sys/bus/pci/rescan ] && echo 'rescan node writable' || echo 'rescan node not writable by this user'
+            printf '\n=== kernel messages: tenstorrent / pcie errors ===\n'
+            (journalctl -k --no-pager -n 4000 2>/dev/null || dmesg 2>/dev/null || true) \
+              | grep -iE 'tenstorrent|tt_|pcie|aer|link (down|up)|bus error' | tail -60 || true
+          } > experiment-results/pcie-card-b.txt 2>&1
+          cat experiment-results/pcie-card-b.txt
+      - name: Survey python packages for a UMD binding
+        working-directory: dram-harvest-probe
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          timeout -k 5 60 docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --cpus 1 --memory 512m \
+            --entrypoint bash "$image" -c '
+              python3 -c "import site,sys; print(\"\n\".join(site.getsitepackages()))" 2>/dev/null || true
+              for d in $(python3 -c "import site;print(\" \".join(site.getsitepackages()))" 2>/dev/null); do
+                ls "$d" 2>/dev/null | grep -iE "umd|tt_|ttnn" || true
+              done
+              ls /opt/tt-metal/build_Release/tools 2>/dev/null || true
+              find /opt/tt-metal/build_Release -maxdepth 2 -type f -executable -name "*cluster*" 2>/dev/null || true
+            ' > experiment-results/python-package-survey.txt 2>&1 || true
+          cat experiment-results/python-package-survey.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-dram-harvest-${{ github.run_id }}
+          path: dram-harvest-probe/experiment-results/

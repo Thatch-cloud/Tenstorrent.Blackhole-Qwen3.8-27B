@@ -1,0 +1,98 @@
+name: Qwen PCIe rescan for the missing third card
+on:
+  push:
+    tags: ['experiment/pcie-rescan-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  rescan:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: pcie-rescan
+          persist-credentials: false
+      - name: Record bus state and privileged link status before rescanning
+        working-directory: pcie-rescan
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          {
+            printf '=== tenstorrent endpoints before ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || true
+            printf '\n=== switch downstream ports, privileged link detail ===\n'
+            for slot in 0000:f2:00.0 0000:f2:01.0 0000:f2:02.0 0000:f2:03.0; do
+              printf -- '--- %s ---\n' "$slot"
+              "${prefix[@]}" lspci -s "$slot" -vv 2>/dev/null \
+                | grep -E 'LnkCap:|LnkSta:|SltCap:|SltSta:|DevSta:|CESta:|UESta:' || echo '  (no capability detail)'
+            done
+            printf '\n=== kernel messages, privileged ===\n'
+            ("${prefix[@]}" journalctl -k --no-pager -n 6000 2>/dev/null \
+              || "${prefix[@]}" dmesg 2>/dev/null || true) \
+              | grep -iE 'tenstorrent|0000:f[234]|aer|link.?(down|up)|bus error|bad dllp|bad tlp' \
+              | tail -80 || true
+          } > experiment-results/before-rescan.txt 2>&1
+          cat experiment-results/before-rescan.txt
+      - name: Rescan the PCI bus
+        working-directory: pcie-rescan
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          # Additive only: a rescan adds devices that appear. It does not remove,
+          # reset or renumber the two cards already enumerated and in use.
+          "${prefix[@]}" sh -c 'echo 1 > /sys/bus/pci/rescan'
+          echo 'rescan issued' > experiment-results/rescan.txt
+          # Give a newly enumerated endpoint a moment to bind its driver.
+          for attempt in 1 2 3 4 5 6; do
+            if [ -e /sys/bus/pci/devices/0000:f4:00.0 ]; then break; fi
+            sleep 2
+          done
+          {
+            printf '=== tenstorrent endpoints after ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || true
+            printf '\n=== expected slots after ===\n'
+            for slot in 0000:d1:00.0 0000:f3:00.0 0000:f4:00.0; do
+              if [ -e "/sys/bus/pci/devices/$slot" ]; then printf '%s PRESENT\n' "$slot"
+              else printf '%s STILL ABSENT\n' "$slot"; fi
+            done
+            printf '\n=== device nodes ===\n'
+            ls -l /dev/tenstorrent/ 2>&1 || true
+            ls -l /dev/tenstorrent/by-id/ 2>&1 || true
+          } >> experiment-results/rescan.txt 2>&1
+          cat experiment-results/rescan.txt
+      - name: Capture the staged flasher's exact interface
+        working-directory: pcie-rescan
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          staging=/home/thatch/firmware-staging-19.12.0
+          flasher="$staging/venv/bin/tt-flash"
+          {
+            printf '=== version ===\n'
+            timeout -k 5 30 "$flasher" --version 2>&1 || echo 'unavailable'
+            printf '\n=== top level help ===\n'
+            timeout -k 5 30 "$flasher" --help 2>&1 || true
+            printf '\n=== flash subcommand help ===\n'
+            timeout -k 5 30 "$flasher" flash --help 2>&1 || true
+          } > experiment-results/tt-flash-interface.txt 2>&1
+          cat experiment-results/tt-flash-interface.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-pcie-rescan-${{ github.run_id }}
+          path: pcie-rescan/experiment-results/

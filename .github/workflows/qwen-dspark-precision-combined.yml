@@ -1,0 +1,91 @@
+name: Qwen combined T16 drafter HiFi2 comparison
+on:
+  push:
+    tags: ['experiment/dspark-precision-combined-v*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  combined:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: precision-orchestrator
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: precision-combined
+          persist-credentials: false
+      - name: Restore winning runtime and complete projection qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          evidence=$(mktemp -d "$RUNNER_TEMP/qwen-dspark-precision-combined.XXXXXX")
+          gh run download 35060395395 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35060395395-1 --dir "$evidence/numerical"
+          gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
+          gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
+          gh run download 35024279412 --repo "$GITHUB_REPOSITORY" --name qwen-history-append-hardware-35024279412 --dir "$evidence/history"
+          gh run download 35086789628 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35086789628-1 --dir "$evidence/norm"
+          gh run download 35158163367 --repo "$GITHUB_REPOSITORY" --name qwen-draft-tail-hardware-35158163367 --dir "$evidence/draft-tail"
+          gh run download 35226045287 --repo "$GITHUB_REPOSITORY" --name qwen-dspark-projection-hifi2-sim-35226045287 --dir "$evidence/precision/self_attn.q_proj.weight"
+          for projection in self_attn.k_proj.weight self_attn.v_proj.weight self_attn.o_proj.weight mlp.gate_proj.weight mlp.up_proj.weight mlp.down_proj.weight; do
+            gh run download 35226751937 --repo "$GITHUB_REPOSITORY" --name "qwen-dspark-projection-hifi2-${projection}-35226751937" --dir "$evidence/precision/$projection"
+          done
+          test "$(cat "$evidence/norm/gdn-shared-recurrence.exit-status")" = 0
+          test "$(cat "$evidence/draft-tail/draft-tail-hardware.exit-status")" = 0
+          cp "$evidence/history/history-append-hardware.json" precision-combined/scripts/ci/history-append-hardware.json
+          cp "$evidence/norm/gdn-shared-recurrence.json" precision-combined/scripts/ci/frozen-gdn-norm.json
+          cp "$evidence/draft-tail/draft-tail-hardware.json" precision-combined/scripts/ci/frozen-draft-tail-hardware.json
+          mkdir -p precision-combined/experiment-results
+          chmod 2775 precision-combined/experiment-results
+          python3 -B precision-orchestrator/scripts/ci/frozen_recipe_context.py --checkout precision-combined \
+            --context 32768 --scalar-reciprocal --target-replay --combined-runtime --norm-prefetch \
+            --manifest precision-combined/experiment-results/frozen-geometry.json
+          python3 -B precision-orchestrator/scripts/ci/frozen_draft_tail_stage.py --checkout precision-combined \
+            --geometry precision-combined/experiment-results/frozen-geometry.json \
+            --manifest precision-combined/experiment-results/draft-tail-sources.json
+          python3 -B precision-orchestrator/scripts/ci/frozen_stage_evidence.py --repository precision-orchestrator \
+            --numerical "$evidence/numerical" --diagnostics "$evidence/diagnostics" --target "$evidence/target" \
+            --output precision-combined/scripts/ci/frozen-evidence > precision-combined/experiment-results/component-qualification.json
+          python3 -B precision-orchestrator/scripts/ci/frozen_ladder_stage.py --checkout precision-combined \
+            --manifest precision-combined/experiment-results/ladder-sources.json
+          python3 -B precision-orchestrator/scripts/ci/dspark_precision_stage.py --checkout precision-combined \
+            --evidence "$evidence/precision" --reviewed precision-orchestrator/scripts/ci/dspark-precision-reviewed.json --manifest precision-combined/experiment-results/precision-combined-sources.json
+          git -C precision-combined diff --check
+      - name: Check host pressure before loading
+        run: |
+          python3 -B precision-orchestrator/scripts/ci/runner_io_gate.py --attempts 4 \
+            --output precision-combined/experiment-results/runner-io-admission.json
+      - name: Matched complete T16 audits and ABBA requests
+        working-directory: precision-combined
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QWEN_CARDS_ALLOCATED: '1'
+          QWEN_FROZEN_COMBINED_RUNTIME: '1'
+          QWEN_DSPARK_PROJECTION_HIFI2: '1'
+          QWEN_DSPARK_REQUEST_CONTEXT: '4096'
+          QWEN_DSPARK_MODE: request-target-attention
+          QWEN_DSPARK_CODING_TASK: merge_intervals
+          QWEN_DSPARK_MLP_DOWN: '0'
+          QWEN_DSPARK_SCORE_LAYOUT: '1'
+          QWEN_DSPARK_BANKED_PROPOSAL: '0'
+          QWEN_DSPARK_NATIVE_SLOT: '0'
+          QWEN_DSPARK_FUSION_T16: '1'
+          QWEN_DSPARK_CAPTURED_PUBLICATION: '1'
+          QWEN_DSPARK_MLP_FOOTPRINT: '0'
+          QWEN_DSPARK_DRAFT_PROFILE: '0'
+          QWEN_DSPARK_HISTORY_PROFILE: '0'
+        run: timeout -k 20 600 bash scripts/ci/run-dspark-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-dspark-precision-combined-${{ github.run_id }}
+          path: precision-combined/experiment-results/

@@ -1,0 +1,128 @@
+# 262K total-window qualification
+
+This is a pending combined-runtime test, not a throughput result.
+
+| Setting | Tokens |
+| --- | ---: |
+| Prompt (CTX reported in results) | 261,888 |
+| Generation budget | 256 |
+| Total positional capacity | 262,144 |
+
+The original 262,144-token **prompt** case remains distinct and is rejected
+when prompt plus generation exceeds the model's positional limit. No implicit
+truncation, RoPE extension, precision change or serving-default change is made.
+
+The new explicit context uses the same geometry calculation: 4,096 addressable
+64-row KV pages, eight spare cache blocks, and a 262,144-row target sequence.
+Padding for scratch storage is not extra usable model positions.
+
+The captured drafter always evaluates 15 query positions, even when fewer
+tokens are requested. Above position 262,129 that would exceed the fixed RoPE
+limit. The full-window-only staging scope therefore selects the existing
+singleton target path for those final positions. Both request and verifier
+plans use the same guard; the original planner is restored on exit. No draft
+positions are clamped and no extra RoPE positions are generated. This tail
+policy still needs complete hardware output/state acceptance and is included
+in measured TG rather than excluded as overhead.
+
+## Acceptance order
+
+1. Finish the existing 131,072-token combined hardware request, including its
+   fresh feature/state audit and two timed requests. Run 35173979225 attempt 2
+   has reached the complete same-recipe context step on the AMD runner.
+2. Qualify the new page-table extent with the weight-free simulator lane:
+   eager output, changed-input replay and unchanged-input checks on both chips.
+3. Bind that new report and exact source hashes into the hardware admission
+   path, then run the complete 261,888-token request with the same T16 recipe.
+4. Report PP, exact prompt CTX and committed TG; label the total window
+   separately. Allocation failure or a correctness failure is not a TG result.
+
+Adding the context changes the geometry source hash. Old cache qualifications
+must not be silently relabeled or reused against that changed source. Existing
+131K CI uses its immutable prior tag and is unaffected by this preparation.
+The simulator alone does not prove full-model memory capacity or performance.
+
+## First cache-check attempt
+
+Run **35186984447** timed out at the inner 360-second probe limit (exit 124),
+not the nine-minute job limit. Allocation completed in about 33 seconds;
+both native-reference seeds completed and both-chip eager comparison was exact.
+Replay began at about 348 seconds, leaving only twelve seconds for two replay
+checks and shutdown. The partial report is rejected: `passed=false` and
+`closed_cleanly=false`. This is not a hardware OOM or a numerical-failure result.
+
+The bounded retry keeps the exact kernel/probe sources and all ten checks.
+Only the 261,888-token case receives a 480-second probe and 510-second launcher;
+the whole job remains capped at nine minutes. Smaller cases retain their old
+budgets. No incomplete evidence is admitted to the hardware lane.
+
+The retry **35189341242** also times out, after the first replay and while
+checking the changed-input replay. Do not extend the budget again. The next
+fixture removes two full native-reference readbacks: native writes touch only
+two physical pages of a zero-initialized cache. It reads those pages, including
+the cumulative written-page set across seeds, and reconstructs the full expected
+zero-plus-written-pages tensor on the host. Every candidate comparison still
+reads and checks the **complete allocated cache on both chips**, including all
+unwritten pages. Kernel math, page-table width, eager/replay sequence and all ten
+checks remain unchanged. The new helper is included in source-bound admission.
+Host tests cover expected pages, writes outside the expected region, invalid
+initial state and cleanup after failed readback. Simulator acceptance is pending.
+
+Run **35190488209** exits after about two minutes with a Python `TypeError`,
+not a timeout: native TT-NN `Shape` supports integer indexing, not slices.
+The reference helper now converts the shape to a tuple before slicing. Host
+fixtures reproduce the native indexing restriction so this error is covered.
+No kernel or admission criteria changed; full-window qualification remains pending.
+
+## Simulator admission
+
+Run **35191010712** at `868a7c3` passes in approximately six minutes: all ten
+eager, changed-input replay and unchanged-input checks are exact on both chips,
+with clean device closure and unchanged source fingerprints. Report SHA-256:
+`72f19c80ed0339e5c28c1a7bde23e950d2c105de75a708b03ad98a9e5d0a9938`.
+The full-window hardware workflow now consumes this pinned report, not either
+timed-out attempt. This qualifies page-cache operations only, not model TG or
+the full-window combined request; those still require hardware acceptance.
+
+Hardware run **35191651862** stopped before model loading: historical component
+admission rejected the added `261888` entry in `frozen_context_geometry.py`.
+The full-window-only adapter now admits exactly that pinned source delta:
+removing the single context-list entry must reproduce the original report hash.
+All other component hashes remain mandatory. Local replay of actual historical
+component reports verifies all 42 component sources with this adapter; geometry
+math or unrelated edits still fail. This does not grant full-request acceptance.
+
+## Hardware memory failure
+
+Run **35192065473** passes admission and completes both 261,888-token prefills,
+then fails during `project_full_prefill_history`, inside `dspark_history.join_rows`.
+This is device DRAM exhaustion, not timeout: a 16 MiB concat allocation needs
+2 MiB per bank, with only 1,174,080 bytes free per bank and a largest free block
+of 293,056 bytes. No timed decode result is qualified.
+
+The existing concat tree retains original pieces and every intermediate level
+until all ten layer K/V outputs are complete. `history_concat_lifetime.py` is
+an uninstalled candidate that releases consumed owned inputs after each concat,
+preserving the same eight-way grouping and borrowed storage. Host tests check
+exact row order, lower peak live rows, aliases and failure cleanup. It still
+needs device lifetime validation before another full-window hardware run;
+no quantization, context truncation or relaxed numerical checks are proposed.
+
+Simulator run **35193888951** passes in **1m42s**, with 32 exact checks across
+original/candidate trees, 65/128 pieces, two seeds and both chips. Borrowed inputs
+remain unchanged and devices close cleanly. Report SHA-256:
+`b60dbf434da64e19807a9a8000c02367c7ecc8c98841a90502cae3adc5fb4e33`.
+The `combined-ladder-window-concat-*` trigger stages only this source-bound
+candidate into the combined 261,888-token request. Runtime admission rechecks
+the report and source fingerprints before and after the scoped change. Simulator
+acceptance is not proof that the full model now fits or reaches the TG target.
+
+Combined retry **35194271521** still fails during history concatenation, after
+both full prefills. The failing allocation is now 133,955,584 bytes (16,744,448
+per bank). The allocator reports 95,472,192 bytes free per bank, but its largest
+free block is only 12,320,768 bytes: total free space is sufficient, contiguous
+space is not. The next candidate must avoid constructing large outputs after
+the history-piece allocation pattern fragments memory, for example by reserving
+outputs before projection and filling them directly. Do not repeat the unchanged
+run or infer 262K TG from these failed requests. Lifetime-only changes have not
+yet made the complete model fit.

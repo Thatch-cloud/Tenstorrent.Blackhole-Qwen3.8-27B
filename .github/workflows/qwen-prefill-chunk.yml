@@ -1,0 +1,220 @@
+name: Qwen prefill chunk size
+on:
+  push:
+    tags: ['experiment/prefill-chunk-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  bench:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        # _PREFILL_WARMUP_CHUNK, default 2048. Total attention work does not change with
+        # chunk size - a chunk attends to everything before it, and the sum over N/C
+        # chunks is still N squared over two - but fixed per-chunk cost divides by it.
+        # So a TTFT difference here is overhead, and no difference means real work.
+        chunk: [2048, 4096]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: cycle
+          persist-credentials: false
+      - name: Stage the draft config and check the fixtures
+        working-directory: cycle
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results draft-config
+          revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
+          cache=/home/thatch/.cache/qwen-experiments
+          curl -fsSL --max-time 30 \
+            "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
+            > draft-config/config.json
+          python3 -B - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(Path('draft-config/config.json').read_text())
+          assert config['architectures'] == ['DFlash2DraftModel']
+          assert config['num_hidden_layers'] == 5 and config['hidden_size'] == 5120
+          assert config['vocab_size'] == 248320 and config['sliding_window'] == 2048
+          assert config['dflash_config']['target_layer_ids'] == [5, 19, 33, 47, 61]
+          print('draft config verified')
+          PY
+          for component in attention convolution mlp projection selector; do
+            test -f "$cache/dflash2-$component-$revision/manifest.json"
+          done
+          for layer in 1 2 3 4; do
+            test -f "$cache/dflash2-stack-$revision/layer-$layer/manifest.json"
+          done
+          echo 'fixtures present'
+      - name: Graft the prefill chunk size
+        working-directory: cycle
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p graft experiment-results
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+          name="qwen-chunk-extract-$GITHUB_RUN_ID-${{ matrix.chunk }}"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$name:$root/qwen36_vllm.py" graft/qwen36_vllm.py.orig
+          docker cp "$name:$root/model.py" graft/model.py.orig
+          python3 -B - <<'PY'
+          import ast, io, os, sys
+          sys.path.insert(0, 'scripts/ci')
+          from lever_n_model_patch import patch_prefill_chunk_fallback
+          size = int(os.environ['CHUNK'])
+          source = io.open('graft/model.py.orig', encoding='utf-8').read()
+          patched = patch_prefill_chunk_fallback(source, size)
+          ast.parse(patched)
+          io.open('graft/model.py', 'w', encoding='utf-8',
+                  newline=chr(10)).write(patched)
+          print('chunk -> %d' % size)
+          PY
+          grep -n 'chunked_chunk_size or' graft/model.py
+          sha256sum graft/model.py >> experiment-results/graft.sha256
+        env:
+          CHUNK: ${{ matrix.chunk }}
+      - name: Reset the boards before measuring
+        working-directory: cycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          # A profiling run leaves the board unable to open its mesh and this sweep
+          # follows one. Run 35422965120 died in open_mesh_device on
+          # assert_active_ethernet_cores_to_reset for exactly that reason.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" \
+            > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+      - name: Confirm no process holds a card
+        working-directory: cycle
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+          for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
+            > experiment-results/host-pressure-before.txt
+          cat experiment-results/host-pressure-before.txt
+      - name: Prefill at chunk ${{ matrix.chunk }}, one user
+        working-directory: cycle
+        timeout-minutes: 34
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The serving image, not the experiment image the probes used.
+          # Image built from this branch by qwen-fast-serving-image.yml, so it carries the
+          # lifted context pin. The pinned canary image does not.
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          cache=/home/thatch/.cache/qwen-experiments
+          revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
+          test -d "$target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          mounts=()
+          for component in attention convolution mlp projection selector; do
+            mounts+=(--mount "type=bind,src=$cache/dflash2-$component-$revision,dst=/experiment-dflash-fixture/$component,readonly")
+          done
+          for layer in 1 2 3 4; do
+            mounts+=(--mount "type=bind,src=$cache/dflash2-stack-$revision/layer-$layer,dst=/experiment-dflash-fixture/layer-$layer,readonly")
+          done
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-cycle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 1900 docker run --rm --name "$name" --network none \
+            --hostname qwen-cycle --add-host qwen-cycle:127.0.0.1 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g \
+            "${devices[@]}" \
+            --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
+            --mount "type=bind,src=$PWD/draft-config,dst=/draft-config,readonly" \
+            --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
+            --mount "type=bind,src=$PWD/graft/model.py,dst=/opt/tt-metal/models/demos/blackhole/qwen36/tt/model.py,readonly" \
+            --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
+            "${mounts[@]}" \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
+            -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 \
+            -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
+            -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
+            -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
+            -e QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1 -e QWEN_FAST_PHASE_TIMING=1 \
+            -e QWEN_GDN_GROUPED_GATHER_ABBA=0 -e QWEN_GDN_GATE_EXP_ABBA=0 \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0 \
+            -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
+            -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            --entrypoint python3 "$image" -B /bench/longctx_cycle_bench.py \
+            --plain --users 1 --context 131072 --prompt-tokens 126976 --max-tokens 8 \
+            > experiment-results/cycle-stdout.log 2>&1 || true
+          sed -n '/CYCLE_BENCH_JSON_BEGIN/,/CYCLE_BENCH_JSON_END/p' \
+            experiment-results/cycle-stdout.log | sed '1d;$d' \
+            > experiment-results/cycle.json || true
+          sed -n '/CYCLE_BENCH_LOG_BEGIN/,/CYCLE_BENCH_LOG_END/p' \
+            experiment-results/cycle-stdout.log | sed '1d;$d' \
+            > experiment-results/server-tail.log || true
+          for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
+            > experiment-results/host-pressure-after.txt
+          python3 -B scripts/ci/cycle_bench_report.py \
+            --report experiment-results/cycle.json \
+            --log experiment-results/cycle-stdout.log
+          python3 -B - <<'GUARD'
+          import json, sys
+          d = json.load(open('experiment-results/cycle.json'))
+          streams = [x for x in (d.get('streams') or []) if x]
+          if not d.get('ready') or d.get('itl_ms_median') is None:
+              print('NO MEASUREMENT: ready=%s error=%s' % (d.get('ready'),
+                    d.get('error') or [x.get('error') for x in streams]))
+              sys.exit(1)
+          observed = d.get('prefill_chunk_observed')
+          want = int(__import__('os').environ['CHUNK'])
+          if not observed or want not in observed:
+              print('LEVER DID NOT MOVE: wanted chunk %s, server reported %s'
+                    % (want, observed))
+              sys.exit(1)
+          print('chunk result: ttft %.1f s, itl %.3f ms, prompt_tokens %s'
+                % (streams[0].get('ttft_s') or 0.0, d['itl_ms_median'],
+                   streams[0].get('prompt_tokens')))
+          GUARD
+        env:
+          CHUNK: ${{ matrix.chunk }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-prefill-chunk-${{ matrix.chunk }}-${{ github.run_id }}
+          path: cycle/experiment-results/

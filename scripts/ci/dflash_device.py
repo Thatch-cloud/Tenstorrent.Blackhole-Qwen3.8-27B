@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from contextlib import nullcontext
 
-from draft_attention import draft_attention_mask
+from dflash_attention_mask import draft_attention_mask
 from draft_attention_branch import prepare_attention_branch, execute_attention_branch
 from draft_head_preparation import rope_tables
 from draft_mlp_branch import prepare_mlp_branch, execute_mlp_branch
@@ -20,7 +20,8 @@ from dflash_prefill_window import prefill_window
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
-                 cache_history=False, cache_projection_capture=False, live_query_qk=False, native_proposal_attention=False):
+                 cache_history=False, cache_projection_capture=False, live_query_qk=False, native_proposal_attention=False,
+                 defer_proposal_capture=False):
         import torch
 
         window = prefill_window(position)
@@ -28,13 +29,14 @@ class DFlashDevice:
         if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
                 or len(layers) != 5 or type(feature_start) is not int or feature_start != window['start']
                 or len(features) != 5 or any(len(value.shape) != 4 or value.shape[2] != window['rows'] for value in features)
-                or type(block_rows) is not int or block_rows not in (8, 32) or type(proposal_capture) is not bool
+                or type(block_rows) is not int or block_rows not in (8, 16, 32) or type(proposal_capture) is not bool
                 or type(fused_convolution) is not bool or type(cache_history) is not bool
-                or (cache_history and (not proposal_capture or block_rows != 8))
+                or type(defer_proposal_capture) is not bool or (defer_proposal_capture and not proposal_capture)
+                or (cache_history and (not proposal_capture or block_rows not in (8, 16)))
                 or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
                 or type(live_query_qk) is not bool or (live_query_qk and (not proposal_capture or block_rows != 8))
                 or type(native_proposal_attention) is not bool or (native_proposal_attention and
-                    (not proposal_capture or not cache_history or block_rows != 8 or live_query_qk or cache_projection_capture))):
+                    (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
@@ -82,7 +84,7 @@ class DFlashDevice:
                     position=position, history_rows=self.history_rows, capture_projection=cache_projection_capture)
                 if self.progress is not None:
                     self.kv_history.audit(self.history)
-            if proposal_capture:
+            if proposal_capture and not defer_proposal_capture:
                 from dflash_proposal_trace import PreparedDFlashProposal
 
                 self.proposal_capture = PreparedDFlashProposal(self, max_new_tokens=max_new_tokens)

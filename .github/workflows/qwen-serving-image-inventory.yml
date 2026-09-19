@@ -1,0 +1,45 @@
+name: Qwen fast serving image inventory
+on:
+  push:
+    tags: ['experiment/serving-image-inventory-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  inventory:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: serving-image-orchestrator
+          persist-credentials: false
+      - name: Inventory retained image and runtime cache without devices
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          output=$(mktemp -d "$RUNNER_TEMP/qwen-serving-image.XXXXXX")
+          echo "QWEN_SERVING_INVENTORY=$output" >> "$GITHUB_ENV"
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          volume=qwen-experiments-f1e9b1a64b4f
+          docker image inspect "$image" --format '{{json .RepoDigests}}' > "$output/base-repo-digests.json"
+          docker volume inspect "$volume" >/dev/null
+          staged=()
+          if test -d "$GITHUB_WORKSPACE/read-combined"; then
+            staged=(--mount "type=bind,src=$GITHUB_WORKSPACE/read-combined,dst=/inventory-staged,readonly")
+          fi
+          timeout -k 10 100 docker run --rm --pull never --network none --read-only \
+            --cpus 2 --memory 2g --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --mount "type=volume,src=$volume,dst=/inventory-cache,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/serving-image-orchestrator/scripts/ci,dst=/inventory-scripts,readonly" \
+            --mount "type=bind,src=$output,dst=/inventory-output" "${staged[@]}" \
+            --entrypoint python3 "$image" -B /inventory-scripts/serving_image_inventory.py \
+            --output /inventory-output/serving-image-inventory.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-serving-image-inventory-${{ github.run_id }}
+          path: ${{ env.QWEN_SERVING_INVENTORY }}/

@@ -60,7 +60,7 @@ class DraftKVHistoryTests(unittest.TestCase):
             features = self.features(min(position, 2048), position)
             with self.fixture(features, position) as (cache, operations):
                 self.assert_history(cache, features)
-                for prefix in (1, 7, 8, 32):
+                for prefix in range(1, 33):
                     candidate = self.features(32, cache.position)
                     old_active = cache.active
                     saved = [{name: value.clone() for name, value in pair.items()} for pair in cache.active]

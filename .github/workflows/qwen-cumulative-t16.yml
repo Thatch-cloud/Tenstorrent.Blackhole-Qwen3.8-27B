@@ -1,0 +1,204 @@
+name: Qwen cumulative T16 windows and compact drafting
+on:
+  push:
+    tags: ['experiment/cumulative-t16-v*', 'experiment/cumulative-t16-down-v*', 'experiment/cumulative-t16-stack-v*', 'experiment/cumulative-t16-full-v*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  combined:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: read-orchestrator
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: read-combined
+          persist-credentials: false
+      - name: Restore winning runtime and direct-window qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          evidence=$(mktemp -d "$RUNNER_TEMP/qwen-direct-window-combined.XXXXXX")
+          gh run download 35060395395 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35060395395-1 --dir "$evidence/numerical"
+          gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
+          gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
+          gh run download 35024279412 --repo "$GITHUB_REPOSITORY" --name qwen-history-append-hardware-35024279412 --dir "$evidence/history"
+          gh run download 35086789628 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35086789628-1 --dir "$evidence/norm"
+          gh run download 35158163367 --repo "$GITHUB_REPOSITORY" --name qwen-draft-tail-hardware-35158163367 --dir "$evidence/draft-tail"
+          gh run download 35271886537 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-direct-window-35271886537-1 --dir "$evidence/direct-window"
+          gh run download 35270248051 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35270248051 --dir "$evidence/conv-native"
+          gh run download 35267717551 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-compact-score-35267717551-1 --dir "$evidence/compact-score"
+          test "$(cat "$evidence/norm/gdn-shared-recurrence.exit-status")" = 0
+          test "$(cat "$evidence/draft-tail/draft-tail-hardware.exit-status")" = 0
+          cp "$evidence/history/history-append-hardware.json" read-combined/scripts/ci/history-append-hardware.json
+          cp "$evidence/norm/gdn-shared-recurrence.json" read-combined/scripts/ci/frozen-gdn-norm.json
+          cp "$evidence/draft-tail/draft-tail-hardware.json" read-combined/scripts/ci/frozen-draft-tail-hardware.json
+          mkdir -p read-combined/experiment-results
+          chmod 2775 read-combined/experiment-results
+          python3 -B read-orchestrator/scripts/ci/frozen_recipe_context.py --checkout read-combined \
+            --context 32768 --scalar-reciprocal --target-replay --combined-runtime --norm-prefetch \
+            --manifest read-combined/experiment-results/frozen-geometry.json
+          python3 -B read-orchestrator/scripts/ci/frozen_draft_tail_stage.py --checkout read-combined \
+            --geometry read-combined/experiment-results/frozen-geometry.json \
+            --manifest read-combined/experiment-results/draft-tail-sources.json
+          python3 -B read-orchestrator/scripts/ci/frozen_stage_evidence.py --repository read-orchestrator \
+            --numerical "$evidence/numerical" --diagnostics "$evidence/diagnostics" --target "$evidence/target" \
+            --output read-combined/scripts/ci/frozen-evidence > read-combined/experiment-results/component-qualification.json
+          python3 -B read-orchestrator/scripts/ci/frozen_ladder_stage.py --checkout read-combined \
+            --manifest read-combined/experiment-results/ladder-sources.json
+          python3 -B read-orchestrator/scripts/ci/gdn_direct_window_combined_stage.py --checkout read-combined \
+            --evidence "$evidence/direct-window" --native-root "$evidence/conv-native/sources" --manifest read-combined/experiment-results/read-combined-sources.json
+          down_args=()
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-down-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
+            gh run download 35254182130 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35254182130-1 --dir "$evidence/mlp-down-grid"
+            gh run download 35189721030 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35189721030 --dir "$evidence/model-native"
+            down_args=(--down-evidence "$evidence/mlp-down-grid" --native-root "$evidence/model-native/prefill-cache/sources")
+          fi
+          native_args=()
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
+            gh run download 35238822290 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-register-epilogue-sim-35238822290 --dir "$evidence/register-epilogue"
+            down_args+=(--register-evidence "$evidence/register-epilogue")
+            native_args+=(--register-epilogue)
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-stack-v* || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
+            gh run download 35214644611 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-cache-35214644611-1 --dir "$evidence/norm-scatter"
+            test "$(cat "$evidence/norm-scatter/gdn-shared-recurrence.exit-status")" = 0
+            gh run download 35092212895 --repo "$GITHUB_REPOSITORY" --name qwen-kernel-inventory-35092212895 --dir "$evidence/gdn-native"
+            python3 -B read-orchestrator/scripts/ci/cumulative_native_sources.py \
+              --report "$evidence/norm-scatter/gdn-shared-recurrence.json" \
+              --retained-root "$evidence/gdn-native/sources" \
+              --destination "$evidence/model-native/prefill-cache/sources" "${native_args[@]}" > read-combined/experiment-results/cumulative-native-sources.json
+            down_args+=(--norm-report "$evidence/norm-scatter/gdn-shared-recurrence.json")
+          fi
+          python3 -B read-orchestrator/scripts/ci/cumulative_t16_stage.py --checkout read-combined \
+            --evidence "$evidence/compact-score" --manifest read-combined/experiment-results/cumulative-sources.json "${down_args[@]}"
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+            drafter_args=()
+            if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+              gh run download 35293698929 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t16-attention-35293698929-1 --dir "$evidence/dflash-native"
+              drafter_args=(--native-evidence "$evidence/dflash-native")
+            fi
+            python3 -B read-orchestrator/scripts/ci/drafter_comparison_stage.py --checkout read-combined \
+              --manifest read-combined/experiment-results/drafter-comparison-sources.json "${drafter_args[@]}"
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
+            gh run download 35297164881 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35297164881 --dir "$evidence/block-stream"
+            python3 -B read-orchestrator/scripts/ci/mlp_block_stream_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/block-stream" --native-root "$evidence/model-native/prefill-cache/sources" \
+              --manifest read-combined/experiment-results/block-stream-hardware-sources.json
+          fi
+          git -C read-combined diff --check
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-bulk-pipeline-block-stream-dflash-native ]]; then
+            gh run download 35314071196 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35314071196 --dir "$evidence/bulk-pipeline"
+            python3 -B read-orchestrator/scripts/ci/mlp_block_stream_pipeline_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/bulk-pipeline" --native-root "$evidence/model-native/prefill-cache/sources" \
+              --manifest read-combined/experiment-results/bulk-pipeline-hardware-sources.json
+            git -C read-combined diff --check
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-kv-slide-block-stream-dflash-native ]]; then
+            slide_run=35317724110
+            slide_args=()
+            if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-direct-dma-kv-slide-block-stream-dflash-native ]]; then
+              slide_run=35320765158
+              slide_args=(--direct-dma)
+            fi
+            gh run download "$slide_run" --repo "$GITHUB_REPOSITORY" --name "qwen-draft-kv-slide-$slide_run-1" --dir "$evidence/kv-slide"
+            python3 -B read-orchestrator/scripts/ci/draft_kv_slide_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/kv-slide" --manifest read-combined/experiment-results/kv-slide-hardware-sources.json "${slide_args[@]}"
+            git -C read-combined diff --check
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-progressive-direct-dma-kv-slide-block-stream-dflash-native ]]; then
+            gh run download 35344423357 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35344423357 --dir "$evidence/progressive-input"
+            python3 -B read-orchestrator/scripts/ci/mlp_progressive_input_hardware_stage.py --checkout read-combined \
+              --evidence "$evidence/progressive-input" --native-root "$evidence/model-native/prefill-cache/sources" \
+              --manifest read-combined/experiment-results/progressive-input-hardware-sources.json
+            git -C read-combined diff --check
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
+            gh run download 35299919048 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-attention-35299919048-1 --dir "$evidence/t32/attention"
+            gh run download 35301426428 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t32-cache-35301426428-2 --dir "$evidence/t32/cache"
+            gh run download 35304765890 --repo "$GITHUB_REPOSITORY" --name qwen-gdn-shared-qk-t32-35304765890-1 --dir "$evidence/t32/gdn"
+            gh run download 35305449655 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-gdn-direct-window-35305449655-1 --dir "$evidence/t32/windows"
+            gh run download 35305677689 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-mlp-down-grid-35305677689-1 --dir "$evidence/t32/down"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10531081390/zip" > "$evidence/t32-stream.zip"
+            mkdir -p "$evidence/t32/stream"
+            python3 -B -m zipfile -e "$evidence/t32-stream.zip" "$evidence/t32/stream"
+            t32_args=()
+            if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
+              t32_args=(--run-comparison)
+            fi
+            python3 -B read-orchestrator/scripts/ci/dflash_t32_combined_stage.py --checkout read-combined \
+              --evidence "$evidence/t32" --manifest read-combined/experiment-results/t32-combined-sources.json "${t32_args[@]}"
+            git -C read-combined diff --check
+          fi
+      - name: Check host pressure before loading
+        run: |
+          python3 -B read-orchestrator/scripts/ci/runner_io_gate.py --attempts 4 \
+            --output read-combined/experiment-results/runner-io-admission.json
+      - name: Matched complete T16 audits and ABBA requests
+        working-directory: read-combined
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QWEN_CARDS_ALLOCATED: '1'
+          QWEN_FROZEN_COMBINED_RUNTIME: '1'
+          QWEN_GDN_DIRECT_WINDOW: '1'
+          QWEN_COMPACT_SCORE_HARDWARE: '1'
+          QWEN_CUMULATIVE_T16: '1'
+          QWEN_CUMULATIVE_MLP_DOWN: ${{ (startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-down-') || startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-stack-') || startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-full-')) && '1' || '0' }}
+          QWEN_CUMULATIVE_NORM: ${{ (startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-stack-') || startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-full-')) && '1' || '0' }}
+          QWEN_CUMULATIVE_REGISTER: ${{ startsWith(github.ref, 'refs/tags/experiment/cumulative-t16-full-') && '1' || '0' }}
+          QWEN_DSPARK_REQUEST_CONTEXT: '4096'
+          QWEN_DSPARK_MODE: request-target-attention
+          QWEN_DSPARK_CODING_TASK: merge_intervals
+          QWEN_DSPARK_MLP_DOWN: '0'
+          QWEN_DSPARK_SCORE_LAYOUT: '1'
+          QWEN_DSPARK_BANKED_PROPOSAL: '0'
+          QWEN_DSPARK_NATIVE_SLOT: '0'
+          QWEN_DSPARK_FUSION_T16: '1'
+          QWEN_DSPARK_CAPTURED_PUBLICATION: '1'
+          QWEN_DSPARK_MLP_FOOTPRINT: '0'
+          QWEN_DSPARK_DRAFT_PROFILE: '0'
+          QWEN_DSPARK_HISTORY_PROFILE: '0'
+        run: timeout -k 20 600 bash scripts/ci/run-dspark-hardware.sh
+      - name: Independently validate combined request evidence
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-preflight-block-stream-dflash-native ]]; then
+            python3 -c 'import json; p=json.load(open("read-combined/experiment-results/t32-preload-admission.json")); assert p["passed"] is True and p["weights_loaded"] is False and p["hardware_qualified"] is False and p["performance_qualified"] is False'
+            exit 0
+          fi
+          validator=cumulative_t16_report.py
+          validator_root=read-orchestrator
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash ]]; then
+            validator=drafter_comparison_report.py
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
+            validator=dflash_native_comparison_report.py
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
+            validator=mlp_block_stream_report.py
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-direct-dma-kv-slide-block-stream-dflash-native ]]; then
+            validator_root=read-combined
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-t32-combined-block-stream-dflash-native ]]; then
+            validator=dflash_t32_comparison_report.py
+            validator_root=read-combined
+          fi
+          python3 -B "$validator_root/scripts/ci/$validator" \
+            read-combined/experiment-results/dspark-captured-publication-request-hardware.json \
+            > read-combined/experiment-results/cumulative-validation.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-cumulative-t16-${{ github.run_id }}
+          path: read-combined/experiment-results/

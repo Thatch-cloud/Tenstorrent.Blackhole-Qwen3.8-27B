@@ -1,0 +1,141 @@
+name: Qwen fabric confirm and firmware rollback
+on:
+  push:
+    tags: ['experiment/fabric-rollback-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  rollback:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: fabric
+          persist-credentials: false
+      - name: Confirm no process holds a card and record firmware
+        working-directory: fabric
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          timeout -k 5 60 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-before.json" \
+            > experiment-results/tt-smi-before.log 2>&1 || true
+          python3 -B scripts/ci/firmware_bundle_report.py \
+            --snapshot experiment-results/tt-smi-before.json --label before
+      - name: Step 1 - does fabric initialise on the current firmware
+        id: probe_before
+        working-directory: fabric
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 10 360 docker run --rm --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_HOME=/opt/tt-metal \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD/scripts/ci,dst=/experiment-scripts/ci,readonly" \
+            --entrypoint python3 "$image" -B /experiment-scripts/ci/fabric_init_probe.py \
+            > experiment-results/fabric-before.log 2>&1 || status=$?
+          sed -n '/FABRIC_PROBE_JSON_BEGIN/,/FABRIC_PROBE_JSON_END/p' \
+            experiment-results/fabric-before.log | sed '1d;$d' \
+            > experiment-results/fabric-before.json || true
+          echo "probe exit ${status}"
+          python3 -B scripts/ci/fabric_probe_report.py \
+            --report experiment-results/fabric-before.json \
+            --log experiment-results/fabric-before.log \
+            --github-output "$GITHUB_OUTPUT" --key fabric_up_before
+      - name: Step 2 - roll back to 19.8.1, only if fabric failed
+        if: steps.probe_before.outputs.fabric_up_before == 'no'
+        working-directory: fabric
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          staging=/home/thatch/firmware-staging-19.12.0
+          bundle=/home/thatch/fw_pack-19.8.1.fwbundle
+          test -f "$bundle"
+          test -x "$staging/venv/bin/tt-flash"
+          sha256sum "$bundle" | tee experiment-results/rollback-bundle.sha256
+          # --force is required here: tt-flash refuses a downgrade on its version
+          # check. --update-boot-images is deliberately omitted so the bootloader and
+          # recovery images are left alone and a power loss cannot corrupt the boot
+          # path. The 19.12.0 recovery image stays staged alongside.
+          set +e
+          timeout -k 30 600 "${prefix[@]}" "$staging/venv/bin/tt-flash" --no-tty --no-color \
+            flash --force "$bundle" > experiment-results/rollback.log 2>&1
+          flash_status=$?
+          set -e
+          echo "flash_exit=${flash_status}" | tee experiment-results/rollback.status
+          tail -30 experiment-results/rollback.log || true
+          exit "$flash_status"
+      - name: Step 3 - verify firmware and fabric after rollback
+        if: always()
+        working-directory: fabric
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          timeout -k 5 60 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-after.json" \
+            > experiment-results/tt-smi-after.log 2>&1 || true
+          python3 -B scripts/ci/firmware_bundle_report.py \
+            --snapshot experiment-results/tt-smi-after.json --label after || true
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          timeout -k 10 360 docker run --rm --network none \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --cpus 8 --memory 32g --shm-size 8g \
+            -e PYTHONDONTWRITEBYTECODE=1 -e TT_METAL_HOME=/opt/tt-metal \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            --tmpfs /tmp:rw,size=512m "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD/scripts/ci,dst=/experiment-scripts/ci,readonly" \
+            --entrypoint python3 "$image" -B /experiment-scripts/ci/fabric_init_probe.py \
+            > experiment-results/fabric-after.log 2>&1 || true
+          sed -n '/FABRIC_PROBE_JSON_BEGIN/,/FABRIC_PROBE_JSON_END/p' \
+            experiment-results/fabric-after.log | sed '1d;$d' \
+            > experiment-results/fabric-after.json || true
+          python3 -B scripts/ci/fabric_probe_report.py \
+            --report experiment-results/fabric-after.json \
+            --log experiment-results/fabric-after.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fabric-rollback-${{ github.run_id }}
+          path: fabric/experiment-results/

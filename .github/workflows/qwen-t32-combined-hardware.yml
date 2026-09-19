@@ -1,0 +1,46 @@
+name: Qwen combined fused T32 hardware audit
+on:
+  push:
+    tags: ['experiment/t32-combined-hardware-*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 20
+    steps:
+      - name: Verify dedicated host
+        run: test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
+          persist-credentials: false
+      - name: Retrieve exact retained simulator evidence
+        working-directory: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 34660555430 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34660555430 --dir experiment-evidence/proposal
+          gh run download 35177332339 --repo "$GITHUB_REPOSITORY" --name qwen-t32-score-35177332339 --dir experiment-evidence/score
+          gh run download 34590151457 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34590151457 --dir experiment-evidence/attention
+          gh run download 34654732582 --repo "$GITHUB_REPOSITORY" --name qwen-hardware-inventory-34654732582 --dir experiment-evidence/commit
+      - name: Check disk pressure before weight loading
+        working-directory: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          mkdir -p experiment-results
+          python3 -B scripts/ci/runner_io_gate.py --attempts 4 --output experiment-results/runner-io-admission.json
+      - name: Complete target and learned proposal audit
+        working-directory: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+          QWEN_T32_TIMED: ${{ startsWith(github.ref_name, 'experiment/t32-combined-hardware-timed-') && '1' || '0' }}
+        run: bash scripts/ci/run-t32-combined-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-t32-combined-hardware-${{ github.run_id }}
+          path: t32-combined-${{ github.run_id }}-${{ github.run_attempt }}/experiment-results/

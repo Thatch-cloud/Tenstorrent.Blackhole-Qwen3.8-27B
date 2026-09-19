@@ -17,18 +17,153 @@ jobs:
       PYTHONPATH: scripts/ci
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install CPU test dependencies
         run: |
           python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy==2.4.6
+          python -m pip install numpy==2.4.6 PyYAML==6.0.2
       - name: T32 and unchanged T16 regression gates
         run: |
+          python -B -m unittest test_dflash_host_attribution
+          python -B -m unittest test_dram_eligibility_inventory
+          python -B -m unittest test_dram_harvest_probe
+          python -B -m unittest test_firmware_staging_manifest
+          python -B -m unittest test_firmware_flash_workflow
+          python -B -m unittest test_gdn_gate_exp_fusion test_gdn_gate_exp_report test_gdn_gate_exp_scope
+          python -B -m unittest test_draft_kv_slide
+          python -B -m unittest test_draft_kv_slide_direct
+          python -B -m unittest test_draft_kv_slide_gate
+          python -B -m unittest test_gdn_slot_copy
+          python -B -m unittest test_serving_fast_request
+          python -B -m unittest test_serving_vllm_contract
+          python -B -m unittest test_serving_vllm_state
+          python -B -m unittest test_serving_page_binding
+          python -B -m unittest test_serving_runner_bridge
+          python -B -m unittest test_serving_fast_policy
+          python -B -m unittest test_lever_n_prefill_range
+          python -B -m unittest test_lever_n_model_patch
+          python -B -m unittest test_lever_n_m1_gate_report
+          python -B -m unittest test_serving_plugin_patch
+          python -B -m unittest test_serving_worker_hook
+          python -B -m unittest test_serving_request_factory
+          python -B -m unittest test_serving_lifecycle
+          python -B -m unittest test_serving_cache_owner
+          python -B -m unittest test_serving_runtime
+          python -B -m unittest test_serving_startup
+          python -B -m unittest test_serving_bundle
+          python -B -m unittest test_serving_native_install
+          python -B -m unittest test_serving_image_preflight
+          python -B -m unittest test_serving_canary_client
+          python -B -m unittest test_serving_canary_runner
+          python -B -m unittest test_gdn_grouped_gather
+          python -B -m unittest test_gdn_grouped_gather_gate test_gdn_grouped_gather_scope
+            python -B -m unittest test_serving_gather_experiment test_serving_gather_report test_mlp_progressive_input test_mlp_progressive_input_report test_mlp_progressive_input_gate test_mlp_progressive_input_hardware_stage
+          python -B -m unittest test_draft_kv_slide_adapter
+          python -B -m unittest test_draft_kv_slide_scope
+          python -B -m unittest test_draft_kv_slide_hardware_stage
+          python -B -m unittest test_mlp_register_epilogue
+          python -B -m unittest test_mlp_rounding_policy
+          python -B -m unittest test_mlp_register_epilogue_gate
+          python -B -m unittest test_mlp_register_combined_experiment test_mlp_register_combined_comparison test_mlp_register_combined_report
           python -B -m unittest discover -s scripts/ci -p 'test_*t32*.py'
-          python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli
+          python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli test_winning_verifier_profile test_winning_risc_attribution
+          python -B -m unittest test_dspark_confidence_reference test_dspark_confidence_fixture test_dspark_confidence_parity
           python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
+          python -B -m unittest test_full_window_tail test_full_window_geometry_admission test_frozen_runtime_context test_frozen_recipe_context
+          python -B -m unittest test_prefill_cache_inventory test_winning_device_attribution
+          python -B -m unittest test_mlp_clock_samples test_mlp_clock_projection test_frozen_mlp_wait_zones
+          python -B -m unittest test_mlp_clock_capture test_mlp_clock_stage
+          python -B -m unittest test_mlp_clock_report
+          python -B -m unittest test_mlp_clock_hardware
+          python -B -m unittest test_mlp_clock_combined
+          python -B -m unittest test_mlp_clock_experiment
+          python -B -m unittest test_mlp_clock_combined_report
+          python -B -m unittest test_mlp_weight_read_order
+          python -B -m unittest test_mlp_read_order_gate
+          python -B -m unittest test_mlp_read_order_comparison
+          python -B -m unittest test_mlp_read_order_experiment
+          python -B -m unittest test_mlp_read_order_report
+          python -B -m unittest test_shared_qk_norm_scatter
+          python -B -m unittest test_shared_qk_norm_scatter_gate
+          python -B -m unittest test_shared_qk_norm_comparison
+          python -B -m unittest test_shared_qk_norm_report
+          python -B -m unittest test_mlp_compute_clock
+          python -B -m unittest test_gdn_recurrence_clock
+          python -B -m unittest test_gdn_recurrence_clock_program test_gdn_recurrence_clock_capture
+          python -B -m unittest test_gdn_recurrence_clock_report
+          python -B -m unittest test_gdn_recurrence_clock_combined
+          python -B -m unittest test_gdn_recurrence_clock_experiment
+          python -B -m unittest test_gdn_recurrence_clock_combined_report
+          python -B -m unittest test_gdn_input_overlap
+          python -B -m unittest test_gdn_qk_double_buffer
+          python -B -m unittest test_gdn_qk_double_buffer_gate
+          python -B -m unittest test_winning_projection_attribution
+          python -B -m unittest test_mlp_down_grid
+          python -B -m unittest test_mlp_down_grid_gate test_mlp_down_grid_scope
+          python -B -m unittest test_mlp_down_grid_comparison test_mlp_down_grid_experiment test_mlp_down_grid_report
+          python -B -m unittest test_gdn_qk_double_buffer_scope test_gdn_qk_double_buffer_comparison
+          python -B -m unittest test_gdn_qk_double_buffer_experiment test_gdn_qk_double_buffer_report
+          python -B -m unittest test_gdn_wait_clock test_gdn_wait_clock_program test_gdn_wait_clock_capture test_gdn_wait_clock_report
+          python -B -m unittest test_gdn_wait_clock_combined test_gdn_wait_clock_experiment test_gdn_wait_clock_combined_report
+          python -B -m unittest test_gdn_input_overlap_gate test_gdn_input_overlap_scope
+          python -B -m unittest test_gdn_input_overlap_comparison test_gdn_input_overlap_experiment test_gdn_input_overlap_report
+          python -B -m unittest test_mlp_compute_clock_capture
+          python -B -m unittest test_mlp_compute_clock_report
+          python -B -m unittest test_mlp_compute_clock_hardware
+          python -B -m unittest test_mlp_compute_clock_combined test_mlp_compute_clock_experiment test_mlp_compute_clock_combined_report
+          python -B -m unittest test_mlp_weight_pipeline
+          python -B -m unittest test_mlp_k_block
+          python -B -m unittest test_speculative_latency_budget
+          python -B -m unittest test_compact_score_selection
+          python -B -m unittest test_compact_score_device
+          python -B -m unittest test_gdn_window_write_overlap
+          python -B -m unittest test_gdn_window_write_gate
+          python -B -m unittest test_gdn_window_write_scope
+          python -B -m unittest test_gdn_window_write_experiment test_gdn_window_write_comparison test_gdn_window_write_report
+          python -B -m unittest test_mlp_k_block_gate
+          python -B -m unittest test_mlp_k_block_experiment test_mlp_k_block_comparison test_mlp_k_block_report
+          python -B -m unittest test_dspark_projection_precision
+          python -B -m unittest test_dspark_layer_precision
+          python -B -m unittest test_dspark_precision_comparison
+          python -B -m unittest test_dspark_precision_device
+          python -B -m unittest test_dspark_precision_gate
+          python -B -m unittest test_dspark_precision_experiment
+          python -B -m unittest test_dspark_precision_stage
+          python -B -m unittest test_dspark_precision_report
+          python -B -m unittest test_winning_interval_attribution
+          python -B -m unittest test_gdn_dual_state_copy
+          python -B -m unittest test_gdn_dual_state_gate test_gdn_dual_state_scope
+          python -B -m unittest test_gdn_dual_state_comparison test_gdn_dual_state_experiment
+          python -B -m unittest test_gdn_dual_state_combined_stage
+          python -B -m unittest test_gdn_dual_state_report
+          python -B -m unittest test_dspark_projection_precision_stage
+          python -B -m unittest test_dspark_projection_precision_report
+          python -B -m unittest test_mlp_weight_pipeline_gate test_mlp_weight_pipeline_experiment test_mlp_weight_pipeline_comparison test_mlp_weight_pipeline_report
+          python -B -m unittest test_ladder_cache_reference
+          python -B -m unittest test_prefill_gdn_checkpoint test_prefill_prefix_resume test_prefill_prefix_features
+          python -B -m unittest test_prefill_prefix_lookup test_prefill_prefix_boundary
+          python -B -m unittest test_prefill_prefix_integration
+          python -B -m unittest test_prefill_prefix_residency
+          python -B -m unittest test_prefill_checkpoint_allocation
+          python -B -m unittest test_prefill_prefix_session
+          python -B -m unittest test_prefill_prefix_stage test_prefill_prefix_experiment.PrefixExperimentTests
+          python -B -m unittest test_dspark_request_experiment.DSparkRequestExperimentTests.test_cached_pp_is_separate_from_cold_pp_and_keeps_full_cycle_tg test_dspark_request_experiment.DSparkRequestExperimentTests.test_incomplete_cached_accounting_or_scope_rejected
+          python -B -m unittest test_history_concat_lifetime test_history_concat_gate
+          python -B -m unittest discover -s scripts/ci -p 'test_cumulative*.py'
+          python -B -m unittest test_dflash_proposal_inputs test_draft_shared_head test_draft_attention test_dflash_cached_trace
+          python -B -m unittest discover -s scripts/ci -p 'test_drafter_comparison*.py'
+          python -B -m unittest test_dflash_combined_request test_dflash_request_runtime test_dflash_attention_mask test_dflash_t16_native_attention test_dflash_t16_native_scope
+          python -B -m unittest test_dflash_native_comparison test_dflash_native_comparison_driver
+          python -B -m unittest test_dflash_compact_selector test_dflash_combined_sim_runtime test_dflash_t32_native_attention test_mlp_block_stream test_mlp_block_stream_projection test_mlp_block_stream_admission test_mlp_block_stream_probe test_mlp_block_stream_gate test_mlp_block_stream_pool test_mlp_block_stream_runtime test_mlp_block_stream_request test_mlp_block_stream_comparison test_mlp_block_stream_hardware_stage
+          python -B -m unittest test_dflash_t32_native_stage test_dflash_t32_cached_adapter test_draft_kv_history test_dflash_t32_cache_stage test_mlp_block_stream_t32_stage test_gdn_shared_qk_t32_adapter
+          python -B -m unittest test_mlp_block_stream_pipeline test_mlp_block_stream_pipeline_gate test_mlp_weight_pipeline test_mlp_block_stream_pipeline_hardware_stage
+          python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
+          python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
+          bash -n scripts/ci/mlp-clock-hardware-suite.sh
           git diff --check

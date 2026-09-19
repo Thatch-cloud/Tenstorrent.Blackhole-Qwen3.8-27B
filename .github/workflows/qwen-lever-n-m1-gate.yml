@@ -1,0 +1,182 @@
+name: Qwen Lever N M1 equality gate
+on:
+  push:
+    tags: ['experiment/lever-n-m1-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m1
+          persist-credentials: false
+      - name: Graft the resumable-prefill patch onto the pinned sources
+        working-directory: m1
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results graft
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+          name="qwen-m1-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          plugin=/opt/qwen-fast-plugin/src/vllm_tt_plugin
+          for file in model.py qwen36_vllm.py; do
+            docker cp "$name:$root/$file" "graft/$file.orig"
+            sha256sum "graft/$file.orig" >> experiment-results/source.sha256
+          done
+          docker cp "$name:$plugin/platform.py" graft/platform.py.orig
+          sha256sum graft/platform.py.orig >> experiment-results/source.sha256
+          python3 -B - <<'PY'
+          import ast, io, sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_model_patch as patcher
+          for name, apply in (('model.py', patcher.patch_model),
+                              ('qwen36_vllm.py', patcher.patch_vllm_entry),
+                              ('platform.py', patcher.patch_platform)):
+              source = io.open('graft/%s.orig' % name, encoding='utf-8').read()
+              patched = apply(source)
+              ast.parse(patched)
+              io.open('graft/%s' % name, 'w', encoding='utf-8', newline='\n').write(patched)
+              print('%s: %d -> %d bytes' % (name, len(source), len(patched)))
+          PY
+          mkdir -p reference
+          docker cp "$name:$root/rope.py" reference/rope.py || true
+          docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin/platform.py" reference/platform.py || true
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          grep -rm1 model_type "$target"/snapshots/*/config.json \
+            > experiment-results/model_type.txt 2>&1 || true
+          echo "--- model_type ---"; cat experiment-results/model_type.txt || true
+          docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin" reference/vllm_tt_plugin || true
+          grep -rln "prefill_forward" reference/ > experiment-results/prefill_forward_callers.txt || true
+          grep -rn "start_pos" reference/vllm_tt_plugin > experiment-results/plugin_start_pos.txt || true
+          echo "--- callers ---"; cat experiment-results/prefill_forward_callers.txt || true
+          echo "--- start_pos ---"; head -40 experiment-results/plugin_start_pos.txt || true
+          sha256sum graft/model.py graft/qwen36_vllm.py graft/platform.py >> experiment-results/graft.sha256
+          cat experiment-results/graft.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-graft-${{ github.run_id }}
+          path: m1/graft/
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-graft-sha-${{ github.run_id }}
+          path: m1/experiment-results/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m1-reference-${{ github.run_id }}
+          path: m1/reference/
+          retention-days: 3
+
+  resumable:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m1
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-graft-${{ github.run_id }}
+          path: m1/graft/
+      - name: Confirm no process holds a card
+        working-directory: m1
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Serve the resumable arm
+        working-directory: m1
+        timeout-minutes: 40
+        shell: bash
+        run: bash scripts/ci/lever_n_m1_run_arm.sh resumable
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m1-resumable-${{ github.run_id }}
+          path: m1/experiment-results/
+
+  baseline:
+    needs: resumable
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m1
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-graft-${{ github.run_id }}
+          path: m1/graft/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-resumable-${{ github.run_id }}
+          path: m1/peer/
+      - name: Confirm no process holds a card
+        working-directory: m1
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Serve the baseline arm
+        working-directory: m1
+        timeout-minutes: 40
+        shell: bash
+        run: bash scripts/ci/lever_n_m1_run_arm.sh baseline peer/m1-resumable.json
+      - name: Report the gate
+        working-directory: m1
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/lever_n_m1_gate_report.py \
+            --report experiment-results/m1-baseline.json \
+            --log experiment-results/m1-baseline-stdout.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m1-baseline-${{ github.run_id }}
+          path: m1/experiment-results/

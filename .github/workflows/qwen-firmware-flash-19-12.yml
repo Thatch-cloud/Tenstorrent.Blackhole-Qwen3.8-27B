@@ -1,0 +1,136 @@
+name: Qwen firmware flash to 19.12.0
+on:
+  push:
+    tags: ['experiment/firmware-flash-19-12-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  flash:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: firmware-flash
+          persist-credentials: false
+      - name: Gate on clear device ownership and a digest-matched bundle
+        working-directory: firmware-flash
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          staging=/home/thatch/firmware-staging-19.12.0
+          bundle="$staging/fw_pack-19.12.0.fwbundle"
+          # Refuse to flash anything whose bytes are not the pinned upstream release.
+          python3 -B scripts/ci/firmware_staging_manifest.py \
+            --directory "$staging" --name fw_pack-19.12.0.fwbundle \
+            --name fw-pack-v19.12.0-recovery.tar.gz \
+            --output experiment-results/pre-flash-manifest.json
+          test -x "$staging/venv/bin/tt-flash"
+          test -f "$bundle"
+          # Refuse to flash while any process holds a card.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          printf 'cards present: %s\n' "${nodes[*]}" | tee experiment-results/pre-flash-cards.txt
+          test "${#nodes[@]}" -ge 1
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/pre-flash-holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/pre-flash-holders.txt ]; then
+            echo 'A process holds a card; refusing to flash'
+            cat experiment-results/pre-flash-holders.txt || true
+            exit 1
+          fi
+      - name: Record the pre-flash firmware state
+        working-directory: firmware-flash
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          staging=/home/thatch/firmware-staging-19.12.0
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          timeout -k 5 45 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-before.json" \
+            > experiment-results/tt-smi-before.log 2>&1 || true
+          timeout -k 10 120 "${prefix[@]}" "$staging/venv/bin/tt-flash" --no-tty verify \
+            > experiment-results/verify-before.txt 2>&1 || true
+          cat experiment-results/verify-before.txt
+      - name: Flash 19.12.0
+        working-directory: firmware-flash
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          staging=/home/thatch/firmware-staging-19.12.0
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          # Conservative flag set on purpose:
+          #   no --force               keep the version and board compatibility checks
+          #   no --update-boot-images  leave bootloader/recovery images alone, so a power
+          #                            loss mid-update cannot corrupt the boot path
+          #   no --skip-missing-fw     a board without firmware in the bundle must stop us
+          #   reset left enabled       tt-flash does its own PCI link reset at the end
+          set +e
+          timeout -k 30 600 "${prefix[@]}" "$staging/venv/bin/tt-flash" --no-tty --no-color \
+            flash "$staging/fw_pack-19.12.0.fwbundle" \
+            > experiment-results/flash.log 2>&1
+          status=$?
+          set -e
+          echo "flash_exit=$status" | tee experiment-results/flash.status
+          tail -60 experiment-results/flash.log || true
+          exit "$status"
+      - name: Confirm both cards report 19.12.0
+        if: always()
+        working-directory: firmware-flash
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          staging=/home/thatch/firmware-staging-19.12.0
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          timeout -k 10 120 "${prefix[@]}" "$staging/venv/bin/tt-flash" --no-tty verify \
+            > experiment-results/verify-after.txt 2>&1 || true
+          timeout -k 5 45 "${prefix[@]}" "$smi" -f "$PWD/experiment-results/tt-smi-after.json" \
+            > experiment-results/tt-smi-after.log 2>&1 || true
+          {
+            printf '=== cards still enumerated ===\n'
+            lspci -D -nn -d 1e52: 2>&1 || true
+            ls -l /dev/tenstorrent/ 2>&1 || true
+            printf '\n=== verify after ===\n'
+            cat experiment-results/verify-after.txt 2>/dev/null || true
+          } > experiment-results/post-flash.txt 2>&1
+          cat experiment-results/post-flash.txt
+          python3 -B - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('experiment-results/tt-smi-after.json')
+          if not path.is_file():
+              print('no post-flash snapshot; inspect artifacts')
+              raise SystemExit(0)
+          snapshot = json.loads(path.read_text())
+          versions = []
+          for index, device in enumerate(snapshot.get('device_info', [])):
+              bundle = (device.get('firmwares') or {}).get('fw_bundle_version')
+              versions.append((index, bundle))
+              print('device %d bundle %s' % (index, bundle))
+          stale = [entry for entry in versions if not str(entry[1]).startswith('19.12.')]
+          print('all_on_19_12:', not stale and bool(versions))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-firmware-flash-${{ github.run_id }}
+          path: firmware-flash/experiment-results/

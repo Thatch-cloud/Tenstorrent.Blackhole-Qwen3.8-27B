@@ -87,7 +87,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
-    parser.add_argument('--wide-cache-evidence', type=Path)
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument('--wide-cache-evidence', type=Path)
+    cache_group.add_argument('--full-window-cache-evidence', type=Path)
     options = parser.parse_args()
     if options.manifest.exists():
         raise ValueError('Fresh ladder staging required')
@@ -100,10 +102,23 @@ def main():
     for name in ('frozen_ladder_prompt.py', 'frozen_ladder_requests.py', 'frozen_ladder_cache.py'):
         result[name] = Path(__file__).with_name(name).read_text()
     payloads = {name: source.encode() for name, source in result.items()}
+    from full_window_geometry_admission import staged_geometry
+    before['frozen_context_geometry.py'] = (scripts / 'frozen_context_geometry.py').read_bytes()
+    payloads['frozen_context_geometry.py'] = staged_geometry(before['frozen_context_geometry.py'],
+        full_window=options.full_window_cache_evidence is not None)
     payloads['frozen-ladder-corpus.json'] = Path(__file__).with_name('frozen-ladder-corpus.json').read_bytes()
     if options.wide_cache_evidence:
         payloads.update(wide_cache_payloads(scripts, options.wide_cache_evidence,
-            payloads['dspark_request_experiment.py']))
+            payloads['dspark_request_experiment.py'], geometry_source=payloads['frozen_context_geometry.py']))
+    if options.full_window_cache_evidence:
+        from full_window_geometry_admission import adapt as adapt_geometry_admission
+        payloads['frozen_combined_runtime.py'] = adapt_geometry_admission(
+            payloads['frozen_combined_runtime.py'].decode()).encode()
+        payloads['full_window_geometry_admission.py'] = Path(__file__).with_name(
+            'full_window_geometry_admission.py').read_bytes()
+        payloads.update(wide_cache_payloads(scripts, options.full_window_cache_evidence,
+            payloads['dspark_request_experiment.py'], full_window=True,
+            geometry_source=payloads['frozen_context_geometry.py']))
     for name, payload in payloads.items():
         (scripts / name).parent.mkdir(parents=True, exist_ok=True)
         (scripts / name).write_bytes(payload)
@@ -117,21 +132,38 @@ def main():
         serving_defaults_changed=False), indent=2) + '\n')
 
 
-def wide_cache_payloads(scripts, evidence, request_source):
+def wide_cache_payloads(scripts, evidence, request_source, *, full_window=False, geometry_source=None):
     from frozen_ladder_cache_gate import qualify
     evidence = Path(evidence)
     raw = (evidence / 'reports.json').read_bytes()
     digests = json.loads(raw)
-    if set(digests) != {'65536', '131072'}:
-        raise ValueError('Both long-context simulator reports required')
+    if type(full_window) is not bool:
+        raise ValueError('Explicit full-window selection required')
+    expected = {'261888'} if full_window else {'65536', '131072'}
+    if set(digests) != expected:
+        raise ValueError('Full-window simulator report required' if full_window
+            else 'Both long-context simulator reports required')
     result = {}
     for name in ('frozen_ladder_cache_scope.py', 'frozen_ladder_cache_gate.py',
-            'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py'):
+            'frozen_ladder_ordered_cache.py', 'frozen_ladder_reference_memory.py', 'ladder-cache-probe.py',
+            'ladder_cache_reference.py'):
         result[name] = Path(__file__).with_name(name).read_bytes()
+    if full_window:
+        from frozen_recipe_context import replace_once
+        result['full_window_tail.py'] = Path(__file__).with_name('full_window_tail.py').read_bytes()
+        scope = result['frozen_ladder_cache_scope.py'].decode()
+        scope = replace_once(scope,
+            '    with page_geometry(context) as evidence, audit_scope() as reference_audit:',
+            '    from full_window_tail import runtime_scope as tail_scope\n'
+            '    with tail_scope() as tail, page_geometry(context) as evidence, audit_scope() as reference_audit:\n'
+            "        evidence['full_window_tail'] = tail")
+        compile(scope, 'frozen_ladder_cache_scope.py', 'exec')
+        result['frozen_ladder_cache_scope.py'] = scope.encode()
     for context, digest in digests.items():
         report = qualify(Path(__file__).parent, evidence / context, digest, int(context))
         for name in ('frozen_context_geometry.py', 'ordered_cache.py', 'attention_batch.py'):
-            if hashlib.sha256((scripts / name).read_bytes()).hexdigest() != report['sources'][name]:
+            payload = geometry_source if name == 'frozen_context_geometry.py' and geometry_source is not None else (scripts / name).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != report['sources'][name]:
                 raise ValueError('Staged cache source differs from simulator: ' + name)
         for name in ('ladder-cache.json', 'ladder-cache.exit-status', 'simulator-runtime.txt'):
             result[f'frozen-cache-evidence/{context}/{name}'] = (evidence / context / name).read_bytes()

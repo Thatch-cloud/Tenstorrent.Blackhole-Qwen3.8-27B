@@ -1,0 +1,55 @@
+name: Qwen bounded MLP clock hardware qualification
+on:
+  push:
+    tags: ['experiment/mlp-clock-hardware-v*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  diagnostic:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: clock-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: clock-candidate
+          persist-credentials: false
+      - name: Stage exact simulator-qualified diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p clock-candidate/experiment-results
+          chmod 2775 clock-candidate/experiment-results
+          gh run download 35207583937 -R Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B \
+            -n qwen-mlp-clock-sim-35207583937-1 -D clock-candidate/experiment-results/simulator
+          python3 -B clock-orchestrator/scripts/ci/frozen_recipe_context.py --checkout clock-candidate \
+            --context 8192 --manifest clock-candidate/experiment-results/geometry.json
+          python3 -B clock-orchestrator/scripts/ci/mlp_clock_stage.py --checkout clock-candidate \
+            --manifest clock-candidate/experiment-results/clock-candidate.json
+          for name in mlp_clock_hardware.py mlp_clock_report.py mlp-clock-hardware-suite.sh run-wait-zone-hardware.sh; do
+            cp "clock-orchestrator/scripts/ci/$name" clock-candidate/scripts/ci/
+          done
+          python3 -B clock-orchestrator/scripts/ci/mlp_clock_hardware.py stage \
+            --directory clock-candidate/scripts/ci --evidence clock-candidate/experiment-results/simulator
+          cp clock-candidate/scripts/ci/clock-hardware-sources.json clock-candidate/experiment-results/
+          git -C clock-candidate diff --check
+      - name: Hardware numerical replay and bounded samples
+        timeout-minutes: 5
+        working-directory: clock-candidate
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+        run: timeout -k 15 280 bash scripts/ci/run-mlp-clock-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-mlp-clock-hardware-${{ github.run_id }}
+          path: clock-candidate/experiment-results/
