@@ -139,3 +139,4 @@ jobs:
         with:
           name: qwen-prefill-profile-${{ github.run_id }}
           path: pp/experiment-results/
+          include-hidden-files: true

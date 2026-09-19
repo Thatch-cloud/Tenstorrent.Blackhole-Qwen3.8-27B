@@ -83,6 +83,26 @@ def main():
         print('prefill %7s tokens -> %s' % (entry.get('prompt_tokens'), entry.get('tokens_per_s')),
               flush=True)
 
+    # Flush the device profiler while the device is still open. Run 35422354841 wrote a
+    # 7 MB host capture and no device logs at all, which is what an un-dumped device
+    # profiler looks like: the working path closes its devices through ttnn and triggers
+    # the dump on the way out, while vLLM tears down its own way.
+    try:
+        import ttnn
+        worker = (llm.llm_engine.engine_core.engine_core
+                  .model_executor.driver_worker.worker)
+        mesh = getattr(worker, 'mesh_device', None)
+        reader = getattr(ttnn, 'ReadDeviceProfiler', None)
+        if mesh is not None and callable(reader):
+            reader(mesh)
+            report['device_profiler_flushed'] = True
+        else:
+            report['device_profiler_flushed'] = 'mesh=%s reader=%s' % (
+                mesh is not None, callable(reader))
+    except BaseException as error:
+        report['device_profiler_flushed'] = '%s: %s' % (type(error).__name__, str(error)[:200])
+    print('device profiler flush:', report.get('device_profiler_flushed'), flush=True)
+
     ok = [r for r in report['results'] if r.get('tokens_per_s')]
     if len(ok) > 1:
         first, last = ok[0], ok[-1]
