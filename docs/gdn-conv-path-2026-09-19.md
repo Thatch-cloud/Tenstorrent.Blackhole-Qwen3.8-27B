@@ -154,3 +154,45 @@ MMIO timeout inside 3 us of the same value, and that was flagged as possibly the
 FIR path corrupting device state. **It is not.** Both arms here ran two generates
 at the same length with no MMIO error at all. The earlier failures changed prompt
 length between calls; the crash follows the shape change, not the conv path.
+
+## The fusion that exists is decode-only, and that is the whole story
+
+Checked because the obvious question after a failed dispatch swap is whether the
+existing fusion work was done correctly. It was. All five custom fused ops are
+engaged at runtime, confirmed from the gate run's own logs:
+
+```
+QWEN_ATTN_PREP engaged:        attn_decode_prep -> q [1,1,12,256] height-sharded
+QWEN_GDN_CONV_GATES engaged:   ttnn.transformer.gdn_decode_conv_gates K=4
+QWEN_GDN_NORM_GATE engaged:    norm+gate folded into decode_gated_delta_rule_packed
+QWEN_GDN_PACKED_QKV engaged:   ttnn.transformer.decode_gated_delta_rule_packed
+QWEN_GDN_PROJ_DIRECT engaged:  conv+gates reads qkvzab [1,1,8240] directly
+```
+
+They default to `"0"` in `gdn/tp.py` and `attention/tp.py`, and neither the
+workflows nor `worker.py` set them, so the image environment does. Worth knowing
+that the defaults are off: a run launched without the image environment silently
+measures the unfused model.
+
+**Every one of them is decode.** `attn_decode_prep`, `gdn_decode_conv_gates`,
+`decode_gated_delta_rule_packed`. Prefill has custom ops for the scan -
+`ChunkGdnScan` and `ChunkGdnPrep`, 517 ms of real work between them - but nothing
+for the conv and gates.
+
+That single fact accounts for the whole prefill/decode asymmetry without needing
+another hypothesis:
+
+| | decode | prefill |
+| --- | --- | --- |
+| fused conv/gates op | yes, engaged | **none** |
+| residue | 3.44 ms over 15 op types, diffuse | 637 ms layout, 80% of op calls do no arithmetic |
+| conv implementation | one fused op | FIR with 3 untilize/slice/tilize, or conv1d with 1 |
+
+So the dispatch swap was trying to reach a fused-op win by choosing between two
+unfused stock ops, and could not: both pay the layout conversion, which is why
+they landed within 2.5% of each other.
+
+**The fix is the prefill sibling of `gdn_decode_conv_gates`**, built on the same
+pattern through the same graft pipeline that produced the decode five, operating
+in TILE layout throughout. It is the only approach measured to be capable of
+taking the 473 ms, because it is the only one that does not untilize.
