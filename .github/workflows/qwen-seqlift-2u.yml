@@ -95,6 +95,24 @@ jobs:
             test -f "$cache/dflash2-stack-$revision/layer-$layer/manifest.json"
           done
           echo 'fixtures present'
+      - name: Reset the boards before opening the mesh
+        working-directory: cycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
       - name: Confirm no process holds a card
         working-directory: cycle
         timeout-minutes: 3
