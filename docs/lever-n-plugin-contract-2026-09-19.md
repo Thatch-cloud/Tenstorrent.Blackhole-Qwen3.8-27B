@@ -129,6 +129,61 @@ The risk is not size but interaction: the PREFILL_ONLY-to-DECODE_ONLY fallback i
 `preempted_req_ids` across a discarded pass, and an alternation policy must not lose that
 bookkeeping.
 
+## Correction 4 — chunked prefill is refused for this model at config time
+
+`platform._apply_chunked_prefill_policy`:
+
+```python
+_CHUNKED_PREFILL_MODEL_TYPES = {"gemma4", "gemma4_unified"}
+...
+if scheduler_config.enable_chunked_prefill:
+    logger.info("Chunked prefill is not supported for `model_type=%s`; disabling it.", model_type)
+    scheduler_config.enable_chunked_prefill = False
+    if max_num_batched_tokens < max_model_len:
+        scheduler_config.max_num_batched_tokens = max_model_len
+scheduler_config.long_prefill_token_threshold = 0
+```
+
+This model's HF `model_type` is **`qwen3_5`**, which is not in the set, so
+`--enable-chunked-prefill --max-num-batched-tokens 2048` was overridden at config time
+and the budget bumped back to `max_model_len`. Runs 35415521079 and 35415811328 each
+produced exactly one `prefill_forward` call for prompts of 460, 3,524 and 5,918 tokens.
+
+The set is, by its own comment, the model types "whose tt-metal generator accepts a
+`chunk_start_idx`" — precisely the capability M1 adds. **M1 is therefore a three-file
+graft** (`model.py`, `qwen36_vllm.py`, `platform.py`), not the two the design describes,
+and section 3.2's plan to enable chunking through Thatch.Server
+`_PER_MODEL_VLLM_KWARGS` would have been silently overridden by this same policy.
+
+Once M1 ships the opt-in should become a plain `"qwen3_5"` entry in the set.
+
+### The multimodal budget follows from it
+
+Taking the allowlisted branch also sets `disable_chunked_mm_input = True`, because a
+chunk boundary inside a multimodal item would split its embeddings from their positions.
+vLLM then refuses a small batch budget outright:
+
+```
+ValueError: Chunked MM input disabled but max_tokens_per_mm_item (16384) is larger
+than max_num_batched_tokens (2048). Please increase max_num_batched_tokens.
+```
+
+The batched path is text-only by assertion regardless, so the gate declares
+`--limit-mm-per-prompt image=0 video=0` on both arms. A production rollout has to make
+the same decision explicitly: chunked prefill and multimodal items do not coexist at a
+2048 budget.
+
+## The scratch really does persist between steps
+
+Design section 3.1 assumes it; `model.py` confirms it. `_bind_gdn_prefill_scratch` is a
+pure Python attribute swap onto each GDN layer, `_ensure_gdn_prefill_scratch` allocates
+only on first use, and `_unbind_gdn_prefill_scratch` restores the batched decode bindings
+"WITHOUT freeing the persistent scratch". Nothing in bind or unbind zeroes it; only
+`_reset_gdn_state_for_new_sequence` does, and the graft gates that on `start == 0`.
+
+Decode steps between two chunks of one prefill are safe for the same reason: they run
+against the batched decode buffers while the scratch is unbound.
+
 ## What M1 has actually shown on hardware
 
 Run 35415521079, batched path, `max_num_seqs=4`, chunk budget 2048:
