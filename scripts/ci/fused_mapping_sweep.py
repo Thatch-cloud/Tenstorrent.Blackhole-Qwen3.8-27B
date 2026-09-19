@@ -55,6 +55,7 @@ def main():
     parser.add_argument('--iterations', type=int, default=10)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--pairs', default='3,4,5,7')
+    parser.add_argument('--warmup', type=int, default=5)
     options = parser.parse_args()
     report = dict(scope=__doc__, token_rows=options.token_rows, pairs_total=PAIRS,
                   arms=[], speedup_claimed=False)
@@ -100,16 +101,43 @@ def main():
             fp32_dest_acc_en=True, packer_l1_acc=True, dst_full_sync_en=True)
 
         # ---- Unfused reference ----
+        # Held in a live list for the whole run. The previous version passed a
+        # throwaway [] and compared after the native timing loop had churned L1,
+        # so the reference had been overwritten and every bit-exact check failed.
+        reference_owned = []
         reference = None
         try:
-            owned = []
             reference = native_gate_up_control(ttnn, inputs, device_gate, device_up,
+                                               kernel, reference_owned)
+            reference_host = [ttnn.to_torch(ttnn.get_device_tensors(reference)[chip]).clone()
+                              for chip in range(2)]
+            report['reference_captured'] = True
+        except BaseException as error:
+            report['reference_error'] = dict(kind=type(error).__name__,
+                                             message=str(error)[:600])
+            reference_host = None
+
+        # Self-test: native against itself. If this fails the harness is at fault and
+        # no bit-exact verdict below means anything.
+        if reference_host is not None:
+            try:
+                owned = []
+                again = native_gate_up_control(ttnn, inputs, device_gate, device_up,
                                                kernel, owned)
-            native_ms = [timed(ttnn, device,
-                               lambda: native_gate_up_control(ttnn, inputs, device_gate,
-                                                              device_up, kernel, []),
-                               options.iterations)
-                         for _ in range(options.repeats)]
+                report['native_self_consistent'] = all(
+                    torch.equal(ttnn.to_torch(ttnn.get_device_tensors(again)[chip]),
+                                reference_host[chip]) for chip in range(2))
+            except BaseException as error:
+                report['native_self_test_error'] = str(error)[:300]
+
+        try:
+            native_ms = []
+            for _ in range(options.repeats):
+                native_ms.append(timed(ttnn, device,
+                                       lambda: native_gate_up_control(
+                                           ttnn, inputs, device_gate, device_up,
+                                           kernel, []),
+                                       options.iterations))
             native_ms.sort()
             report['native'] = dict(workers=39, grid=[11, 4],
                                     ms_median=round(native_ms[len(native_ms) // 2], 4),
@@ -131,21 +159,31 @@ def main():
                                             token_rows=rows,
                                             source_root=os.environ.get('TT_METAL_HOME',
                                                                        '/opt/tt-metal'))
-                produced = operation(inputs)
+                # Warm until the patched program is built and cached; the first call
+                # carries JIT and program construction, which is not what we are timing.
+                warm_ms = []
+                for _ in range(options.warmup):
+                    start = time.perf_counter()
+                    produced = operation(inputs)
+                    ttnn.synchronize_device(device)
+                    warm_ms.append(round(1000.0 * (time.perf_counter() - start), 4))
+                    if produced is not None:
+                        last = produced
+                arm['warmup_ms'] = warm_ms
                 arm['ran'] = True
-                if reference is not None:
-                    exact = all(torch.equal(
-                        ttnn.to_torch(ttnn.get_device_tensors(produced)[chip]),
-                        ttnn.to_torch(ttnn.get_device_tensors(reference)[chip]))
-                        for chip in range(2))
-                    arm['bit_exact_vs_native'] = bool(exact)
-                ttnn.deallocate(produced)
-                samples = [timed(ttnn, device, lambda: operation(inputs),
-                                 options.iterations)
-                           for _ in range(options.repeats)]
+                if reference_host is not None:
+                    arm['bit_exact_vs_native'] = all(
+                        torch.equal(ttnn.to_torch(ttnn.get_device_tensors(last)[chip]),
+                                    reference_host[chip]) for chip in range(2))
+                ttnn.deallocate(last)
+                samples = []
+                for _ in range(options.repeats):
+                    samples.append(timed(ttnn, device, lambda: operation(inputs),
+                                         options.iterations))
                 samples.sort()
                 arm['ms_median'] = round(samples[len(samples) // 2], 4)
                 arm['ms_all'] = [round(v, 4) for v in samples]
+                arm['spread_pct'] = round(100.0 * (samples[-1] - samples[0]) / samples[0], 1)
             except BaseException as error:
                 arm['error'] = dict(kind=type(error).__name__, message=str(error)[:700])
             report['arms'].append(arm)
