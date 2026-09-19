@@ -71,7 +71,7 @@ jobs:
           path: m1/reference/
           retention-days: 3
 
-  baseline:
+  resumable:
     needs: graft
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 45
@@ -104,19 +104,19 @@ jobs:
             cat experiment-results/holders.txt || true
             exit 1
           fi
-      - name: Serve the baseline arm
+      - name: Serve the resumable arm
         working-directory: m1
         timeout-minutes: 40
         shell: bash
-        run: bash scripts/ci/lever_n_m1_run_arm.sh baseline
+        run: bash scripts/ci/lever_n_m1_run_arm.sh resumable
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: m1-baseline-${{ github.run_id }}
+          name: m1-resumable-${{ github.run_id }}
           path: m1/experiment-results/
 
-  resumable:
-    needs: baseline
+  baseline:
+    needs: resumable
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
     timeout-minutes: 45
     steps:
@@ -130,7 +130,7 @@ jobs:
           path: m1/graft/
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: m1-baseline-${{ github.run_id }}
+          name: m1-resumable-${{ github.run_id }}
           path: m1/peer/
       - name: Confirm no process holds a card
         working-directory: m1
@@ -152,11 +152,11 @@ jobs:
             cat experiment-results/holders.txt || true
             exit 1
           fi
-      - name: Serve the resumable arm and compare byte for byte
+      - name: Serve the baseline arm
         working-directory: m1
         timeout-minutes: 40
         shell: bash
-        run: bash scripts/ci/lever_n_m1_run_arm.sh resumable peer/m1-baseline.json
+        run: bash scripts/ci/lever_n_m1_run_arm.sh baseline peer/m1-resumable.json
       - name: Report the gate
         working-directory: m1
         if: always()
@@ -164,10 +164,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B scripts/ci/lever_n_m1_gate_report.py \
-            --report experiment-results/m1-resumable.json \
-            --log experiment-results/m1-resumable-stdout.log
+            --report experiment-results/m1-baseline.json \
+            --log experiment-results/m1-baseline-stdout.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: m1-resumable-${{ github.run_id }}
+          name: m1-baseline-${{ github.run_id }}
           path: m1/experiment-results/

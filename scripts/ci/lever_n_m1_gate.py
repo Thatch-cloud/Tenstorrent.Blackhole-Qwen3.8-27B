@@ -65,7 +65,7 @@ def build_prompt(target_tokens):
     return ''.join(text)
 
 
-def start_server(port, context, chunked, results, log_name, fast=False):
+def start_server(port, context, chunked, results, log_name, fast=False, seqs=4):
     # Without the tt block the plugin opens the mesh with l1_small_size=0 and the
     # first L1_SMALL allocation dies with 'bank size is 0 B'.
     recipe = dict(tt=dict(trace_mode='decode_only', trace_region_size=1073741824,
@@ -76,11 +76,15 @@ def start_server(port, context, chunked, results, log_name, fast=False):
                                            runtime_root='/opt/tt-metal',
                                            fixtures='/experiment-dflash-fixture',
                                            target_snapshot=MODEL)
-    blocks = -(-context // BLOCK_SIZE)
+    # prefill_paged_slots and prefill_paged_slots_range are the BATCHED path, and
+    # prefill_forward only reaches it when model.args.max_batch_size > 1. At
+    # max_num_seqs=1 run 35415167291 served both arms through _prefill_forward_tp
+    # instead, so the methods under test never ran and the control caught it.
+    blocks = seqs * (-(-context // BLOCK_SIZE))
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
                '--model', MODEL, '--served-model-name', 'qwen-m1',
                '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',
-               '--max-model-len', str(context), '--max-num-seqs', '1',
+               '--max-model-len', str(context), '--max-num-seqs', str(seqs),
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
                '--shutdown-timeout', '30',
@@ -147,12 +151,13 @@ def complete(port, prompt, max_tokens):
                 seconds=round(time.perf_counter() - started, 3))
 
 
-def run_arm(port, context, chunked, prompts, max_tokens, results, log_name, fast=False):
+def run_arm(port, context, chunked, prompts, max_tokens, results, log_name, fast=False,
+            seqs=4):
     process = handle = None
     arm = dict(chunked=chunked, completions=[])
     try:
         process, handle, log_path, command = start_server(port, context, chunked,
-                                                          results, log_name, fast)
+                                                          results, log_name, fast, seqs)
         arm['command'] = command
         arm['ready'] = True
         for name, prompt in prompts:
@@ -175,6 +180,9 @@ def run_arm(port, context, chunked, prompts, max_tokens, results, log_name, fast
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--context', type=int, default=16384)
+    parser.add_argument('--seqs', type=int, default=4,
+                        help='max_num_seqs; must exceed 1 or prefill_forward never '
+                             'reaches the batched path these methods live on')
     parser.add_argument('--max-tokens', type=int, default=32)
     parser.add_argument('--results', type=Path, default=Path('/tmp/m1-gate'))
     parser.add_argument('--lengths', default='400,3000,5000')
@@ -193,9 +201,13 @@ def main():
     except OSError:
         pass
 
+    if options.seqs < 2:
+        raise SystemExit('--seqs must be at least 2; at 1 the batched prefill path '
+                         'this gate exists to test is never reached')
     targets = [int(v) for v in options.lengths.split(',')]
     prompts = [('approx_%d' % n, build_prompt(n)) for n in targets]
     report = dict(scope=__doc__, context=options.context, chunk_size=CHUNK_SIZE,
+                  seqs=options.seqs,
                   targets=targets, max_tokens=options.max_tokens)
     try:
         report['fast_path'] = options.fast_path
@@ -208,11 +220,11 @@ def main():
         if options.arm in ('baseline', 'both'):
             report['baseline'] = run_arm(8000, options.context, False, prompts,
                                          options.max_tokens, options.results,
-                                         'baseline.log', options.fast_path)
+                                         'baseline.log', options.fast_path, options.seqs)
         if options.arm in ('resumable', 'both'):
             report['resumable'] = run_arm(8001, options.context, True, prompts,
                                           options.max_tokens, options.results,
-                                          'resumable.log', options.fast_path)
+                                          'resumable.log', options.fast_path, options.seqs)
         comparisons = []
         base = {c['name']: c for c in report['baseline'].get('completions', [])}
         test = {c['name']: c for c in report['resumable'].get('completions', [])}
