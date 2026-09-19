@@ -48,8 +48,8 @@ def scrape(log_path):
     text = log_path.read_text(errors='replace')
     patterns = {
         'kv_cache_lines': r'(?i)^.*kv[ _-]?cache.*$',
-        'gpu_blocks_lines': r'(?i)^.*(gpu|num).{0,12}blocks.*$',
-        'oom_lines': r'(?i)^.*(out of memory|oom|allocation failed|not enough).*$',
+        'gpu_blocks_lines': r'(?i)^.*(?:gpu|num).{0,12}blocks.*$',
+        'oom_lines': r'(?i)^.*(?:out of memory|oom|allocation failed|not enough|kv cache memory).*$',
         'firmware_line': r'^.*firmware bundle version.*$',
     }
     found = {}
@@ -72,6 +72,8 @@ def main():
         '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0'))
     parser.add_argument('--draft-config', default=os.environ.get('QWEN_DRAFT_CONFIG'),
                         help='enable speculation against this draft config path')
+    parser.add_argument('--chunked-prefill', action='store_true')
+    parser.add_argument('--batched-tokens', type=int, default=None)
     parser.add_argument('--readiness-seconds', type=int, default=900)
     options = parser.parse_args()
     try:
@@ -99,11 +101,15 @@ def main():
                '--max-model-len', str(options.context),
                '--max-num-seqs', str(options.users),
                # Without chunked prefill the scheduler needs to admit a whole prefill.
-               '--max-num-batched-tokens', str(options.context),
+               '--max-num-batched-tokens', str(options.batched_tokens or options.context),
                '--block-size', str(BLOCK_SIZE),
                '--num-gpu-blocks-override', str(plan['blocks']),
                '--no-enable-prefix-caching', '--no-async-scheduling',
-               '--no-enable-chunked-prefill', '--shutdown-timeout', '30']
+               '--shutdown-timeout', '30']
+    if options.chunked_prefill:
+        command += ['--enable-chunked-prefill']
+    else:
+        command += ['--no-enable-chunked-prefill']
     if options.draft_config:
         command += ['--speculative-config', json.dumps(dict(
             model=options.draft_config, method='dflash', num_speculative_tokens=15,
@@ -176,7 +182,7 @@ def main():
         print(END)
         print(LOG_BEGIN)
         if log_path.is_file():
-            for line in log_path.read_text(errors='replace').splitlines()[-120:]:
+            for line in log_path.read_text(errors='replace').splitlines()[-400:]:
                 print(line[:300])
         print(LOG_END)
         sys.stdout.flush()
