@@ -30,6 +30,8 @@ import io
 import sys
 
 MARKER = '[SEQLIFT]'
+EOS_OLD = '            or parameters.ignore_eos is not False'
+EOS_NEW = ('            or not isinstance(parameters.ignore_eos, bool)')
 OLD = '    if (scheduler.max_num_seqs != 1 or scheduler.async_scheduling is not False'
 NEW = ('    _qwen_seqs = scheduler.max_num_seqs\n'
        '    _qwen_logger.info("%s admitting max_num_seqs={}", _qwen_seqs)\n'
@@ -45,6 +47,18 @@ def patch_policy(source):
         raise SystemExit('expected exactly one max_num_seqs clause, found %d'
                          % source.count(OLD))
     source = source.replace(OLD, NEW, 1)
+
+    # ignore_eos is an output-COMPARABILITY assertion: it exists so a fast-path
+    # response can be diffed against a reference. This probe measures latency,
+    # and the bench needs ignore_eos to get a fixed decode count at all - the
+    # comment at longctx_cycle_bench.py:181 records run 35418922350 returning
+    # zero tokens because the model emitted EOS first. The two requirements are
+    #incompatible, so the assertion is relaxed to a type check for the probe.
+    if source.count(EOS_OLD) != 1:
+        raise SystemExit('expected exactly one ignore_eos clause, found %d'
+                         % source.count(EOS_OLD))
+    source = source.replace(EOS_OLD, EOS_NEW, 1)
+
     if 'from loguru import logger as _qwen_logger' not in source:
         source = 'from loguru import logger as _qwen_logger\n' + source
     return source
@@ -62,6 +76,9 @@ def main():
     assert '_qwen_seqs < 1' in patched
     assert 'max_num_seqs != 1' not in patched
     assert 'async_scheduling is not False' in patched, 'async gate must survive'
+    assert 'ignore_eos is not False' not in patched
+    assert 'temperature != 0' in patched, 'greedy gate must survive'
+    assert 'max_tokens <= OUTPUT_BUDGET' in patched, 'output budget must survive'
     assert 'tensor_parallel_size != 1' in patched, 'host TP gate must survive'
     assert '%d' not in NEW and '%s' not in NEW.split(MARKER)[1], (
         'loguru formats with braces; a percent placeholder logs literally')

@@ -54,7 +54,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - {users: 2, context: 4096, product: 8192, prompt: 3072}
+          - {users: 2, context: 4352, product: 8704, prompt: 3072}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
