@@ -55,7 +55,7 @@ jobs:
           done
           echo 'fixtures present'
       - name: Graft the prefill chunk size
-        working-directory: chunk
+        working-directory: cycle
         timeout-minutes: 6
         shell: bash
         run: |
