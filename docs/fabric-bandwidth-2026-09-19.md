@@ -1,4 +1,4 @@
-# Inter-card fabric: measured at 83.74 GB/s, which is one cable fully used
+# Inter-card fabric: four links are up, and only about two links of bandwidth arrives
 
 Run 35424379930. Answers a question the prefill profile raised and could not settle:
 collectives looked like 37% of prefill device time, and the traffic model implied they
@@ -21,48 +21,65 @@ Fitting `time = fixed + bytes / rate` across those three points gives **about 10
 fixed cost per collective and an asymptote near 85 GB/s**. Rising GB/s with size is what a
 per-collective overhead looks like; the overhead is real but small.
 
-**83.74 GB/s is 84% of one QSFP-DD800 cable**, which carries two 400 Gb/s links for
-100 GB/s. That is a saturated cable, in the same way that 405 GB/s is a saturated GDDR6
-subsystem at 79% of spec - and because it exceeds one 50 GB/s link, both links of that
-cable are demonstrably in use.
+Whether 83.74 GB/s is good depends on how many cables carry the four links the runtime
+reports, which is unresolved below. It is 84% of one cable or 42% of two.
 
-## The Ethernet fabric is up, and at least two links are already carrying traffic
+## Four ethernet links are up. There is nothing to enable
 
-Worth stating because the physical topology invites the opposite guess: the second card
-sits behind a gen5 MCIO switch and negotiates x4, so it is reasonable to suspect the
-traffic never reaches Ethernet at all.
-
-It does. From the run log:
+Run 35425330364 read the cluster descriptor the runtime serialises
+(`ttnn.cluster.serialize_cluster_descriptor()` returns a path; the container is `--rm`, so
+it has to be read inside the run). Between the two chips:
 
 ```
-Fabric initialized on 2 devices
-Fabric Initialized with config FabricConfig::FABRIC_1D
-Using custom mesh graph descriptor: p150_x2_mesh_graph_descriptor.textproto
+ethernet_connections:
+  - [chip 0 chan  8, chip 1 chan 5]
+  - [chip 0 chan  9, chip 1 chan 4]
+  - [chip 0 chan 10, chip 1 chan 7]
+  - [chip 0 chan 11, chip 1 chan 6]
+ethernet_connections_to_remote_devices: []
 ```
 
-And the arithmetic rules PCIe out independently: gen5 x4 is about 15.8 GB/s and gen5 x16
-about 63 GB/s, so a measured 83.74 GB/s cannot have crossed either. PCIe width is not in
-this path, consistent with the earlier finding that it costs about a second once at model
-load and nothing per step.
+**Four links, all up**, between `0000:d1:00.0` and `0000:f3:00.0` - the M+A pair the Qwen
+work uses. `get_cluster_type` is `ClusterType.P150_X2`. The mesh descriptor asks for
+`channels { count: 4 policy: RELAXED }`, so the runtime is requesting all four and the
+hardware is providing all four.
 
-**One QSFP-DD800 cable carries two ethernet links of 400 Gb/s each**, so a link is
-50 GB/s and a cable is 100 GB/s. That fixes the reading:
+So the answer to "can we enable the other links" is that they are already enabled. The
+gap is that the collective delivers far less than four links of bandwidth.
 
-- 83.74 GB/s is **above** a single 400 Gb/s link, so **at least two links are already
-  active**. "Only one link is in use" is false.
-- 83.74 GB/s is **84% of one cable**, which is what one fully-used cable looks like.
+## How much is being left on the table depends on the cabling
 
-So the open question is not whether links are being used, but **how many cables connect
-the pair**. One fully used and two half used produce similar bandwidth, so the number
-cannot be inferred from it. Run 35425107580 asks the runtime directly, via the per-peer
-ethernet socket count.
+| if the four links are | ceiling | measured 83.74 GB/s is |
+| --- | ---: | ---: |
+| **two cables**, two 400 Gb/s links each | 200 GB/s | **41.9%** - about 116 GB/s unused |
+| **one cable**, four channels on one port | 100 GB/s | **83.7%** - near saturation |
 
-> **CORRECTION.** An earlier version of this document read
-> `intra-mesh degree histograms mesh0 {1:2}` as proof of a single link. That was wrong.
-> Degree counts *neighbours*, not edges: with two chips in the mesh each has exactly one
-> neighbour however many cables run between them, so the line is true of any two-node
-> mesh and says nothing about link count. The measurement above is what constrains the
-> answer; that log line never did.
+The descriptor cannot separate these: chip 0 uses channels 8-11 and chip 1 uses 4-7, and
+contiguous runs of four are equally consistent with one four-channel port or two
+two-channel ports. **This is a question for whoever can see the back of the machine**, and
+it decides whether there is a factor of two waiting or nothing at all.
+
+The earlier reasoning in this document assumed a single cable and treated 83.74 GB/s as
+saturation. That assumption is now explicitly unresolved rather than quietly load-bearing.
+
+## A candidate explanation, and it is testable
+
+If the ceiling is 200 GB/s, the shortfall wants an explanation, and the runtime supplies a
+suspect in its own warning:
+
+```
+Fabric packet size 4352 B is suboptimal for transporting 2048 B pages.
+Configure 8192 B packet size to maximize throughput.
+```
+
+One 2048-byte page per 4352-byte packet is **47% payload efficiency**, against a measured
+**41.9% of a 200 GB/s ceiling**. Those two numbers being close is suggestive and nothing
+more - it is exactly the shape of coincidence that produced the 9.3 GB/s error, so it is
+recorded as a hypothesis with a test attached, not as a finding.
+
+**The test:** raise the fabric packet size to 8192 B and re-measure the same three shapes.
+If throughput rises towards 170-180 GB/s, packing was the whole story. If it does not
+move, the collective is using two of the four links and the lever is elsewhere.
 
 ## num_links is deprecated, so the link sweep proves nothing
 
@@ -121,11 +138,12 @@ remedy for overhead is fewer, larger collectives or a different sharding.
 Every input to that argument is now wrong:
 
 - collectives are **11-15%** of prefill, not 37.2%
-- delivered bandwidth is **~84 GB/s**, one cable; the 400 GB/s aggregate was never measured
+- delivered bandwidth is **83.74 GB/s** across four links; the 400 GB/s figure was never measured
 - the collectives that do run achieve **42-84 GB/s**, 50-100% of that measured ceiling
 - fixed cost is ~10 us per collective; across ~2,950 collective calls that is about
   **29 ms of 3,697 ms, under 1%**, so "fewer, larger collectives" is also small
 
-A resource at 50-100% of its measured capability is saturated, not idle. Dropping TP2
-would cost decode 24.6 ms per step to buy back at most 15% of prefill. **Do not pursue
-it.**
+Dropping TP2 would cost decode 24.6 ms per step to buy back at most 15% of prefill, and
+that trade does not come close under either cabling reading. **Do not pursue it.** If the
+ceiling really is 200 GB/s, the remedy is the packet size or the collective's link usage,
+both of which cost decode nothing.
