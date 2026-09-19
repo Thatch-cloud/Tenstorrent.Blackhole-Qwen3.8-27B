@@ -51,11 +51,17 @@ def main():
         except ImportError:
             report['signpost'] = 'tracy signpost unavailable'
 
+    # num_gpu_blocks_override is not optional here: every working runner on this stack
+    # passes it, and without it vLLM runs its own memory profiling pass to size the
+    # cache, which is not something to discover inside a profiled run.
+    blocks = -(-options.context // 64)
     llm = LLM(model=options.model, dtype='bfloat16', max_model_len=options.context,
               max_num_seqs=1, block_size=64, enforce_eager=False,
+              num_gpu_blocks_override=blocks, enable_prefix_caching=False,
               additional_config=dict(tt=dict(trace_mode='decode_only',
                                              trace_region_size=1073741824,
                                              l1_small_size=24576)))
+    report['blocks'] = blocks
     sampling = SamplingParams(max_tokens=1, temperature=0.0)
     for target in [int(v) for v in options.lengths.split(',')]:
         prompt = build(target)
