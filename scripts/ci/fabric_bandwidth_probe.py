@@ -97,6 +97,12 @@ def main():
         if good:
             report['best_gb_s'] = max(r['gb_s'] for r in good)
             report['implied_in_prefill_gb_s'] = 9.3
+            # 800 Gb/s of link is 100 GB/s. The implied 9.3 GB/s in prefill is about 9%
+            # of that, so the expectation going in is overhead-bound rather than
+            # link-bound; this measurement is what settles it.
+            report['link_spec_gb_s'] = 100.0
+            report['percent_of_link_spec'] = round(100 * report['best_gb_s'] / 100.0, 1)
+            report['prefill_percent_of_link_spec'] = round(100 * 9.3 / 100.0, 1)
             if len(good) > 1:
                 small, large = good[0], good[-1]
                 report['scales_with_size'] = round(large['gb_s'] / small['gb_s'], 2)
