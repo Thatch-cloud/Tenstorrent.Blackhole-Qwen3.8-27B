@@ -40,11 +40,13 @@ def stream_once(port, prompt, max_tokens, results, index):
     """One streaming completion; record the gap between successive tokens."""
     payload = json.dumps(dict(model='qwen-longctx', prompt=prompt,
                               max_tokens=max_tokens, temperature=0.0,
-                              stream=True)).encode()
+                              stream=True,
+                              stream_options=dict(include_usage=True))).encode()
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})
     gaps, tokens, started = [], 0, time.perf_counter()
     first_token_at = None
+    entry = {}
     try:
         with urlopen(request, timeout=900) as response:
             previous = None
@@ -59,6 +61,15 @@ def stream_once(port, prompt, max_tokens, results, index):
                     chunk = json.loads(body)
                 except ValueError:
                     continue
+                if chunk.get('error') is not None:
+                    # vLLM reports a rejected request inside the stream. Without this
+                    # the loop simply saw no 'text' and reported zero tokens with no
+                    # reason, which is what run 35418622804 did.
+                    entry['error'] = str(chunk['error'])[:300]
+                    break
+                usage = chunk.get('usage')
+                if usage:
+                    entry['prompt_tokens'] = usage.get('prompt_tokens')
                 text = (chunk.get('choices') or [{}])[0].get('text', '')
                 if not text:
                     continue
@@ -69,9 +80,10 @@ def stream_once(port, prompt, max_tokens, results, index):
                 elif previous is not None:
                     gaps.append(now - previous)   # first token deliberately dropped
                 previous = now
-        results[index] = dict(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps],
-                              ttft_s=(first_token_at - started) if first_token_at else None,
-                              wall_s=time.perf_counter() - started)
+        entry.update(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps],
+                     ttft_s=(first_token_at - started) if first_token_at else None,
+                     wall_s=time.perf_counter() - started)
+        results[index] = entry
     except BaseException as error:
         results[index] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]))
 
@@ -156,8 +168,14 @@ def main():
                 time.sleep(2)
         report.update(ready=True, startup_seconds=round(time.perf_counter() - started, 1))
 
+        # Eight, not six. The phrase runs about six BPE tokens, so dividing by six
+        # targeted the whole budget and overshot max_model_len when the real count
+        # ran high; run 35418622804 then had every request rejected in-band and
+        # reported zero tokens with no reason. Undershooting costs a little KV
+        # occupancy and keeps the request servable, and the usage field now reports
+        # what the prompt actually came to.
         prompt = 'def solve(n):\n    # ' + ('compute the answer carefully. ' *
-                                            max(1, options.prompt_tokens // 6))
+                                            max(1, options.prompt_tokens // 8))
         results = [None] * options.users
         threads = [threading.Thread(target=stream_once,
                                     args=(options.port, prompt, options.max_tokens,
