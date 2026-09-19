@@ -27,6 +27,22 @@ class FastPolicyTests(unittest.TestCase):
             config.scheduler_config.max_num_seqs = capacity
             self.assertEqual(internal_batch_capacity(config), capacity)
 
+    def test_concurrent_requests_admitted_up_to_the_device_slots(self):
+        """Lifted 2026-09-19: the bound is the device's own native_gdn_slots."""
+        for capacity in (1, 2, 4, 8):
+            config = self.fixture()
+            config.scheduler_config.max_num_seqs = capacity
+            profile = validate_fast_config(config)
+            self.assertEqual(profile['scheduler_requests'], capacity)
+            self.assertEqual(profile['native_gdn_slots'], 8)
+
+    def test_ignore_eos_accepts_either_boolean(self):
+        """Relaxed to a type check; it asserted output comparability, not correctness."""
+        for value in (True, False):
+            sample = self.sampling()
+            sample.ignore_eos = value
+            validate_request_sampling(sample, prompt_tokens=4096)
+
     def test_long_contexts_admitted_in_whole_pages(self):
         """The 4352 pin is now a floor: capture planning is position-parameterised."""
         for model_len in (4352, 8192, 65536, 163840):
@@ -44,9 +60,15 @@ class FastPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_fast_config(config)
 
-    def test_scheduler_request_pin_is_unchanged(self):
-        """Concurrency stays pinned: session state in the fast path is singular."""
-        for capacity in (2, 4, 8):
+    def test_scheduler_requests_bounded_by_device_slots(self):
+        """Was test_scheduler_request_pin_is_unchanged, which asserted a pin on 1.
+
+        The pin was lifted on 2026-09-19 to the device's own native_gdn_slots, so
+        the half of this test that survives is the ceiling: concurrency must not be
+        unbounded just because it is no longer one. Admission up to 8 is covered by
+        test_concurrent_requests_admitted_up_to_the_device_slots.
+        """
+        for capacity in (9, 16, 0, -1, 'two', None):
             config = self.fixture()
             config.scheduler_config.max_num_seqs = capacity
             with self.assertRaises(ValueError):
@@ -77,7 +99,7 @@ class FastPolicyTests(unittest.TestCase):
         """These are what make output bit-comparable; loosening them invalidates every
         correctness claim downstream."""
         for field, value in (('temperature', 0.7), ('n', 2), ('min_tokens', 1),
-                             ('ignore_eos', True), ('presence_penalty', 0.1),
+                             ('ignore_eos', 'yes'), ('presence_penalty', 0.1),
                              ('frequency_penalty', 0.1), ('repetition_penalty', 1.1),
                              ('logprobs', 5), ('prompt_logprobs', 5), ('stop', ['x']),
                              ('structured_outputs', object()), ('logit_bias', {1: 1.0}),
@@ -91,7 +113,8 @@ class FastPolicyTests(unittest.TestCase):
                 validate_request_sampling(self.sampling(), prompt_tokens=prompt_tokens)
 
     def test_unsupported_configs_rejected(self):
-        for group, field, value in (('scheduler_config', 'max_num_seqs', 2),
+        for group, field, value in (('scheduler_config', 'max_num_seqs', 9),
+                ('scheduler_config', 'max_num_seqs', 0),
                 ('scheduler_config', 'async_scheduling', True), ('parallel_config', 'tensor_parallel_size', 2),
                 ('cache_config', 'enable_prefix_caching', True), ('cache_config', 'block_size', 32),
                 ('model_config', 'max_model_len', 4351), ('model_config', 'max_model_len', 8100),
@@ -116,7 +139,7 @@ class FastPolicyTests(unittest.TestCase):
 
         validate_request_sampling(parameters(), prompt_tokens=4096)
         for field, value in (('temperature', .7), ('n', 2), ('max_tokens', 512), ('min_tokens', 1),
-                ('ignore_eos', True), ('logprobs', 1), ('repetition_penalty', 1.1),
+                ('ignore_eos', 'yes'), ('logprobs', 1), ('repetition_penalty', 1.1),
                 ('stop', ['END']), ('stop_token_ids', [13]), ('structured_outputs', object()),
                 ('logit_bias', {13: 1}), ('allowed_token_ids', [13]), ('bad_words', ['bad'])):
             sample = parameters()
