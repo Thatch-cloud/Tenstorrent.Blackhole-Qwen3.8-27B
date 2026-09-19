@@ -68,7 +68,7 @@ jobs:
           for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
             > experiment-results/host-pressure-before.txt
           cat experiment-results/host-pressure-before.txt
-      - name: Serve at 4 users and measure inter-token latency
+      - name: T2 gate - fast path at one user above 4352 positions
         working-directory: cycle
         timeout-minutes: 34
         shell: bash
@@ -76,7 +76,9 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           # The serving image, not the experiment image the probes used.
-          image=sha256:29153355a914393e98345ff77c5bd3619943f1d93b6fd0042d7fe538665c2ff1
+          # Image built from this branch by qwen-fast-serving-image.yml, so it carries the
+          # lifted context pin. The pinned canary image does not.
+          image=sha256:4942871e27f68277eae874d12cd7b9295cfdc5f8e083766c8839984e76ed511f
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           cache=/home/thatch/.cache/qwen-experiments
           revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
@@ -117,7 +119,7 @@ jobs:
             -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B /experiment-scripts/ci/longctx_cycle_bench.py \
-            --users 4 --context 163840 --max-tokens 64 \
+            --users 1 --context 65536 --max-tokens 64 \
             > experiment-results/cycle-stdout.log 2>&1 || true
           sed -n '/CYCLE_BENCH_JSON_BEGIN/,/CYCLE_BENCH_JSON_END/p' \
             experiment-results/cycle-stdout.log | sed '1d;$d' \
