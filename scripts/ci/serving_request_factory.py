@@ -33,7 +33,10 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     seed = state.output_token_ids[0]
     if type(seed) is not int or not 0 <= seed < model.args.vocab_size:
         raise ValueError('Valid target-selected prefill seed required')
-    if seed in eos_ids:
+    # Only when EOS is honoured. Under ignore_eos the request keeps decoding, so it
+    # needs a verifier exactly like any other - run 35442208627 stopped here after
+    # the lifecycle had already been corrected for the same assumption one layer up.
+    if seed in eos_ids and not getattr(state.sampling_params, 'ignore_eos', False):
         raise ValueError('Terminal prefill must finish without allocating a verifier')
     if len(state.block_ids) != 1:
         raise ValueError('One scheduler-owned KV group required')
