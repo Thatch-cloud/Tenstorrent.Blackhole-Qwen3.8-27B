@@ -1,17 +1,21 @@
 """Explicit committed-block update for the pinned TT runner's single-request state."""
 
 
-def validate_runner_reservation(runner, captured_state, ticket):
+def validate_runner_reservation(runner, captured_state, ticket, users=1):
+    # `users` is how many requests share this scheduled step. At one it is exactly
+    # the old contract; packed, the batch holds one row per user and a request's
+    # row is whichever index the batch gave it, not row zero.
     state = runner.requests.get(ticket.request_id)
     batch = runner.input_batch
-    if (state is not captured_state or state is None or batch.num_reqs != 1
-            or batch.req_id_to_index.get(ticket.request_id) != 0
-            or batch.req_output_token_ids[0] is not state.output_token_ids
+    row = batch.req_id_to_index.get(ticket.request_id)
+    if (state is not captured_state or state is None or batch.num_reqs != users
+            or row is None or not 0 <= row < users
+            or batch.req_output_token_ids[row] is not state.output_token_ids
             or state.prompt_token_ids is None):
         raise ValueError('One live captured request and stable output binding required')
-    start = int(batch.num_tokens[0])
+    start = int(batch.num_tokens[row])
     if (start != ticket.position + 1 or start != len(state.prompt_token_ids) + len(state.output_token_ids)
-            or int(batch.num_computed_tokens_cpu[0]) != ticket.position
+            or int(batch.num_computed_tokens_cpu[row]) != ticket.position
             or state.num_computed_tokens != ticket.position):
         raise ValueError('Runner and prepared target frontier differ before verification')
     end = start + len(ticket.tokens)
@@ -19,14 +23,15 @@ def validate_runner_reservation(runner, captured_state, ticket):
         raise ValueError('Runner storage cannot hold the maximum committed block')
 
 
-def apply_committed_output(runner, captured_state, output):
+def apply_committed_output(runner, captured_state, output, users=1):
     request_id = output.request_id
     state = runner.requests.get(request_id)
     batch = runner.input_batch
-    if state is not captured_state or state is None or batch.num_reqs != 1:
+    if state is not captured_state or state is None or batch.num_reqs != users:
         raise ValueError('One live request with unchanged captured identity required')
     row = batch.req_id_to_index.get(request_id)
-    if (row is None or row != 0 or batch.req_output_token_ids[row] is not state.output_token_ids
+    if (row is None or not 0 <= row < users
+            or batch.req_output_token_ids[row] is not state.output_token_ids
             or state.prompt_token_ids is None):
         raise ValueError('Stable single-request token row and shared output-list binding required')
     tokens = tuple(output.token_ids)

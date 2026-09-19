@@ -42,7 +42,7 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
         runner._update_states(scheduled)
         for entry in ordered:
             bridge, ticket = entry['bridge'], entry['ticket']
-            validate_runner_reservation(runner, bridge.state, ticket)
+            validate_runner_reservation(runner, bridge.state, ticket, len(ordered))
             if len(bridge.state.block_ids) != 1:
                 raise ValueError('One explicit target KV page group required')
             bridge.page_binding.refresh(bridge.state.block_ids[0], position=ticket.position,
@@ -53,7 +53,7 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
         for entry, output in zip(ordered, outputs):
             if output.request_id != entry['request_id']:
                 raise ValueError('Packed outputs must follow the scheduled order')
-            apply_committed_output(runner, entry['bridge'].state, output)
+            apply_committed_output(runner, entry['bridge'].state, output, len(ordered))
         return packed_model_runner_output(outputs)
     except BaseException:
         for bridge in bridges.values():
