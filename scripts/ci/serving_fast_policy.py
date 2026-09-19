@@ -1,4 +1,16 @@
-"""Opt-in configuration contract; importing this module does not enable TT speculation."""
+"""Opt-in configuration contract; importing this module does not enable TT speculation.
+
+The model-length ceiling was originally pinned to exactly 4352 (4096 context plus a
+256-token output budget) as an initial profile. Capture planning in
+attention_request_plan is parameterised by position rather than tied to that number,
+so the pin is relaxed to a floor: any whole number of 64-token pages at or above 4352.
+The scheduler request pin is a different matter and stays - session state through
+serving_lifecycle, serving_runner_bridge and the trace bucket is singular, so more
+than one in-flight request needs code, not a wider contract.
+"""
+
+OUTPUT_BUDGET = 256
+MINIMUM_MODEL_LEN = 4352
 
 
 def fast_requested(config):
@@ -22,16 +34,20 @@ def validate_fast_config(config):
             or parallel.tensor_parallel_size != 1 or parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_size != 1):
         raise ValueError('Synchronous single-request single-worker serving required; TT mesh supplies TP2')
+    model_len = config.model_config.max_model_len
     if (cache.block_size != 64 or cache.enable_prefix_caching is not False
-            or config.lora_config is not None or config.model_config.max_model_len != 4352):
-        raise ValueError('Initial fast profile requires 64-token pages, 4352 positions, no prefix cache or LoRA')
+            or config.lora_config is not None or type(model_len) is not int
+            or model_len < MINIMUM_MODEL_LEN or model_len % cache.block_size):
+        raise ValueError('Fast profile requires 64-token pages, at least %d positions in whole '
+                         'pages, no prefix cache or LoRA' % MINIMUM_MODEL_LEN)
     if (speculative is None or speculative.method != 'dflash'
             or speculative.num_speculative_tokens != 15
             or speculative.draft_sample_method != 'greedy'
             or speculative.rejection_sample_method != 'standard'):
         raise ValueError('Explicit greedy 15-proposal DFlash T16 policy required')
     return dict(scheduler_requests=1, native_gdn_slots=8, verifier_rows=16,
-        physical_devices=2, context_tokens=4096, output_budget=256,
+        physical_devices=2, context_tokens=model_len - OUTPUT_BUDGET,
+        output_budget=OUTPUT_BUDGET, max_model_len=model_len,
         serving_qualified=False, performance_qualified=False)
 
 

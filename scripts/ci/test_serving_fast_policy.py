@@ -27,11 +27,37 @@ class FastPolicyTests(unittest.TestCase):
             config.scheduler_config.max_num_seqs = capacity
             self.assertEqual(internal_batch_capacity(config), capacity)
 
+    def test_long_contexts_admitted_in_whole_pages(self):
+        """The 4352 pin is now a floor: capture planning is position-parameterised."""
+        for model_len in (4352, 8192, 65536, 163840):
+            config = self.fixture()
+            config.model_config.max_model_len = model_len
+            profile = validate_fast_config(config)
+            self.assertEqual(profile['max_model_len'], model_len)
+            self.assertEqual(profile['context_tokens'], model_len - 256)
+            self.assertEqual(profile['output_budget'], 256)
+
+    def test_short_or_partial_page_lengths_still_rejected(self):
+        for model_len in (4096, 4351, 4353, 8100):
+            config = self.fixture()
+            config.model_config.max_model_len = model_len
+            with self.assertRaises(ValueError):
+                validate_fast_config(config)
+
+    def test_scheduler_request_pin_is_unchanged(self):
+        """Concurrency stays pinned: session state in the fast path is singular."""
+        for capacity in (2, 4, 8):
+            config = self.fixture()
+            config.scheduler_config.max_num_seqs = capacity
+            with self.assertRaises(ValueError):
+                validate_fast_config(config)
+
     def test_unsupported_configs_rejected(self):
         for group, field, value in (('scheduler_config', 'max_num_seqs', 2),
                 ('scheduler_config', 'async_scheduling', True), ('parallel_config', 'tensor_parallel_size', 2),
                 ('cache_config', 'enable_prefix_caching', True), ('cache_config', 'block_size', 32),
-                ('model_config', 'max_model_len', 65536), ('speculative_config', 'num_speculative_tokens', 31),
+                ('model_config', 'max_model_len', 4351), ('model_config', 'max_model_len', 8100),
+                ('speculative_config', 'num_speculative_tokens', 31),
                 ('speculative_config', 'method', 'ngram'), ('speculative_config', 'draft_sample_method', 'probabilistic')):
             config = self.fixture()
             setattr(getattr(config, group), field, value)
