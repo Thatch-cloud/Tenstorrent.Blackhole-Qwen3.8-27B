@@ -50,8 +50,22 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
 
     with ExitStack() as owned:
         owned.callback(release_capture)
+        # T1 diagnostic. dflash_device's pin raises one message for fourteen or-ed
+        # terms and names none of them, and run 35433428038 hit it on the FIRST
+        # request once two users were admitted. Report what is about to be passed,
+        # so which term fires is read rather than guessed.
+        _qwen_outputs = capture.outputs()
+        try:
+            from loguru import logger as _qwen_logger
+            _qwen_logger.info(
+                "[PINDIAG] position={} feature_start={} features={} block_ids={}",
+                len(prompt), len(prompt) - 2048,
+                [tuple(getattr(v, 'shape', ())) for v in _qwen_outputs],
+                getattr(state, 'block_ids', None))
+        except BaseException:
+            pass
         device = components.device(operations, model, components.collectives(model.mesh_device),
-            layers, projection, selector, capture.outputs(), position=len(prompt),
+            layers, projection, selector, _qwen_outputs, position=len(prompt),
             block_rows=16, proposal_capture=True, max_new_tokens=256,
             fused_convolution=True, feature_start=len(prompt) - 2048,
             cache_history=True, cache_projection_capture=False, live_query_qk=False,
