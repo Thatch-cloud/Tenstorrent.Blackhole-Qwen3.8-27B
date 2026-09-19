@@ -22,31 +22,36 @@ def instance_overrides(bindings):
                 delattr(instance, name)
 
 
-def validate_pack(pack):
-    """Refuse a packed multi-user verify block until the GDN seam is handled.
+def validate_pack(pack, gdn_layers=48):
+    """Per-user rows for a packed verify block, or None for one sequence.
 
-    The 16 full-attention layers are per row, and target_packed_pages builds the
-    per-row positions and page tables they need. The other 48 layers are GDN, and
-    there the row axis is TIME for one sequence: gdn_prefix.decode_projected steps
-    one row at a time through a single recurrent state and its projection callback
-    refuses any batch but one. Packed rows would therefore continue the previous
-    user's recurrence - wrong for every row of the second user, and it would leave
-    the first user's state advanced by the whole block.
+    Each user brings its own frontier, its own page table, its own accepted prefix,
+    and - because the row axis is TIME for the 48 GDN layers - its own per-layer
+    checkpoint and carried recurrent state. Without that last pair, user B would
+    continue user A's recurrence: wrong for every row of B, and A left advanced by
+    the whole block.
 
-    The weight-heavy GDN work, the qkvzab and output projections, already runs once
-    across all rows and is per-token independent, so what is missing is a state swap
-    at each segment boundary rather than a batch dimension in the kernels. Until that
-    exists this raises, because the alternative is silently wrong committed tokens.
+    The weight-heavy work is untouched by packing. Each GDN layer still runs one
+    input projection across all rows and one output projection over the whole
+    block; only the elementwise recurrence runs once per segment.
     """
     if pack is None:
         return None
     from target_packed_pages import packed_rows
 
-    packed = packed_rows(pack)
-    if len(packed['segments']) > 1:
-        raise ValueError('Packed verify rows need a per-segment GDN recurrent state; '
-                         'gdn_prefix.decode_projected steps one sequence through one state, '
-                         'so a pack would continue the previous user rather than restart')
+    users = tuple(pack)
+    packed = packed_rows([dict(start=user['start'], rows=user['rows'], pages=user['pages'])
+                          for user in users])
+    for user, (first, last) in zip(users, packed['segments']):
+        width = last - first
+        if (type(user.get('prefix')) is not int or not 0 <= user['prefix'] <= width
+                or len(user.get('checkpoints') or ()) != gdn_layers
+                or len(user.get('slots') or ()) != gdn_layers):
+            raise ValueError('Each packed user needs an accepted prefix within its own segment '
+                             'and one GDN checkpoint and carried state per linear layer')
+    packed['prefixes'] = tuple(user['prefix'] for user in users)
+    packed['checkpoints'] = tuple(tuple(user['checkpoints']) for user in users)
+    packed['slots'] = tuple(tuple(user['slots']) for user in users)
     return packed
 
 
@@ -78,12 +83,15 @@ class ModelBatch:
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
-                 attention_audit=False, commit_only_gdn=False):
+                 attention_audit=False, commit_only_gdn=False, pack=None):
         import torch
         import ttnn
         from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
+        self.pack = validate_pack(pack)
+        if self.pack is not None and self.pack['rows'] != self.rows:
+            raise ValueError('Packed segments must cover exactly the block rows')
         validate_checkpoint(self.rows, prefix)
         if type(commit_only_gdn) is not bool or (commit_only_gdn and self.rows > 1 and not (
                 device_loop_gdn and packed_checkpoints and batch_conv and retain_records)):
@@ -185,12 +193,23 @@ class ModelBatch:
             self.buffers.append(result)
             return result
 
-        positions = torch.arange(start, start + self.rows, dtype=torch.int32)
+        # Packed, the rows belong to different users: each brings its own frontier
+        # and its own blocks, so neither a single arange nor one repeated page table
+        # describes the block any more.
+        positions = (self.pack['positions'] if self.pack is not None
+                     else torch.arange(start, start + self.rows, dtype=torch.int32))
+        page_rows = self.pack['pages'] if self.pack is not None else pages.repeat(self.rows, 1)
+        if tuple(positions.shape) != (self.rows,) or page_rows.shape[0] != self.rows:
+            raise ValueError('One position and one page-table row per query row required')
         self.tokens = upload(torch.tensor(tokens, dtype=torch.int32).reshape(self.rows, 1), ttnn.uint32)
         self.positions = upload(positions, ttnn.int32)
-        self.pages = upload(pages.repeat(self.rows, 1), ttnn.int32)
+        self.pages = upload(page_rows, ttnn.int32)
         singleton_pages = upload(pages, ttnn.int32)
         self.singleton_pages = singleton_pages
+        # Per row, so a packed row reads its own user's blocks rather than the first
+        # user's table repeated.
+        self.row_pages = ([upload(page_rows[index:index + 1], ttnn.int32) for index in range(self.rows)]
+                          if self.pack is not None else self.row_pages)
         singleton_positions = [upload(position.reshape(1), ttnn.int32) for position in positions]
         self.singleton_positions = singleton_positions
         self.cos, self.sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
@@ -210,7 +229,7 @@ class ModelBatch:
             if attention_audit:
                 from attention_replay_audit import AttentionReplayAudit
                 self.replay_reader.audit = AttentionReplayAudit(ttnn,
-                    SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows),
+                    SerialAttentionReader(ttnn, singleton_positions, self.row_pages),
                     pages=pages[:, :self.replay_capacity // 64],
                     output_directory='/experiment/results/attention-mismatch', masks=self.replay_reader.metadata)
             if self.replay_reader.start != start:
@@ -219,12 +238,12 @@ class ModelBatch:
         for layer in model.layers:
             attention = layer.attention
             if layer.is_full_attention:
-                writer = SerialCacheWriter(ttnn, singleton_positions, [singleton_pages] * self.rows,
+                writer = SerialCacheWriter(ttnn, singleton_positions, self.row_pages,
                                            attention._kv_shard_cfg(1))
                 if self.ordered_cache:
                     writer = OrderedCacheWriter(model.mesh_device, ttnn, cache_kernels)
                 self.writers.append(writer)
-                reader = SerialAttentionReader(ttnn, singleton_positions, [singleton_pages] * self.rows) if serial_sdpa else None
+                reader = SerialAttentionReader(ttnn, singleton_positions, self.row_pages) if serial_sdpa else None
                 if self.replay_reader is not None:
                     reader = self.replay_reader
                 elif self.grouped_attention:
@@ -252,7 +271,7 @@ class ModelBatch:
             else:
                 if helpers[gdn_index].gdn is not attention:
                     raise ValueError("GDN checkpoint layer order mismatch")
-                forward = self.gdn_forward(attention, helpers[gdn_index], checkpoints[gdn_index])
+                forward = self.gdn_forward(attention, helpers[gdn_index], checkpoints[gdn_index], gdn_index)
                 if profiler:
                     forward = profiler.wrap("gdn.block", forward)
                     for name, category in (("_project_qkvzab_raw", "gdn.input_projection"),
@@ -269,7 +288,7 @@ class ModelBatch:
             for name, category in (("embd", "embedding"), ("_final_norm_decode", "final_norm"), ("_lm_head", "lm_head")):
                 self.bindings.append((model, name, profiler.wrap(category, getattr(model, name))))
 
-    def gdn_forward(self, layer, helper, checkpoint):
+    def gdn_forward(self, layer, helper, checkpoint, gdn_slot=0):
         operations = self.operations
         if self.device_loop_gdn:
             from pathlib import Path
@@ -288,7 +307,16 @@ class ModelBatch:
                 if tuple(value.shape) != (1, 1, self.rows, 5120):
                     raise ValueError('Unexpected full-model GDN input geometry')
                 packed = operations.reshape(value, (1, self.rows, 5120))
-                result = state.decode(packed, checkpoint, self.prefix)
+                if self.pack is None:
+                    result = state.decode(packed, checkpoint, self.prefix)
+                else:
+                    # One recurrence per user, each from its own carried state, over
+                    # its own slice of the single input projection.
+                    result = state.decode(packed,
+                        [user[gdn_slot] for user in self.pack['checkpoints']],
+                        list(self.pack['prefixes']),
+                        segments=self.pack['segments'],
+                        slots=[user[gdn_slot] for user in self.pack['slots']])
                 if result.get('commit_only_gdn', False) != self.commit_only_gdn:
                     raise AssertionError('Commit-only GDN must engage in every selected layer')
                 finish_output(layer, result, operations, tt_all_reduce)

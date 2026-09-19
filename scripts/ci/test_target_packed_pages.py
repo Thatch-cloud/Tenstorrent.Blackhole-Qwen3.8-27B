@@ -55,22 +55,46 @@ class TargetPackedPagesTests(unittest.TestCase):
         self.assertEqual((spans, total), (((0, 4), (4, 8)), 8))
 
 
-class ModelBatchGuardTests(unittest.TestCase):
-    """A packed ModelBatch must refuse until the GDN seam is handled.
+class ModelBatchPackTests(unittest.TestCase):
+    """A pack is only accepted once every user carries its own GDN state.
 
-    gdn_prefix.decode_projected runs one row at a time through a single recurrent
-    state, so packed rows would continue the previous user's recurrence. That is
-    wrong for every row of the second user, not just the first, and it also leaves
-    the first user's state advanced by the whole block.
+    The row axis is TIME for the 48 GDN layers, so each user needs its own
+    per-layer checkpoint and carried recurrent state. Without them user B would
+    continue user A's recurrence - wrong for every row of B, and A left advanced
+    by the whole block - so an incomplete pack is refused rather than run.
     """
 
-    def test_model_batch_refuses_a_pack(self):
+    def user(self, start, value, prefix=12, layers=48):
+        return dict(start=start, rows=16, pages=table(4, value), prefix=prefix,
+                    checkpoints=['ck%d' % index for index in range(layers)],
+                    slots=['slot%d' % index for index in range(layers)])
+
+    def test_a_complete_pack_is_accepted_and_carries_the_per_user_state(self):
         from model_batch import validate_pack
 
-        with self.assertRaises(ValueError) as caught:
-            validate_pack([dict(start=0, rows=16, pages=table(4, 1)),
-                           dict(start=0, rows=16, pages=table(4, 2))])
-        self.assertIn('GDN', str(caught.exception))
+        packed = validate_pack([self.user(0, 1, prefix=12), self.user(500, 2, prefix=9)])
+        self.assertEqual(packed['rows'], 32)
+        self.assertEqual(packed['segments'], ((0, 16), (16, 32)))
+        self.assertEqual(packed['prefixes'], (12, 9))
+        self.assertEqual(len(packed['checkpoints']), 2)
+        self.assertEqual(len(packed['slots'][0]), 48)
+        self.assertTrue(bool((packed['pages'][:16] == 1).all()))
+        self.assertTrue(bool((packed['pages'][16:] == 2).all()))
+
+    def test_a_pack_without_per_layer_gdn_state_is_refused(self):
+        from model_batch import validate_pack
+
+        for broken in ([dict(start=0, rows=16, pages=table(4, 1)),
+                        dict(start=0, rows=16, pages=table(4, 2))],
+                       [self.user(0, 1), self.user(0, 2, layers=47)],
+                       [self.user(0, 1), dict(self.user(0, 2), prefix=17)]):
+            with self.assertRaises(ValueError) as caught:
+                validate_pack(broken)
+            self.assertIn('GDN', str(caught.exception))
+
+    def test_no_pack_stays_none(self):
+        from model_batch import validate_pack
+
         self.assertIsNone(validate_pack(None))
 
 
