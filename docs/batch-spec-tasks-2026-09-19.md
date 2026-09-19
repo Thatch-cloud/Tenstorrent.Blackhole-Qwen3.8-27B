@@ -144,3 +144,55 @@ sum over one.
   second would be needed. CPU-testable.
 - **T5c** `_sample` for N seeds and N bridges.
 - **T6** The hook. Unscoped until T5a says whether captures can coexist.
+
+## T5a: ANSWERED. Two concurrent captures are structurally impossible
+
+No device needed; the source settles it.
+
+```python
+def capture(self):
+    if self.started or self.closed             or hasattr(self.model, '_qwen_dflash_prefill_capture')             or hasattr(self.model, '_qwen_target_feature_capture'):
+        raise ValueError('One non-nested native prefill capture required')
+```
+
+`PrefillWindowCapture.capture()` installs itself **as an attribute on the model**
+through `instance_overrides`, and monkey-patches `model._forward_prefill_chunk_masked_tp`
+with its own wrapper. There is one model. The guard exists precisely to stop a second.
+
+It is not incidental. The wrapper carries per-capture sequence state:
+
+```python
+if not self.active or chunk_start != self.cursor:
+    raise ValueError('Prefill chunks must execute once in absolute sequence order')
+self.cursor += valid_len
+```
+
+One `cursor`, tracking absolute chunk order for one sequence. Two interleaved prefills
+break that ordering check even if the attribute collision were solved.
+
+**So T5b as written is unreachable**: it was going to hold N captures, and N captures
+cannot exist. The boundary is below `serving_lifecycle`, in how prefill capture attaches
+to the model.
+
+Three ways on, none small:
+
+1. **Serialise the prefills.** Admit both, prefill one at a time, then decode both. The
+   capture is only live *during* prefill - `_sample` sets it to None once the bridge is
+   built - so the constraint may never be violated. Cheapest thing that could work, and
+   it would make this a scheduling change rather than a capture-machinery one.
+2. **Per-sequence capture.** Key the model attribute and the cursor by request. Touches
+   `instance_overrides` and the chunk wrapper.
+3. **Capture-free second prefill.** Almost certainly not: the features *are* the DFlash
+   input.
+
+Option 1 first, and the question it needs is observable: does `scheduled_new_reqs` ever
+carry two, or can the scheduler be made to deliver them in separate `_execute` calls?
+
+## Iteration speed, fixed
+
+The serving CPU suite runs **locally in 15 seconds** with `py -3.10` (see
+[[tt-rig-benchmark-tooling]]). It had been running as a 10-minute CI round trip all day
+because `python` here is 3.7 and cannot parse the tests' PEP 604 unions, which presents
+as a test failure rather than a version problem. Every remaining lifecycle and policy
+task - T5b, T5c, most of T2 - is now a seconds-long loop. Only device behaviour, timing
+and capture still need the rig.
