@@ -77,8 +77,14 @@ class WorkerHookTests(unittest.TestCase):
         self.assertEqual(len(bridge.runner._pending_samples), 0)
         original_forward.assert_not_called()
         original_sampler.assert_not_called()
-        with self.assertRaises(RuntimeError):
-            worker.sample_tokens(None)
+        # The hook's own decode returns committed output and never defers, which is
+        # what original_sampler.assert_not_called() above shows. A sampler call that
+        # DOES arrive belongs to another request's prefill - a second user joining -
+        # so it reaches the runner rather than raising. The gate on whether a prefill
+        # is actually pending lives in the lifecycle, which is the only party that
+        # knows; this test asserts the delegation, not a refusal.
+        worker.sample_tokens(None)
+        original_sampler.assert_called_once_with(None)
         hook.close()
         hook.close()
         self.assertIs(bridge.runner.execute_model, original_forward)

@@ -91,6 +91,67 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(hook._execute(worker.model_runner, step), 'passed-through')
         self.assertEqual(len(seen), 1, 'the prefill step reached the runner')
 
+    def test_a_second_prefill_attaches_to_the_hook_instead_of_needing_another(self):
+        """This used to raise. One hook WAS the binding of one request to the
+        worker, so a second arrival could not decode at all - run 35436193682's
+        named boundary. Probe 35436807668 then showed the scheduler putting every
+        live decode in one step, so the worker serves them together or not at all,
+        and the hook holds a registry.
+        """
+        lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
+        lifecycle.packed_step = lambda entries, *, cancelled: []
+        sampler = worker.model_runner.sample_tokens
+        worker.execute_model(prefill)
+        worker.sample_tokens(None)
+        first = lifecycle.hook
+        self.assertIsNotNone(first)
+        self.assertEqual(lifecycle.decoding_ids, ['request'])
+
+        second = SimpleNamespace(req_id='second', prompt_token_ids=[1] * 4096,
+            num_computed_tokens=0, mm_features=[], prompt_embeds=None, lora_request=None,
+            sampling_params=prefill.scheduled_new_reqs[0].sampling_params)
+        step = SimpleNamespace(finished_req_ids=set(), scheduled_new_reqs=[second],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]), scheduled_spec_decode_tokens={},
+            num_scheduled_tokens={'second': 4096}, total_num_scheduled_tokens=4096)
+        sampler.return_value = SimpleNamespace(req_ids=['second'], sampled_token_ids=[[11]])
+        worker.model_runner.requests['second'] = SimpleNamespace(output_token_ids=[11])
+
+        def second_bridge(state, features):
+            features.close()
+            return SimpleNamespace(runner=worker.model_runner, failed=False,
+                request=SimpleNamespace(session=SimpleNamespace(request_id='second')),
+                close=lambda: None)
+
+        lifecycle.bridge_factory = second_bridge
+        worker.execute_model(step)
+        worker.sample_tokens(None)
+
+        self.assertIs(lifecycle.hook, first, 'the same hook serves both')
+        self.assertEqual(sorted(first.bridges), ['request', 'second'])
+        self.assertEqual(lifecycle.decoding_ids, ['request', 'second'])
+
+    def test_one_request_finishing_leaves_the_other_decoding(self):
+        """Detaching must not tear down the hook the other request is using."""
+        lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
+        lifecycle.packed_step = lambda entries, *, cancelled: []
+        worker.execute_model(prefill)
+        worker.sample_tokens(None)
+        hook = lifecycle.hook
+        other = Mock()
+        other.request.session.request_id = 'second'
+        other.runner = worker.model_runner
+        hook.attach(other)
+        lifecycle.decoding_ids.append('second')
+
+        # a real finish step still carries the scheduler's request lists
+        finished = SimpleNamespace(finished_req_ids={'request'}, total_num_scheduled_tokens=0,
+            scheduled_new_reqs=[], scheduled_cached_reqs=SimpleNamespace(req_ids=['second']))
+        worker.execute_model(finished)
+        self.assertIs(lifecycle.hook, hook, 'the hook survives')
+        self.assertEqual(list(hook.bridges), ['second'])
+        self.assertEqual(lifecycle.decoding_ids, ['second'])
+        self.assertEqual(lifecycle.decoding_id, 'second')
+
     def test_prefill_to_committed_decode_to_finished_cleanup(self):
         lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
         self.assertIsNone(worker.execute_model(prefill))

@@ -25,6 +25,9 @@ class FastWorkerHook:
         # Kept so a step that is not this request's decode can still reach the
         # runner. Captured before _replace, or it would capture the replacement.
         self.original_execute = runner.execute_model
+        # Same reason: a request that is not this hook's decode still needs the
+        # native deferred sampler for its prefill.
+        self.original_sample = runner.sample_tokens
         self._replace(runner, '_qwen_fast_hook', self)
         self._replace(runner, 'execute_model', MethodType(self._execute, runner))
         self._replace(runner, 'sample_tokens', MethodType(self._sample, runner))
@@ -62,6 +65,12 @@ class FastWorkerHook:
         # and a second arrival cannot prefill while the first decodes.
         if getattr(scheduled, 'scheduled_new_reqs', None):
             return self.original_execute(scheduled)
+        # A step that schedules no tokens is a bookkeeping step - a request
+        # finishing, for instance - not this hook's decode. With one bridge the
+        # lifecycle released the hook before such a step could arrive; holding
+        # several, it does not, so the pass-through has to be here.
+        if not getattr(scheduled, 'total_num_scheduled_tokens', 1):
+            return self.original_execute(scheduled)
         if len(self.bridges) == 1 and self.packed_step is None:
             return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
         from serving_packed_bridge import execute_packed_decode
@@ -70,7 +79,14 @@ class FastWorkerHook:
                                      packed_step=self.packed_step)
 
     def _sample(self, runner, grammar_output):
-        raise RuntimeError('Fast execution returns committed output directly; deferred sampling is forbidden')
+        # The hook's own decode returns committed output directly and never defers,
+        # so any sampler call arriving here belongs to ANOTHER request's prefill -
+        # which is exactly what a second user needs before it can join the block.
+        # The gate on that stays in the lifecycle, which is the only party that
+        # knows whether a prefill is actually pending.
+        if self.closed or runner is not self.runner:
+            raise ValueError('Fast worker ownership changed')
+        return self.original_sample(grammar_output)
 
     def _drafts(self, worker):
         if self.closed or worker is not self.worker:

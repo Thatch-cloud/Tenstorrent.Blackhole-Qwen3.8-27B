@@ -7,7 +7,8 @@ from serving_worker_hook import FastWorkerHook
 
 
 class FastServingLifecycle:
-    def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled):
+    def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
+                 packed_step=None):
         validate_fast_config(config)
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner._pending_samples
@@ -17,10 +18,14 @@ class FastServingLifecycle:
         self.worker, self.runner = worker, runner
         self.capture_factory, self.bridge_factory = capture_factory, bridge_factory
         self.eos_ids, self.cancelled = tuple(eos_ids), cancelled
+        self.packed_step = packed_step
         # request_id is the request in the PREFILL phase; decoding_id is the one
         # the hook serves. They were one field, which is why a second arrival
         # hit 'one complete fresh prefill' while the first was merely decoding.
         self.request_id = self.decoding_id = self.capture = self.hook = None
+        # Every request the hook is serving, in arrival order. decoding_id stays as
+        # the most recent, so existing single-user behaviour reads the same.
+        self.decoding_ids = []
         self.prefill_pending = self.failed = self.closed = False
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
@@ -45,14 +50,24 @@ class FastServingLifecycle:
             self.capture.close()
             self.capture = None
         self.request_id = self.decoding_id = None
+        self.decoding_ids = []
 
     def _execute(self, worker, scheduled):
         self._check()
         try:
             if self.prefill_pending:
                 raise ValueError('Prefill must be sampled before another execution')
-            if (self.request_id in scheduled.finished_req_ids
-                    or self.decoding_id in scheduled.finished_req_ids):
+            finished = set(scheduled.finished_req_ids)
+            for request_id in [value for value in self.decoding_ids if value in finished]:
+                # One finishing request must not tear down the hook the others are
+                # still decoding on.
+                self.decoding_ids.remove(request_id)
+                if self.hook is not None and len(self.hook.bridges) > 1:
+                    self.hook.detach(request_id)
+                    if self.decoding_id == request_id:
+                        self.decoding_id = self.decoding_ids[-1]
+            if (self.request_id in finished
+                    or (self.decoding_id in finished and not self.decoding_ids)):
                 self._release_request()
             if self.hook is not None:
                 # A prefill-only step for a NEW request, while another request
@@ -108,23 +123,24 @@ class FastServingLifecycle:
                 self.capture.close()
                 self.capture = None
                 return result
-            if self.hook is not None:
-                # The prefill succeeded, and handing it to a hook cannot: one
-                # FastWorkerHook binds one request to the worker, and that worker
-                # is already serving self.decoding_id. This is T6, and it is the
-                # boundary - not the scheduler, which serialises, and not the
-                # capture, which was released before this prefill began.
-                raise ValueError('A second FastWorkerHook would be required: one hook '
-                                 'binds one request to the worker, and %r is already '
-                                 'decoding' % (self.decoding_id,))
             bridge = self.bridge_factory(state, self.capture)
             try:
-                self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled)
+                if self.hook is None:
+                    self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled,
+                                               packed_step=self.packed_step)
+                else:
+                    # A hook used to BE the binding of one request to the worker,
+                    # which is why a second arrival could not decode. It now holds a
+                    # registry, because probe 35436807668 showed the scheduler
+                    # putting every live decode in one step: the worker serves them
+                    # together or not at all.
+                    self.hook.attach(bridge)
             except BaseException:
                 bridge.close()
                 raise
-            # The request leaves the prefill phase and becomes the decoding one, so
-            # the prefill slot is free for the next arrival.
+            # The request leaves the prefill phase and joins the decoding set, so the
+            # prefill slot is free for the next arrival.
+            self.decoding_ids.append(self.request_id)
             self.decoding_id = self.request_id
             self.request_id = None
             self.capture = None
