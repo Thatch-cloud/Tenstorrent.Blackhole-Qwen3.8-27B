@@ -27,27 +27,28 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results
           image=sha256:6ff990c9fe4b9fa283df4fbd62321052c8849bf7a9dbc80f5d9e5df2824774aa
-          script="${QWEN_PROBE:-probe_prefill_serialisation.py}"
-          name="qwen-cpu-probe-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
-          timeout -k 20 420 docker run --rm --name "$name" --network none \
-            --cap-drop ALL --security-opt no-new-privileges --pids-limit 1024 \
-            --cpus 8 --memory 16g --tmpfs /tmp:rw,size=512m \
-            --mount "type=bind,src=$PWD/scripts/ci,dst=/probe,readonly" \
-            -e PYTHONDONTWRITEBYTECODE=1 \
-            -e PYTHONPATH=/probe:/experiment-scripts/ci \
-            -e VLLM_PLUGINS='' -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-            -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 \
-            --entrypoint python3 "$image" -B "/probe/$script" \
-            > "experiment-results/probe.log" 2>&1 || true
+          # Every probe_*.py in scripts/ci runs, so adding a probe needs no workflow
+          # edit and a stale name cannot silently re-run yesterday's question. Each
+          # must print VERDICT; the step fails if any does not.
+          scripts=$(cd scripts/ci && ls probe_*.py | sort)
+          echo "probes: $scripts"
+          for script in $scripts; do
+            name="qwen-cpu-probe-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${script%.py}"
+            echo "=== $script ===" | tee -a experiment-results/probe.log
+            timeout -k 20 420 docker run --rm --name "$name" --network none --cap-drop ALL --security-opt no-new-privileges --pids-limit 1024 --cpus 8 --memory 16g --tmpfs /tmp:rw,size=512m --mount "type=bind,src=$PWD/scripts/ci,dst=/probe,readonly" -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/probe:/experiment-scripts/ci -e VLLM_PLUGINS='' -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 --entrypoint python3 "$image" -B "/probe/$script" >> experiment-results/probe.log 2>&1 || true
+            timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true
+          done
           if grep -qE 'Unable to find image|^docker: ' experiment-results/probe.log; then
-            echo 'The container never started.'
+            echo 'A container never started.'
             head -5 experiment-results/probe.log || true
             exit 1
           fi
           cat experiment-results/probe.log
-          if ! grep -q 'VERDICT' experiment-results/probe.log; then
-            echo 'Probe did not reach a verdict.'
+          want=$(echo "$scripts" | wc -w)
+          got=$(grep -c '^VERDICT' experiment-results/probe.log || true)
+          echo "probes=$want verdicts=$got"
+          if [ "$got" != "$want" ]; then
+            echo 'A probe did not reach a verdict.'
             exit 1
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
