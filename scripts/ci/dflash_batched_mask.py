@@ -150,3 +150,64 @@ def packed_rope_tables(users, block_rows=16, *, key_multiple=32):
     if any(tuple(table.shape) != (1, 1, key_rows, 128) for table in key):
         raise AssertionError('Packed key RoPE must cover every key segment')
     return dict(q=query, k=key)
+
+
+def key_value_plan(contexts, block_rows=16, *, key_multiple=32):
+    """Ordered pieces to concatenate into the packed key axis.
+
+    This mirrors what `execute_attention_branch` does for one user on the
+    cache_history path that production runs:
+
+        heads[name] = concat([cached_history[name], live[name]], dim=2)
+
+    where `cached_history` is the committed K/V for the prompt and `live` is the
+    K/V of the 32-row proposal block. At one user, `live` is 32 rows of which 16
+    carry the T16 proposals and 16 are padding, and context + 32 lands exactly on
+    the aligned span.
+
+    Packed, each user contributes its own cached rows, then ITS OWN 16 live rows
+    taken out of the shared block, then padding out to its aligned span. So the
+    live block is split by user rather than appended whole - the piece that makes
+    one proposal pass serve several users.
+    """
+    spans, key_rows = segments(contexts, block_rows, key_multiple=key_multiple)
+    plan = []
+    for span in spans:
+        pad = span['span'] - span['context'] - block_rows
+        if pad < 0:
+            raise ValueError('A user history leaves no room for its own proposal block')
+        plan.append(dict(kind='cached', user=span['user'], rows=span['context']))
+        plan.append(dict(kind='live', user=span['user'], rows=block_rows,
+                         source=slice(span['user'] * block_rows, (span['user'] + 1) * block_rows)))
+        if pad:
+            plan.append(dict(kind='pad', user=span['user'], rows=pad))
+    if sum(piece['rows'] for piece in plan) != key_rows:
+        raise AssertionError('The assembly plan must cover the packed key axis exactly')
+    return plan, spans, key_rows
+
+
+def live_key_rope(users, block_rows=16, *, key_multiple=32):
+    """The 32 rows of key RoPE that rotate the proposal block, in packed order.
+
+    For one user the branch slices `rope['k'][context:key_rows]`, the 32 rows whose
+    absolute positions are the block's own. Packed, each user needs the 16 rows at
+    its own segment offset, concatenated in block order.
+    """
+    import torch
+
+    users, contexts = user_contexts(users)
+    spans, _ = segments(contexts, block_rows, key_multiple=key_multiple)
+    tables = packed_rope_tables(users, block_rows, key_multiple=key_multiple)['k']
+    parts = []
+    for span in spans:
+        start = span['offset'] + span['context']
+        parts.append(tuple(table[:, :, start:start + block_rows] for table in tables))
+    used = len(spans) * block_rows
+    if used < 32:
+        last = spans[-1]
+        start = last['offset'] + last['context'] + block_rows
+        parts.append(tuple(table[:, :, start:start + 32 - used] for table in tables))
+    packed = tuple(torch.cat([part[index] for part in parts], dim=2) for index in (0, 1))
+    if any(tuple(table.shape) != (1, 1, 32, 128) for table in packed):
+        raise AssertionError('The live key RoPE must cover the whole 32-row proposal block')
+    return packed

@@ -180,3 +180,97 @@ class PackedRopeTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             packed_rope_tables([dict(position=10, history_rows=2048)], block_rows=16)
+
+
+class CachedHistoryPackingTests(unittest.TestCase):
+    """The production path: cache_history=True, native_proposal_attention, T16.
+
+    serving_request_factory builds the device with block_rows=16,
+    cache_history=True, native_proposal_attention=True, so the branch that must
+    pack is the one that does
+
+        heads[name] = concat([cached_history[name], live[name]], dim=2)
+
+    with cached_history shaped (1, 4, context, 128) and context in
+    (256, 512, 1024, 2048). Packed, each user contributes its cached rows and its
+    own 16 rows out of the shared live block.
+    """
+
+    def setUp(self):
+        torch.manual_seed(20260920)
+
+    def assemble(self, plan, cached, live):
+        """Concatenate the packed key axis exactly as the plan describes."""
+        pieces = []
+        for piece in plan:
+            if piece['kind'] == 'cached':
+                pieces.append(cached[piece['user']])
+            elif piece['kind'] == 'live':
+                pieces.append(live[:, :, piece['source']])
+            else:
+                pieces.append(torch.zeros(1, 4, piece['rows'], 128))
+            self.assertEqual(pieces[-1].shape[2], piece['rows'], piece)
+        return torch.cat(pieces, dim=2)
+
+    def test_packed_cached_history_matches_each_user_alone(self):
+        from dflash_batched_mask import key_value_plan
+
+        for contexts in ([2048, 2048], [512, 2048], [256, 1024], [1024, 1024]):
+            plan, spans, key_rows = key_value_plan(contexts, block_rows=16)
+            cached_key = [torch.randn(1, 4, context, 128) for context in contexts]
+            cached_value = [torch.randn(1, 4, context, 128) for context in contexts]
+            live_key, live_value = torch.randn(1, 4, 32, 128), torch.randn(1, 4, 32, 128)
+            query = torch.randn(1, 16, 32, 128)
+
+            packed = reference_sdpa(query, self.assemble(plan, cached_key, live_key),
+                                    self.assemble(plan, cached_value, live_value),
+                                    batched_attention_mask(contexts, block_rows=16))
+
+            for span, context in zip(spans, contexts):
+                rows = span['rows']
+                pad = torch.zeros(1, 4, span['span'] - context - 16, 128)
+                alone = reference_sdpa(
+                    query[:, :, rows],
+                    torch.cat([cached_key[span['user']], live_key[:, :, rows], pad], dim=2),
+                    torch.cat([cached_value[span['user']], live_value[:, :, rows], pad], dim=2),
+                    shipped_mask(context, block_rows=16)[:, :, :16, :])
+                self.assertTrue(torch.allclose(packed[:, :, rows], alone, rtol=1e-5, atol=1e-6),
+                                'user %d of %s moved when packed: max abs %g'
+                                % (span['user'], contexts, float((packed[:, :, rows] - alone).abs().max())))
+
+    def test_plan_covers_the_axis_and_splits_the_live_block_by_user(self):
+        from dflash_batched_mask import key_value_plan
+
+        plan, spans, key_rows = key_value_plan([2048, 2048], block_rows=16)
+        self.assertEqual(key_rows, 4160)
+        self.assertEqual([(piece['kind'], piece['rows']) for piece in plan],
+                         [('cached', 2048), ('live', 16), ('pad', 16),
+                          ('cached', 2048), ('live', 16), ('pad', 16)])
+        live = [piece['source'] for piece in plan if piece['kind'] == 'live']
+        self.assertEqual([(part.start, part.stop) for part in live], [(0, 16), (16, 32)])
+
+    def test_live_key_rope_is_each_users_own_block_positions(self):
+        from draft_head_preparation import rope_tables
+        from dflash_batched_mask import live_key_rope
+
+        users = [dict(position=9000, history_rows=2048), dict(position=1200, history_rows=1024)]
+        packed = live_key_rope(users, block_rows=16)
+        for index, user in enumerate(users):
+            expected = rope_tables(user['position'], 16)
+            for half, table in enumerate(expected):
+                got = packed[half][:, :, index * 16:(index + 1) * 16]
+                self.assertTrue(torch.equal(got, table), 'live key rope for user %d' % index)
+
+    def test_live_key_rope_at_one_user_matches_todays_slice(self):
+        from draft_head_preparation import rope_tables
+        from dflash_batched_mask import live_key_rope, packed_rope_tables
+
+        position, history_rows = 4096, 2048
+        user = [dict(position=position, history_rows=history_rows)]
+        spans, key_rows = segments([history_rows], 16)
+        today = tuple(table[:, :, history_rows:key_rows]
+                      for table in packed_rope_tables(user, block_rows=16)['k'])
+        packed = live_key_rope(user, block_rows=16)
+        for index, table in enumerate(today):
+            self.assertEqual(tuple(table.shape), (1, 1, 32, 128))
+            self.assertTrue(torch.equal(packed[index], table), 'live key rope index %d' % index)
