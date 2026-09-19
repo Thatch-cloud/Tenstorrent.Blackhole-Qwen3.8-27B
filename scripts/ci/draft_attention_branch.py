@@ -58,6 +58,10 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                              parameters, context, pack=None, wide_dot_placement=False, convolution_operation=None,
                              cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False):
     convolve = convolution_operation or grouped_causal_convolution
+    # The convolution is causal over rows, so a packed block must restart the shift
+    # at each user. Threaded into every call rather than defaulted, because the
+    # default is the one that silently mixes users.
+    seams = {}
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
     if parameters.get('native_kernel') and wide_dot_placement:
@@ -90,6 +94,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             raise ValueError('Packed users replace the single context and require the cached native proposal path')
         pack, contexts = user_contexts(pack)
         plan, spans, key_rows = key_value_plan(contexts, block_rows)
+        seams['boundaries'] = tuple((span['rows'].start, span['rows'].stop) for span in spans)
         if len(cached_history) != len(pack):
             raise ValueError('One committed K/V cache per packed user required')
     # The cached path never reads `history`: keys come from cached_history plus the
@@ -136,7 +141,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
     prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
-        fp32_intermediates=True, retain_temporaries=retain))
+        fp32_intermediates=True, retain_temporaries=retain, **seams))
     def normalize_head(name, head):
         norm = retain(operations.rms_norm(head, epsilon=1e-6, weight=parameters['head_norms'][name],
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
@@ -239,7 +244,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     reduced = retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
     finished = retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
-        fp32_intermediates=True, retain_temporaries=retain))
+        fp32_intermediates=True, retain_temporaries=retain, **seams))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (finished, hidden)]
     summed = retain(operations.add(*wide, dtype=operations.float32))
     return retain(operations.typecast(summed, operations.bfloat16))

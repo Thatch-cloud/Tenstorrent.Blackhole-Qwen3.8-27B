@@ -213,10 +213,6 @@ class DFlashDevice:
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
                          audit_convolution=False, cached_history=None, pack=None):
         operations = self.operations
-        # Packed, several users share the block and every one of its 32 rows is a
-        # live proposal, so there is nothing to pad away and nothing to trim off the
-        # end before the vocabulary head.
-        rows = 32 if pack is not None else self.block_rows
         live_query_qk = getattr(self, 'live_query_qk', False)
         native_proposal_attention = getattr(self, 'native_proposal_attention', False)
         if live_query_qk and addresses(operations, mask) not in self.validated_live_masks:
@@ -227,6 +223,14 @@ class DFlashDevice:
             raise ValueError('Every prepared learned layer requires a committed K/V cache')
         if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
             raise ValueError('Convolution audit requires the explicit fused candidate')
+        # After the guards, so an unregistered mask or a bad audit request still fails
+        # on its own terms rather than on a missing attribute.
+        # Packed, every one of the 32 rows is a live proposal, so there is nothing to
+        # pad away and nothing to trim off before the vocabulary head; and the causal
+        # convolution must restart at each user's first row.
+        rows = 32 if pack is not None else self.block_rows
+        seams = None if pack is None else tuple(
+            (index * self.block_rows, (index + 1) * self.block_rows) for index in range(len(pack)))
         stage('borrowed-embedding')
         local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
         local = retain(operations.reshape(local, (1, 1, rows, 2560)))
@@ -258,7 +262,8 @@ class DFlashDevice:
                     else cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
-                retain, parameters=mlp, trace_safe=True, **convolution_options)['output']
+                retain, parameters=mlp, trace_safe=True, **convolution_options,
+                **(dict(boundaries=seams) if pack is not None else {}))['output']
         stage('final-norm-and-selector-projection')
         normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
             compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))

@@ -65,7 +65,7 @@ class PackedBranchTests(unittest.TestCase):
         caches = [{name: SimpleNamespace(shape=(1, 4, context, 128), dtype='bf16') for name in ('k', 'v')}
                   for context in self.contexts]
         live = {name: object() for name in ('q', 'k', 'v')}
-        with patch('draft_attention_branch.grouped_causal_convolution', return_value=object()), \
+        with patch('draft_attention_branch.grouped_causal_convolution', return_value=object()) as convolve, \
                 patch('draft_attention_branch.gather_add_projection', return_value=object()), \
                 patch('draft_attention_branch.concatenate_query_heads', return_value=object()), \
                 patch('draft_attention_branch.split_projected_heads',
@@ -78,7 +78,7 @@ class PackedBranchTests(unittest.TestCase):
             execute_attention_branch(operations, mesh, collective, tensors.hidden, None,
                 tensors.mask, rope, lambda value: value, parameters=parameters, context=None,
                 pack=self.users(), cached_history=caches, native_proposal_mask_validated=True)
-        return projection, caches, live, native
+        return projection, caches, live, native, convolve
 
     def test_key_axis_is_assembled_exactly_as_the_plan_says(self):
         plan, spans, key_rows = key_value_plan(list(self.contexts), block_rows=16)
@@ -98,7 +98,7 @@ class PackedBranchTests(unittest.TestCase):
     def test_the_live_block_is_not_padded_and_uses_the_supplied_block_rope(self):
         plan, spans, key_rows = key_value_plan(list(self.contexts), block_rows=16)
         operations, weights, convolution, tensors, rope, pieces = self.fixture(key_rows)
-        projection, caches, live, native = self.run_packed(operations, weights, convolution, tensors, rope)
+        projection, caches, live, native, convolve = self.run_packed(operations, weights, convolution, tensors, rope)
         self.assertIs(projection.call_args.args[3], rope['live_k'],
                       'the packed path must rotate the block with the caller-supplied table')
         operations.pad.assert_not_called()
@@ -157,7 +157,26 @@ class PackedKeyBoundTests(unittest.TestCase):
         spans, key_rows = segments(list(tests.contexts), 16)
         self.assertEqual(key_rows, 4160)
         operations, weights, convolution, tensors, rope, pieces = tests.fixture(key_rows)
-        _, _, _, native = tests.run_packed(operations, weights, convolution, tensors, rope)
+        _, _, _, native, _ = tests.run_packed(operations, weights, convolution, tensors, rope)
         native.assert_called_once()
         self.assertEqual(native.call_args.kwargs.get('users'), 2,
                          'the packed user count must reach the kernel bound')
+
+
+class PackedConvolutionSeamTests(unittest.TestCase):
+    """The causal convolution shifts by one ROW, so a packed block must restart it.
+
+    Without segment spans, user B's first row convolves against user A's last draft.
+    That row is B's anchor, so the whole block below it is wrong - and no attention
+    mask can catch it, because the damage happens before attention.
+    """
+
+    def test_both_branch_convolutions_receive_the_segment_spans(self):
+        tests = PackedBranchTests()
+        plan, spans, key_rows = key_value_plan(list(tests.contexts), block_rows=16)
+        operations, weights, convolution, tensors, rope, pieces = tests.fixture(key_rows)
+        _, _, _, _, convolve = tests.run_packed(operations, weights, convolution, tensors, rope)
+        self.assertTrue(convolve.call_args_list, 'the branch convolves at least once')
+        for call in convolve.call_args_list:
+            self.assertEqual(call.kwargs.get('boundaries'), ((0, 16), (16, 32)),
+                             'every packed convolution needs the seams')

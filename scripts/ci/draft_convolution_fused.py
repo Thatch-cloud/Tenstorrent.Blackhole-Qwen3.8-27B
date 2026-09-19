@@ -6,9 +6,16 @@ from draft_convolution import validate_shapes
 
 
 def checked_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False,
-                        retain_temporaries=None, audit=False, checks=None, context=None):
+                        retain_temporaries=None, audit=False, checks=None, context=None, boundaries=None):
     if fp32_intermediates is not True or not callable(retain_temporaries) or type(audit) is not bool:
         raise ValueError('Fused request convolution requires exact FP32 arithmetic and an explicit lifetime owner')
+    if boundaries is not None:
+        # draft_convolution_fused_compute.cpp carries the causal row shift inside the
+        # kernel and takes only `rows` as a runtime argument, so it cannot restart the
+        # shift at a packed segment. Refusing here is the difference between a clear
+        # failure and user B's anchor silently convolving against user A's last draft.
+        raise ValueError('The fused convolution kernel has no packed segment boundaries; '
+                         'pack with the reference convolution until the kernel takes them')
     if audit and (not isinstance(checks, list) or not isinstance(context, dict)):
         raise ValueError('Audited convolution requires an owned check log and call context')
     output = fused_convolution(operations, mesh, hidden, dynamic, base)

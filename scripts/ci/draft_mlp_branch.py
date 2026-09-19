@@ -31,8 +31,9 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
 
 
 def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None,
-                       trace_safe=False, convolution_operation=None):
+                       trace_safe=False, convolution_operation=None, boundaries=None):
     convolve = convolution_operation or grouped_causal_convolution
+    seams = {} if boundaries is None else dict(boundaries=boundaries)
     if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
         raise ValueError('A padded32-row BF16 hidden block is required')
     if parameters is None:
@@ -57,14 +58,14 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
     bases = parameters['bases']
-    prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership))
+    prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership, **seams))
     projections = [project(prepared, parameters['device_projections'][index], (8, 10), 4)
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
     partial = project(activation, parameters['device_projections'][2], (8, 10), 2)
     reduced = retain(gather_add_projection(operations, mesh, collectives, partial, **ownership))
     rounded_output = retain(operations.typecast(reduced, operations.bfloat16))
-    finished = retain(convolve(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership))
+    finished = retain(convolve(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership, **seams))
     wide_finished = retain(operations.typecast(finished, operations.float32))
     wide_hidden = retain(operations.typecast(hidden, operations.float32))
     summed = retain(operations.add(wide_finished, wide_hidden, dtype=operations.float32))
