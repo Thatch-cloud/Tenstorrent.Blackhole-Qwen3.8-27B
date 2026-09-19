@@ -45,6 +45,13 @@ jobs:
               io.open('graft/%s' % name, 'w', encoding='utf-8', newline='\n').write(patched)
               print('%s: %d -> %d bytes' % (name, len(source), len(patched)))
           PY
+          mkdir -p reference
+          docker cp "$name:$root/rope.py" reference/rope.py || true
+          docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin" reference/vllm_tt_plugin || true
+          grep -rln "prefill_forward" reference/ > experiment-results/prefill_forward_callers.txt || true
+          grep -rn "start_pos" reference/vllm_tt_plugin > experiment-results/plugin_start_pos.txt || true
+          echo "--- callers ---"; cat experiment-results/prefill_forward_callers.txt || true
+          echo "--- start_pos ---"; head -40 experiment-results/plugin_start_pos.txt || true
           sha256sum graft/model.py graft/qwen36_vllm.py >> experiment-results/graft.sha256
           cat experiment-results/graft.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -56,6 +63,13 @@ jobs:
         with:
           name: m1-graft-sha-${{ github.run_id }}
           path: m1/experiment-results/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m1-reference-${{ github.run_id }}
+          path: m1/reference/
+          retention-days: 3
 
   baseline:
     needs: graft
