@@ -15,7 +15,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - {users: 2, context: 4352, product: 8704, prompt: 3072}
+          - {users: 2, context: 4352, product: 8704, prompt: 4800}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -153,6 +153,7 @@ jobs:
             > experiment-results/server-tail.log || true
           for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
             > experiment-results/host-pressure-after.txt
+          python3 -B -c "import json,io,sys; d=json.load(io.open('experiment-results/cycle.json',encoding='utf-8')); s=(d.get('streams') or [{}])[0]; t=s.get('prompt_tokens') or d.get('prompt_tokens') or 0; print('realised prompt tokens:', t); sys.exit(0 if t>=2048 else 1)" || { echo 'Prompt below the 2048-token DFlash history window: feature_start would be negative, so this run cannot speak to concurrency.'; exit 1; }
           python3 -B scripts/ci/cycle_bench_report.py \
             --report experiment-results/cycle.json \
             --log experiment-results/cycle-stdout.log
