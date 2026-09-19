@@ -38,30 +38,29 @@ CEILING_GB_S = 200.0
 SHAPES = ((512, 5120), (2048, 5120), (8192, 5120))
 
 
-def measure(ttnn, mesh, rows, cols, iters):
-    """All-gather a column-sharded tensor and time the steady state."""
+def measure(ttnn, mesh, gather, sync, rows, cols, iters):
+    """All-gather a column-sharded tensor and time the steady state.
+
+    Sharder, sync and gather are passed in from the proven setup in
+    fabric_bandwidth_probe rather than rebuilt here. Run 35425588508 failed every
+    shape with "Trying to get un-initialized fabric context" because this probe
+    rebuilt that setup from memory and dropped set_fabric_config; reusing the
+    working path is why that cannot recur.
+    """
     import torch
 
     host = torch.randn(1, 1, rows, cols, dtype=torch.bfloat16)
-    shard = ttnn.ShardTensorToMesh(mesh, dim=3)
+    shard = ttnn.ShardTensor2dMesh(mesh, dims=(None, -1), mesh_shape=(1, 2))
     sharded = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                               device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG,
                               mesh_mapper=shard)
-
-    def once():
-        return ttnn.all_gather(sharded, dim=3)
-
-    def sync():
-        for device in mesh.get_device_ids():
-            ttnn.synchronize_device(mesh.get_device(device))
-
-    out = once()
+    out = gather(sharded, dim=3)
     sync()
     ttnn.deallocate(out)
 
     start = time.time()
     for _ in range(iters):
-        out = once()
+        out = gather(sharded, dim=3)
     sync()
     elapsed = time.time() - start
     ttnn.deallocate(out)
@@ -96,24 +95,41 @@ def main():
     report['arm'] = 'tuned' if report['applied'] else 'baseline'
 
     try:
+        from feature_projection import require_projection_environment
+        require_projection_environment(os.environ, True)
         import ttnn
 
-        # Read the lever back. This is the control: if the payload size the
-        # runtime reports is unchanged, the arm proves nothing about packing.
-        for name in ('get_tt_fabric_max_payload_size_bytes',
-                     'get_tt_fabric_packet_header_size_bytes'):
-            accessor = getattr(ttnn, name, None)
-            try:
-                report[name] = accessor() if accessor else 'ABSENT'
-            except BaseException as error:
-                report[name] = '%s: %s' % (type(error).__name__, str(error)[:160])
+        # Collectives need the fabric up. Omitting this in run 35425588508 made
+        # every shape fail on an un-initialized fabric context.
+        for name in ('FABRIC_1D', 'FABRIC_1D_RING'):
+            config = getattr(ttnn.FabricConfig, name, None)
+            if config is not None:
+                ttnn.set_fabric_config(config)
+                report['fabric'] = name
+                break
 
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2))
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         try:
+            def sync():
+                ttnn.synchronize_device(mesh)
+
+            gather = (getattr(ttnn, 'all_gather', None)
+                      or getattr(getattr(ttnn, 'experimental', None), 'all_gather_async', None))
+            report['all_gather_api'] = gather.__name__ if gather else None
+
+            # Payload size is only readable once the fabric context exists.
+            for name in ('get_tt_fabric_max_payload_size_bytes',
+                         'get_tt_fabric_packet_header_size_bytes'):
+                accessor = getattr(ttnn, name, None)
+                try:
+                    report[name] = accessor() if accessor else 'ABSENT'
+                except BaseException as error:
+                    report[name] = '%s: %s' % (type(error).__name__, str(error)[:120])
+
             results = []
             for rows, cols in SHAPES:
                 try:
-                    entry = measure(ttnn, mesh, rows, cols, options.iters)
+                    entry = measure(ttnn, mesh, gather, sync, rows, cols, options.iters)
                 except BaseException as error:
                     entry = {'rows': rows, 'cols': cols,
                              'error': '%s: %s' % (type(error).__name__, str(error)[:200])}
