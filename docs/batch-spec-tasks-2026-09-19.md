@@ -367,10 +367,29 @@ alternation would cost. Reaching 200 tok/s per user still needs the documented
 
 ### Not yet built
 
-- `DFlashDevice` holds one `history`, `position` and `history_rows`. Packed proposal
-  needs N slot states feeding `execute_proposal(pack=...)`, which now accepts them.
-- Per-user page tables and starts in `ReplayAttentionReader` for the target verify.
-- `serving_vllm_contract.admit_scheduler_output` still asserts
+- **Slot state.** `DFlashDevice` holds one `history`, `position` and `history_rows`.
+  `propose_packed` takes the per-user state as explicit slots, so what remains is
+  for the serving path to keep N of them instead of one - today two concurrent
+  requests would mean two devices and two uploads of the five DFlash2 layers.
+- **Target-side page tables.** `ReplayAttentionReader` pins one user three ways:
+  `pages_host.shape[0] != 1`, a single `start` word staged into `self.positions`,
+  and `pages_host.repeat(len(bundle), 1)` repeating one table across the bundle.
+  `parallel_groups` bundles up to three row groups sharing a `(rows, signature)`,
+  and the signature derives from `start`, so two users at different frontiers
+  generally will not share a bundle. Per-user page tables and starts are the work,
+  and it interacts with trace capture since `positions` is captured into the
+  program. No new attention kernel: `paged_scaled_dot_product_attention_decode`
+  already takes a page table per batch entry.
+- **Serving contract.** `serving_vllm_contract.admit_scheduler_output` still asserts
   `list(cached.req_ids) != [request_id]`, and `FastWorkerHook` still binds one
   request to the worker.
-- The one-in-flight prefill rule, which is required independently.
+- **The one-in-flight prefill rule**, required independently of all of the above.
+
+### Regression standing
+
+Every module touched passes: 120 tests across the packed modules and their
+neighbours, plus 14 branch tests and 9 proposal tests, all locally in seconds. The
+full local discover sits at 12 failures and 44 errors against a 12/43 baseline; all
+56 named failures are in modules that import nothing changed here, and the eleven
+largest reproduce in isolation as missing weights and devices. The extra one is not
+attributable to this work, and is not claimed to be absent either.
