@@ -130,10 +130,24 @@ Prefill is **8.5x off compute-bound in the per-token term**, and 3% of its wall 
 weight traffic, so it is neither bandwidth-bound nor close to compute-bound. A chunk
 takes 833 ms against a 71 ms ideal.
 
-The hypothesis was the GDN layers; preliminary evidence from the untraced rows of the
-existing profile **argues against it** - `ChunkGdnScanOperation` costs about 50 ms per
-2048-token chunk, roughly 6% rather than the 50%+ the hypothesis needs. The dedicated
-prefill profile settles it.
+The hypothesis was the GDN layers. **The profile refutes it**: the GDN family is 14.3% of
+prefill device time against the 50%+ the hypothesis needed, and the preliminary evidence
+from the untraced decode rows had already pointed that way.
+
+Where prefill time actually goes, from run 35422536834 regrouped
+(`prefill-profile-corrected-2026-09-19.md`):
+
+| group | share |
+| --- | ---: |
+| arithmetic - matmul, fused matmul, SDPA | **39-43%** |
+| layout and data movement | 17.2% |
+| GDN family | 14.3% |
+| communication | 11-15% |
+| elementwise, norm, the rest | ~16% |
+
+About 40% of prefill is already arithmetic while prefill is 11.7x off compute-bound, so
+the matmuls are **slow when they run** rather than crowded out. That is the live question,
+and it is not the one this roadmap previously queued.
 
 One caveat that halves or doubles the prize: peak is taken at the fp8 rate. Activations
 are bf16, so if the matmuls execute at the bf16 rate the gap is 5.9x rather than 11.7x.
@@ -142,11 +156,14 @@ should be added to the next graft extraction, because it changes how much is on 
 
 ## Recommended order
 
-1. **Read the prefill profile** when it lands, against the pre-registered prediction in
-   `prefill-prediction-2026-09-19.md`. Prefill is the larger multiple off its ceiling
-   (8.5x versus decode's 1.3x) and nothing has ever been aimed at it.
-2. **Extract `model_config.py`** and settle the fidelity question. An hour, and it halves
-   or doubles every prefill estimate here.
+1. **Extract `model_config.py` and count the parameters.** Now first, not second. Both
+   the fidelity setting and a counted FLOP requirement are needed before "prefill matmuls
+   are inefficient" is a measurement rather than a reading, and that claim is currently
+   carrying the whole prefill case. An hour, and the 9.3 GB/s episode is what happens when
+   a derived number is built on instead.
+2. **Prefill layout, 17.2%.** 6,643 `Slice` calls plus tilize and untilize is pure
+   shuffling, it is the second largest group, and unlike the matmul question it needs no
+   further measurement to start on.
 3. **T4/T8/T16 recurrence sweep in one run.** Settles whether GDN cost scales with verify
    rows, which decides whether attacking the recurrence helps speculation or merely
    shifts it.
@@ -159,53 +176,65 @@ work, and that would mean eliminating essentially all of it. The target is not r
 by tuning alone at 4 users and 131k. It is reachable at lower user counts or shorter
 context - the decode cost model says exactly where, and that arithmetic is now reliable.
 
-## Sharding: a trade, not a win, and probably the wrong lever
+## Sharding: ruled out, and the argument for it was built on a misreading
 
-Prompted by the prefill profile putting collectives at 37.2% of device time.
+Superseded in full. The earlier version of this section argued that TP2 is a decode
+optimisation prefill pays for, on the grounds that collectives were 37.2% of prefill
+device time while running at 9.3 GB/s, or 2.3% of a 400 GB/s aggregate. A resource that
+idle is overhead-bound, and the remedies for overhead are fewer collectives or different
+sharding.
 
-### What TP2 buys and what it costs
+**Every input to that argument was wrong**, and the two measurements queued to test it are
+what showed it.
 
-TP2 exists to halve the decode weight pass, which is the dominant decode cost:
-
-| | weights read per card per pass | at 405 GB/s |
+| input | as argued | measured |
 | --- | ---: | ---: |
-| TP2 (current) | 9.96 GB | 24.6 ms |
-| data parallel (weights replicated) | 19.92 GB | 49.2 ms |
+| collectives, share of prefill | 37.2% | **11-15%** |
+| fabric aggregate | 400 GB/s over four links | **~84 GB/s over one link** |
+| rate collectives achieve | 9.3 GB/s, 2.3% of aggregate | **42-84 GB/s, 50-100% of it** |
+| fixed cost per collective | assumed to dominate | ~10 us, **under 1% of prefill in total** |
 
-So dropping TP2 adds about 24.6 ms to a 97.6 ms decode cycle. In exchange it removes
-all 37.2% of prefill collectives.
+Two independent errors, compounding:
 
-**Data parallel would fit.** Replicated weights plus KV comes to 22.6 GB at 65k context
-and 25.2 GB at 131k, against 33.1 GB usable per card.
+1. `AllGatherMinimalMatmulAsyncOp` is a **fused** all-gather and matmul. Counting it as a
+   collective charged 1,096.7 ms of matmul to the link and roughly tripled the apparent
+   communication share. Details in `prefill-profile-corrected-2026-09-19.md`.
+2. The 9.3 GB/s was traffic divided by that same inflated time bucket, so it understated
+   the achieved rate by the same factor. It was flagged as derived rather than measured,
+   and the flag was the right instinct - the measurement moved it by 4.5x to 9x.
 
-So the two regimes want opposite sharding, which is the same inversion the collectives
-finding showed. **TP2 is a decode optimisation that prefill pays for.**
+And the fabric is not what the 400 GB/s figure assumed. The run log reports
+`intra-mesh degree histograms mesh0 {1:2}`: two nodes of degree one, so the mesh
+descriptor gives this pair **a single link**. `num_links` is accepted and ignored - it is
+deprecated in this runtime - which is why the one/two/four sweep returned identical
+numbers. See `fabric-bandwidth-2026-09-19.md`.
 
-### Why it is probably still the wrong lever
+**Do not pursue a sharding change.** Dropping TP2 costs decode 24.6 ms per step to buy
+back at most 15% of prefill, against a resource already running at half to full its
+measured ceiling. The trade was never close once the numbers were right.
 
-The links are four QSFP-DD at 800 Gb/s, so 100 GB/s per port and **400 GB/s aggregate**
-in theory. The rate implied by the prefill profile is **9.3 GB/s**, which is 2.3% of
-aggregate and 9.3% of a single port. DRAM on the same cards achieves 79-80% of its spec,
-which is what a saturated resource looks like.
+**Do try the packet size.** The runtime volunteers
+`Fabric packet size 4352 B is suboptimal for transporting 2048 B pages. Configure 8192 B`.
+That is cheap, low-risk and the only fabric lever the measurement supports - and it is
+bounded at a few percent of prefill, so it is a knob rather than a programme.
 
-A resource running at 2% of capability is not saturated. That points at a fixed cost per
-collective rather than a bandwidth limit, and the remedy for that is **fewer and larger
-collectives, which costs decode nothing**, rather than a sharding change that costs
-decode 24.6 ms per step.
+## What this episode is worth keeping
 
-Two measurements decide it, both queued:
+Three levers this month produced arms that agreed to within 2%, and each time the
+agreement was the tell rather than the result:
 
-1. **Inter-card collective bandwidth**, swept by size. Rising GB/s with size means a
-   fixed per-collective cost and confirms the reading above. Flat near 400 means the
-   link really is the limit and sharding becomes the only remedy.
-2. **The prefill chunk sweep**, which halves the number of collectives by doubling the
-   chunk. If prefill time falls roughly in proportion, the cost is per-collective and
-   the fix is a constant rather than an architecture.
+| lever | why it never moved | what would have caught it |
+| --- | --- | --- |
+| prefill chunk size | `_chunked_chunk_size or 2048` default never overridden | log the value in the run |
+| fabric `num_links` | accepted but deprecated and ignored | grep the log for the new behaviour |
+| M1 resumable prefill | dispatch condition never true | assert the path was taken |
 
-### Caveat on the 9.3 GB/s
+**Suspiciously exact agreement between arms means the arms were not different.** Two
+genuinely different configurations do not agree to within a percent. Treat it as a defect
+in the experiment until the lever is proven to have moved, and prove it from the run's own
+output rather than from the code that was supposed to set it.
 
-It is derived, not measured: expected all-gather traffic computed as
-`layers x chunks x tokens x (hidden/2) x 2 bytes`, divided by the profiled collective
-time. If the traffic model is wrong the ratio moves with it. That is precisely why the
-probe exists; the DRAM figure was assumed at 85% of spec and measured at 79%, and the
-gap here is 43x rather than a few percent.
+The companion rule, from the 9.3 GB/s: **a derived number is a hypothesis, not a
+measurement.** Both the DRAM figure and this one were assumed before they were measured;
+DRAM came back 6% off its assumption and this came back 450-900% off. The cost of
+measuring was an hour in each case.

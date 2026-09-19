@@ -111,7 +111,25 @@ clean answer. If it confirms this, the revised hypothesis is the projection path
 fused collective-matmul, and the remedy is matmul efficiency or fusion rather than
 anything to do with the recurrence.
 
-## RESULT: the prediction was wrong. Collectives dominate, GDN does not
+## RESULT: the prediction was wrong about GDN, and the first reading of why
+was wrong too
+
+> **CORRECTION, same day.** The section below grouped
+> `AllGatherMinimalMatmulAsyncOp` as a collective. It is a *fused* all-gather and
+> matmul, so its 1,096.7 ms of matmul was charged to the link. Collectives are
+> **11-15%** of prefill, not 37.2%, and arithmetic is **39-43%**, not 16.9%. The
+> conclusion that prefill is communication-bound does not survive, and neither
+> does the sharding recommendation built on it. See
+> `prefill-profile-corrected-2026-09-19.md` for the regrouping and
+> `fabric-bandwidth-2026-09-19.md` for the measured link.
+>
+> What does survive: **the GDN hypothesis was wrong**, at 14.3% against a
+> predicted 50%+, and **layout is 17.2%** and remains a target. The original text
+> is kept below unedited, because a pre-registered prediction is worth nothing if
+> its result is quietly rewritten.
+
+### Original reading, superseded
+
 
 Run 35422536834, 16 MB device report, three prefills of 2,568 / 10,248 / 20,488 tokens.
 Chip 0, all operations, 37,203 calls over 36 op types, 3,697 ms of device time.

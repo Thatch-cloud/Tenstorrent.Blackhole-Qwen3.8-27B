@@ -1,0 +1,112 @@
+# Prefill device profile, regrouped correctly
+
+Run 35422536834, chip 0, three prefills of 2,568 / 10,248 / 20,488 tokens. 37,203 calls
+over 36 op types, **3,696.8 ms** of `DEVICE KERNEL DURATION`.
+
+Supersedes the grouping in `prefill-prediction-2026-09-19.md`, which put collectives at
+37.2% of device time and arithmetic at 17%, and on that basis argued for a sharding
+change. Reproduce with:
+
+```
+python scripts/ci/prefill_profile_groups.py --csv .../cpp_device_perf_report.csv
+```
+
+## The error
+
+`AllGatherMinimalMatmulAsyncOp` was counted as a collective. It is a **fused all-gather
+and matmul** - the name says so - so putting all 1,096.7 ms of it in a communication
+bucket charged its matmul time to the link. That one misassignment is the whole inversion:
+it is 29.67% of device time on its own, against 7.51% for every op that does nothing but
+move bytes.
+
+| bucket | ms | share |
+| --- | ---: | ---: |
+| `AllGatherMinimalMatmulAsyncOp` (**fused**, comm + matmul) | 1096.7 | 29.67% |
+| `MatmulDeviceOperation` | 488.7 | 13.22% |
+| `ChunkGdnScanOperation` | 325.7 | 8.81% |
+| `ReduceScatterMinimalAsyncDeviceOperation` (pure comm) | 260.7 | 7.05% |
+| `SliceDeviceOperation` | 226.0 | 6.11% |
+| `ChunkGdnPrepOperation` | 191.3 | 5.17% |
+| `SDPAOperation` | 134.0 | 3.62% |
+| `AllGatherAsyncDeviceOperation` (pure comm) | 16.9 | 0.46% |
+
+`AllGatherAsyncDeviceOperation` is 898 calls at 18.8 us against `LayerNormPreAllGather`'s
+897 calls, so it is the layernorm-statistic gather - a few hundred bytes, not activations.
+The activation gather lives inside the fused op.
+
+## Splitting the fused op by traffic
+
+The profile cannot separate the two halves, so bound it instead. TP2 shards hidden, so
+each card must receive the other half once per layer per token:
+
+```
+33,304 tokens x 64 layers x 2,560 cols x 2 bytes = 10.91 GB per combine-per-layer
+```
+
+The reduce-scatter carries exactly one such combine per layer and takes 260.7 ms, so it is
+achieving **41.9 GB/s - 50% of the 83.74 GB/s** measured by the fabric probe
+(`fabric-bandwidth-2026-09-19.md`). Pricing the fused op's gather at the probe ceiling is
+the optimistic end; pricing it at the reduce-scatter's own observed rate is the
+pessimistic end.
+
+| | communication | arithmetic |
+| --- | ---: | ---: |
+| optimistic (gather at 83.7 GB/s) | 407.9 ms, **11.0%** | 1589.5 ms, **43.0%** |
+| pessimistic (gather at 41.9 GB/s) | 538.2 ms, **14.6%** | 1459.2 ms, **39.5%** |
+| **as previously reported** | 1374.3 ms, 37.2% | 625.2 ms, 16.9% |
+
+Both ends of the bound land in the same place, which is what makes the conclusion safe
+despite the estimate: **communication is 11-15%, arithmetic is 39-43%.** The previous
+figures were wrong by roughly a factor of three in each direction, and they pointed the
+work the wrong way.
+
+## Corrected picture of where prefill time goes
+
+| group | ms | share |
+| --- | ---: | ---: |
+| arithmetic (matmul, fused matmul, SDPA) | 1459-1590 | **39-43%** |
+| layout and data movement | 637.1 | 17.2% |
+| GDN family | 528.9 | 14.3% |
+| communication | 408-538 | **11-15%** |
+| elementwise, norm, everything else | ~600 | ~16% |
+
+What survives from the original reading:
+
+- **The GDN hypothesis was wrong.** Predicted above 50%, measured 14.3%. That stands, and
+  the preliminary evidence from the untraced decode rows called it correctly.
+- **Layout is 17.2%** and remains a genuine target: 6,643 `Slice` calls, plus tilize and
+  untilize, is pure shuffling.
+
+What inverts:
+
+- Prefill is **not** communication-bound. It was never communication-bound.
+- Decode and prefill are **not** opposites on this axis. Decode is bandwidth-bound with
+  negligible communication; prefill is arithmetic-heavy with modest communication. The
+  "an optimisation for one is useless for the other" framing was an artefact of the
+  misgrouping.
+
+## What the real question now is
+
+Prefill is 11.7x off compute-bound overall, and about 40% of its device time is already
+arithmetic. Those two facts together say the matmuls are **running slowly when they run**,
+not being crowded out by data movement.
+
+That is a different investigation from the one the roadmap had queued, and it needs two
+inputs that are still missing:
+
+1. **`model_config.py`** - the math-fidelity settings. Peak was taken at the fp8 rate; if
+   the matmuls execute at bf16, the ceiling halves and so does the apparent gap. Extract it
+   on the next graft.
+2. **The actual parameter count and per-layer shapes**, so the FLOP requirement is counted
+   rather than inferred from the model name. Without it the MFU figure cannot be trusted,
+   and an MFU figure is exactly the kind of derived number that produced the 9.3 GB/s
+   error.
+
+Until both land, "prefill matmuls are inefficient" is the best-supported reading but not a
+measurement. Do not build on it yet.
+
+## Caveat carried forward
+
+These are observed intervals. Durations include waits, can overlap, and are not a
+dependency-graph critical path. The traffic split is an estimate bounded at both ends, not
+an observation.
