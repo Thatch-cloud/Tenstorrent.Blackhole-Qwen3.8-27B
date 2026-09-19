@@ -72,9 +72,9 @@ def _qwen_discovered_links(mesh_device):
             with open(path, "r") as handle:
                 found = _qwen_count_descriptor_links(handle.read())
             if found:
-                logger.info("[CCLLINKS] cluster descriptor reports %d links", found)
+                logger.info("[CCLLINKS] cluster descriptor reports {} links", found)
     except BaseException as error:
-        logger.warning("[CCLLINKS] discovery failed, keeping the table: %s", error)
+        logger.warning("[CCLLINKS] discovery failed, keeping the table: {}", error)
         found = None
     _QWEN_LINK_CACHE[key] = found
     return found
@@ -87,7 +87,7 @@ NEW = '''    device_links = link_dict[device_name]
     # upward, so this cannot pick fewer links than upstream would have.
     _found = _qwen_discovered_links(mesh_device)
     if _found and _found > min(device_links):
-        logger.info("[CCLLINKS] overriding %s %s with %d discovered links",
+        logger.info("[CCLLINKS] overriding {} {} with {} discovered links",
                     device_name, device_links, _found)
         device_links = (_found, _found)'''
 
@@ -121,6 +121,10 @@ def main():
     io.open(sys.argv[2], 'w', encoding='utf-8', newline='\n').write(patched)
     # Grep for the NEW behaviour, never the absence of the old.
     assert 'discovered links' in patched
+    injected = HELPER + NEW
+    assert '%d' not in injected and '%s' not in injected, (
+        'loguru formats with braces; a percent placeholder logs literally and the '
+        'control then proves the line ran but not what it found')
     assert '_found > min(device_links)' in patched
     print('patched %s (%d -> %d bytes)' % (sys.argv[1], len(source), len(patched)))
     return 0

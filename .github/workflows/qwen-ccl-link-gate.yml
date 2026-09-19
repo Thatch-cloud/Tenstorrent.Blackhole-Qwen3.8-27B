@@ -235,7 +235,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B scripts/ci/gdn_conv_gate_report.py             --baseline peer/baseline.json             --fixed experiment-results/fixed.json             --fixed-log experiment-results/fixed.log \n            --marker 'discovered links'             --json experiment-results/gate.json
+          python3 -B scripts/ci/gdn_conv_gate_report.py             --baseline peer/baseline.json             --fixed experiment-results/fixed.json             --fixed-log experiment-results/fixed.log            --marker 'discovered links'             --json experiment-results/gate.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
