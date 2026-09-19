@@ -28,9 +28,12 @@ PATCHED = ('ttnn.set_fabric_config(\n'
            '            fabric_config,\n'
            '            reliability_mode,\n'
            '            router_config=_qwen_router_config(),\n'
-           '        )')
+           '        )\n'
+           '        _qwen_report_payload()')
 
 HELPER = '''
+from loguru import logger as _qwen_logger
+
 
 def _qwen_router_config():
     """Request the packet payload size the CCL validator computes as ideal.
@@ -45,13 +48,30 @@ def _qwen_router_config():
     """
     builder = getattr(ttnn, "FabricRouterConfig", None)
     if builder is None:
+        _qwen_logger.warning("[PKTSIZE] FabricRouterConfig absent; keeping the default")
         return None
     try:
-        return builder(max_packet_payload_size_bytes=8192)
+        config = builder(max_packet_payload_size_bytes=8192)
     except TypeError:
         config = builder()
         config.max_packet_payload_size_bytes = 8192
-        return config
+    _qwen_logger.info("[PKTSIZE] requesting {} B fabric packet payload", 8192)
+    return config
+
+
+def _qwen_report_payload():
+    """Read the adopted payload size back from the runtime.
+
+    Requesting a size only proves intent. Run 35430489453 passed a gate whose
+    marker fired while proving nothing about the value, because the log line
+    used percent formatting that loguru does not apply. This reports what the
+    fabric context actually adopted, which is the only thing that settles it.
+    """
+    try:
+        _qwen_logger.info("[PKTSIZE] runtime reports {} B payload",
+                          ttnn.get_tt_fabric_max_payload_size_bytes())
+    except BaseException as error:
+        _qwen_logger.warning("[PKTSIZE] payload readback unavailable: {}", error)
 
 '''
 
@@ -83,6 +103,10 @@ def main():
     # Grep for the NEW behaviour, never for the absence of the old.
     assert 'router_config=_qwen_router_config()' in patched
     assert 'max_packet_payload_size_bytes=8192' in patched
+    assert '_qwen_report_payload()' in patched
+    # loguru formats with braces; a percent placeholder logs literally and the
+    # control then proves the line ran but not what it found.
+    assert '%d' not in HELPER and '%s' not in HELPER
     print('patched %s -> %s (%d -> %d bytes)'
           % (sys.argv[1], sys.argv[2], len(source), len(patched)))
     return 0

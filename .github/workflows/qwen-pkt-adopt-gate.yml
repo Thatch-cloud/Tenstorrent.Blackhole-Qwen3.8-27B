@@ -1,0 +1,243 @@
+name: Qwen fabric packet adopt gate
+on:
+  push:
+    tags: ['experiment/pkt-adopt-gate-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: gc
+          persist-credentials: false
+      - name: Patch the worker to request the 8192 B fabric packet payload
+        working-directory: gc
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p graft experiment-results
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          name="qwen-pkt-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          src=/opt/qwen-fast-plugin/src/vllm_tt_plugin/worker.py
+          docker cp "$name:$src" graft/worker.py.orig
+          sha256sum graft/worker.py.orig > experiment-results/source.sha256
+          python3 -B scripts/ci/fabric_packet_adopt_patch.py graft/worker.py.orig graft/worker.py
+          sha256sum graft/worker.py >> experiment-results/source.sha256
+          grep -n 'PKTSIZE' graft/worker.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qwen-pkt-graft-${{ github.run_id }}
+          path: gc/graft/
+
+  baseline:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: gc
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-pkt-graft-${{ github.run_id }}
+          path: gc/graft/
+      - name: Reset the boards before opening the mesh
+        working-directory: gc
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
+      - name: Confirm no process holds a card
+        working-directory: gc
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Run the baseline arm
+        working-directory: gc
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+          graft=/opt/qwen-fast-plugin/src/vllm_tt_plugin/worker.py
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-pkt-baseline-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 3300 docker run --rm --name "$name" --network none             --hostname qwen-gc --add-host qwen-gc:127.0.0.1             --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges             --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g             "${devices[@]}"             --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G             --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly"             --mount "type=bind,src=$PWD/scripts/ci/gdn_conv_gate.py,dst=/bench/gdn_conv_gate.py,readonly"             --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache             -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1             -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0             -e VLLM_ENABLE_V1_MULTIPROCESSING=0             -e PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal             -e QWEN_PROJECTION_LINKS=4             -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8             -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto             --entrypoint python3 "$image" -B /bench/gdn_conv_gate.py             --model "$model" --context 65536 --lengths 2048 --arm baseline             > experiment-results/baseline.log 2>&1 || echo "runner exited non-zero" >&2
+          sed -n '/GDN_CONV_GATE_JSON_BEGIN/,/GDN_CONV_GATE_JSON_END/p'             experiment-results/baseline.log | sed '1d;$d' > experiment-results/baseline.json || true
+          if grep -qE 'Unable to find image|^docker: ' experiment-results/baseline.log; then
+            echo 'The container never started: docker rejected the invocation.'
+            head -5 experiment-results/baseline.log || true
+            exit 1
+          fi
+          if [ ! -s experiment-results/baseline.json ]; then
+            echo 'No structured result; tail of stdout:'
+            tail -60 experiment-results/baseline.log || true
+            exit 1
+          fi
+          if grep -qi 'Downgrading to mesh shape' experiment-results/baseline.log; then
+            echo 'Mesh downgraded: one board did not come back from reset. Not a result.'
+            exit 1
+          fi
+          cat experiment-results/baseline.json
+          if python3 -c "import json,io,sys; sys.exit(0 if json.load(io.open('experiment-results/baseline.json',encoding='utf-8')).get('arms_complete') else 1)"; then
+            echo 'arm complete'
+          else
+            echo 'An errored length makes this arm a failure, not a partial pass.'
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-pkt-baseline-${{ github.run_id }}
+          path: gc/experiment-results/
+
+  fixed:
+    needs: baseline
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: gc
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-pkt-graft-${{ github.run_id }}
+          path: gc/graft/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-pkt-baseline-${{ github.run_id }}
+          path: gc/peer/
+      - name: Reset the boards before opening the mesh
+        working-directory: gc
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
+      - name: Confirm no process holds a card
+        working-directory: gc
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Run the fixed arm
+        working-directory: gc
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+          graft=/opt/qwen-fast-plugin/src/vllm_tt_plugin/worker.py
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-pkt-fixed-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 3300 docker run --rm --name "$name" --network none             --hostname qwen-gc --add-host qwen-gc:127.0.0.1             --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges             --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g             "${devices[@]}"             --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G             --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly"             --mount "type=bind,src=$PWD/scripts/ci/gdn_conv_gate.py,dst=/bench/gdn_conv_gate.py,readonly"             --mount "type=bind,src=$PWD/graft/worker.py,dst=$graft,readonly"             --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache             -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1             -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0             -e VLLM_ENABLE_V1_MULTIPROCESSING=0             -e PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal             -e QWEN_PROJECTION_LINKS=4             -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8             -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto             --entrypoint python3 "$image" -B /bench/gdn_conv_gate.py             --model "$model" --context 65536 --lengths 2048 --arm fixed             > experiment-results/fixed.log 2>&1 || echo "runner exited non-zero" >&2
+          sed -n '/GDN_CONV_GATE_JSON_BEGIN/,/GDN_CONV_GATE_JSON_END/p'             experiment-results/fixed.log | sed '1d;$d' > experiment-results/fixed.json || true
+          if grep -qE 'Unable to find image|^docker: ' experiment-results/fixed.log; then
+            echo 'The container never started: docker rejected the invocation.'
+            head -5 experiment-results/fixed.log || true
+            exit 1
+          fi
+          if [ ! -s experiment-results/fixed.json ]; then
+            echo 'No structured result; tail of stdout:'
+            tail -60 experiment-results/fixed.log || true
+            exit 1
+          fi
+          if grep -qi 'Downgrading to mesh shape' experiment-results/fixed.log; then
+            echo 'Mesh downgraded: one board did not come back from reset. Not a result.'
+            exit 1
+          fi
+          cat experiment-results/fixed.json
+          if python3 -c "import json,io,sys; sys.exit(0 if json.load(io.open('experiment-results/fixed.json',encoding='utf-8')).get('arms_complete') else 1)"; then
+            echo 'arm complete'
+          else
+            echo 'An errored length makes this arm a failure, not a partial pass.'
+            exit 1
+          fi
+      - name: Decide the gate
+        working-directory: gc
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/gdn_conv_gate_report.py             --baseline peer/baseline.json             --fixed experiment-results/fixed.json             --fixed-log experiment-results/fixed.log            --marker 'runtime reports 8192 B payload'             --json experiment-results/gate.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-pkt-fixed-${{ github.run_id }}
+          path: gc/experiment-results/
