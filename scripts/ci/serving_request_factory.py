@@ -91,8 +91,11 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         try:
             from loguru import logger as _qwen_gate_logger
             _qwen_gate_logger.info(
-                '[PINDIAG] gate rows={} session_position={} remaining={} emitted={}',
-                16, session.position, session.max_new_tokens - len(session.emitted),
+                '[PINDIAG] gate rows={} position={}/{} remaining={}/{} maxnew={}/{} emitted={}',
+                16, session.position, type(session.position).__name__,
+                session.max_new_tokens - len(session.emitted),
+                type(session.max_new_tokens - len(session.emitted)).__name__,
+                session.max_new_tokens, type(session.max_new_tokens).__name__,
                 len(session.emitted))
         except BaseException:
             pass
