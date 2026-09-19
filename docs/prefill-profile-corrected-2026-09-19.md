@@ -85,25 +85,83 @@ What inverts:
   "an optimisation for one is useless for the other" framing was an artefact of the
   misgrouping.
 
-## What the real question now is
+## RESULT: the matmuls are fine. Counted, not inferred
 
-Prefill is 11.7x off compute-bound overall, and about 40% of its device time is already
-arithmetic. Those two facts together say the matmuls are **running slowly when they run**,
-not being crowded out by data movement.
+Run 35426279454 extracted `config.json` and `model_config.py`. Reproduce with
+`scripts/ci/model_param_count.py --config <config.json>`.
 
-That is a different investigation from the one the roadmap had queued, and it needs two
-inputs that are still missing:
+The architecture is nothing like the one earlier estimates assumed. `config.json` is a
+multimodal wrapper and the language model lives under `text_config`:
 
-1. **`model_config.py`** - the math-fidelity settings. Peak was taken at the fp8 rate; if
-   the matmuls execute at bf16, the ceiling halves and so does the apparent gap. Extract it
-   on the next graft.
-2. **The actual parameter count and per-layer shapes**, so the FLOP requirement is counted
-   rather than inferred from the model name. Without it the MFU figure cannot be trusted,
-   and an MFU figure is exactly the kind of derived number that produced the 9.3 GB/s
-   error.
+| | assumed | actual |
+| --- | ---: | ---: |
+| intermediate_size | 8704 | **17408** |
+| head_dim | 128 | **256** |
+| num_attention_heads | 40 | 24 |
+| vocab_size | 151936 | 248320 |
+| full_attention_interval | - | 4, so **16 full / 48 GDN** confirmed |
 
-Until both land, "prefill matmuls are inefficient" is the best-supported reading but not a
-measurement. Do not build on it yet.
+Counted parameters: **25.36 B** (body 22.82 B), which matches the 27B in the name once the
+MTP layer is included. Weights are `bfloat8_b`, activations `bfloat16`, read directly from
+`model_config.py`.
+
+### The fidelity question answers itself
+
+Prefill for the profiled 33,304 tokens is **1.52 PFLOP**, so 0.76 PFLOP per card under TP2.
+
+| rate | ideal | vs 3697 ms device time | MFU in the 1459-1590 ms arithmetic window |
+| --- | ---: | ---: | ---: |
+| LoFi, 774 TFLOPS/card | 982 ms | **3.77x** | **62-67%** |
+| HiFi2, 387 TFLOPS/card | 1964 ms | 1.88x | 124-135% - **impossible** |
+
+`model_config.py` carries no explicit `MathFidelity`, but it does not need to: the HiFi2
+ideal of 1964 ms **exceeds the 1590 ms that arithmetic ops actually occupied**, and work
+cannot take less time than its own floor. So the matmuls demonstrably execute at the
+faster rate, and the measurement settles what the config did not state.
+
+### This reverses the recommendation
+
+The roadmap said prefill's problem was matmul efficiency and put "extract model_config.py"
+first precisely so that claim could be checked. Checked, it fails:
+
+- **Prefill is 3.77x off compute-bound, not 11.7x.** The 11.7x came from dividing a
+  wall-clock serving prefill by a peak derived from the model's *name*. Both halves were
+  wrong.
+- **The matmuls run at 62-67% of peak when they run.** That is respectable. There is no
+  factor of three hiding in them.
+
+The real shape of prefill is that **arithmetic occupies only about 40% of device time**:
+
+| group | share | is it a target? |
+| --- | ---: | --- |
+| arithmetic | 39-43% | no - already at 62-67% MFU |
+| layout | 17.2% | **yes** - 6,643 Slice calls, pure shuffling |
+| GDN family | 14.3% | maybe - it is real work, but 48 layers of it |
+| communication | 11-15% | no - fabric measured, bounded at ~1% of prefill |
+| elementwise and norm | ~16% | **yes** - fusion candidates |
+
+**The opportunity is the ~60% that is not arithmetic**, and layout plus elementwise is a
+third of prefill on its own. That is a fusion and data-movement problem, which is a
+different programme from the kernel-efficiency one the roadmap had queued.
+
+### What this did not settle
+
+`prefill_pflop` counts the body's projections. It does not count the attention quadratic
+term, which matters at long context and not at the 33k profiled here, nor the GDN
+recurrence, which is cheap in FLOPs and expensive in wall time. So 62-67% is the MFU of
+the projection work, and the GDN recurrence remains unpriced.
+
+## What to do next
+
+Both inputs this section used to ask for have landed, and they closed the question rather
+than sharpening it. The matmuls are not the problem, so the order is:
+
+1. **Layout, 17.2%.** 6,643 `Slice` calls plus tilize and untilize is pure shuffling and
+   the largest non-arithmetic group. Needs no further measurement to start on.
+2. **Elementwise and norm, ~16%.** Fusion candidates in the same vein.
+3. **Price the GDN recurrence.** 14.3% of prefill, and the FLOP count above deliberately
+   does not cover it, so its efficiency is genuinely unknown rather than assumed good.
+4. **Not arithmetic, not communication, not sharding.** All three are measured and closed.
 
 ## Caveat carried forward
 

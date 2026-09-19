@@ -145,9 +145,9 @@ Where prefill time actually goes, from run 35422536834 regrouped
 | communication | 11-15% |
 | elementwise, norm, the rest | ~16% |
 
-About 40% of prefill is already arithmetic while prefill is 11.7x off compute-bound, so
-the matmuls are **slow when they run** rather than crowded out. That is the live question,
-and it is not the one this roadmap previously queued.
+About 40% of prefill is arithmetic and those matmuls run at **62-67% of peak**, so they
+are not the problem. Prefill is 3.77x off compute-bound because arithmetic only occupies
+40% of the device; the other 60% is layout, GDN, communication and elementwise.
 
 One caveat that halves or doubles the prize: peak is taken at the fp8 rate. Activations
 are bf16, so if the matmuls execute at the bf16 rate the gap is 5.9x rather than 11.7x.
@@ -156,14 +156,13 @@ should be added to the next graft extraction, because it changes how much is on 
 
 ## Recommended order
 
-1. **Extract `model_config.py` and count the parameters.** Now first, not second. Both
-   the fidelity setting and a counted FLOP requirement are needed before "prefill matmuls
-   are inefficient" is a measurement rather than a reading, and that claim is currently
-   carrying the whole prefill case. An hour, and the 9.3 GB/s episode is what happens when
-   a derived number is built on instead.
-2. **Prefill layout, 17.2%.** 6,643 `Slice` calls plus tilize and untilize is pure
-   shuffling, it is the second largest group, and unlike the matmul question it needs no
-   further measurement to start on.
+1. **DONE, and it closed the question.** `model_config.py` and the parameter count landed
+   (run 35426279454). The model is 25.36 B counted, weights `bfloat8_b`, activations
+   `bfloat16`, and prefill is **3.77x off compute-bound with matmuls at 62-67% of peak** -
+   not the 11.7x and not inefficient. See `prefill-profile-corrected-2026-09-19.md`.
+2. **Prefill layout, 17.2%, and elementwise at ~16%.** Now the leading prefill target by
+   default, because arithmetic is closed and communication is closed. A third of prefill
+   between them, and it is a fusion and data-movement problem.
 3. **T4/T8/T16 recurrence sweep in one run.** Settles whether GDN cost scales with verify
    rows, which decides whether attacking the recurrence helps speculation or merely
    shifts it.
