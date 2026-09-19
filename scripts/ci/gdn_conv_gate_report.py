@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--baseline', required=True)
     parser.add_argument('--fixed', required=True)
     parser.add_argument('--fixed-log', required=True)
+    parser.add_argument('--min-speedup', type=float, default=0.95,
+                        help='fail if the fixed arm is slower than this multiple')
     parser.add_argument('--marker', default='full=True',
                         help='string whose presence in the fixed log proves the lever moved')
     parser.add_argument('--json')
@@ -72,12 +74,20 @@ def main():
     complete = bool(base.get('arms_complete')) and bool(fixed.get('arms_complete'))
     identical = bool(checked) and all(c['identical'] for c in checked)
 
+    # Run 35431417507 passed every correctness control on a change that made
+            # serving 14x slower: 1765.3 to 127.6 tok/s. Correct and unusable is
+            # still a failure, so a regression floor is a control too.
+    speeds = [c['speedup'] for c in checked if c['speedup']]
+    no_regression = bool(speeds) and min(speeds) >= options.min_speedup
+    report['min_speedup_required'] = options.min_speedup
+    report['worst_speedup'] = round(min(speeds), 3) if speeds else None
+
     report['controls'] = {'lever_moved': lever_moved,
                           'tokens_identical': identical,
-                          'both_arms_complete': complete}
-    report['gate_passed'] = lever_moved and identical and complete
+                          'both_arms_complete': complete,
+                          'no_regression': no_regression}
+    report['gate_passed'] = lever_moved and identical and complete and no_regression
 
-    speeds = [c['speedup'] for c in checked if c['speedup']]
     if speeds:
         report['mean_speedup'] = round(sum(speeds) / len(speeds), 3)
 
