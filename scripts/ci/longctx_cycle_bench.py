@@ -93,6 +93,13 @@ def stream_once(port, prompt, max_tokens, results, index):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--users', type=int, default=4)
+    # Probe 35436384975: TTScheduler batches SIMULTANEOUS prefills into one step
+    # (new=['A','B']) but serialises a LATER arrival (new=['B'] cached=[]). Starting
+    # every thread at once therefore exercises the batched case, which the fast path
+    # cannot serve at all - one capture and one prompt per prefill - while the
+    # staggered case is the one the current code is built for.
+    parser.add_argument('--stagger', type=float, default=0.0,
+                        help='seconds between user starts; 0 starts them together')
     parser.add_argument('--plain', action='store_true',
                         help='serve without the T16 fast runtime or speculation. The fast '
                              'path admits one request, so this is the only way to measure '
@@ -114,7 +121,8 @@ def main():
         pass
 
     blocks = -(-(options.users * options.context) // BLOCK_SIZE)
-    report = dict(scope=__doc__, users=options.users, context=options.context,
+    report = dict(scope=__doc__, users=options.users, stagger=options.stagger,
+                  context=options.context,
                   plain=options.plain,
                   blocks=blocks, target_tokens_per_user=TARGET_TOKS_PER_USER,
                   target_itl_ms=1000.0 / TARGET_TOKS_PER_USER, ready=False)
@@ -190,7 +198,9 @@ def main():
                                           results, index))
                    for index in range(options.users)]
         wall = time.perf_counter()
-        for thread in threads:
+        for index, thread in enumerate(threads):
+            if index and options.stagger:
+                time.sleep(options.stagger)
             thread.start()
         for thread in threads:
             thread.join()
