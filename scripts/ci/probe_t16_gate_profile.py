@@ -26,6 +26,9 @@ import re
 import sys
 
 
+NEXT_DEF = chr(10) + 'def '
+
+
 def show(label, value):
     print('%-40s %s' % (label, value))
 
@@ -56,13 +59,11 @@ def main():
             source = text
             start = text.find('def validate_request_option')
             print('----- image target_t16_attention_gate.validate_request_option -----')
-            print(text[start:text.find('
-def ', start + 1)])
+            print(text[start:text.find(NEXT_DEF, start + 1)])
         else:
             start = text.find('def request_context')
             print('----- image request_context -----')
-            print(text[start:text.find('
-def ', start + 1)])
+            print(text[start:text.find(NEXT_DEF, start + 1)])
 
     positions = sorted(set(int(value) for value in re.findall(r'position != (\d+)', source or '')))
     show('positions this gate accepts', positions)
