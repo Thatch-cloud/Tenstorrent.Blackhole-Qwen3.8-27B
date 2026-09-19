@@ -1,4 +1,4 @@
-# Inter-card fabric: measured, and it is one link, not four
+# Inter-card fabric: measured at 83.74 GB/s, which is one cable fully used
 
 Run 35424379930. Answers a question the prefill profile raised and could not settle:
 collectives looked like 37% of prefill device time, and the traffic model implied they
@@ -21,10 +21,12 @@ Fitting `time = fixed + bytes / rate` across those three points gives **about 10
 fixed cost per collective and an asymptote near 85 GB/s**. Rising GB/s with size is what a
 per-collective overhead looks like; the overhead is real but small.
 
-**83.74 GB/s is 84% of one QSFP-DD800 port.** That is a saturated single link, in the same
-way that 405 GB/s is a saturated GDDR6 subsystem at 79% of spec.
+**83.74 GB/s is 84% of one QSFP-DD800 cable**, which carries two 400 Gb/s links for
+100 GB/s. That is a saturated cable, in the same way that 405 GB/s is a saturated GDDR6
+subsystem at 79% of spec - and because it exceeds one 50 GB/s link, both links of that
+cable are demonstrably in use.
 
-## The Ethernet fabric is up. It just has one edge
+## The Ethernet fabric is up, and at least two links are already carrying traffic
 
 Worth stating because the physical topology invites the opposite guess: the second card
 sits behind a gen5 MCIO switch and negotiates x4, so it is reasonable to suspect the
@@ -43,16 +45,24 @@ about 63 GB/s, so a measured 83.74 GB/s cannot have crossed either. PCIe width i
 this path, consistent with the earlier finding that it costs about a second once at model
 load and nothing per step.
 
-But the topology line is the one that matters:
+**One QSFP-DD800 cable carries two ethernet links of 400 Gb/s each**, so a link is
+50 GB/s and a cable is 100 GB/s. That fixes the reading:
 
-```
-intra-mesh degree histograms mesh0 {1:2}
-```
+- 83.74 GB/s is **above** a single 400 Gb/s link, so **at least two links are already
+  active**. "Only one link is in use" is false.
+- 83.74 GB/s is **84% of one cable**, which is what one fully-used cable looks like.
 
-Two nodes, each of degree **1**. The mesh descriptor gives this pair **a single
-connection**. So the "four QSFP-DD ports, 400 GB/s aggregate" figure that earlier analysis
-leaned on is not what this configuration presents to the runtime, and every number derived
-from 400 GB/s should be discarded.
+So the open question is not whether links are being used, but **how many cables connect
+the pair**. One fully used and two half used produce similar bandwidth, so the number
+cannot be inferred from it. Run 35425107580 asks the runtime directly, via the per-peer
+ethernet socket count.
+
+> **CORRECTION.** An earlier version of this document read
+> `intra-mesh degree histograms mesh0 {1:2}` as proof of a single link. That was wrong.
+> Degree counts *neighbours*, not edges: with two chips in the mesh each has exactly one
+> neighbour however many cables run between them, so the line is true of any two-node
+> mesh and says nothing about link count. The measurement above is what constrains the
+> answer; that log line never did.
 
 ## num_links is deprecated, so the link sweep proves nothing
 
@@ -83,8 +93,9 @@ All three produce the same symptom. **Suspiciously exact agreement between arms 
 arms were not different** - it is never a physical result until the lever is proven to
 have moved.
 
-Here the deprecation warning and the degree-1 topology agree independently: there is one
-link, and asking for four changes nothing.
+Here the deprecation warning explains the flat sweep on its own: the runtime chooses its
+own link count from what the fabric offers, and the argument asking for more is ignored.
+Whether more links exist to be chosen is a separate question, measured in run 35425107580.
 
 ## A real tuning knob, volunteered by the runtime
 
@@ -110,8 +121,8 @@ remedy for overhead is fewer, larger collectives or a different sharding.
 Every input to that argument is now wrong:
 
 - collectives are **11-15%** of prefill, not 37.2%
-- aggregate is **one link at ~84 GB/s**, not 400 GB/s
-- the collectives that do run achieve **42-84 GB/s**, which is 50-100% of that ceiling
+- delivered bandwidth is **~84 GB/s**, one cable; the 400 GB/s aggregate was never measured
+- the collectives that do run achieve **42-84 GB/s**, 50-100% of that measured ceiling
 - fixed cost is ~10 us per collective; across ~2,950 collective calls that is about
   **29 ms of 3,697 ms, under 1%**, so "fewer, larger collectives" is also small
 

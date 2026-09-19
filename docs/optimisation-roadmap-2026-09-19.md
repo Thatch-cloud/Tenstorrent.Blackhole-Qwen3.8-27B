@@ -190,7 +190,7 @@ what showed it.
 | input | as argued | measured |
 | --- | ---: | ---: |
 | collectives, share of prefill | 37.2% | **11-15%** |
-| fabric aggregate | 400 GB/s over four links | **~84 GB/s over one link** |
+| fabric aggregate | 400 GB/s over four links | **83.74 GB/s measured, one cable** |
 | rate collectives achieve | 9.3 GB/s, 2.3% of aggregate | **42-84 GB/s, 50-100% of it** |
 | fixed cost per collective | assumed to dominate | ~10 us, **under 1% of prefill in total** |
 
@@ -203,11 +203,12 @@ Two independent errors, compounding:
    the achieved rate by the same factor. It was flagged as derived rather than measured,
    and the flag was the right instinct - the measurement moved it by 4.5x to 9x.
 
-And the fabric is not what the 400 GB/s figure assumed. The run log reports
-`intra-mesh degree histograms mesh0 {1:2}`: two nodes of degree one, so the mesh
-descriptor gives this pair **a single link**. `num_links` is accepted and ignored - it is
-deprecated in this runtime - which is why the one/two/four sweep returned identical
-numbers. See `fabric-bandwidth-2026-09-19.md`.
+And the fabric is not what the 400 GB/s figure assumed: measured delivery is
+**83.74 GB/s**, which is 84% of one QSFP-DD800 cable. A cable carries two 400 Gb/s links,
+so both links of one cable are demonstrably in use, and `num_links` is accepted and
+ignored because it is deprecated in this runtime - which is why the one/two/four sweep
+returned identical numbers. Whether a second cable is connected is measured separately in
+run 35425107580. See `fabric-bandwidth-2026-09-19.md`.
 
 **Do not pursue a sharding change.** Dropping TP2 costs decode 24.6 ms per step to buy
 back at most 15% of prefill, against a resource already running at half to full its
@@ -228,6 +229,11 @@ agreement was the tell rather than the result:
 | prefill chunk size | `_chunked_chunk_size or 2048` default never overridden | log the value in the run |
 | fabric `num_links` | accepted but deprecated and ignored | grep the log for the new behaviour |
 | M1 resumable prefill | dispatch condition never true | assert the path was taken |
+
+A fourth, different in kind and worth separating: reading `intra-mesh degree histograms
+mesh0 {1:2}` as proof of a single link. Nothing was inert - the log line was simply
+misread. Degree counts neighbours, not edges, so it is true of any two-node mesh. **A log
+line that would read the same under every hypothesis is not evidence for one of them.**
 
 **Suspiciously exact agreement between arms means the arms were not different.** Two
 genuinely different configurations do not agree to within a percent. Treat it as a defect
