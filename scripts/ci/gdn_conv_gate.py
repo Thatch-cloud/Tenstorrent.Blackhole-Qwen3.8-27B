@@ -57,35 +57,50 @@ def main():
     sampling = SamplingParams(max_tokens=options.max_tokens, temperature=0.0,
                               ignore_eos=True)
 
+    # Timing and equality want different generation lengths, so each length runs
+    # both. The timed pass uses one token so prefill is not diluted by decode:
+    # run 35428215943 reported 1202 vs 1199 tok/s across a real change, because
+    # sixteen decode steps were roughly half of each measurement.
+    timed = SamplingParams(max_tokens=1, temperature=0.0, ignore_eos=True)
+
     for target in [int(v) for v in options.lengths.split(',')]:
         prompt = build(target)
         entry = {'target_tokens': target}
         try:
             started = time.perf_counter()
-            out = llm.generate([prompt], sampling)
+            out = llm.generate([prompt], timed)
             elapsed = time.perf_counter() - started
-            completion = out[0].outputs[0]
             entry.update(prompt_tokens=len(out[0].prompt_token_ids),
-                         seconds=round(elapsed, 3),
-                         token_ids=list(completion.token_ids),
-                         text=completion.text[:120])
+                         seconds=round(elapsed, 3))
             entry['tokens_per_s'] = round(entry['prompt_tokens'] / elapsed, 1)
+
+            # Second pass for equality. The baseline arm has failed on its second
+            # generate twice now, at two different lengths, with an MMIO timeout
+            # inside 3 us of the same value. If that is the FIR path rather than
+            # the card, it reproduces here and is worth knowing.
+            out = llm.generate([prompt], sampling)
+            completion = out[0].outputs[0]
+            entry.update(token_ids=list(completion.token_ids),
+                         text=completion.text[:120])
         except BaseException as error:
             entry['error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
         report['results'].append(entry)
-        print('prefill %7s tokens -> %s tok/s, ids %s'
+        print('prefill %7s tokens -> %s tok/s, ids %s %s'
               % (entry.get('prompt_tokens'), entry.get('tokens_per_s'),
-                 entry.get('token_ids')), flush=True)
+                 entry.get('token_ids'), entry.get('error', '')), flush=True)
 
     ok = [r for r in report['results'] if r.get('token_ids')]
     report['arms_complete'] = len(ok) == len(report['results'])
+    report['errors'] = [r.get('error') for r in report['results'] if r.get('error')]
     print(BEGIN)
     print(json.dumps(report, indent=2))
     print(END)
     if options.json:
         io.open(options.json, 'w', encoding='utf-8', newline='\n').write(
             json.dumps(report, indent=2) + '\n')
-    return 0 if ok else 1
+    # An errored length is a failed arm, loudly. Previously the job went
+    # green with a missing result and only the gate noticed.
+    return 0 if report['arms_complete'] else 1
 
 
 if __name__ == '__main__':
