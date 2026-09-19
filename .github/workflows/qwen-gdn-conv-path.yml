@@ -1,0 +1,131 @@
+name: Qwen GDN conv path attribution
+on:
+  push:
+    tags: ['experiment/gdn-conv-path-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: gc
+          persist-credentials: false
+      - name: Patch tp.py to log which causal-conv path each chunk takes
+        working-directory: gc
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p graft experiment-results
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          name="qwen-gdn-conv-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          src=/opt/tt-metal/models/demos/blackhole/qwen36/tt/gdn/tp.py
+          docker cp "$name:$src" graft/tp.py.orig
+          sha256sum graft/tp.py.orig > experiment-results/source.sha256
+          python3 -B scripts/ci/gdn_conv_path_patch.py graft/tp.py.orig graft/tp.py
+          sha256sum graft/tp.py >> experiment-results/source.sha256
+          grep -n 'CONVPATH' graft/tp.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qwen-gdn-conv-graft-${{ github.run_id }}
+          path: gc/graft/
+
+  attribute:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: gc
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-gdn-conv-graft-${{ github.run_id }}
+          path: gc/graft/
+      - name: Confirm no process holds a card
+        working-directory: gc
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Run the same prefill shape and count the conv paths taken
+        working-directory: gc
+        timeout-minutes: 50
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+          graft=/opt/tt-metal/models/demos/blackhole/qwen36/tt/gdn/tp.py
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-gdn-conv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 2700 docker run --rm --name "$name" --network none \
+            --hostname qwen-gc --add-host qwen-gc:127.0.0.1 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g \
+            "${devices[@]}" \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
+            --mount "type=bind,src=$PWD/scripts/ci/prefill_profile.py,dst=/bench/prefill_profile.py,readonly" \
+            --mount "type=bind,src=$PWD/graft/tp.py,dst=$graft,readonly" \
+            --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0 \
+            -e VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+            -e PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal \
+            -e QWEN_PROJECTION_LINKS=4 \
+            -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
+            -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            --entrypoint python3 "$image" -B /bench/prefill_profile.py \
+            --model "$model" --context 65536 --lengths 2048,10240,20480 \
+            > experiment-results/gc-stdout.log 2>&1 || true
+          echo '=== CONVPATH markers, the whole point of the run ==='
+          grep -c 'CONVPATH' experiment-results/gc-stdout.log \
+            > experiment-results/convpath-count.txt || echo 0 > experiment-results/convpath-count.txt
+          cat experiment-results/convpath-count.txt
+          grep -o 'CONVPATH\] [a-z]* [a-z_]*=[A-Za-z0-9]*' experiment-results/gc-stdout.log \
+            | sort | uniq -c | sort -rn | head -20 \
+            > experiment-results/convpath-summary.txt || true
+          cat experiment-results/convpath-summary.txt || true
+          grep 'CONVPATH' experiment-results/gc-stdout.log | head -20 || true
+          if [ ! -s experiment-results/convpath-count.txt ] \
+             || [ "$(cat experiment-results/convpath-count.txt)" = 0 ]; then
+            echo 'No CONVPATH markers: the graft did not load. Tail of stdout:'
+            tail -60 experiment-results/gc-stdout.log || true
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-gdn-conv-path-${{ github.run_id }}
+          path: gc/experiment-results/
