@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -14,7 +15,7 @@ def main():
         print('No structured report; tail of stdout:')
         if options.log and options.log.is_file():
             print('\n'.join(options.log.read_text(errors='replace').splitlines()[-30:]))
-        return
+        return 1
     report = json.loads(options.report.read_text())
     print('context=%s chunk_size=%s targets=%s'
           % (report.get('context'), report.get('chunk_size'), report.get('targets')))
@@ -37,10 +38,11 @@ def main():
             print('        first divergence at char %s' % entry.get('first_divergence'))
             print('        baseline  %r' % (entry.get('baseline_at') or '')[:60])
             print('        resumable %r' % (entry.get('resumable_at') or '')[:60])
+    passed = bool(report.get('gate_passed'))
     print('\nM1 GATE %s  (%s lengths checked)'
-          % ('PASSED' if report.get('gate_passed') else 'NOT PASSED',
-             report.get('lengths_checked')))
+          % ('PASSED' if passed else 'NOT PASSED', report.get('lengths_checked')))
+    return 0 if passed else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

@@ -10,10 +10,16 @@ start_pos-is-None branch and calls prefill_paged_slots exactly as today.
 Resumable arm: chunked prefill on with max_num_batched_tokens equal to the model
 chunk size, so the runner supplies a window per step and the new range path runs.
 
-Sampling is greedy with n=1 and no penalties - the determinism constraints the fast
-policy still pins - so identical prompts must give identical completions. Anything
-else means the resumable path diverges, and the failure mode this guards against is
-silent GDN state corruption at long context rather than a crash.
+Runs on the PLAIN path by default. Run 35413668471 sent both arms through the T16 fast
+runtime and every request died in dflash_device.__init__ with 'bounded prefill
+required': that path pins a 4096-token prompt in two places, so it rejects every prompt
+this gate needs. M1 is a prefill contract and owes nothing to speculation. Plain greedy
+decode is also the cleaner probe, being a direct function of the state prefill left
+behind, with no acceptance dynamics on top. --fast-path restores the old behaviour.
+
+Sampling is greedy with n=1 and no penalties, so identical prompts must give identical
+completions. Anything else means the resumable path diverges, and the failure mode this
+guards against is silent GDN state corruption at long context rather than a crash.
 
 Prompt lengths cover the three shapes: no full chunk, one full chunk plus a tail, and
 several full chunks plus a tail. The mid-prefill short-prompt case from section 5 is
@@ -59,16 +65,17 @@ def build_prompt(target_tokens):
     return ''.join(text)
 
 
-def start_server(port, context, chunked, results, log_name):
-    recipe = dict(qwen_fast_t16=True,
-                  tt=dict(trace_mode='decode_only', trace_region_size=1073741824,
-                          l1_small_size=24576),
-                  qwen_fast_runtime=dict(directory='/experiment-scripts/ci',
-                                         runtime_root='/opt/tt-metal',
-                                         fixtures='/experiment-dflash-fixture',
-                                         target_snapshot=MODEL))
-    speculative = dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
-                       draft_sample_method='greedy', rejection_sample_method='standard')
+def start_server(port, context, chunked, results, log_name, fast=False):
+    # Without the tt block the plugin opens the mesh with l1_small_size=0 and the
+    # first L1_SMALL allocation dies with 'bank size is 0 B'.
+    recipe = dict(tt=dict(trace_mode='decode_only', trace_region_size=1073741824,
+                          l1_small_size=24576))
+    if fast:
+        recipe['qwen_fast_t16'] = True
+        recipe['qwen_fast_runtime'] = dict(directory='/experiment-scripts/ci',
+                                           runtime_root='/opt/tt-metal',
+                                           fixtures='/experiment-dflash-fixture',
+                                           target_snapshot=MODEL)
     blocks = -(-context // BLOCK_SIZE)
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
                '--model', MODEL, '--served-model-name', 'qwen-m1',
@@ -77,8 +84,11 @@ def start_server(port, context, chunked, results, log_name):
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
                '--shutdown-timeout', '30',
-               '--speculative-config', json.dumps(speculative),
                '--additional-config', json.dumps(recipe)]
+    if fast:
+        command += ['--speculative-config', json.dumps(
+            dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
+                 draft_sample_method='greedy', rejection_sample_method='standard'))]
     if chunked:
         command += ['--enable-chunked-prefill',
                     '--max-num-batched-tokens', str(CHUNK_SIZE)]
@@ -137,12 +147,12 @@ def complete(port, prompt, max_tokens):
                 seconds=round(time.perf_counter() - started, 3))
 
 
-def run_arm(port, context, chunked, prompts, max_tokens, results, log_name):
+def run_arm(port, context, chunked, prompts, max_tokens, results, log_name, fast=False):
     process = handle = None
     arm = dict(chunked=chunked, completions=[])
     try:
         process, handle, log_path, command = start_server(port, context, chunked,
-                                                          results, log_name)
+                                                          results, log_name, fast)
         arm['command'] = command
         arm['ready'] = True
         for name, prompt in prompts:
@@ -160,6 +170,9 @@ def main():
     parser.add_argument('--max-tokens', type=int, default=32)
     parser.add_argument('--results', type=Path, default=Path('/tmp/m1-gate'))
     parser.add_argument('--lengths', default='400,3000,5000')
+    parser.add_argument('--fast-path', action='store_true',
+                        help='route through the T16 fast runtime; its 4096-token prompt '
+                             'pins apply and will reject shorter prompts')
     options = parser.parse_args()
     try:
         options.results.mkdir(parents=True, exist_ok=True)
@@ -171,10 +184,13 @@ def main():
     report = dict(scope=__doc__, context=options.context, chunk_size=CHUNK_SIZE,
                   targets=targets, max_tokens=options.max_tokens)
     try:
+        report['fast_path'] = options.fast_path
         report['baseline'] = run_arm(8000, options.context, False, prompts,
-                                     options.max_tokens, options.results, 'baseline.log')
+                                     options.max_tokens, options.results, 'baseline.log',
+                                     options.fast_path)
         report['resumable'] = run_arm(8001, options.context, True, prompts,
-                                      options.max_tokens, options.results, 'resumable.log')
+                                      options.max_tokens, options.results, 'resumable.log',
+                                      options.fast_path)
         comparisons = []
         base = {c['name']: c for c in report['baseline'].get('completions', [])}
         test = {c['name']: c for c in report['resumable'].get('completions', [])}
