@@ -184,7 +184,38 @@ only on first use, and `_unbind_gdn_prefill_scratch` restores the batched decode
 Decode steps between two chunks of one prefill are safe for the same reason: they run
 against the batched decode buffers while the scratch is unbound.
 
-## What M1 has actually shown on hardware
+## M1 gate PASSED, run 35416319586
+
+Batched path, `max_num_seqs=4`, chunk budget 2048, greedy, three-file graft.
+
+```
+gate_passed: True    lengths_checked: 3/3
+  baseline_took_one_shot:  true
+  baseline_avoided_range:  true
+  resumable_took_range:    true
+```
+
+| Prompt | Tokens | Prefill steps | Identical |
+| --- | ---: | --- | --- |
+| approx_400 | 460 | one-shot only | yes (86 chars) |
+| approx_3000 | 3,524 | one-shot + range[2048,3524) | yes (7 chars) |
+| approx_5000 | 5,918 | one-shot + range[2048,4096) + range[4096,5918) | yes (12 chars) |
+
+The baseline arm ran `prefill_paged_slots` and never reached the range method; the
+resumable arm used the one-shot path for each prompt's first chunk and the range method
+for every continuation. That is the comparison the gate exists to make.
+
+**Caveat on strength.** Two of the three completions are short - the model hit EOS after
+8 and 10 tokens on the repetitive code prompts, so those equalities rest on about ten
+tokens each rather than the 32-token cap. Only the 460-token case ran to the cap. The
+result is real but a follow-up with prompts that generate longer continuations would
+harden it.
+
+**Cost.** Chunking a 5,918-token prompt took 4.43 s against 2.35 s one-shot, three steps
+instead of one. Part is the extra `synchronize_device` per step that section 3.1
+predicts, part is the intermediate slot writes this implementation does not skip.
+
+## What M1 showed on the way
 
 Run 35415521079, batched path, `max_num_seqs=4`, chunk budget 2048:
 
