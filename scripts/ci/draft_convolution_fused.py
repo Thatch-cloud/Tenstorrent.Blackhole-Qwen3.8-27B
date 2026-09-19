@@ -2,29 +2,37 @@
 
 from pathlib import Path
 
-from draft_convolution import validate_shapes
+from draft_convolution import validate_boundaries, validate_shapes
+
+
+def seam_mask(boundaries, rows):
+    """Bitmask of rows that begin a segment, as the IO kernel reads it.
+
+    Row 0 always begins one. For a single sequence that is the only bit, which is
+    exactly the `row &&` guard the kernel carried before, so an unpacked call is
+    unchanged. Rows are at most 32, so a uint32 holds every seam.
+    """
+    spans = validate_boundaries(boundaries, rows) or ((0, rows),)
+    mask = 0
+    for start, _ in spans:
+        mask |= 1 << start
+    return mask
 
 
 def checked_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False,
                         retain_temporaries=None, audit=False, checks=None, context=None, boundaries=None):
     if fp32_intermediates is not True or not callable(retain_temporaries) or type(audit) is not bool:
         raise ValueError('Fused request convolution requires exact FP32 arithmetic and an explicit lifetime owner')
-    if boundaries is not None:
-        # draft_convolution_fused_compute.cpp carries the causal row shift inside the
-        # kernel and takes only `rows` as a runtime argument, so it cannot restart the
-        # shift at a packed segment. Refusing here is the difference between a clear
-        # failure and user B's anchor silently convolving against user A's last draft.
-        raise ValueError('The fused convolution kernel has no packed segment boundaries; '
-                         'pack with the reference convolution until the kernel takes them')
     if audit and (not isinstance(checks, list) or not isinstance(context, dict)):
         raise ValueError('Audited convolution requires an owned check log and call context')
-    output = fused_convolution(operations, mesh, hidden, dynamic, base)
+    output = fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries)
     retain_temporaries(output)
     if audit:
         import torch
         from draft_convolution import grouped_causal_convolution
 
-        control = grouped_causal_convolution(operations, mesh, hidden, dynamic, base, fp32_intermediates=True)
+        control = grouped_causal_convolution(operations, mesh, hidden, dynamic, base,
+            fp32_intermediates=True, boundaries=boundaries)
         try:
             for chip, (candidate, reference) in enumerate(zip(operations.get_device_tensors(output),
                     operations.get_device_tensors(control), strict=True)):
@@ -38,8 +46,9 @@ def checked_convolution(operations, mesh, hidden, dynamic, base, *, fp32_interme
     return output
 
 
-def fused_convolution(operations, mesh, hidden, dynamic, base):
+def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=None):
     rows = validate_shapes(hidden, dynamic, base)
+    seams = seam_mask(boundaries, rows)
     tensors = [hidden, *dynamic, *base]
     if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16
             or value.layout != operations.TILE_LAYOUT or value.memory_config() != operations.DRAM_MEMORY_CONFIG
@@ -68,7 +77,7 @@ def fused_convolution(operations, mesh, hidden, dynamic, base):
                 raise ValueError('Convolution output must not alias borrowed inputs')
             runtime = operations.RuntimeArgs()
             for worker in range(80):
-                runtime[worker % 8][worker // 8] = [value.buffer_address() for value in local] + [rows, worker]
+                runtime[worker % 8][worker // 8] = [value.buffer_address() for value in local] + [rows, worker, seams]
             reader = operations.KernelDescriptor(kernel_source=str(Path(__file__).with_name('draft_convolution_fused_io.cpp')),
                 core_ranges=cores, compile_time_args=[argument for value in local
                     for argument in operations.TensorAccessorArgs(value).get_compile_time_args()], runtime_args=runtime,

@@ -19,6 +19,11 @@ void kernel_main() {
     const auto output = TensorAccessor(output_args, get_arg_val<uint32_t>(5), 2048);
     const uint32_t rows = get_arg_val<uint32_t>(6);
     const uint32_t worker = get_arg_val<uint32_t>(7);
+    // Bit r set means row r begins a packed user's segment, so its causal shift
+    // reads zero instead of the row above - which belongs to the previous user.
+    // Bit 0 is always set; for one sequence that is the only bit and the mask
+    // reproduces the old `row &&` behaviour exactly.
+    const uint32_t seams = get_arg_val<uint32_t>(8);
     const uint32_t scratch = get_write_ptr(1);
     for (uint32_t page = worker; page < 160; page += 80) {
         cb_reserve_back(0, 7);
@@ -35,7 +40,8 @@ void kernel_main() {
             for (uint32_t column = 0; column < 32; ++column) {
                 const uint32_t element = lane(row, column);
                 const uint32_t group = lane(row, 2 * (page % 16) + column / 16);
-                tiles[1024 + element] = row && row < rows ? tiles[lane(row - 1, column)] : 0;
+                const bool carries = row < rows && !((seams >> row) & 1u);
+                tiles[1024 + element] = carries ? tiles[lane(row - 1, column)] : 0;
                 tiles[2 * 1024 + element] = tiles[2 * 1024 + lane(0, column)];
                 tiles[3 * 1024 + element] = row < rows ? coefficients[group] : 0;
                 tiles[4 * 1024 + element] = tiles[4 * 1024 + lane(0, column)];

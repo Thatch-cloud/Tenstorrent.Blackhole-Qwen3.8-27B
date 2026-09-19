@@ -61,12 +61,14 @@ class PackedConvolutionTests(unittest.TestCase):
                 validate_boundaries(spans, 32)
         self.assertIsNone(validate_boundaries(None, 32))
 
-    def test_the_fused_kernel_refuses_packed_boundaries(self):
-        from draft_convolution_fused import checked_convolution
+    def test_the_fused_kernel_now_takes_the_same_spans(self):
+        """It used to refuse them. draft_convolution_fused_io.cpp reads a seam
+        bitmask as its ninth runtime argument, and test_draft_convolution_fused_seams
+        pins that the mask means what the kernel reads."""
+        from draft_convolution_fused import seam_mask
 
-        with self.assertRaises(ValueError):
-            checked_convolution(None, None, None, None, None, fp32_intermediates=True,
-                                retain_temporaries=lambda value: value, boundaries=((0, 16), (16, 32)))
+        self.assertEqual(seam_mask(((0, 16), (16, 32)), 32), (1 << 0) | (1 << 16))
+        self.assertEqual(seam_mask(None, 32), 1)
 
 
 if __name__ == '__main__':
