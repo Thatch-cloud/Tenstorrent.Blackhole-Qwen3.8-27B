@@ -80,9 +80,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
             block_stream=block_stream, kv_publication_evidence=kv_publication_evidence))
+        # Correct, not yet fast: one weight pass per user per round. The batched
+        # verifier replaces this behind the same parameter, and describe() records
+        # the cost so a benchmark reading it is not mistaken for the goal.
+        from serving_sequential_step import sequential_packed_step
+
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
-            cancelled=cancelled)
+            cancelled=cancelled, packed_step=sequential_packed_step)
     except BaseException:
         scopes.close()
         raise
