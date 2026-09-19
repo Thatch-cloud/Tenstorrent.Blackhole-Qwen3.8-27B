@@ -17,7 +17,10 @@ class FastServingLifecycle:
         self.worker, self.runner = worker, runner
         self.capture_factory, self.bridge_factory = capture_factory, bridge_factory
         self.eos_ids, self.cancelled = tuple(eos_ids), cancelled
-        self.request_id = self.capture = self.hook = None
+        # request_id is the request in the PREFILL phase; decoding_id is the one
+        # the hook serves. They were one field, which is why a second arrival
+        # hit 'one complete fresh prefill' while the first was merely decoding.
+        self.request_id = self.decoding_id = self.capture = self.hook = None
         self.prefill_pending = self.failed = self.closed = False
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
@@ -41,18 +44,27 @@ class FastServingLifecycle:
         if self.capture is not None:
             self.capture.close()
             self.capture = None
-        self.request_id = None
+        self.request_id = self.decoding_id = None
 
     def _execute(self, worker, scheduled):
         self._check()
         try:
             if self.prefill_pending:
                 raise ValueError('Prefill must be sampled before another execution')
-            if self.request_id in scheduled.finished_req_ids:
+            if (self.request_id in scheduled.finished_req_ids
+                    or self.decoding_id in scheduled.finished_req_ids):
                 self._release_request()
             if self.hook is not None:
-                return self.original_execute(scheduled)
-            if scheduled.total_num_scheduled_tokens == 0:
+                # A prefill-only step for a NEW request, while another request
+                # decodes. TTScheduler never mixes prefill and decode in one batch
+                # (probe 35435453374: stock vllm gives new=['B'] cached=['A'], the
+                # plugin gives new=['B'] cached=[]), so this is a clean prefill step
+                # and belongs on the prefill path below. Delegating it to the hook
+                # sends it to admit_scheduler_output, which refuses any new request.
+                if not (scheduled.scheduled_new_reqs
+                        and not scheduled.scheduled_cached_reqs.req_ids):
+                    return self.original_execute(scheduled)
+            elif scheduled.total_num_scheduled_tokens == 0:
                 return self.original_execute(scheduled)
             if (self.request_id is not None or len(scheduled.scheduled_new_reqs) != 1
                     or scheduled.scheduled_cached_reqs.req_ids
@@ -96,12 +108,25 @@ class FastServingLifecycle:
                 self.capture.close()
                 self.capture = None
                 return result
+            if self.hook is not None:
+                # The prefill succeeded, and handing it to a hook cannot: one
+                # FastWorkerHook binds one request to the worker, and that worker
+                # is already serving self.decoding_id. This is T6, and it is the
+                # boundary - not the scheduler, which serialises, and not the
+                # capture, which was released before this prefill began.
+                raise ValueError('A second FastWorkerHook would be required: one hook '
+                                 'binds one request to the worker, and %r is already '
+                                 'decoding' % (self.decoding_id,))
             bridge = self.bridge_factory(state, self.capture)
             try:
                 self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled)
             except BaseException:
                 bridge.close()
                 raise
+            # The request leaves the prefill phase and becomes the decoding one, so
+            # the prefill slot is free for the next arrival.
+            self.decoding_id = self.request_id
+            self.request_id = None
             self.capture = None
             return result
         except BaseException:

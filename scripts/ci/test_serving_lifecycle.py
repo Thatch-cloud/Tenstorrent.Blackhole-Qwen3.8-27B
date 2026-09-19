@@ -35,6 +35,62 @@ class LifecycleTests(unittest.TestCase):
             eos_ids=(99,), cancelled=lambda: False)
         return lifecycle, worker, bridge, capture, build, scheduled, decode
 
+    def test_second_prefill_during_decode_reaches_the_prefill_path(self):
+        """A new request arriving while another decodes is a PREFILL-only step.
+
+        TTScheduler never mixes prefill and decode in one batch - probe 35435453374
+        measured stock vllm producing new=['B'] cached=['A'] where the plugin gives
+        new=['B'] cached=[] - so this step belongs on the prefill path. It used to be
+        delegated to the hook, which sent it to admit_scheduler_output and was refused
+        for carrying a new request.
+
+        It must now reach the prefill path and fail on the HOOK instead, which is the
+        real boundary: one FastWorkerHook binds one request to the worker.
+        """
+        lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
+        self.assertIsNone(worker.execute_model(prefill))
+        worker.sample_tokens(None)
+        self.assertIsNotNone(lifecycle.hook)
+        self.assertEqual(lifecycle.decoding_id, 'request')
+        self.assertIsNone(lifecycle.request_id, 'the prefill slot must be free again')
+
+        second = SimpleNamespace(req_id='second', prompt_token_ids=[1] * 4096,
+            num_computed_tokens=0, mm_features=[], prompt_embeds=None, lora_request=None,
+            sampling_params=prefill.scheduled_new_reqs[0].sampling_params)
+        step = SimpleNamespace(finished_req_ids=set(), scheduled_new_reqs=[second],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]), scheduled_spec_decode_tokens={},
+            num_scheduled_tokens={'second': 4096}, total_num_scheduled_tokens=4096)
+
+        # the prefill path runs: a capture is taken for the new request, and the
+        # step is NOT routed into the decode contract
+        self.assertIsNone(worker.execute_model(step))
+        self.assertEqual(lifecycle.request_id, 'second')
+        self.assertEqual(lifecycle.decoding_id, 'request',
+                         'the first request keeps decoding')
+        self.assertTrue(lifecycle.prefill_pending)
+        self.assertTrue(lifecycle.hook is not None, 'the first hook survives')
+
+    def test_hook_passes_a_prefill_step_through_to_the_runner(self):
+        """The hook replaces runner.execute_model, so it decides this, not the lifecycle.
+
+        It used to send every step to bridge.execute_decode, and
+        admit_scheduler_output refuses any step carrying a new request. A step with
+        new requests is someone else's prefill - TTScheduler never mixes - so it must
+        reach the runner instead.
+        """
+        lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
+        worker.execute_model(prefill)
+        worker.sample_tokens(None)
+        hook = lifecycle.hook
+        self.assertIsNotNone(hook)
+
+        seen = []
+        hook.original_execute = lambda scheduled: seen.append(scheduled) or 'passed-through'
+        step = SimpleNamespace(scheduled_new_reqs=[SimpleNamespace(req_id='second')],
+                               scheduled_cached_reqs=SimpleNamespace(req_ids=[]))
+        self.assertEqual(hook._execute(worker.model_runner, step), 'passed-through')
+        self.assertEqual(len(seen), 1, 'the prefill step reached the runner')
+
     def test_prefill_to_committed_decode_to_finished_cleanup(self):
         lifecycle, worker, bridge, capture, build, prefill, decode = self.fixture()
         self.assertIsNone(worker.execute_model(prefill))
