@@ -84,6 +84,27 @@ jobs:
           sha256sum graft/qwen36_vllm.py >> experiment-results/graft.sha256
         env:
           CHUNK: ${{ matrix.chunk }}
+      - name: Reset the boards before measuring
+        working-directory: cycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          # A profiling run leaves the board unable to open its mesh and this sweep
+          # follows one. Run 35422965120 died in open_mesh_device on
+          # assert_active_ethernet_cores_to_reset for exactly that reason.
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" \
+            > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
       - name: Confirm no process holds a card
         working-directory: cycle
         timeout-minutes: 3
@@ -171,6 +192,18 @@ jobs:
           python3 -B scripts/ci/cycle_bench_report.py \
             --report experiment-results/cycle.json \
             --log experiment-results/cycle-stdout.log
+          python3 -B - <<'GUARD'
+          import json, sys
+          d = json.load(open('experiment-results/cycle.json'))
+          streams = [x for x in (d.get('streams') or []) if x]
+          if not d.get('ready') or d.get('itl_ms_median') is None:
+              print('NO MEASUREMENT: ready=%s error=%s' % (d.get('ready'),
+                    d.get('error') or [x.get('error') for x in streams]))
+              sys.exit(1)
+          print('chunk result: ttft %.1f s, itl %.3f ms, prompt_tokens %s'
+                % (streams[0].get('ttft_s') or 0.0, d['itl_ms_median'],
+                   streams[0].get('prompt_tokens')))
+          GUARD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
