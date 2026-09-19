@@ -26,7 +26,7 @@ class FastServingLifecycle:
         # Every request the hook is serving, in arrival order. decoding_id stays as
         # the most recent, so existing single-user behaviour reads the same.
         self.decoding_ids = []
-        self.prefill_pending = self.failed = self.closed = False
+        self.prefill_pending = self.failed = self.closed = self.ignore_eos = False
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -103,6 +103,8 @@ class FastServingLifecycle:
                     or scheduled.total_num_scheduled_tokens != len(new.prompt_token_ids)):
                 raise ValueError('Text-only uncached complete prompt required')
             validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids), eos_ids=self.eos_ids)
+            # A terminal first token only ends the request when EOS is honoured.
+            self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
             self.request_id = new.req_id
             self.capture = self.capture_factory(len(new.prompt_token_ids))
             with self.capture.capture():
@@ -128,7 +130,7 @@ class FastServingLifecycle:
             state = self.runner.requests[self.request_id]
             if state.output_token_ids != result.sampled_token_ids[0]:
                 raise ValueError('Native prefill output and runner state disagree')
-            if state.output_token_ids[0] in self.eos_ids:
+            if state.output_token_ids[0] in self.eos_ids and not self.ignore_eos:
                 # Finished at its first token: no bridge, no hook. The prefill slot
                 # MUST be freed here - leaving it held is invisible with one user,
                 # because that user is done, and fatal with two: run 35441524535

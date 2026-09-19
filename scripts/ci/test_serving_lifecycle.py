@@ -208,6 +208,24 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle.request_id, 'second')
         self.assertTrue(lifecycle.prefill_pending)
 
+    def test_a_terminal_first_token_under_ignore_eos_still_builds_a_bridge(self):
+        """Run 35441818361: both users prefilled, then the decode step arrived with
+        no hook, because both had taken the terminal branch. Under ignore_eos the
+        request does NOT stop - vLLM keeps scheduling it - so short-circuiting
+        leaves it with nothing to decode on. The branch is only correct when EOS
+        is actually honoured.
+        """
+        lifecycle, worker, bridge, capture, build, prefill, _ = self.fixture()
+        prefill.scheduled_new_reqs[0].sampling_params.ignore_eos = True
+        bridge.state.output_token_ids[:] = [99]
+        worker.model_runner.sample_tokens.return_value.sampled_token_ids = [[99]]
+        worker.execute_model(prefill)
+        worker.sample_tokens(None)
+        build.assert_called_once()
+        self.assertIsNotNone(lifecycle.hook, 'the request keeps decoding, so it needs a bridge')
+        self.assertEqual(lifecycle.decoding_ids, ['request'])
+        lifecycle.close()
+
     def test_partial_prefill_rejected_without_device_execution(self):
         lifecycle, worker, _, capture, build, prefill, _ = self.fixture()
         prefill.total_num_scheduled_tokens = 2048
