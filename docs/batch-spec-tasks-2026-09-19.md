@@ -393,3 +393,58 @@ full local discover sits at 12 failures and 44 errors against a 12/43 baseline; 
 56 named failures are in modules that import nothing changed here, and the eleven
 largest reproduce in isolation as missing weights and devices. The extra one is not
 attributable to this work, and is not claimed to be absent either.
+
+## Target side: the page tables were never the blocker (2026-09-19)
+
+`ModelBatch` builds the verify block as
+
+    positions = torch.arange(start, start + rows)
+    self.pages = upload(pages.repeat(self.rows, 1))
+    self.cos, self.sin = rot_mats_decode(..., positions)
+
+so the model already takes one position and one page-table row per query row. The
+only single-user assumptions are that the positions are one contiguous run and that
+one page table is repeated. `target_packed_pages.packed_rows` replaces both, and at
+one user reproduces today's tensors exactly. That is built and tested.
+
+It is not enough, and the reason is the same class of bug as the draft convolution
+seam, one layer deeper.
+
+**48 of the 64 target layers are GDN, and their row axis is TIME.**
+`gdn_prefix.decode_projected` is explicit:
+
+    for index, token in enumerate(token_inputs):
+        outputs.append((forward or gdn.forward_decode)(token))
+        checkpoint(index + 1)
+
+one row at a time through a single recurrent state, with a projection callback that
+raises on any batch but one. Packed without handling this, user B's rows continue
+user A's recurrence: wrong for EVERY row of B, not just the first, and A's state is
+left advanced by the whole block. Nothing downstream can detect it. "batch" in
+`gdn_batched_conv`, `batch_conv` and `norm_batch` means batching operations across
+the rows of one sequence, not across sequences; there is no per-sequence batch
+anywhere in the GDN modules.
+
+So `ModelBatch.validate_pack` refuses a multi-user pack outright. The page tables
+are correct and tested, and they stay behind that guard rather than becoming a
+silent source of wrong committed tokens.
+
+### Why this is still tractable
+
+The weight-heavy GDN work - the qkvzab input projection and the output projection -
+already runs ONCE across all rows (`gdn._project_qkvzab_raw(packed_input, rows, ...)`)
+and is per-token independent. Only the recurrent update is per sequence, and it is
+elementwise, not a weight pass. So the fix is a **state swap at each segment
+boundary**, the same pattern as the convolution seam, rather than a batch dimension
+in the GDN kernels. That keeps the whole point of packing intact: one pass over the
+19.92 GB of weights serving every user.
+
+Ordered by what blocks what:
+
+1. GDN per-segment recurrent state in `DeviceLoopState` / `decode_projected`,
+   which unblocks `validate_pack` and the target verify.
+2. The fused draft convolution kernel taking segment spans, since
+   `draft_convolution_fused_compute.cpp` has only `rows` as a runtime argument and
+   production sets `fused_convolution=True`.
+3. `admit_scheduler_output`, the one-hook-per-request binding, and the one-in-flight
+   prefill rule.

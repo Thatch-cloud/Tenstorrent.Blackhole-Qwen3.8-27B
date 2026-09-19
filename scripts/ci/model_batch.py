@@ -22,6 +22,34 @@ def instance_overrides(bindings):
                 delattr(instance, name)
 
 
+def validate_pack(pack):
+    """Refuse a packed multi-user verify block until the GDN seam is handled.
+
+    The 16 full-attention layers are per row, and target_packed_pages builds the
+    per-row positions and page tables they need. The other 48 layers are GDN, and
+    there the row axis is TIME for one sequence: gdn_prefix.decode_projected steps
+    one row at a time through a single recurrent state and its projection callback
+    refuses any batch but one. Packed rows would therefore continue the previous
+    user's recurrence - wrong for every row of the second user, and it would leave
+    the first user's state advanced by the whole block.
+
+    The weight-heavy GDN work, the qkvzab and output projections, already runs once
+    across all rows and is per-token independent, so what is missing is a state swap
+    at each segment boundary rather than a batch dimension in the kernels. Until that
+    exists this raises, because the alternative is silently wrong committed tokens.
+    """
+    if pack is None:
+        return None
+    from target_packed_pages import packed_rows
+
+    packed = packed_rows(pack)
+    if len(packed['segments']) > 1:
+        raise ValueError('Packed verify rows need a per-segment GDN recurrent state; '
+                         'gdn_prefix.decode_projected steps one sequence through one state, '
+                         'so a pack would continue the previous user rather than restart')
+    return packed
+
+
 def validate_checkpoint(rows, prefix):
     if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError("Expected T=1/2/4/8/16/32")
