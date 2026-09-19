@@ -81,6 +81,16 @@ def main():
     except BaseException as error:
         show('image verifier_engine.py', 'unreadable: %s' % error)
 
+    # The one that actually raised, read from the IMAGE. The repo's copy already
+    # proved a poor guide once: verifier_engine here is the bundle's, not this repo's.
+    try:
+        frozen = io.open('/experiment-scripts/ci/frozen_combined_runtime.py', encoding='utf-8').read()
+        start = frozen.find('def validate_target_option')
+        print('----- image frozen_combined_runtime.validate_target_option -----')
+        print(frozen[start:frozen.find(NEXT_DEF, start + 1)])
+    except BaseException as error:
+        show('image frozen_combined_runtime.py', 'unreadable: %s' % error)
+
     positions = sorted(set(int(value) for value in re.findall(r'position != (\d+)', source or '')))
     show('positions this gate accepts', positions)
 
