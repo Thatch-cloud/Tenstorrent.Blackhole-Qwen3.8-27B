@@ -54,7 +54,12 @@ jobs:
         run: |
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
-          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          # The experiment image, not the serving one. Run 35421182587 used the
+          # serving image and tracy ran the workload while collecting nothing: no
+          # device data, no post-process, no CSV. This is the image the proven
+          # profile path in run-dspark-hardware.sh uses, and the one the DRAM
+          # bandwidth probe opened the cards with.
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
           mkdir -p experiment-results/profile
@@ -96,6 +101,14 @@ jobs:
             exit 1
           fi
           cat experiment-results/prefill-profile.json
+          csv=experiment-results/profile/prefill-profile/metadata/cpp_device_perf_report.csv
+          if [ ! -s "$csv" ]; then
+            echo 'Timings collected but NO device profile. That is the point of this job.'
+            echo '--- profiler console tail ---'
+            tail -25 experiment-results/profile/prefill-profile/console.log || true
+            exit 1
+          fi
+          echo "device profile: $(wc -l < "$csv") rows"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
