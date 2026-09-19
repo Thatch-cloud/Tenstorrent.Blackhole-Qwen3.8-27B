@@ -65,6 +65,22 @@ def main():
             print('----- image request_context -----')
             print(text[start:text.find(NEXT_DEF, start + 1)])
 
+    # The engine is NOT copied into the image from this repo - the bundle's copy is
+    # what runs - so read that one and show exactly what it hands the gate.
+    try:
+        engine = io.open('/experiment-scripts/ci/verifier_engine.py', encoding='utf-8').read()
+        start = engine.find('validate_request_option(')
+        print('----- image verifier_engine gate call -----')
+        print(engine[max(0, start - 200):start + 420])
+        for name in ('short_context', 'norm_batch', 'native_sampling_rows',
+                     'replay_group_rows', 'attention_replay', 'max_verify_rows'):
+            hits = [line.strip() for line in engine.splitlines()
+                    if name in line and ('self.%s' % name in line or 'def __init__' in line
+                                         or '%s=' % name in line)]
+            show('image engine %s' % name, hits[:2])
+    except BaseException as error:
+        show('image verifier_engine.py', 'unreadable: %s' % error)
+
     positions = sorted(set(int(value) for value in re.findall(r'position != (\d+)', source or '')))
     show('positions this gate accepts', positions)
 
