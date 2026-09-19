@@ -85,6 +85,17 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 raise ValueError('Proposal trace already captured before verifier allocation')
             device.proposal_capture = components.proposal(device, max_new_tokens=256)
 
+        # The T16 gate compares these four for equality and run 35474038724 passed
+        # position=32768 from len(prompt) yet still failed, so report what the gate
+        # will actually read rather than guessing which term differs.
+        try:
+            from loguru import logger as _qwen_gate_logger
+            _qwen_gate_logger.info(
+                '[PINDIAG] gate rows={} session_position={} remaining={} emitted={}',
+                16, session.position, session.max_new_tokens - len(session.emitted),
+                len(session.emitted))
+        except BaseException:
+            pass
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
             norm_batch=True, attention_replay=True, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
