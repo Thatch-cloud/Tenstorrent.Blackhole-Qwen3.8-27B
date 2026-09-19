@@ -64,6 +64,30 @@ def main():
     if 'scheduler_cls' in fields:
         show('scheduler_cls default', fields['scheduler_cls'].default)
 
+    # A dotted path only works if vLLM resolves strings. Measure it rather than
+    # trusting that it looks like the kind of field that would.
+    if 'scheduler_cls' in fields:
+        show('scheduler_cls annotation', fields['scheduler_cls'].type)
+    try:
+        import vllm.v1.engine.core as core
+
+        source = inspect.getsource(core)
+        show('engine core mentions scheduler_cls', 'scheduler_cls' in source)
+        for line in source.splitlines():
+            if 'scheduler_cls' in line:
+                print('    core: %s' % line.strip())
+    except BaseException as error:
+        show('engine core source', 'unavailable: %s' % error)
+    try:
+        from vllm.utils import resolve_obj_by_qualname
+        show('resolve_obj_by_qualname', 'present')
+    except BaseException as error:
+        try:
+            from vllm.utils.import_utils import resolve_obj_by_qualname
+            show('resolve_obj_by_qualname', 'present in import_utils')
+        except BaseException:
+            show('resolve_obj_by_qualname', 'absent: %s' % error)
+
     platform = None
     try:
         from vllm_tt_plugin.platform import TTPlatform as platform

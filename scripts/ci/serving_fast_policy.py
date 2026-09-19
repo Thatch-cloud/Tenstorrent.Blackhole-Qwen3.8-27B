@@ -87,6 +87,16 @@ def validate_fast_config(config):
             or speculative.draft_sample_method != 'greedy'
             or speculative.rejection_sample_method != 'standard'):
         raise ValueError('Explicit greedy 15-proposal DFlash T16 policy required')
+    if _seqs > 1:
+        # Probe 35436384975: the plugin scheduler batches SIMULTANEOUS prefills into
+        # one step, and the fast prefill path takes one capture and executes one
+        # prompt, so it cannot serve that. Probe 35440618178 showed the subclass
+        # admitting one fresh prompt per step against the plugin's own scheduler.
+        # Only at more than one request, because at one there is nothing to serialise.
+        from serving_one_in_flight import install as _install_one_in_flight
+
+        if getattr(scheduler, 'scheduler_cls', None) in (None, ''):
+            _install_one_in_flight(config)
     return dict(scheduler_requests=_seqs, native_gdn_slots=NATIVE_GDN_SLOTS, verifier_rows=16,
         physical_devices=2, context_tokens=model_len - OUTPUT_BUDGET,
         output_budget=OUTPUT_BUDGET, max_model_len=model_len,

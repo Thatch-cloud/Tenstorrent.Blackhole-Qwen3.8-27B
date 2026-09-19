@@ -68,14 +68,29 @@ def effective_capacity(max_num_running_reqs, decodes, partials):
     return max(0, capped - decodes)
 
 
+SCHEDULER_PATH = 'serving_one_in_flight.OneInFlightScheduler'
+
+
+def __getattr__(name):
+    # Built on first access rather than at import, so the plugin is only imported
+    # when vLLM actually resolves the scheduler. Config validation runs in places
+    # the plugin is not importable, and it has no business importing it.
+    if name == 'OneInFlightScheduler':
+        return one_in_flight_scheduler()
+    raise AttributeError(name)
+
+
 def install(vllm_config, scheduler=None):
     """Point the fast path's config at the one-in-flight scheduler.
 
     Only when the fast path is requested: this is part of that path's contract,
     not a change to how the plugin schedules by default.
+
+    A dotted path rather than a class, so nothing imports the plugin until vLLM
+    resolves it.
     """
     scheduler_config = vllm_config.scheduler_config
     if getattr(scheduler_config, 'scheduler_cls', None) not in (None, ''):
         raise ValueError('A scheduler class is already selected for this config')
-    scheduler_config.scheduler_cls = scheduler or one_in_flight_scheduler()
+    scheduler_config.scheduler_cls = SCHEDULER_PATH if scheduler is None else scheduler
     return scheduler_config.scheduler_cls

@@ -109,6 +109,16 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(chosen, 'marker')
         self.assertEqual(config.scheduler_config.scheduler_cls, 'marker')
 
+    def test_the_default_is_a_dotted_path_so_nothing_imports_the_plugin(self):
+        import serving_one_in_flight
+
+        config = SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=None))
+        self.assertEqual(install(config), 'serving_one_in_flight.OneInFlightScheduler')
+        self.assertEqual(serving_one_in_flight.SCHEDULER_PATH,
+                         config.scheduler_config.scheduler_cls)
+        with self.assertRaises(AttributeError):
+            serving_one_in_flight.something_else
+
     def test_install_refuses_to_replace_an_existing_choice(self):
         config = SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls='someone_elses'))
         with self.assertRaises(ValueError):
