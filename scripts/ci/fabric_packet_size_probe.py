@@ -43,7 +43,7 @@ CEILING_GB_S = 200.0
 SHAPES = ((512, 5120), (2048, 5120), (8192, 5120))
 
 
-def configure_fabric(ttnn, report, packet_size):
+def configure_fabric(ttnn, report, packet_size, num_planes=0):
     """Bring the fabric up, optionally requesting a packet payload size."""
     config = None
     for name in ('FABRIC_1D', 'FABRIC_1D_RING'):
@@ -55,8 +55,16 @@ def configure_fabric(ttnn, report, packet_size):
         report['fabric'] = 'ABSENT'
         return
 
+    extra = {}
+    if num_planes:
+        # set_fabric_config takes num_planes: int | None. With four links up and
+        # only about one cable of bandwidth arriving, how many parallel routing
+        # planes the fabric builds is the leading suspect.
+        extra['num_planes'] = num_planes
+        report['requested_num_planes'] = num_planes
+
     if not packet_size:
-        ttnn.set_fabric_config(config)
+        ttnn.set_fabric_config(config, **extra)
         return
 
     # FabricRouterConfig carries exactly one field. Try the constructor first,
@@ -78,9 +86,9 @@ def configure_fabric(ttnn, report, packet_size):
         except BaseException as error:
             report['router_config'] = '%s: %s' % (type(error).__name__, str(error)[:200])
     if router is None:
-        ttnn.set_fabric_config(config)
+        ttnn.set_fabric_config(config, **extra)
         return
-    ttnn.set_fabric_config(config, router_config=router)
+    ttnn.set_fabric_config(config, router_config=router, **extra)
     report['requested_packet_size'] = packet_size
 
 
@@ -118,12 +126,15 @@ def main():
     parser.add_argument('--iters', type=int, default=30)
     parser.add_argument('--packet-size', type=int, default=0,
                         help='request this payload size; 0 leaves the default')
+    parser.add_argument('--num-planes', type=int, default=0,
+                        help='request this many parallel routing planes; 0 leaves the default')
     parser.add_argument('--json')
     options = parser.parse_args()
 
     report = {'baseline_gb_s': BASELINE_GB_S, 'ceiling_gb_s': CEILING_GB_S,
               'links': 4, 'cables': 2,
-              'arm': 'tuned' if options.packet_size else 'baseline',
+              'arm': ('planes' if options.num_planes else
+                      'tuned' if options.packet_size else 'baseline'),
               'page_size_bytes': 2048, 'ideal_packet_size_bytes': 8192,
               'hw_max_payload_blackhole': 15232}
     try:
@@ -131,7 +142,7 @@ def main():
         require_projection_environment(os.environ, True)
         import ttnn
 
-        configure_fabric(ttnn, report, options.packet_size)
+        configure_fabric(ttnn, report, options.packet_size, options.num_planes)
 
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
         try:
