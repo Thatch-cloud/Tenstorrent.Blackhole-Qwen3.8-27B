@@ -55,8 +55,8 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
-                             parameters, context, wide_dot_placement=False, convolution_operation=None, cached_history=None,
-                             live_query_mask_validated=False, native_proposal_mask_validated=False):
+                             parameters, context, pack=None, wide_dot_placement=False, convolution_operation=None,
+                             cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False):
     convolve = convolution_operation or grouped_causal_convolution
     if parameters['operations'] is not operations or parameters['mesh'] is not mesh:
         raise ValueError('Prepared attention parameters belong to another mesh or runtime')
@@ -73,22 +73,46 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         from dflash_t16_native_scope import require_active
 
         require_active()
-    if type(context) is not int or context < 1 or context > 2048:
-        raise ValueError('Explicit bounded committed feature context required')
     block_rows = parameters.get('block_rows', 8)
-    key_rows = ((context + block_rows + 31) // 32) * 32
+    spans = None
+    if pack is None:
+        if type(context) is not int or context < 1 or context > 2048:
+            raise ValueError('Explicit bounded committed feature context required')
+        key_rows = ((context + block_rows + 31) // 32) * 32
+    else:
+        # Several users share the one 32-row proposal block, each confined to its
+        # own key segment. Probe 35436807668: TTScheduler schedules every live
+        # request's decode in ONE step, and alternating them instead costs a whole
+        # 19.92 GB weight pass per user per round.
+        from dflash_batched_mask import key_value_plan, user_contexts
+
+        if context is not None or cached_history is None or not parameters.get('native_proposal_attention'):
+            raise ValueError('Packed users replace the single context and require the cached native proposal path')
+        pack, contexts = user_contexts(pack)
+        plan, spans, key_rows = key_value_plan(contexts, block_rows)
+        if len(cached_history) != len(pack):
+            raise ValueError('One committed K/V cache per packed user required')
     if (tuple(hidden.shape) != (1, 1, 32, 5120) or tuple(history.shape) != (1, 1, key_rows, 5120)
             or hidden.dtype != operations.bfloat16 or history.dtype != operations.bfloat16
             or tuple(mask.shape) != (1, 1, 32, key_rows) or mask.dtype != operations.bfloat16):
         raise ValueError('Padded BF16 proposal, context and mask geometry required')
-    if set(rope) != {'q', 'k'} or any(len(rope[name]) != 2 or any(
-            tuple(table.shape) != (1, 1, 32 if name == 'q' else key_rows, 128)
-            or table.dtype != operations.bfloat16 for table in rope[name]) for name in ('q', 'k')):
+    expected = {'q': 32, 'k': key_rows} if spans is None else {'q': 32, 'k': key_rows, 'live_k': 32}
+    if set(rope) != set(expected) or any(len(rope[name]) != 2 or any(
+            tuple(table.shape) != (1, 1, expected[name], 128)
+            or table.dtype != operations.bfloat16 for table in rope[name]) for name in expected):
         raise ValueError('Caller-owned BF16 position tables required for query and keys')
-    if cached_history is not None and (not parameters.get('native_head_layout') or context not in (256, 512, 1024, 2048)
-            or set(cached_history) != {'k', 'v'} or any(tuple(value.shape) != (1, 4, context, 128)
-                or value.dtype != operations.bfloat16 for value in cached_history.values())):
-        raise ValueError('Explicit native fixed-bucket historical K/V heads required')
+    if cached_history is not None:
+        # One cache at one user, one per user when packed; each is checked against
+        # its own history length rather than a shared one.
+        caches = [cached_history] if spans is None else list(cached_history)
+        lengths = [context] if spans is None else [span['context'] for span in spans]
+        if not parameters.get('native_head_layout'):
+            raise ValueError('Explicit native fixed-bucket historical K/V heads required')
+        for cache, length in zip(caches, lengths):
+            if (length not in (256, 512, 1024, 2048) or set(cache) != {'k', 'v'}
+                    or any(tuple(value.shape) != (1, 4, length, 128)
+                           or value.dtype != operations.bfloat16 for value in cache.values())):
+                raise ValueError('Explicit native fixed-bucket historical K/V heads required')
     kernel = parameters['kernel']
 
     def project(value, weight, grid, rows, columns):
@@ -117,12 +141,35 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         from draft_kv_projection import project_key_value
 
         query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), 32, 1), operations.bfloat16))
-        valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
-        proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
-        tables = tuple(retain(operations.slice(table, (0, 0, context, 0), (1, 1, key_rows, 128))) for table in rope['k'])
+        if spans is None:
+            valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
+            proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
+            tables = tuple(retain(operations.slice(table, (0, 0, context, 0), (1, 1, key_rows, 128))) for table in rope['k'])
+        else:
+            # Packed, every row of the block is some user's live proposal, so there
+            # is nothing to pad away and the caller supplies the 32 rows of key RoPE
+            # already laid out in block order.
+            proposal, tables = prepared, rope['live_k']
         live = project_key_value(operations, proposal, query, tables, retain, parameters=parameters)
-        heads = dict(q=normalize_head('q', live['q']), **{name: retain(operations.concat([cached_history[name], live[name]],
-            dim=2, memory_config=operations.DRAM_MEMORY_CONFIG)) for name in ('k', 'v')})
+        heads = dict(q=normalize_head('q', live['q']))
+        for name in ('k', 'v'):
+            if spans is None:
+                heads[name] = retain(operations.concat([cached_history[name], live[name]],
+                    dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+                continue
+            pieces = []
+            for part in plan:
+                if part['kind'] == 'cached':
+                    pieces.append(caches[part['user']][name])
+                    continue
+                # 'live' takes this user's own rows out of the shared block. 'pad'
+                # fills the tail of the segment, and any rows do: the mask covers
+                # them, exactly as it already covers the live rows beyond block_rows
+                # at one user today.
+                start = part['source'].start if part['kind'] == 'live' else 0
+                pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
+                    (1, 4, start + part['rows'], 128))))
+            heads[name] = retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
     else:
         context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
         proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))

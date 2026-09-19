@@ -6,9 +6,25 @@ from draft_attention import draft_sdpa, validate_attention
 POLICY = 'dflash-t16-native-proposal-only-unqualified'
 
 
-def validate_mask(mask):
+def packed_key_limit(users):
+    """Largest key axis a pack of `users` can present: each is a 2048 window plus
+    its own aligned block, and the pack is their concatenation."""
+    return users * 2080
+
+
+def validate_mask(mask, contexts=None):
     import torch
 
+    if contexts is not None:
+        # A packed mask is not the single-user shape: every one of the 32 rows is
+        # some user's live proposal, so the padded-row rule below does not apply and
+        # the block-diagonal rule takes its place.
+        from dflash_batched_mask import validate_batched_mask
+
+        validate_batched_mask(mask, contexts, block_rows=32 // len(tuple(contexts)))
+        if mask.device.type != 'cpu':
+            raise ValueError('Host tiled BF16 T16 proposal mask required')
+        return
     if (not isinstance(mask, torch.Tensor) or mask.device.type != 'cpu'
             or mask.dtype != torch.bfloat16 or mask.ndim != 4
             or tuple(mask.shape[:3]) != (1, 1, 32)
@@ -22,11 +38,13 @@ def validate_mask(mask):
         raise ValueError('Every padded query must have exactly one visible key')
 
 
-def attention(operations, query, key, value, mask, *, mask_validated=False):
+def attention(operations, query, key, value, mask, *, mask_validated=False, users=1):
     if mask_validated is not True:
         raise ValueError('Validate the actual T16 host mask before upload and replay')
+    if type(users) is not int or not 1 <= users <= 2:
+        raise ValueError('One or two T16 users share the 32-row proposal block')
     validate_attention(operations, query, key, value, mask)
-    if not 32 <= key.shape[2] <= 2080:
+    if not 32 <= key.shape[2] <= packed_key_limit(users):
         raise ValueError('Only bounded 2048-history T16 proposals supported')
     if any(tensor.layout != operations.TILE_LAYOUT
             or tensor.memory_config() != operations.DRAM_MEMORY_CONFIG
