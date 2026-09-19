@@ -41,7 +41,7 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 
-def build(directory, max_num_seqs):
+def build(directory, max_num_seqs, scheduler_type=None):
     GPT2Config(n_positions=8192, n_embd=256, n_layer=1, n_head=4).save_pretrained(directory)
     model = ModelConfig(model=directory, dtype='float32', max_model_len=4352,
                         skip_tokenizer_init=True, seed=0)
@@ -60,7 +60,8 @@ def build(directory, max_num_seqs):
         KVCacheGroupSpec(['layer'], FullAttentionSpec(block_size=64, num_kv_heads=2,
                                                       head_size=256, dtype=torch.bfloat16))])
     register_all_kvcache_specs(config)
-    scheduler = Scheduler(config, cache, StructuredOutputManager(config), block_size=64)
+    kind = scheduler_type or Scheduler
+    scheduler = kind(config, cache, StructuredOutputManager(config), block_size=64)
     scheduler.use_v2_model_runner = False
     return scheduler
 
@@ -82,16 +83,27 @@ def main():
     parameters = SamplingParams(temperature=0, max_tokens=256)
     findings = {}
 
-    # 1 and 2: both queued at once, at max_num_seqs 2 and 1
-    for seqs in (2, 1):
-        with TemporaryDirectory() as directory:
-            scheduler = build(directory, seqs)
-            for name in ('A', 'B'):
-                scheduler.add_request(Request(name, [42] * 3000, parameters, None))
-            first = describe(scheduler.schedule())
-            findings['both_queued_max_num_seqs_%d' % seqs] = first
-            print('max_num_seqs=%d, two queued -> new=%s cached=%s tokens=%d'
-                  % (seqs, first['new'], first['cached'], first['total_tokens']))
+    # 1 and 2: both queued at once, stock and plugin. Run 35436193682 failed at
+    # len(scheduled_new_reqs) != 1 with the bench firing both streams together,
+    # and the earlier probe only ever tested B arriving LATER, so this is the
+    # case that was assumed rather than measured.
+    try:
+        from vllm_tt_plugin.scheduler import TTScheduler
+    except BaseException:
+        TTScheduler = None
+    for label, kind in (('stock', None), ('TTSched', TTScheduler)):
+        if kind is None and label == 'TTSched':
+            print('TTScheduler unavailable')
+            continue
+        for seqs in (2, 1):
+            with TemporaryDirectory() as directory:
+                scheduler = build(directory, seqs, kind)
+                for name in ('A', 'B'):
+                    scheduler.add_request(Request(name, [42] * 3000, parameters, None))
+                first = describe(scheduler.schedule())
+                findings['%s_both_queued_seqs_%d' % (label, seqs)] = first
+                print('%-8s max_num_seqs=%d, two queued -> new=%s cached=%s'
+                      % (label, seqs, first['new'], first['cached']))
 
     # 3: A already decoding, B arrives afterwards
     with TemporaryDirectory() as directory:
@@ -108,17 +120,18 @@ def main():
         print('B arrives  -> new=%s cached=%s' % (step2['new'], step2['cached']))
 
     print()
-    both = findings['both_queued_max_num_seqs_2']['new']
     print('VERDICT')
-    if len(both) > 1:
-        print('  one schedule() returns BOTH prefills, so _execute sees two new reqs')
-        print('  and serialising needs the scheduler constrained, not just the lifecycle')
-    else:
-        print('  prefills already arrive one per step: serialisation is free')
-    mixed = findings['a_decoding_then_b']['step2']
-    if mixed['new'] and mixed['cached']:
-        print('  a later prefill arrives ALONGSIDE a decoding request: _execute refuses')
-        print('  that shape today (scheduled_cached_reqs non-empty), so it must change')
+    for key in sorted(findings):
+        if 'both_queued' in key:
+            print('  %-28s new=%s' % (key, findings[key]['new']))
+    plugin2 = findings.get('TTSched_both_queued_seqs_2')
+    if plugin2 and len(plugin2['new']) > 1:
+        print('  TTScheduler batches SIMULTANEOUS prefills, so _execute sees two new')
+        print('  reqs and needs the one-in-flight rule from Lever N 3.3 item 1, which')
+        print('  hides waiting while a prefill is in flight')
+    elif plugin2:
+        print('  TTScheduler already admits one prefill at a time even when both are')
+        print('  queued together: nothing more is needed for simultaneous arrivals')
     return 0
 
 
