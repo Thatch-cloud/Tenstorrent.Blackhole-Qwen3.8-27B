@@ -200,10 +200,18 @@ jobs:
               print('NO MEASUREMENT: ready=%s error=%s' % (d.get('ready'),
                     d.get('error') or [x.get('error') for x in streams]))
               sys.exit(1)
+          observed = d.get('prefill_chunk_observed')
+          want = int(__import__('os').environ['CHUNK'])
+          if not observed or want not in observed:
+              print('LEVER DID NOT MOVE: wanted chunk %s, server reported %s'
+                    % (want, observed))
+              sys.exit(1)
           print('chunk result: ttft %.1f s, itl %.3f ms, prompt_tokens %s'
                 % (streams[0].get('ttft_s') or 0.0, d['itl_ms_median'],
                    streams[0].get('prompt_tokens')))
           GUARD
+        env:
+          CHUNK: ${{ matrix.chunk }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

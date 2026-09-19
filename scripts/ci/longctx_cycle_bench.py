@@ -17,6 +17,7 @@ the target is reachable.
 
 import argparse
 import json
+import re
 import os
 import signal
 import statistics
@@ -209,6 +210,17 @@ def main():
             report['fraction_of_target'] = round(
                 (1000.0 / statistics.median(gaps)) / TARGET_TOKS_PER_USER, 3)
         report['total_tokens'] = total_tokens
+        # Positive control for any experiment that retunes the prefill chunk. The model
+        # does chunk_size = self._chunked_chunk_size or 2048, so a constant that never
+        # reaches the warmup falls back silently and two arms measure the same thing.
+        # Run 35423170257 compared 2048 against 4096 and they agreed to 0.1%, which is
+        # what a lever that did not move looks like.
+        try:
+            text = log_path.read_text(errors='replace')
+            found = re.findall(r'chunk=(\d+)', text) + re.findall(r'chunk_size=(\d+)', text)
+            report['prefill_chunk_observed'] = sorted({int(v) for v in found}) or None
+        except BaseException as error:
+            report['prefill_chunk_observed'] = '%s' % type(error).__name__
     except BaseException as error:
         report['error'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:
