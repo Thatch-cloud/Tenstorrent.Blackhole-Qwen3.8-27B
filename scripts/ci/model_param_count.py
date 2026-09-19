@@ -53,6 +53,9 @@ def main():
     options = parser.parse_args()
 
     config = json.load(io.open(options.config, encoding='utf-8'))
+    # Qwen3.5 ships a multimodal wrapper; the language model lives under
+    # text_config and the top level carries only vision and token ids.
+    config = config.get('text_config', config)
     used = set()
 
     def get(*names, **kw):
@@ -69,54 +72,79 @@ def main():
     kv_heads = get('num_key_value_heads', default=heads)
     head_dim = get('head_dim', default=(hidden // heads if hidden and heads else None))
     vocab = get('vocab_size')
+    interval = get('full_attention_interval', default=4)
+    gated_attn = get('attn_output_gate', default=False)
+    tied = get('tie_word_embeddings', default=False)
+    # Gated delta-net mixer dimensions.
+    lin_k_heads = get('linear_num_key_heads')
+    lin_k_dim = get('linear_key_head_dim')
+    lin_v_heads = get('linear_num_value_heads')
+    lin_v_dim = get('linear_value_head_dim')
+    conv_kernel = get('linear_conv_kernel_dim', default=0)
 
     report = {'hidden': hidden, 'layers': layers, 'intermediate': intermediate,
               'heads': heads, 'kv_heads': kv_heads, 'head_dim': head_dim,
-              'vocab': vocab, 'tokens': options.tokens}
+              'vocab': vocab, 'tokens': options.tokens,
+              'full_attention_interval': interval, 'attn_output_gate': gated_attn}
 
     if not all((hidden, layers, intermediate, heads, head_dim, vocab)):
-        report['error'] = 'config.json lacks the fields needed to count parameters'
+        report['error'] = 'config lacks the fields needed to count parameters'
         report['config_keys'] = sorted(config.keys())
         print(json.dumps(report, indent=2, default=str))
         return 1
 
-    # 48 of 64 layers are linear-attention (GDN) and 16 are full attention. The
-    # GDN mixer's projections are sized from its own config fields when present;
-    # where they are absent the attention sizing is used as a stand-in and the
-    # result is flagged, because a guess here moves the whole answer.
-    full_attention = get('full_attention_interval', 'num_full_attention_layers',
-                         default=None)
-    per_layer_mlp = mlp_params(hidden, intermediate)
-    per_layer_attn = attention_params(hidden, heads, kv_heads, head_dim)
+    full_layers = layers // interval if interval else layers
+    gdn_layers = layers - full_layers
+    report['full_attention_layers'] = full_layers
+    report['gdn_layers'] = gdn_layers
 
-    report['per_layer_mlp_m'] = round(per_layer_mlp / 1e6, 1)
-    report['per_layer_attn_m'] = round(per_layer_attn / 1e6, 1)
-    report['full_attention_hint'] = full_attention
+    per_mlp = mlp_params(hidden, intermediate)
+    per_attn = attention_params(hidden, heads, kv_heads, head_dim)
+    if gated_attn:
+        # an output gate the width of q
+        per_attn += hidden * heads * head_dim
 
-    body = layers * (per_layer_mlp + per_layer_attn)
+    if all((lin_k_heads, lin_k_dim, lin_v_heads, lin_v_dim)):
+        k_width = lin_k_heads * lin_k_dim
+        v_width = lin_v_heads * lin_v_dim
+        per_gdn = (hidden * k_width * 2      # q and k
+                   + hidden * v_width        # v
+                   + v_width * hidden)       # output
+        per_gdn += conv_kernel * (2 * k_width + v_width)
+        report['gdn_sized_from'] = 'its own config fields'
+    else:
+        per_gdn = per_attn
+        report['gdn_sized_from'] = 'ATTENTION AS A STAND-IN - approximate'
+
+    report['per_layer_mlp_m'] = round(per_mlp / 1e6, 1)
+    report['per_layer_attn_m'] = round(per_attn / 1e6, 1)
+    report['per_layer_gdn_m'] = round(per_gdn / 1e6, 1)
+
+    body = layers * per_mlp + full_layers * per_attn + gdn_layers * per_gdn
     embed = vocab * hidden
-    total = body + 2 * embed
+    total = body + embed * (1 if tied else 2)
     report['params_body_b'] = round(body / 1e9, 2)
     report['params_total_b'] = round(total / 1e9, 2)
-    report['note'] = ('GDN mixer sized as attention where config lacks its own '
-                      'fields; treat the total as approximate')
 
-    # Prefill FLOPs: 2 per multiply-accumulate, over the body only. Embeddings
-    # are a lookup; the LM head runs once per request, not per prefill token.
+    # Prefill FLOPs: 2 per multiply-accumulate over the body. Embeddings are a
+    # lookup and the LM head runs per request, not per prefill token.
     flops = 2.0 * body * options.tokens
     report['prefill_pflop'] = round(flops / 1e15, 3)
 
-    # TP2 splits the work across two cards, and the profile is one chip.
+    # TP2 splits the work; the profile is one chip.
     per_card = flops / 2.0
-    for label, tflops in (('fp8_1548_total', 774e12), ('bf16_774_total', 387e12)):
+    report['weights'] = 'bfloat8_b'
+    report['activations'] = 'bfloat16'
+    for label, tflops in (('lofi_774_per_card', 774e12), ('hifi2_387_per_card', 387e12)):
         ideal_ms = 1e3 * per_card / tflops
-        entry = {'ideal_ms': round(ideal_ms, 1)}
-        for name, measured in (('vs_device_time', options.device_ms),
-                               ('vs_arithmetic_low', options.arithmetic_ms_low),
-                               ('vs_arithmetic_high', options.arithmetic_ms_high)):
-            entry[name] = round(measured / ideal_ms, 2) if ideal_ms else None
-        entry['mfu_of_arithmetic_window'] = (
-            round(100 * ideal_ms / options.arithmetic_ms_high, 1) if options.arithmetic_ms_high else None)
+        entry = {'ideal_ms': round(ideal_ms, 1),
+                 'device_time_multiple': round(options.device_ms / ideal_ms, 2),
+                 'mfu_in_arithmetic_window_pct': [
+                     round(100 * ideal_ms / options.arithmetic_ms_high, 1),
+                     round(100 * ideal_ms / options.arithmetic_ms_low, 1)]}
+        # A rate is impossible if its ideal exceeds the time the arithmetic ops
+        # actually occupied: the work cannot take less time than its own floor.
+        entry['possible'] = ideal_ms <= options.arithmetic_ms_high
         report[label] = entry
 
     report['unused_config_keys'] = sorted(set(config.keys()) - used)
