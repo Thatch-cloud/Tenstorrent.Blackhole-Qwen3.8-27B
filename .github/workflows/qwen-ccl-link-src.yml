@@ -1,0 +1,47 @@
+name: Qwen CCL link source
+on:
+  push:
+    tags: ['experiment/ccl-link-src-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  extract:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: cl
+          persist-credentials: false
+      - name: Extract the link-count lookup from issue 55125
+        working-directory: cl
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results/source
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          name="qwen-ccl-src-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$name:/opt/tt-metal/models/common/modules/tt_ccl.py"             experiment-results/source/tt_ccl.py 2>/dev/null || true
+          docker cp "$name:/opt/tt-metal/models/common/utility_functions.py"             experiment-results/source/utility_functions.py 2>/dev/null || true
+          for p in models/common/modules/device_utils.py models/common/device_utils.py; do
+            docker cp "$name:/opt/tt-metal/$p" experiment-results/source/device_utils.py 2>/dev/null || true
+          done
+          ls -l experiment-results/source/
+          echo '=== link_dict and get_num_links ==='
+          grep -n -B4 -A22 'link_dict\|def get_num_links'             experiment-results/source/tt_ccl.py 2>/dev/null | head -70             > experiment-results/link-lookup.txt || true
+          cat experiment-results/link-lookup.txt || true
+          echo '=== where the product name comes from ==='
+          grep -rn 'P300\|product\|num_devices' experiment-results/source/device_utils.py 2>/dev/null             | head -20 > experiment-results/device-utils.txt || true
+          cat experiment-results/device-utils.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-ccl-link-src-${{ github.run_id }}
+          path: cl/experiment-results/
