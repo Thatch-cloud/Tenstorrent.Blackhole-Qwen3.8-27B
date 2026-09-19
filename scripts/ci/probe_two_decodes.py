@@ -50,8 +50,10 @@ def scenario(label, scheduler_type):
         scheduler.add_request(Request('B', [42] * 3000, parameters, None))
         second = scheduler.schedule()
         show('%s B arrives' % label, second)
-        ids = [r.req_id for r in second.scheduled_new_reqs] or list(
-            getattr(second.scheduled_cached_reqs, 'req_ids', []) or [])
+        # Both, not either: stock schedules new=['B'] WITH cached=['A'], and
+        # update_from_output raises KeyError for any scheduled id the output omits.
+        ids = ([r.req_id for r in second.scheduled_new_reqs]
+               + list(getattr(second.scheduled_cached_reqs, 'req_ids', []) or []))
         scheduler.update_from_output(second, output(ids, 100))
         for name in ids:
             scheduler.update_draft_token_ids(DraftTokenIds([name], [proposals]))
