@@ -196,3 +196,64 @@ because `python` here is 3.7 and cannot parse the tests' PEP 604 unions, which p
 as a test failure rather than a version problem. Every remaining lifecycle and policy
 task - T5b, T5c, most of T2 - is now a seconds-long loop. Only device behaviour, timing
 and capture still need the rig.
+
+## T5b: prefills CAN be serialised, and the chain that blocks it is three links
+
+CPU probe, run 35434952352, 50 seconds, real vllm `Scheduler`:
+
+```
+max_num_seqs=1, two queued -> new=['A'] cached=[]
+A prefill                  -> new=['A'] cached=[]
+B arrives                  -> new=['B'] cached=['A']
+```
+
+Three results:
+
+- **`max_num_seqs=1` already serialises**: the scheduler admits one prefill and queues
+  the other.
+- **`max_num_seqs=2` with both queued batches them** into one step. That is the
+  simultaneous-arrival case, and the only one that would need two live captures.
+- **A later prefill arrives as `new=['B'] cached=['A']`** - B prefills while A decodes,
+  with no change to anything.
+
+And the capture constraint from T5a is **not violated** by that shape: `_sample` sets
+`self.capture = None` once the bridge is built, so A's capture is already released before
+B's is created. Only one is ever live. **Serialisation needs no capture surgery.**
+
+### The three links
+
+Serialised prefills are refused three times, in this order:
+
+1. **`serving_lifecycle._execute`** - `scheduled_cached_reqs.req_ids` must be empty, so a
+   new prefill alongside a decoding request raises "one complete fresh prefill".
+2. **`serving_vllm_contract.admit_scheduler_output`** - the decode-side contract the hook
+   runs under requires `not scheduled.scheduled_new_reqs` and exactly one cached request
+   matching the ticket. It refuses B's prefill outright while A decodes.
+3. **`FastWorkerHook`** - singular, bound to `self.worker`, and it is what executes decode
+   at all.
+
+Nothing here is capture machinery, which is the good news. All three are admission
+contracts around a singular session. The bad news is that they are three coordinated
+changes rather than the one the sheet assumed, and (2) is the one that decides whether
+prefill and decode can interleave at all - which is the same question Lever N's M2 asks.
+
+### Revised remaining work
+
+- **T5b-i** `_execute`: accept a new prefill when cached requests exist. Local test.
+- **T5b-ii** `admit_scheduler_output`: admit a step carrying one new prefill plus the
+  resident decode. **This is the load-bearing one.**
+- **T5c** `_sample` for N seeds and N bridges.
+- **T6** the hook: N tickets on one worker.
+- Simultaneous arrivals still batch both prefills into one step, so either the scheduler
+  is constrained to one new request per step, or (1) and (2) must tolerate two.
+
+### Cycle time, for the record
+
+| question | before | now |
+| --- | ---: | ---: |
+| lifecycle and policy logic | ~10 min CI | **15 s local**, `py -3.10` |
+| anything needing vllm | ~10 min CI | **50 s** CPU probe lane, no card |
+| device, timing, capture | ~10 min | unchanged, genuinely needs the rig |
+
+The CPU lane attaches no device, loads no weights, and sits outside the exclusive
+concurrency group so it cannot queue behind hardware work.
