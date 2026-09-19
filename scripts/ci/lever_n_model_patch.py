@@ -11,7 +11,7 @@ What the edits do, per docs/lever-N-prefill-decode-interleave.md section 3.1:
 - _prefill_traced_chunked_tp gains chunk_from / chunk_to / do_reset / do_tail. The
   GDN reset happens only on the first step, the replay covers a chunk range rather
   than always range(num_full), and the tail plus logits happen only on the last.
-- prefill_traced_chunked gains start / is_last and derives that range.
+- prefill_traced_chunked gains start and derives that range.
 - prefill_paged_slots_range drives one step across N requests, writing a decode slot
   only for the requests finishing on this step.
 
@@ -103,14 +103,14 @@ def patch_tp_replay(source):
 
 
 def patch_chunked_entry(source):
-    """Thread start / is_last through the chunked entry point."""
+    """Thread start through the chunked entry point."""
     lines = source.splitlines(keepends=True)
     span = function_span(source, CHUNKED_FUNCTION)
     lines = replace_once(
         lines, span,
         'def prefill_traced_chunked(self, token_ids, page_table, actual_len, vision_tokens=None):',
         'def prefill_traced_chunked(self, token_ids, page_table, actual_len, vision_tokens=None,\n'
-        '                               start=0, is_last=True):',
+        '                               start=0):',
         'chunked signature')
 
     span = function_span(''.join(lines), CHUNKED_FUNCTION)
@@ -136,7 +136,7 @@ def patch_chunked_entry(source):
         '                return self._prefill_traced_chunked_tp(\n'
         '                    token_ids, page_table, actual_len, num_full, chunk_size, tail_real,\n'
         '                    vision_tokens=vision_tokens, chunk_from=start // chunk_size,\n'
-        '                    chunk_to=num_full, do_reset=(start == 0), do_tail=is_last,\n'
+        '                    chunk_to=num_full, do_reset=(start == 0),\n'
         '                )',
         'chunked tp call')
     return ''.join(lines)
@@ -144,14 +144,18 @@ def patch_chunked_entry(source):
 
 SLOTS_RANGE = '''
     def prefill_paged_slots_range(self, token_ids_list, page_table, empty_slots, starts, ends,
-                                  is_last, valid_lens=None):
+                                  valid_lens=None):
         """One resumable prefill step across N requests (Lever N M1, design section 3.1).
 
         The per-step analogue of prefill_paged_slots. Each request advances through its
-        own [start, end) token window; only a request whose window ends at its prompt
-        length produces logits and writes its decode slot. Intermediate steps return
-        zero logits for that row and leave the slot untouched, so a long prompt can be
-        interleaved with decode steps for the other slots.
+        own [start, end) token window, where end is the chunk end the runner scheduled.
+
+        No is_last: design section 3.1 assumed the runner would pass one, and it does not.
+        It is not needed. The tail runs iff tail_real > 0, which is only true on a final
+        chunk that does not land on a chunk boundary, and the runner already discards the
+        logits of a mid-prompt row itself - model_runner zeroes next_token_ids when
+        intermediate_prefill_mask covers the rows. So every step returns its logits and
+        writes its slot, and the final step's values are the ones that survive.
 
         One in-flight prefill per lane in v1: the GDN scratch and the host RoPE table are
         single-occupancy, so a second request's prefill between two chunk steps of the
@@ -159,8 +163,8 @@ SLOTS_RANGE = '''
         """
         assert self.num_devices > 1, "prefill_paged_slots_range is the TP (num_devices>1) path"
         N = len(token_ids_list)
-        assert len(empty_slots) == N and len(starts) == N and len(ends) == N and len(is_last) == N, (
-            "one slot, start, end and is_last per request"
+        assert len(empty_slots) == N and len(starts) == N and len(ends) == N, (
+            "one slot, start and end per request"
         )
         pt = page_table if isinstance(page_table, torch.Tensor) else ttnn.to_torch(page_table)
         assert pt.shape[0] == N, "page_table must have one row per request"
@@ -176,17 +180,10 @@ SLOTS_RANGE = '''
                 assert toks.shape[0] == 1, f"request {u}: token_ids must be [1, T_u]"
                 actual = int(valid_lens[u]) if valid_lens is not None else toks.shape[1]
                 assert actual >= 1, f"request {u}: empty prompt (actual_len={actual})"
-                start, last = int(starts[u]), bool(is_last[u])
+                start = int(starts[u])
                 lg = self.prefill_traced_chunked(
-                    toks[:, :actual], pt[u : u + 1], actual_len=actual, start=start, is_last=last
+                    toks[:, :actual], pt[u : u + 1], actual_len=actual, start=start
                 )
-                if not last:
-                    # Intermediate step: no logits for this row, and no slot write. The GDN
-                    # scratch keeps this request's state for its next step.
-                    if lg is not None:
-                        ttnn.deallocate(lg)
-                    host_logits[u] = torch.zeros(1, 1, self.args.vocab_size)
-                    continue
                 host_logits[u] = (
                     ttnn.to_torch(lg, mesh_composer=comp)
                     .reshape(-1, self.args.vocab_size)[:1]
@@ -225,7 +222,7 @@ VLLM_BATCHED = '_prefill_forward_tp_batched'
 
 
 def patch_vllm_entry(source):
-    """Thread start_pos / is_last from the runner down to the batched prefill.
+    """Thread start_pos from the runner down to the batched prefill.
 
     vLLM hands the model a chunk window per step once chunked prefill is on. The entry
     passes it through unchanged; the batched path turns it into per-request starts and
@@ -243,7 +240,7 @@ def patch_vllm_entry(source):
         'return self._prefill_forward_tp_batched(model, tokens, page_table, prompt_lens, kwargs.get("empty_slots"))',
         'return self._prefill_forward_tp_batched(\n'
         '                model, tokens, page_table, prompt_lens, kwargs.get("empty_slots"),\n'
-        '                start_pos=kwargs.get("start_pos"), is_last=kwargs.get("is_last"),\n'
+        '                start_pos=kwargs.get("start_pos"),\n'
         '            )',
         'vllm entry call')
 
@@ -252,28 +249,28 @@ def patch_vllm_entry(source):
         lines, span,
         'def _prefill_forward_tp_batched(self, model, tokens, page_table, prompt_lens, empty_slots):',
         'def _prefill_forward_tp_batched(self, model, tokens, page_table, prompt_lens, empty_slots,\n'
-        '                                    start_pos=None, is_last=None):',
+        '                                    start_pos=None):',
         'batched signature')
 
     span = function_span(''.join(lines), VLLM_BATCHED)
     lines = replace_once(
         lines, span,
         '        host_logits = model.prefill_paged_slots(token_ids_list, pt, empty_slots, valid_lens=plens)',
-        '        if start_pos is None:\n'
+        '        starts = [] if start_pos is None else [int(s) for s in start_pos]\n'
+        '        if not any(s > 0 for s in starts):\n'
         '            logger.info("[M1] prefill path: one-shot prefill_paged_slots")\n'
         '            host_logits = model.prefill_paged_slots(token_ids_list, pt, empty_slots, valid_lens=plens)\n'
         '        else:\n'
-        '            # Chunked prefill: this step covers [start_pos[u], plens[u]) of each row.\n'
-        '            # prompt_lens is the chunk END in the runner terms, and is_last comes\n'
-        '            # from the runner intermediate_prefill_mask rather than being re-derived.\n'
-        '            starts = [int(s) for s in start_pos]\n'
-        '            lasts = [bool(v) for v in is_last] if is_last is not None else [True] * N\n'
+        '            # A continuation. model_runner.submit_prefill always supplies start_pos,\n'
+        '            # so its presence says nothing; a nonzero start is what marks a resumed\n'
+        '            # prompt. The first chunk stays on the one-shot path, where it is\n'
+        '            # equivalent: its end is chunk-aligned so tail_real is 0 and no tail runs.\n'
         '            logger.info(\n'
         '                f"[M1] prefill path: resumable prefill_paged_slots_range "\n'
-        '                f"starts={starts} ends={list(plens)} is_last={lasts}"\n'
+        '                f"starts={starts} ends={list(plens)}"\n'
         '            )\n'
         '            host_logits = model.prefill_paged_slots_range(\n'
-        '                token_ids_list, pt, empty_slots, starts, plens, lasts, valid_lens=plens\n'
+        '                token_ids_list, pt, empty_slots, starts, plens, valid_lens=plens\n'
         '            )',
         'batched dispatch')
     return ''.join(lines)

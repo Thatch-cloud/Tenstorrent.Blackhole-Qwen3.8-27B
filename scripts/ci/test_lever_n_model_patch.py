@@ -101,7 +101,7 @@ class OutputTests(unittest.TestCase):
                       'for c in range(chunk_from, chunk_to):',
                       'if do_tail and tail_real > 0:',
                       'def prefill_paged_slots_range(',
-                      'start=0, is_last=True',
+                      'start=0',
                       'assert start % chunk_size == 0'):
             self.assertIn(probe, out, probe)
 
@@ -116,9 +116,26 @@ class OutputTests(unittest.TestCase):
     def test_vllm_entry_threads_start_pos(self):
         out = patch_vllm_entry(VLLM)
         ast.parse(out)
-        for probe in ('start_pos=kwargs.get("start_pos")', 'start_pos=None, is_last=None',
-                      'model.prefill_paged_slots_range(', 'if start_pos is None:'):
+        for probe in ('start_pos=kwargs.get("start_pos")', 'start_pos=None):',
+                      'model.prefill_paged_slots_range('):
             self.assertIn(probe, out, probe)
+
+    def test_dispatch_keys_off_a_nonzero_start_not_a_present_start_pos(self):
+        """model_runner.submit_prefill always sends start_pos, so "is None" never fires.
+
+        Keying off presence would send the unchunked path through the range method too,
+        which is what made run 35415521079's baseline arm indistinguishable from its
+        resumable arm.
+        """
+        out = patch_vllm_entry(VLLM)
+        self.assertIn('if not any(s > 0 for s in starts):', out)
+        self.assertNotIn('if start_pos is None:', out)
+
+    def test_is_last_is_not_threaded_because_the_runner_does_not_send_it(self):
+        out = patch_vllm_entry(VLLM)
+        self.assertNotIn('is_last', out)
+        model = patch_model(MODEL)
+        self.assertNotIn('is_last=', model)
 
     def test_unpatched_path_is_preserved_when_start_pos_is_absent(self):
         """Without chunked prefill the old call must still run unchanged."""

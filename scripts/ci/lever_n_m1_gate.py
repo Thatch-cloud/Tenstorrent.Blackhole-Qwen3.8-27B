@@ -251,9 +251,13 @@ def main():
         # Every length must actually run. Scoring only the lengths that happened to
         # succeed is how a gate passes while silently testing less than it claims.
         base_arm, test_arm = report.get('baseline') or {}, report.get('resumable') or {}
+        # The resumable arm legitimately uses BOTH paths: a prompt's first chunk starts
+        # at 0 and stays one-shot, continuations go to the range method. So the control
+        # is that the baseline arm never reaches the range method, not that the
+        # resumable arm never reaches the one-shot one.
         controls = dict(baseline_took_one_shot=bool(base_arm.get('one_shot_path_seen')),
-                        resumable_took_range=bool(test_arm.get('range_path_seen')),
-                        resumable_did_not_fall_back=not test_arm.get('one_shot_path_seen'))
+                        baseline_avoided_range=not base_arm.get('range_path_seen'),
+                        resumable_took_range=bool(test_arm.get('range_path_seen')))
         report['controls'] = controls
         report['gate_passed'] = (len(checked) == len(prompts)
                                  and all(c['identical'] for c in checked)

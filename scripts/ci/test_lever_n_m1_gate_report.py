@@ -76,8 +76,8 @@ class ExitCodeTests(unittest.TestCase):
         """Identical output means nothing if the resumable arm never ran the new path."""
         code, out = run(dict(gate_passed=False, lengths_checked=3, lengths_required=3,
                              controls=dict(baseline_took_one_shot=True,
-                                           resumable_took_range=False,
-                                           resumable_did_not_fall_back=False),
+                                           baseline_avoided_range=True,
+                                           resumable_took_range=False),
                              comparisons=[comparison(True)] * 3))
         self.assertEqual(code, 1)
         self.assertIn('resumable_took_range', out)
@@ -86,11 +86,22 @@ class ExitCodeTests(unittest.TestCase):
     def test_controls_are_reported_when_the_gate_passes(self):
         code, out = run(dict(gate_passed=True, lengths_checked=3, lengths_required=3,
                              controls=dict(baseline_took_one_shot=True,
-                                           resumable_took_range=True,
-                                           resumable_did_not_fall_back=True),
+                                           baseline_avoided_range=True,
+                                           resumable_took_range=True),
                              comparisons=[comparison(True)] * 3))
         self.assertEqual(code, 0)
         self.assertIn('control', out)
+
+    def test_a_baseline_that_reached_the_range_path_fails_the_build(self):
+        """Run 35415521079: both arms took the range path, so equality proved nothing."""
+        code, out = run(dict(gate_passed=False, lengths_checked=3, lengths_required=3,
+                             controls=dict(baseline_took_one_shot=False,
+                                           baseline_avoided_range=False,
+                                           resumable_took_range=True),
+                             comparisons=[comparison(True)] * 3))
+        self.assertEqual(code, 1)
+        self.assertIn('baseline_avoided_range', out)
+        self.assertIn('FAILED', out)
 
     def test_a_missing_report_fails_the_build(self):
         code, out = run(None)
