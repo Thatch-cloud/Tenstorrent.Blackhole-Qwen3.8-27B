@@ -67,6 +67,38 @@ def call_all(target, names, args=()):
     return found
 
 
+
+def count_links_from_yaml(text, a=0, b=1):
+    """Count ethernet links between two chips in a UMD cluster descriptor.
+
+    The descriptor lists each link as a pair of (chip, chan) entries under
+    ethernet_connections, so every pair naming both chips is one link. Parsed
+    by hand because the container is not guaranteed a yaml module, and the
+    shape is fixed and simple:
+
+        ethernet_connections:
+          -
+            - chip: 0
+              chan: 6
+            - chip: 1
+              chan: 6
+
+    Links to a third board, and to remote devices, must not be counted: this
+    rig has a spare p150a.
+    """
+    import re
+    parts = text.split("ethernet_connections:", 1)
+    if len(parts) < 2:
+        return None
+    block = parts[1].split("\nethernet_connections_to_remote_devices:", 1)[0]
+    links = 0
+    for record in re.split(r"\n\s*-\s*\n", block):
+        chips = [int(m) for m in re.findall(r"chip:\s*(\d+)", record)]
+        if len(chips) == 2 and set(chips) == set([a, b]):
+            links += 1
+    return links
+
+
 def count_links(connections, a=0, b=1):
     """Count ethernet channels joining chip a to chip b.
 
@@ -100,12 +132,22 @@ def main():
             report['cluster_symbols'] = sorted(
                 name for name in dir(cluster) if not name.startswith('_'))
             report['cluster'] = call_all(cluster, CLUSTER_NULLARY)
-            for key in ('get_ethernet_connections', 'get_cluster_desc'):
-                links = count_links(report['cluster'].get(key))
-                if links:
-                    report['links_to_peer'] = links
-                    report['links_source'] = key
-                    break
+            # Run 35425234093: every direct accessor is ABSENT in this build,
+            # but serialize_cluster_descriptor returns a PATH to a yaml holding
+            # the ethernet_connections. The container is --rm, so it has to be
+            # read here rather than collected afterwards.
+            path = report['cluster'].get('serialize_cluster_descriptor')
+            if isinstance(path, str) and path.endswith('.yaml'):
+                try:
+                    text = io.open(path, encoding='utf-8', errors='replace').read()
+                    report['cluster_descriptor_yaml'] = text[:20000]
+                    links = count_links_from_yaml(text)
+                    if links is not None:
+                        report['links_to_peer'] = links
+                        report['links_source'] = 'cluster_descriptor.yaml'
+                except BaseException as error:
+                    report['cluster_descriptor_error'] = (
+                        '%s: %s' % (type(error).__name__, str(error)[:200]))
 
         # Opening the mesh is the fallback, and also confirms the runtime agrees.
         mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2))
