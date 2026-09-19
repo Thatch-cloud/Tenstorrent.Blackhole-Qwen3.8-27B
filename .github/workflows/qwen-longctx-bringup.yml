@@ -72,11 +72,9 @@ jobs:
             --entrypoint python3 "$image" -B /experiment-scripts/ci/longctx_bringup_runner.py \
             --users 4 --context 163840 --results /results \
             > experiment-results/bringup-stdout.log 2>&1 || true
-          echo '--- bringup summary ---'
-          python3 -B -c "import json;d=json.load(open('experiment-results/bringup.json'));p=d['plan'];print('plan: %d users x %d ctx -> %d blocks, %.2f GiB KV'%(p['users'],p['context'],p['blocks'],p['kv_gib']));print('ready:',d.get('ready'),'stage:',d.get('stage'),'startup_s:',d.get('startup_seconds'));print('error:',d.get('error'));print('smoke:',(d.get('smoke_completion') or d.get('smoke_error') or '')[:200])" \
-            || tail -25 experiment-results/bringup-stdout.log
-          echo '--- kv / memory lines from server.log ---'
-          python3 -B -c "import json;d=json.load(open('experiment-results/bringup.json'));[print(' ',x) for k in ('kv_cache_lines','gpu_blocks_lines','oom_lines') for x in (d.get('log') or {}).get(k,[])]" || true
+          sed -n '/LONGCTX_JSON_BEGIN/,/LONGCTX_JSON_END/p'             experiment-results/bringup-stdout.log | sed '1d;$d'             > experiment-results/bringup.json || true
+          sed -n '/LONGCTX_SERVERLOG_BEGIN/,/LONGCTX_SERVERLOG_END/p'             experiment-results/bringup-stdout.log | sed '1d;$d'             > experiment-results/server-tail.log || true
+          python3 -B scripts/ci/longctx_bringup_summary.py             --report experiment-results/bringup.json             --log experiment-results/bringup-stdout.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

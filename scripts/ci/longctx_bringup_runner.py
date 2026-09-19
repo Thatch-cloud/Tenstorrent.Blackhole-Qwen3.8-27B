@@ -22,6 +22,11 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
+BEGIN = '<<<LONGCTX_JSON_BEGIN>>>'
+END = '<<<LONGCTX_JSON_END>>>'
+LOG_BEGIN = '<<<LONGCTX_SERVERLOG_BEGIN>>>'
+LOG_END = '<<<LONGCTX_SERVERLOG_END>>>'
+
 BLOCK_SIZE = 64
 TOKENS_PER_BLOCK_KB = 32  # 16 attention layers x 2 x 8 kv heads x 128 dim at bf8
 
@@ -60,7 +65,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--users', type=int, default=4)
     parser.add_argument('--context', type=int, default=163840)
-    parser.add_argument('--results', type=Path, default=Path('/results'))
+    parser.add_argument('--results', type=Path, default=Path('/tmp/longctx-results'))
     parser.add_argument('--model', default=os.environ.get(
         'QWEN_TARGET_MODEL',
         '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/'
