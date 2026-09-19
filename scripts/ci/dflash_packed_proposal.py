@@ -83,3 +83,97 @@ def select_packed(parts, seeds, counts, predecessors, successors):
             predecessors, successors, torch.tensor([seed], dtype=torch.int64))
         chosen.append(tuple(int(token) for token in tokens[0, :count]))
     return tuple(chosen)
+
+
+def propose_packed(device, slots, seeds, counts, *, stage=None):
+    """One proposal pass over every packed user, returning each user's tokens.
+
+    `slots` carry the per-user state DFlashDevice holds singly today: the absolute
+    frontier, the committed history length, and the per-layer cached K/V. The shared
+    weights, mesh and prepared layers come from `device`, so packing costs one pass
+    rather than one pass per user.
+
+    The cached path never reads a history tensor, so none is built: at two 2048-row
+    users that would be 42 MB of DRAM nobody touches.
+    """
+    import torch
+
+    from dflash_batched_mask import batched_attention_mask, live_key_rope, packed_rope_tables
+    from dflash_t16_native_attention import validate_mask
+    from gdn_multitoken_conv import addresses, release_owned
+
+    operations = device.operations
+    slots = tuple(slots)
+    seeds, counts = tuple(seeds), tuple(counts)
+    if (not slots or 32 % len(slots) or device.closed or device.pending is not None
+            or len(seeds) != len(slots) or len(counts) != len(slots)):
+        raise ValueError('An idle device, one anchor and count per slot, and a block-dividing slot count required')
+    block_rows = 32 // len(slots)
+    if block_rows != device.block_rows:
+        raise ValueError('Packed slots must divide the block into this device rows')
+    users = [dict(position=slot['position'], history_rows=slot['history_rows']) for slot in slots]
+    contexts = [user['history_rows'] for user in users]
+    caches = [slot['kv_history'] for slot in slots]
+    if any(cache is None or len(cache) != len(device.layers) for cache in caches):
+        raise ValueError('Every packed slot needs a committed K/V cache for each prepared layer')
+
+    stage = stage or (lambda name, **values: None)
+    owned, retain = device.temporaries([device.history, device.spare_history, *device.owned])
+
+    def upload(value, dtype=None, row_major=False):
+        return retain(operations.from_torch(value, device=device.mesh, dtype=dtype or operations.bfloat16,
+            layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
+            memory_config=operations.DRAM_MEMORY_CONFIG,
+            mesh_mapper=operations.ReplicateTensorToMesh(device.mesh)))
+
+    try:
+        stage('upload-packed-anchor-and-mask')
+        identifiers = upload(packed_identifiers(seeds, block_rows),
+            dtype=operations.uint32, row_major=True)
+        host_mask = batched_attention_mask(contexts, block_rows)
+        validate_mask(host_mask, contexts=contexts)
+        mask = upload(host_mask)
+        # execute_proposal refuses a native proposal mask it has not seen validated,
+        # and the address is the identity it checks.
+        device.validated_native_proposal_masks.add(addresses(operations, mask))
+        stage('prepare-packed-rope')
+        tables = packed_rope_tables(users, block_rows)
+        rope = dict(q=tuple(upload(value) for value in tables['q']),
+                    k=tuple(upload(value) for value in tables['k']),
+                    live_k=tuple(upload(value) for value in live_key_rope(users, block_rows)))
+        outputs = device.execute_proposal(identifiers, None, mask, rope, context=None, pack=users,
+            cached_history=caches, owned=owned, retain=retain, stage=stage)
+        stage('synchronize-packed-head')
+        operations.synchronize_device(device.mesh)
+        stage('read-packed-candidates')
+        return select_device_outputs(device, outputs, seeds, counts, len(slots), block_rows)
+    finally:
+        stage('release-packed-temporaries')
+        operations.synchronize_device(device.mesh)
+        release_owned(operations, owned)
+
+
+def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
+    """Read the shared head back once and split it by user."""
+    import torch
+
+    from draft_shared_head import merge_chunk_candidates
+
+    operations = device.operations
+    host_chunks = []
+    for chunk in outputs.chunks:
+        values = operations.get_device_tensors(chunk['values'])
+        indices = operations.get_device_tensors(chunk['indices'])
+        if len(values) != 2 or len(indices) != 2:
+            raise AssertionError('Both learned head shards required')
+        for chip in range(2):
+            host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
+                values=operations.to_torch(values[chip]).float().reshape(32, 16),
+                indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
+    candidates, unary = merge_chunk_candidates(host_chunks, block_rows=32)
+    parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+    if len(parts) != 2 or not torch.equal(*parts):
+        raise AssertionError('Replicated learned selector features differ')
+    hidden = parts[0].reshape(1, 32, 256)
+    return select_packed(split_selection(hidden, candidates, unary, users, block_rows),
+        seeds, counts, device.predecessors, device.successors)

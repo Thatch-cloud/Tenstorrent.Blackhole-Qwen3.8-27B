@@ -72,3 +72,74 @@ class PackedProposalTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProposePackedTests(unittest.TestCase):
+    """One pass carries every slot, and it must reach execute_proposal packed."""
+
+    def device(self):
+        from types import SimpleNamespace
+
+        operations = SimpleNamespace(bfloat16='bf16', uint32='u32', TILE_LAYOUT='tile',
+            ROW_MAJOR_LAYOUT='row', DRAM_MEMORY_CONFIG='dram')
+        operations.from_torch = unittest.mock.Mock(side_effect=lambda *a, **k: object())
+        operations.ReplicateTensorToMesh = unittest.mock.Mock(return_value='map')
+        operations.synchronize_device = unittest.mock.Mock()
+        owned = []
+        device = SimpleNamespace(operations=operations, mesh='mesh', closed=False, pending=None,
+            block_rows=16, layers=[object()] * 5, history=None, spare_history=None, owned=[],
+            predecessors=torch.zeros(2, 2), successors=torch.zeros(2, 2),
+            validated_native_proposal_masks=set(),
+            temporaries=lambda protected: (owned, lambda value: value),
+            execute_proposal=unittest.mock.Mock(return_value='outputs'))
+        return device, operations
+
+    def slots(self):
+        return [dict(position=4096, history_rows=2048, kv_history=[{'k': 0, 'v': 0}] * 5),
+                dict(position=1200, history_rows=1024, kv_history=[{'k': 1, 'v': 1}] * 5)]
+
+    def test_one_pass_is_issued_with_the_pack_and_no_history_tensor(self):
+        from dflash_packed_proposal import propose_packed
+
+        device, operations = self.device()
+        slots = self.slots()
+        with unittest.mock.patch('gdn_multitoken_conv.addresses', return_value=('a', 'b')), \
+                unittest.mock.patch('gdn_multitoken_conv.release_owned'), \
+                unittest.mock.patch('dflash_packed_proposal.select_device_outputs',
+                                    return_value=(('x',), ('y',))) as select:
+            tokens = propose_packed(device, slots, [11, 22], [15, 15])
+
+        device.execute_proposal.assert_called_once()
+        call = device.execute_proposal.call_args
+        self.assertIsNone(call.args[1], 'the cached packed path builds no history tensor')
+        self.assertIsNone(call.kwargs['context'], 'a single context has no meaning packed')
+        self.assertEqual([user['history_rows'] for user in call.kwargs['pack']], [2048, 1024])
+        self.assertEqual([user['position'] for user in call.kwargs['pack']], [4096, 1200])
+        self.assertEqual(call.kwargs['cached_history'], [slot['kv_history'] for slot in slots])
+        self.assertEqual(set(call.args[3]), {'q', 'k', 'live_k'})
+        self.assertEqual(len(device.validated_native_proposal_masks), 1,
+                         'execute_proposal refuses a native mask it has not seen validated')
+        self.assertEqual(tokens, (('x',), ('y',)))
+        self.assertEqual(select.call_args.args[3], (15, 15))
+
+    def test_slot_and_anchor_mismatches_are_refused_before_any_upload(self):
+        from dflash_packed_proposal import propose_packed
+
+        for slots, seeds, counts in ((self.slots(), [1], [15, 15]),
+                                     (self.slots(), [1, 2], [15]),
+                                     ([], [], [])):
+            device, operations = self.device()
+            with self.assertRaises(ValueError):
+                propose_packed(device, slots, seeds, counts)
+            operations.from_torch.assert_not_called()
+            device.execute_proposal.assert_not_called()
+
+    def test_a_slot_missing_a_layer_cache_is_refused(self):
+        from dflash_packed_proposal import propose_packed
+
+        device, operations = self.device()
+        slots = self.slots()
+        slots[1]['kv_history'] = [{'k': 1, 'v': 1}] * 3
+        with self.assertRaises(ValueError):
+            propose_packed(device, slots, [1, 2], [15, 15])
+        device.execute_proposal.assert_not_called()

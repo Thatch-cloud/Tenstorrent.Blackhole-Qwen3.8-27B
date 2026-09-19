@@ -75,7 +75,7 @@ class PackedBranchTests(unittest.TestCase):
                 patch('dflash_t16_native_scope.require_active', return_value=None):
             parameters = prepare_attention_branch(operations, mesh, weights, convolution, lambda value: value)
             parameters.update(block_rows=16, native_head_layout=True, native_proposal_attention=True)
-            execute_attention_branch(operations, mesh, collective, tensors.hidden, tensors.history,
+            execute_attention_branch(operations, mesh, collective, tensors.hidden, None,
                 tensors.mask, rope, lambda value: value, parameters=parameters, context=None,
                 pack=self.users(), cached_history=caches, native_proposal_mask_validated=True)
         return projection, caches, live
@@ -114,9 +114,24 @@ class PackedBranchTests(unittest.TestCase):
                              cached_history=[{'k': None, 'v': None}, {'k': None, 'v': None}])
             arguments.update(overrides)
             with self.assertRaises(ValueError):
-                execute_attention_branch(operations, mesh, object(), tensors.hidden, tensors.history,
+                execute_attention_branch(operations, mesh, object(), tensors.hidden, None,
                     tensors.mask, rope, lambda value: value, parameters=parameters, **arguments)
             operations.matmul.assert_not_called()
+
+    def test_an_unread_packed_history_tensor_is_refused(self):
+        """Packed and cached, keys come from the caches and the live block, so a
+        history tensor would be 42 MB nobody reads. Passing one is a mistake."""
+        plan, spans, key_rows = key_value_plan(list(self.contexts), block_rows=16)
+        operations, weights, convolution, tensors, rope, pieces = self.fixture(key_rows)
+        mesh = object()
+        parameters = dict(operations=operations, mesh=mesh, block_rows=16,
+                          native_head_layout=True, native_proposal_attention=True)
+        with self.assertRaises(ValueError):
+            execute_attention_branch(operations, mesh, object(), tensors.hidden, tensors.history,
+                tensors.mask, rope, lambda value: value, parameters=parameters, context=None,
+                pack=self.users(),
+                cached_history=[{'k': None, 'v': None}, {'k': None, 'v': None}],
+                native_proposal_mask_validated=True)
 
     def test_live_key_rope_shape_matches_what_the_branch_expects(self):
         tables = live_key_rope(self.users(), block_rows=16)

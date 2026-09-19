@@ -92,8 +92,15 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         plan, spans, key_rows = key_value_plan(contexts, block_rows)
         if len(cached_history) != len(pack):
             raise ValueError('One committed K/V cache per packed user required')
-    if (tuple(hidden.shape) != (1, 1, 32, 5120) or tuple(history.shape) != (1, 1, key_rows, 5120)
-            or hidden.dtype != operations.bfloat16 or history.dtype != operations.bfloat16
+    # The cached path never reads `history`: keys come from cached_history plus the
+    # live block. Packed it would be a 4160-row tensor nobody touches, roughly 42 MB
+    # of DRAM, so packed callers may pass None. At one user it stays required, which
+    # keeps the shipped path's geometry check exactly as it was.
+    unused_history = pack is not None and cached_history is not None
+    if (tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16
+            or (not unused_history and (history is None or tuple(history.shape) != (1, 1, key_rows, 5120)
+                or history.dtype != operations.bfloat16))
+            or (unused_history and history is not None)
             or tuple(mask.shape) != (1, 1, 32, key_rows) or mask.dtype != operations.bfloat16):
         raise ValueError('Padded BF16 proposal, context and mask geometry required')
     expected = {'q': 32, 'k': key_rows} if spans is None else {'q': 32, 'k': key_rows, 'live_k': 32}
