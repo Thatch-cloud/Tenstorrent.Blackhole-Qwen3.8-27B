@@ -1,0 +1,57 @@
+name: Qwen GDN op sources
+on:
+  push:
+    tags: ['experiment/gdn-op-sources-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  extract:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: go
+          persist-credentials: false
+      - name: Extract the custom GDN ops and the transformer op wiring
+        working-directory: go
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results/ops
+          image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
+          name="qwen-gdn-op-src-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          root=/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer
+          echo '=== what custom ops exist under transformer/ ==='
+          docker cp "$name:$root" experiment-results/transformer 2>/dev/null || true
+          ls -1 experiment-results/transformer/ > experiment-results/op-listing.txt 2>&1 || true
+          cat experiment-results/op-listing.txt || true
+          echo '=== the prefill-side GDN ops, which already tile the time axis ==='
+          for op in chunk_gdn_prep chunk_gdn_scan gdn_conv_gates; do
+            if [ -d "experiment-results/transformer/$op" ]; then
+              echo "--- $op ---"
+              find "experiment-results/transformer/$op" -type f | sed 's|.*/transformer/||'
+            fi
+          done > experiment-results/gdn-op-files.txt 2>&1 || true
+          cat experiment-results/gdn-op-files.txt || true
+          echo '=== build wiring: sources.cmake and the nanobind list ==='
+          docker cp "$name:$root/sources.cmake" experiment-results/ops/sources.cmake 2>/dev/null || true
+          docker cp "$name:$root/transformer_nanobind.cpp" experiment-results/ops/transformer_nanobind.cpp 2>/dev/null || true
+          docker cp "$name:$root/CMakeLists.txt" experiment-results/ops/CMakeLists.txt 2>/dev/null || true
+          ls -l experiment-results/ops/ || true
+          echo '=== does chunk_gdn_prep already read the conv input? ==='
+          grep -rn "conv\|taps\|silu" experiment-results/transformer/chunk_gdn_prep/ 2>/dev/null \
+            | head -30 > experiment-results/prep-conv-refs.txt || true
+          cat experiment-results/prep-conv-refs.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-gdn-op-sources-${{ github.run_id }}
+          path: go/experiment-results/
