@@ -97,12 +97,18 @@ def main():
         if good:
             report['best_gb_s'] = max(r['gb_s'] for r in good)
             report['implied_in_prefill_gb_s'] = 9.3
-            # 800 Gb/s of link is 100 GB/s. The implied 9.3 GB/s in prefill is about 9%
-            # of that, so the expectation going in is overhead-bound rather than
-            # link-bound; this measurement is what settles it.
-            report['link_spec_gb_s'] = 100.0
-            report['percent_of_link_spec'] = round(100 * report['best_gb_s'] / 100.0, 1)
-            report['prefill_percent_of_link_spec'] = round(100 * 9.3 / 100.0, 1)
+            # QSFP-DD is 800 Gb/s per port, which is 100 GB/s, and this pair runs four
+            # links (num_links=4 throughout the runtime), so 400 GB/s aggregate in
+            # theory. The 9.3 GB/s implied by the prefill profile is about 2% of that,
+            # which is very hard to explain as a saturated link. Note the 9.3 rests on
+            # an estimate of all-gather traffic rather than a measurement; this probe
+            # measures the achievable rate directly, and the gap between the two is the
+            # point of running it.
+            report['link_spec_gb_s_per_port'] = 100.0
+            report['links'] = 4
+            report['link_spec_gb_s_aggregate'] = 400.0
+            report['percent_of_link_aggregate'] = round(100 * report['best_gb_s'] / 400.0, 2)
+            report['prefill_percent_of_link_aggregate'] = round(100 * 9.3 / 400.0, 2)
             if len(good) > 1:
                 small, large = good[0], good[-1]
                 report['scales_with_size'] = round(large['gb_s'] / small['gb_s'], 2)
