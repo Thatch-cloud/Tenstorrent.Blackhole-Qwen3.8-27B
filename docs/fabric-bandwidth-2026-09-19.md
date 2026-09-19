@@ -95,13 +95,30 @@ weakness of the control was recorded before the run rather than discovered after
 
 Treat the planes question as **open**, not as answered in the negative.
 
-### Where that leaves the fabric
+### ROOT CAUSE: tt-metal hardcodes 2 links, and we filed it ourselves in September
 
-Four links are up, two cables, 200 GB/s ceiling. Best measured is **90.43 GB/s, 45%**.
-And 90 GB/s is about 90% of *one* cable, which continues to point at the collective using
-half the fabric - but `num_links` is deprecated and ignored, and `num_planes` produced no
-measurable change, so nothing reachable from the ttnn API has moved it. The next step is
-an upstream question rather than another sweep here.
+The missing factor of two is **upstream issue
+[#55125](https://github.com/tenstorrent/tt-metal/issues/55125), filed by this project on
+2026-09-02**, and rediscovered from scratch today.
+
+`models/common/modules/tt_ccl.py:148-181` looks up `link_dict` by a product name derived
+purely from **device count** (`device_utils.py:26-32`). Two Blackhole devices resolve to
+`"P300"`, and a real p300 is two dies on one package with two links, so `get_num_links()`
+returns **2 whatever the cabling is**. The link count is a property of how the boards are
+cabled, and UMD already discovers it - the cluster descriptor lists all four connections.
+
+The arithmetic closes exactly. Two links at 50 GB/s is a 100 GB/s path, and the best
+measurement is **90.43 GB/s, which is 90% of it**. Not 45% of a four-link fabric that is
+running badly; **90% of a two-link fabric that is running well.** Nothing was inefficient
+- half the fabric was never asked for.
+
+That also explains every negative result today: `num_links` on the op cannot help because
+the cap is applied inside the CCL layer, and `num_planes` cannot help because planes were
+never the constraint.
+
+**Overriding the value to 4 was already measured when the issue was filed: +2.4% decode.**
+So the remaining fabric win is known, is small, and needs a source patch via the graft
+pattern rather than any configuration available to us.
 
 ### Is it worth taking the 8.6%?
 
@@ -111,6 +128,9 @@ Honestly: barely, and it is not free to adopt.
 | --- | ---: | ---: |
 | prefill communication | 408-538 ms of 3697 | saves ~35-46 ms, **~1% of prefill** |
 | decode collectives | 3.44 ms of 64.90 | saves 0.27 ms, **0.4% of the cycle** |
+
+And the two-link fix on top of it is worth **+2.4% decode**, already measured. Both are
+real, both are small, and neither is a route to the target.
 
 Against a 32.4 ms gap in the decode cycle this is under 1% of what is needed. The packet
 size is also a **serving default**, so changing it needs authorisation rather than being
