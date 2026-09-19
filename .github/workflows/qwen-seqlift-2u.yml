@@ -61,6 +61,10 @@ jobs:
         with:
           path: cycle
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-seqlift-graft-${{ github.run_id }}
+          path: cycle/graft/
       - name: Stage the draft config and check the fixtures
         working-directory: cycle
         timeout-minutes: 5
