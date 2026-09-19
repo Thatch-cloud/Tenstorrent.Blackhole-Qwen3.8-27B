@@ -11,6 +11,7 @@ target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+plugin=/opt/qwen-fast-plugin/src/vllm_tt_plugin
 
 mkdir -p draft-config experiment-results
 curl -fsSL --max-time 30 \
@@ -46,9 +47,11 @@ timeout -k 30 2400 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/draft-config,dst=/draft-config,readonly" \
   --mount "type=bind,src=$PWD/graft/model.py,dst=$root/model.py,readonly" \
   --mount "type=bind,src=$PWD/graft/qwen36_vllm.py,dst=$root/qwen36_vllm.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/platform.py,dst=$plugin/platform.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m1_gate.py,dst=/bench/lever_n_m1_gate.py,readonly" \
   --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
   "${mounts[@]}" \
+  -e TT_M1_FORCE_CHUNKED_PREFILL=1 \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 \
   -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \

@@ -9,7 +9,8 @@ import ast
 import unittest
 
 from lever_n_model_patch import (function_span, patch_chunked_entry, patch_model,
-                                 patch_tp_replay, patch_vllm_entry, replace_once)
+                                 patch_platform, patch_tp_replay, patch_vllm_entry,
+                                 replace_once)
 
 # A miniature stand-in with the same ambiguity as the real source: the decoy methods
 # carry identical reset calls and chunk loops.
@@ -146,6 +147,62 @@ class OutputTests(unittest.TestCase):
         out = patch_model(MODEL)
         with self.assertRaises(ValueError):
             patch_model(out)
+
+
+
+# The real policy, reduced to the shape patch_platform depends on.
+PLATFORM = """import os
+
+_CHUNKED_PREFILL_MODEL_TYPES = {"gemma4", "gemma4_unified"}
+
+
+def _apply_chunked_prefill_policy(vllm_config: "VllmConfig") -> None:
+    \"\"\"Restrict token-chunked prefill to the model types that support it.\"\"\"
+    scheduler_config = vllm_config.scheduler_config
+    model_config = vllm_config.model_config
+    model_type = getattr(model_config.hf_config, "model_type", None)
+
+    if model_type in _CHUNKED_PREFILL_MODEL_TYPES:
+        scheduler_config.disable_chunked_mm_input = True
+        return
+
+    if scheduler_config.enable_chunked_prefill:
+        scheduler_config.enable_chunked_prefill = False
+    scheduler_config.long_prefill_token_threshold = 0
+
+
+def _unrelated(vllm_config):
+    if model_type in _CHUNKED_PREFILL_MODEL_TYPES:
+        return True
+"""
+
+
+class PlatformTests(unittest.TestCase):
+    def test_the_allowlist_gains_an_explicit_opt_in(self):
+        out = patch_platform(PLATFORM)
+        ast.parse(out)
+        self.assertIn('def _m1_chunked_prefill_opt_in():', out)
+        self.assertIn('if model_type in _CHUNKED_PREFILL_MODEL_TYPES or '
+                      '_m1_chunked_prefill_opt_in():', out)
+
+    def test_a_lookalike_condition_elsewhere_is_untouched(self):
+        """_unrelated carries the same line; only the policy function may change."""
+        out = patch_platform(PLATFORM)
+        self.assertEqual(out.count('if model_type in _CHUNKED_PREFILL_MODEL_TYPES:'), 1)
+        self.assertIn('def _unrelated(vllm_config):', out)
+
+    def test_the_opt_in_reads_the_documented_variable(self):
+        out = patch_platform(PLATFORM)
+        self.assertIn('os.environ.get("TT_M1_FORCE_CHUNKED_PREFILL") == "1"', out)
+
+    def test_patching_twice_raises(self):
+        out = patch_platform(PLATFORM)
+        with self.assertRaises(ValueError):
+            patch_platform(out)
+
+    def test_a_source_without_the_policy_raises(self):
+        with self.assertRaises(ValueError):
+            patch_platform('import os' + chr(10))
 
 
 if __name__ == '__main__':

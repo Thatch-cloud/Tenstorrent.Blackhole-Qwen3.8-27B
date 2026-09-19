@@ -29,16 +29,20 @@ jobs:
           name="qwen-m1-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          plugin=/opt/qwen-fast-plugin/src/vllm_tt_plugin
           for file in model.py qwen36_vllm.py; do
             docker cp "$name:$root/$file" "graft/$file.orig"
             sha256sum "graft/$file.orig" >> experiment-results/source.sha256
           done
+          docker cp "$name:$plugin/platform.py" graft/platform.py.orig
+          sha256sum graft/platform.py.orig >> experiment-results/source.sha256
           python3 -B - <<'PY'
           import ast, io, sys
           sys.path.insert(0, 'scripts/ci')
           import lever_n_model_patch as patcher
           for name, apply in (('model.py', patcher.patch_model),
-                              ('qwen36_vllm.py', patcher.patch_vllm_entry)):
+                              ('qwen36_vllm.py', patcher.patch_vllm_entry),
+                              ('platform.py', patcher.patch_platform)):
               source = io.open('graft/%s.orig' % name, encoding='utf-8').read()
               patched = apply(source)
               ast.parse(patched)
@@ -47,12 +51,17 @@ jobs:
           PY
           mkdir -p reference
           docker cp "$name:$root/rope.py" reference/rope.py || true
+          docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin/platform.py" reference/platform.py || true
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          grep -rm1 model_type "$target"/snapshots/*/config.json \
+            > experiment-results/model_type.txt 2>&1 || true
+          echo "--- model_type ---"; cat experiment-results/model_type.txt || true
           docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin" reference/vllm_tt_plugin || true
           grep -rln "prefill_forward" reference/ > experiment-results/prefill_forward_callers.txt || true
           grep -rn "start_pos" reference/vllm_tt_plugin > experiment-results/plugin_start_pos.txt || true
           echo "--- callers ---"; cat experiment-results/prefill_forward_callers.txt || true
           echo "--- start_pos ---"; head -40 experiment-results/plugin_start_pos.txt || true
-          sha256sum graft/model.py graft/qwen36_vllm.py >> experiment-results/graft.sha256
+          sha256sum graft/model.py graft/qwen36_vllm.py graft/platform.py >> experiment-results/graft.sha256
           cat experiment-results/graft.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

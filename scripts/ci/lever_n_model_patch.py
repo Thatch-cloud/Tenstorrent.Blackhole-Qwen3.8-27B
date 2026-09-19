@@ -275,6 +275,66 @@ def patch_vllm_entry(source):
         'batched dispatch')
     return ''.join(lines)
 
+
+PLATFORM_OPT_IN = """def _m1_chunked_prefill_opt_in():
+    \"\"\"Lever N M1: allow chunked prefill for a generator the graft made resumable.
+
+    _CHUNKED_PREFILL_MODEL_TYPES lists the HF model_type values whose tt-metal
+    generator accepts a chunk_start_idx. The Qwen3.8-27B generator does once
+    model.py and qwen36_vllm.py carry prefill_paged_slots_range, which is exactly
+    what this graft adds, so the set is opened by explicit opt-in rather than by
+    guessing the model_type string.
+
+    ONLY set TT_M1_FORCE_CHUNKED_PREFILL alongside that graft. On a stock image the
+    scheduler would hand the model a chunk it cannot resume, and the prompt would be
+    silently re-prefilled from zero on every step.
+    \"\"\"
+    return os.environ.get("TT_M1_FORCE_CHUNKED_PREFILL") == "1"
+
+
+"""
+
+
+def patch_platform(source):
+    """Let the chunked-prefill policy opt in, for the grafted generator only.
+
+    platform._apply_chunked_prefill_policy turns enable_chunked_prefill off for every
+    model_type outside a two-entry allowlist, which is why runs 35415521079 and
+    35415811328 never chunked a 5,918-token prompt despite being asked to: the flag was
+    overridden at config time and max_num_batched_tokens was bumped back to max_model_len.
+    """
+    lines = source.splitlines(keepends=True)
+    anchor = 'def _apply_chunked_prefill_policy(vllm_config: "VllmConfig") -> None:'
+    hits = [i for i, line in enumerate(lines) if line.startswith(anchor)]
+    if len(hits) != 1:
+        raise ValueError('platform: expected one _apply_chunked_prefill_policy, got %d'
+                         % len(hits))
+    # Splice as individual lines: a single multi-line element would leave list
+    # indices out of step with the line numbers function_span_module returns.
+    block = PLATFORM_OPT_IN.lstrip(chr(10)).splitlines(keepends=True)
+    lines[hits[0]:hits[0]] = block
+    span = function_span_module(''.join(lines), '_apply_chunked_prefill_policy')
+    lines = replace_once(
+        lines, span,
+        '    if model_type in _CHUNKED_PREFILL_MODEL_TYPES:',
+        '    if model_type in _CHUNKED_PREFILL_MODEL_TYPES or _m1_chunked_prefill_opt_in():',
+        'platform allowlist')
+    return ''.join(lines)
+
+
+def function_span_module(source, name):
+    """Span of a module-level function, by the same next-sibling rule as function_span."""
+    tree = ast.parse(source)
+    total = len(source.splitlines())
+    members = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for index, node in enumerate(members):
+        if node.name != name:
+            continue
+        start = min(d.lineno for d in node.decorator_list) - 1 if node.decorator_list else node.lineno - 1
+        end = members[index + 1].lineno - 1 if index + 1 < len(members) else total
+        return start, end
+    raise ValueError('no module-level function named %s' % name)
+
 def patch_model(source):
     patched = patch_tp_replay(source)
     patched = patch_chunked_entry(patched)
