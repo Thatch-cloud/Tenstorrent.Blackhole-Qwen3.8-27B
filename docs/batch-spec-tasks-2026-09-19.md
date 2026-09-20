@@ -655,3 +655,50 @@ differed from this repo's - `verifier_engine` is the bundle's, this repo's
 and the frozen validator compares a computed geometry where this repo's compares a
 constant. The CPU probe lane mounts the repo at `/probe` FIRST on `PYTHONPATH`, so
 importing a module there measures the repo. Read image files by path.
+
+## Why two users cannot simply take turns (2026-09-20, measured)
+
+One user decodes. Two users prefill, admit, and commit two blocks each, and then
+the DRAFT path fails inside `select_proposal`:
+
+```
+Replicated learned selector features differ:
+call=1 position=32779 rows=2048 max_abs=2.01562 mean_abs=0.36001
+differing=8184 of 8192 finite=True/True
+```
+
+Read that carefully, because it rules out most of the candidates at once:
+
+- **8184 of 8192 elements differ.** Not a corrupted region - everything.
+- **max 2.02, mean 0.36.** Far too large for fidelity or rounding.
+- **Both shards finite.** Not a bad write, not uninitialised memory.
+- **call=1**, the device's SECOND proposal, i.e. the first one that happens after
+  the other user's pass has run in between. Call 0 is fine for both users.
+
+The selector projection is replicated across the two chips, so identical inputs
+must give identical outputs. They did not. The two chips computed the proposal on
+different data - a collective that did not pair.
+
+Two candidate explanations were tested on hardware and BOTH are excluded:
+
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| Each request captures its own device trace, and two traces collide | `QWEN_FAST_EAGER_PROPOSAL=1` leaves `proposal_capture` unset; `propose` already has an eager path | Run 35478872085: still diverges |
+| Each request builds its own `TT_CCL`, so two cycle semaphore handles over one mesh | one shared collectives object for every request | Run 35479238722: still diverges |
+
+Both changes are kept: they are correct regardless, and one user still decodes
+with them (run 35478659909, 10 tokens, 7.2 tok/s eager against 8.2 traced).
+
+**What this says about the design.** The draft proposal pass is not re-entrant
+across requests on a TP2 mesh. Running two complete single-user passes in turn is
+not equivalent to serving two users, whatever order they run in. That is not an
+argument the batched verifier wins on speed - it is the reason the sequential
+shortcut cannot be made correct by tuning. The packed design has one device, one
+proposal pass, one set of collectives and one set of semaphores serving every
+user, so the failure mode does not exist to be fixed.
+
+Getting an eager mask validated also required the device modules to be OVERRIDDEN
+into the image: `dflash_device`, `draft_attention_branch`, `draft_mlp_branch` and
+the convolution modules were never copied, so none of the packed work had ever
+reached hardware. The build context is a temp directory the workflow fills file by
+file, so a Dockerfile COPY alone fails the build - both lists need the name.
