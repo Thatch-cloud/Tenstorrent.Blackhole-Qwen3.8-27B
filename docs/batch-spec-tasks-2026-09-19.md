@@ -1699,3 +1699,14 @@ verify, so they are safe; so are the GDN entry/state (written in-trace before
 read) and every pooled buffer. Both bugs are being fixed before the gate run:
 slot adoption at admission (agent 'slotfix') and pooled replay page tables plus
 a page-table drift check under QWEN_FAST_SHARD_CHECK (agent 'replaypool').
+
+Adoption scope check (audit): the prefill reads back exactly rec_state and
+conv_states per layer (lever_n_model_patch.py:197-198) and `_write_gdn_slot`
+takes only those (:205); the tensors are written in place, so the addresses the
+traces baked hold (gdn_device_loop_state.py:112-114 would raise otherwise).
+One risk: conv_states are (1, 8, 5120) per chip in TILE layout with all eight
+slots inside one 32-row tile, so a slice starting at row k != 0 is a tile-
+internal unaligned slice no path exercises today. `adopt_slot` therefore
+verifies each device slice against a host readback of the full tensor's row k
+on both chips before writing row 0, and raises otherwise - once per admission,
+unconditional, so the gate run is also the proof of the slice.
