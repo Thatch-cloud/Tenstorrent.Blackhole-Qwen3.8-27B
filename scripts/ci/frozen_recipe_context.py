@@ -305,8 +305,16 @@ def main():
             adapted[prefix + 'fused_1d_weights.cpp'] = sources['fused_1d_weights.cpp']
             for name in ('frozen_mlp_input_scope.py', 'frozen_mlp_input_gate.py'):
                 adapted[name] = Path(__file__).with_name(name).read_text()
+    # The fused MLP input reader and its simulator evidence ride with the
+    # orchestrator: run 35485758177 showed the reader exiting with its final
+    # multicast in flight, and the fix has to reach every lane's tree without
+    # moving REVISION. The reader, the admission module and the target-mode
+    # simulator report (with its exit status) are one unit: fused_t16_admission
+    # hashes the report, and the report records the reader's hash.
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
-            'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
+            'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py',
+            'fused_1d_input.cpp', 'fused_t16_admission.py',
+            'fused-t16-target-simulator.json', 'fused-t16-target-simulator.exit-status'):
         adapted[name] = Path(__file__).with_name(name).read_text()
     for name, source in adapted.items():
         if name.endswith('.py'):
