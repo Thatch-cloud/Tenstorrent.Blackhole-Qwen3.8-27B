@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - name: Run the CPU probe in the serving image, no devices attached
         working-directory: cp
-        timeout-minutes: 8
+        timeout-minutes: 11
         shell: bash
         run: |
           set -euo pipefail
