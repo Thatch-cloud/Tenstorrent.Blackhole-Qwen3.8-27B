@@ -909,3 +909,28 @@ block is inside a device's second proposal or the step after round two. v36 adds
 per-execute scheduling counts, a periodic Python stack dump and TT-Metal's
 watcher (its log printed by the bench) so the stalled kernel names itself, and
 runs with per-request collectives as the A/B for semaphore residue.
+
+### Per-request allocations that still follow a trace (audit-verified, 2026-09-20)
+
+Protected now: draft history and spare history (pool), draft K/V banks (pool),
+draft weights (uploaded once at attach, shared), the per-engine GDN carry
+(allocated beside the initial snapshots, before capture).
+
+Still allocated after an earlier request's traces exist, in the order they would
+matter:
+
+1. The verifier's own state: initial GDN snapshots (`verifier_engine.py` ~:109),
+   per-bucket checkpoints (~:143), target feature taps (~:124), and the
+   fixture's ModelBatch buffers (`model_batch.py` ~:471-499: tokens, positions,
+   pages, singleton pages/positions, cos/sin, replay-reader positions/pages/masks).
+   tokens/positions/pages are restaged before every verify, so a clobber there is
+   overwritten before use; the GDN snapshots and checkpoints are NOT, and a
+   clobber there corrupts the recurrent state silently - wrong tokens, no
+   assertion. This is the next suspect if two users decode but emit garbage.
+2. `DraftKVHistory.query` (a zero input the projection only reads).
+3. `PreparedDFlashProposal` buckets and retained trace intermediates - trace mode
+   only, not exercised while proposals are eager.
+
+The principle that closes the class: nothing a request keeps across steps may be
+allocated after any trace that will replay exists. The packed design needs the
+same rule for its single shared engine.
