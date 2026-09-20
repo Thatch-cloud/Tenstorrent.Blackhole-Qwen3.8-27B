@@ -11,7 +11,7 @@ from unittest.mock import patch
 import torch
 
 from model_batch import (ModelBatch, compact_gdn_enabled, device_loop_enabled, instance_overrides, prepare_inputs,
-                         validate_checkpoint)
+                         validate_checkpoint, validate_pack)
 
 
 class ModelBatchTests(unittest.TestCase):
@@ -384,3 +384,94 @@ class RowPagesAssignmentTests(unittest.TestCase):
         reads = [node for node in ast.walk(assigned.value)
                  if isinstance(node, ast.Attribute) and node.attr == 'row_pages']
         self.assertEqual(reads, [], 'the assignment must not read self.row_pages')
+
+
+class PackedFixtureTests(unittest.TestCase):
+    """A packed retained fixture is decided per user after the verify readback.
+
+    So ModelBatch builds commit-only device-loop states with one entry per user, runs
+    every layer's decode deferred, and records each user's carry as that layer's
+    commit destination. A packed fixture that retains records without commit-only GDN
+    would decide eagerly with placeholder prefixes, so it is refused at construction.
+    """
+
+    def pack(self, users=2):
+        return [dict(start=100 * (index + 1), rows=16, pages=torch.full((1, 4), index + 1, dtype=torch.int32), prefix=0,
+                     checkpoints=['ck%d.%d' % (index, layer) for layer in range(48)],
+                     slots=[['slot%d.%d.%d' % (index, layer, part) for part in range(5)] for layer in range(48)])
+                for index in range(users)]
+
+    def test_a_packed_retained_fixture_requires_commit_only_gdn(self):
+        with patch.dict(sys.modules, {'ttnn': SimpleNamespace()}):
+            with self.assertRaisesRegex(ValueError, 'commit-only'):
+                ModelBatch(SimpleNamespace(), [1] * 32, 0, torch.zeros(1, 4, dtype=torch.int32), [None] * 48, [None] * 48, 32,
+                           serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                           hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
+                           packed_checkpoints=True, retain_records=True, pack=self.pack())
+
+    def fixture(self):
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.rows = 32
+        fixture.pack = validate_pack(self.pack())
+        fixture.device_loop_gdn = fixture.compact_prologue = fixture.batch_conv = fixture.packed_checkpoints = True
+        fixture.commit_only_gdn = True
+        fixture.norm_batch = fixture.prefix_zero_reuse = fixture.defer_conv_publication = False
+        fixture.operations = SimpleNamespace(reshape=lambda value, shape: SimpleNamespace(shape=shape),
+            get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2)
+        fixture.working_states, fixture.gdn_calls, fixture.norm_batch_calls = [], 0, 0
+        fixture.retained = SimpleNamespace(append=Mock())
+        return fixture
+
+    def test_every_layer_decodes_deferred_with_one_entry_per_user_and_records_each_users_carry(self):
+        fixture = self.fixture()
+        layer = SimpleNamespace(B=8, _stable_state=True, rec_state='rec', conv_states=['c0', 'c1', 'c2', 'c3'])
+        helper = SimpleNamespace(direct=True, gdn=layer, live=['rec', 'c0', 'c1', 'c2', 'c3'],
+                                 allocate=Mock(side_effect=lambda: [object() for part in range(5)]))
+        decoded = dict(commit_only_gdn=True, owned=[], layer_output='reduced')
+        with patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': SimpleNamespace(tt_all_reduce='reduce')}), \
+                patch('gdn_multitoken.load_kernels', return_value='kernels'), \
+                patch('gdn_device_loop_state.DeviceLoopState.decode', return_value=decoded) as decode, \
+                patch('gdn_multitoken_conv.finish_output') as finish, \
+                patch('gdn_records.retain_checkpoint_histories') as retain:
+            forward = fixture.gdn_forward(layer, helper, 'ck3', 3)
+            self.assertEqual(forward(SimpleNamespace(shape=(1, 1, 32, 5120))), 'reduced')
+        (state,) = fixture.working_states
+        self.assertTrue(state.commit_only)
+        self.assertEqual((len(state.segment_entries), state.entry, state.state), (2, [], []))
+        self.assertEqual(helper.allocate.call_count, 2, 'one block-start entry per user, before any trace')
+        decode.assert_called_once()
+        self.assertEqual(decode.call_args.args[0].shape, (1, 32, 5120))
+        self.assertEqual(decode.call_args.args[1:], (['ck0.3', 'ck1.3'], [0, 0]))
+        carries = (fixture.pack['slots'][0][3], fixture.pack['slots'][1][3])
+        self.assertEqual(decode.call_args.kwargs, dict(segments=((0, 16), (16, 32)), slots=list(carries), deferred=True))
+        finish.assert_called_once_with(layer, decoded, fixture.operations, 'reduce')
+        retain.assert_called_once_with(fixture.operations, decoded, 'reduced')
+        fixture.retained.append.assert_called_once_with(state, decoded, carries)
+        self.assertEqual(fixture.gdn_calls, 1)
+
+    def test_a_packed_block_checkpoints_once_per_user(self):
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = None
+        fixture.rows = 32
+        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.norm_batch = fixture.attention_mask_once = fixture.skip_row_clones = False
+        fixture.compact_gdn = fixture.device_loop_gdn = True
+        fixture.writers, fixture.readers, fixture.bindings = [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.working_states = [SimpleNamespace(calls=0, checkpoint_calls=0, skipped_clones=0) for layer in range(48)]
+        decisions = [1]
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            for state in fixture.working_states:
+                state.calls += 1
+                state.checkpoint_calls += decisions[0]
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        packed = dict(segments=((0, 16), (16, 32)))
+        for fixture.pack, decisions[0] in ((None, 1), (packed, 2)):
+            self.assertEqual(fixture.run(), 'logits')
+        for fixture.pack, decisions[0] in ((None, 2), (packed, 1)):
+            with self.assertRaisesRegex(AssertionError, 'once per user'):
+                fixture.run()

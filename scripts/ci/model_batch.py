@@ -205,6 +205,11 @@ class ModelBatch:
                 device_loop_gdn and packed_checkpoints and batch_conv and retain_records)):
             raise ValueError('Commit-only GDN requires a retained packed-history verifier and an explicit decision')
         self.commit_only_gdn = commit_only_gdn and self.rows > 1
+        # A packed retained block is decided per user after the verify readback, through
+        # the block's commit_user; the decode must therefore defer, which is the
+        # commit-only device loop with one entry per user.
+        if self.pack is not None and retain_records and not self.commit_only_gdn:
+            raise ValueError('A packed retained block commits per user after the readback: commit-only GDN required')
         if type(short_context) is not bool or (short_context and (not attention_replay or replay_group_rows != 4)):
             raise ValueError('Short-context attention requires explicit four-row replay groups')
         self.short_context = short_context
@@ -394,11 +399,15 @@ class ModelBatch:
             from gdn_device_loop_state import DeviceLoopState
             from gdn_multitoken import load_kernels
             from gdn_multitoken_conv import finish_output, release_owned
+            # Commit-only and packed: the decode defers every user's decision, so each
+            # user needs its own block-start entry for its later commit.
+            deferred = self.pack is not None and self.commit_only_gdn
             state = DeviceLoopState(helper, operations, load_kernels(Path('/opt/tt-metal'), True),
                                     self.compact_prologue, self.batch_conv, self.batch_conv, self.packed_checkpoints,
                                     norm_batch=self.norm_batch, prefix_zero_reuse=self.prefix_zero_reuse,
                                     defer_conv_publication=self.defer_conv_publication,
-                                    **(dict(commit_only=True) if self.commit_only_gdn else {}))
+                                    **(dict(commit_only=True) if self.commit_only_gdn else {}),
+                                    **(dict(users=len(self.pack['segments'])) if deferred else {}))
             self.working_states.append(state)
 
             def device_forward(value):
@@ -410,12 +419,14 @@ class ModelBatch:
                     result = state.decode(packed, checkpoint, self.prefix)
                 else:
                     # One recurrence per user, each from its own carried state, over
-                    # its own slice of the single input projection.
+                    # its own slice of the single input projection. Deferred, the
+                    # pack's prefixes are placeholders: the readback decides them.
                     result = state.decode(packed,
                         [user[gdn_slot] for user in self.pack['checkpoints']],
                         list(self.pack['prefixes']),
                         segments=self.pack['segments'],
-                        slots=[user[gdn_slot] for user in self.pack['slots']])
+                        slots=[user[gdn_slot] for user in self.pack['slots']],
+                        deferred=deferred)
                 if result.get('commit_only_gdn', False) != self.commit_only_gdn:
                     raise AssertionError('Commit-only GDN must engage in every selected layer')
                 finish_output(layer, result, operations, tt_all_reduce)
@@ -423,7 +434,10 @@ class ModelBatch:
                 if self.retained is not None:
                     from gdn_records import retain_checkpoint_histories
                     retain_checkpoint_histories(operations, result, output)
-                    self.retained.append(state, result, checkpoint)
+                    # Packed, each user's decision is committed into that user's carry,
+                    # the state the next block's decode restores that user from.
+                    self.retained.append(state, result, checkpoint if self.pack is None
+                                         else tuple(user[gdn_slot] for user in self.pack['slots']))
                 else:
                     release_owned(operations, [value for value in result['owned'] if value is not output])
                 self.gdn_calls += 1
@@ -504,11 +518,14 @@ class ModelBatch:
         if any(reader.calls - before != (16 if self.attention_replay else 1)
                for reader, before in zip(self.readers, before_reads, strict=True)):
             raise AssertionError("Every selected B1 SDPA adapter must engage")
+        # One decision per block, or packed one per user: each user's segment is its
+        # own checkpoint, deferred or not.
         if len(self.working_states) != (48 if self.compact_gdn else 0) or any(
-            state.calls - before[0] != (1 if self.device_loop_gdn else self.rows) or state.checkpoint_calls - before[1] != 1
+            state.calls - before[0] != (1 if self.device_loop_gdn else self.rows)
+            or state.checkpoint_calls - before[1] != (1 if self.pack is None else len(self.pack['segments']))
             for state, before in zip(self.working_states, before_compact, strict=True)
         ):
-            raise AssertionError("Every compact GDN layer must update in place and checkpoint exactly once")
+            raise AssertionError("Every compact GDN layer must update in place and checkpoint exactly once per user")
         if any(state.skipped_clones - before != (self.rows - 1 if self.skip_row_clones and not self.device_loop_gdn else 0)
                for state, before in zip(self.working_states, before_clones, strict=True)):
             raise AssertionError("Projected-row clone removal did not engage exactly")

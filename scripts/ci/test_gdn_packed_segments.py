@@ -19,7 +19,9 @@ from unittest.mock import Mock, patch
 from gdn_device_loop_state import DeviceLoopState, validate_segments
 
 
-class PackedSegmentTests(unittest.TestCase):
+class PackedFixture(unittest.TestCase):
+    """One GDN layer's device-loop state over fakes that record every device call."""
+
     def build(self, **options):
         calls = []
         operations = SimpleNamespace(L1_MEMORY_CONFIG='l1', DRAM_MEMORY_CONFIG='dram')
@@ -42,9 +44,15 @@ class PackedSegmentTests(unittest.TestCase):
         layer._project_qkvzab_raw = Mock(side_effect=lambda packed, rows, memory: (
             calls.append(('project', rows)) or SimpleNamespace(shape=(1, rows, 8240), name='projected')))
 
+        allocations = []
+
+        def allocate():
+            allocations.append(['E%d.%d' % (len(allocations), index) for index in range(5)])
+            return allocations[-1]
+
         active = SimpleNamespace(direct=True, gdn=layer, live=['rec', 'c0', 'c1', 'c2', 'c3'])
-        active.allocate = Mock(side_effect=lambda: ['e%d' % index for index in range(5)])
-        active.save = Mock(side_effect=lambda destination: calls.append(('save',)))
+        active.allocate = Mock(side_effect=allocate)
+        active.save = Mock(side_effect=lambda destination: calls.append(('save', destination[0])))
         active.restore = Mock(side_effect=lambda source: calls.append(('restore', source[0])))
 
         state = DeviceLoopState(active, operations, kernels='kernels', batch_conv=True,
@@ -54,14 +62,16 @@ class PackedSegmentTests(unittest.TestCase):
     def recurrence(self, calls):
         def run(mesh, projected, initial, conv_states, *args, **kwargs):
             calls.append(('recur', projected.shape[1]))
+            calls.append(('history', initial, tuple(conv_states)))
             return dict(output=SimpleNamespace(shape=(1, projected.shape[1], 5120), name='out'),
                         states=SimpleNamespace(shape=(projected.shape[1], 24, 128, 128)),
                         conv_prefixes=[None] * projected.shape[1], owned=[],
-                        packed_checkpoints=True, deferred_conv_publication=False,
+                        packed_checkpoints=True,
+                        deferred_conv_publication=kwargs.get('defer_conv_publication', False),
                         norm_batch=False, prefix_zero_reuse=False)
         return run
 
-    def run_packed(self, state, operations, calls, spans, prefixes, slots, checkpoints):
+    def run_packed(self, state, operations, calls, spans, prefixes, slots, checkpoints, **options):
         with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
                 patch('gdn_device_loop_state.restore_prefix',
                       side_effect=lambda ops, result, entry, destination, accepted:
@@ -70,8 +80,10 @@ class PackedSegmentTests(unittest.TestCase):
                 patch('gdn_device_loop_state.release_owned'), \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
             return state.decode(SimpleNamespace(shape=(1, 32, 5120)), checkpoints, prefixes,
-                                segments=spans, slots=slots)
+                                segments=spans, slots=slots, **options)
 
+
+class PackedSegmentTests(PackedFixture):
     def test_one_projection_serves_every_segment(self):
         state, operations, layer, active, calls = self.build()
         slots = [['A%d' % index for index in range(5)], ['B%d' % index for index in range(5)]]
@@ -85,6 +97,8 @@ class PackedSegmentTests(unittest.TestCase):
                          [('slice', 0, 16), ('slice', 16, 32)])
         self.assertEqual(result['output'].shape, (1, 32, 5120))
         self.assertEqual(result['segments'], ((0, 16), (16, 32)))
+        self.assertIs(result['segment_results'], state.segment_results)
+        self.assertEqual(len(state.segment_results), 2)
 
     def test_each_segment_starts_from_its_own_carried_state(self):
         state, operations, layer, active, calls = self.build()
@@ -117,6 +131,73 @@ class PackedSegmentTests(unittest.TestCase):
         self.assertEqual(prefix.call_count, 2, 'checkpoint and end-of-block state')
         self.assertNotIn('segments', result)
         self.assertEqual(state.checkpoint_calls, 1)
+        self.assertIsNone(state.segment_results)
+        self.assertIsNone(state.segment_entries)
+
+
+class DeferredPackedTests(PackedFixture):
+    """The packed serving step: prefixes are known only after the verify readback.
+
+    So the decode restores each user from its carry, snapshots that block-start state
+    into the user's OWN entry, runs the recurrence, and decides nothing. The retained
+    block's commit_user later rebuilds any accepted prefix from that entry and that
+    user's histories, straight into the carry - which is why the carry must be left
+    exactly as decode found it: a prefix of zero then has nothing to write.
+    """
+
+    spans = ((0, 16), (16, 32))
+    slots = [['A%d' % index for index in range(5)], ['B%d' % index for index in range(5)]]
+    checkpoints = [['ckA'], ['ckB']]
+
+    def test_every_user_keeps_its_own_entry_and_nothing_is_decided_at_decode(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=2)
+        result = self.run_packed(state, operations, calls, self.spans, [0, 0], self.slots, self.checkpoints,
+                                 deferred=True)
+        self.assertEqual(layer._project_qkvzab_raw.call_count, 1, 'still one weight pass')
+        first, second = state.segment_entries
+        self.assertEqual((state.entry, state.state), ([], []), 'no shared entry, no speculative state')
+        self.assertNotEqual(first, second)
+        self.assertEqual([entry for entry in calls if entry[0] in ('restore', 'save', 'recur')],
+                         [('restore', 'A0'), ('save', first[0]), ('recur', 16),
+                          ('restore', 'B0'), ('save', second[0]), ('recur', 16)],
+                         'each user: restored from its carry, snapshotted into its own entry, run')
+        self.assertEqual([entry for entry in calls if entry[0] == 'history'],
+                         [('history', first[0], tuple(first[1:])), ('history', second[0], tuple(second[1:]))],
+                         'the recurrence starts from that user\'s own entry, read-only')
+        self.assertEqual([entry for entry in calls if entry[0] == 'prefix'], [],
+                         'neither the checkpoint nor the carry is written before the readback')
+        self.assertEqual([piece['states'].shape[0] for piece in state.segment_results], [16, 16])
+        self.assertIs(result['segment_results'], state.segment_results)
+        self.assertTrue(all(piece['deferred_conv_publication'] for piece in state.segment_results))
+        self.assertTrue(result['commit_only_gdn'])
+        self.assertEqual(result['segments'], self.spans)
+        self.assertEqual((state.calls, state.checkpoint_calls), (1, 2), 'one deferred decision per user')
+
+    def test_deferred_decode_needs_commit_only_and_one_entry_per_user(self):
+        with self.assertRaises(ValueError):
+            self.build(users=2)
+        for options, deferred in (({}, True), (dict(commit_only=True), False), (dict(commit_only=True), True),
+                                  (dict(commit_only=True, users=3), True), (dict(commit_only=True, users=2), 1)):
+            state, operations, layer, active, calls = self.build(**options)
+            with self.assertRaises(ValueError):
+                self.run_packed(state, operations, calls, self.spans, [0, 0], self.slots, self.checkpoints,
+                                deferred=deferred)
+            layer._project_qkvzab_raw.assert_not_called()
+            active.restore.assert_not_called()
+        # a single sequence decides at decode; it has nothing to defer
+        state, operations, layer, active, calls = self.build()
+        with self.assertRaises(ValueError):
+            state.decode(SimpleNamespace(shape=(1, 32, 5120)), ['ck'], 12, deferred=True)
+        layer._project_qkvzab_raw.assert_not_called()
+
+    def test_close_frees_every_users_entry(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=2)
+        entries = [list(entry) for entry in state.segment_entries]
+        with patch('gdn_device_loop_state.release_owned') as release:
+            state.close()
+        release.assert_called_once_with(operations, [value for entry in entries for value in entry])
+        self.assertEqual([list(entry) for entry in state.segment_entries], [[], []])
+        self.assertIsNone(state.segment_results)
 
 
 class SegmentValidationTests(unittest.TestCase):
