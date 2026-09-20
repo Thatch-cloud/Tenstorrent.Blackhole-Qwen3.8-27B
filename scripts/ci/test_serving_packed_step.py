@@ -3,9 +3,12 @@ scheduler's order, and every round the block cannot serve handed to the sequenti
 
 Fakes in the shape of what the step drives: a block with the contract of
 packed_verifier.PackedVerifierEngine (segments bound to engines by their carry, predictions
-in entries order, commits one segment at a time with the last one fenced), and requests
-whose session, engine and runtime keep the state machines of greedy_session.GreedySession,
-VerifierEngine.adopt_packed/publish and DFlashRequestRuntime.publish."""
+in entries order, commits one segment at a time), and requests whose session, engine and
+runtime keep the state machines of greedy_session.GreedySession,
+VerifierEngine.adopt_packed/publish and DFlashRequestRuntime.publish. Which commit the
+block fences is the block's own rule (packed_verifier.commit_user fences the one that
+empties its pending segments) and is asserted on the REAL block, through
+test_packed_verifier's fixture, at the end."""
 
 import io
 import sys
@@ -13,10 +16,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from serving_fast_request import CommittedOutput
 import serving_packed_step
 from serving_packed_step import audit_log, describe, packed_device_step
 from serving_sequential_step import describe as describe_sequential
+from test_packed_verifier import PAGE_WIDTH, BlockFixture
 import verifier_engine
 
 ROWS = 16
@@ -26,7 +32,7 @@ TAPS = ('tap0', 'tap1', 'tap2', 'tap3', 'tap4')
 class FakeBlock:
     """PackedVerifierEngine as the step sees it. Segments are bound to engines (by carry on
     the real block), verify returns predictions and segments in entries order, and every
-    commit is recorded with whether it was the round's fence."""
+    commit is recorded in the order it arrived."""
 
     def __init__(self, users=2, rows=ROWS):
         self.shape = SimpleNamespace(users=users, rows_per_user=rows, block_rows=users * rows)
@@ -68,10 +74,7 @@ class FakeBlock:
 
     def commit_user(self, segment, prefix):
         self.check_segment(segment)
-        # packed_verifier.PackedVerifierEngine.commit_user fences exactly the commit that
-        # empties its pending segments; test_packed_verifier checks that rule on the real block.
-        fenced = self.pending_segments == {segment}
-        self.calls.append(('commit', segment, prefix, fenced))
+        self.calls.append(('commit', segment, prefix))
         self.pending_segments.discard(segment)
         if not self.pending_segments:
             self.phase = 'idle'
@@ -142,10 +145,13 @@ class FakeSession:
 class FakeEngine:
     """VerifierEngine.adopt_packed and the packed branch of its publish."""
 
-    def __init__(self, session):
+    def __init__(self, session, carry=None):
         self.session, self.position = session, session.position
         self.phase, self.pending, self.packed = 'idle', None, None
         self.adopted = []
+        if carry is not None:
+            # borrowed from a pool slot, the way VerifierEngine.allocate_carry borrows it
+            self.carry = [list(snapshot) for snapshot in carry]
 
     def adopt_packed(self, ticket, block, segment):
         self.session.check_ticket(self.session.request_id, ticket)
@@ -204,9 +210,9 @@ class FakeRuntime:
 
 
 class FakeRequest:
-    def __init__(self, request_id, position, stepped):
+    def __init__(self, request_id, position, stepped, carry=None):
         self.session = FakeSession(request_id, position)
-        self.engine = FakeEngine(self.session)
+        self.engine = FakeEngine(self.session, carry)
         self.runtime = FakeRuntime(self.engine)
         self.closed = self.cancelled = self.busy = False
         self.collect_timings = False
@@ -268,8 +274,8 @@ class PackedStepTests(unittest.TestCase):
         verifier_engine._resident = object()
         outputs = self.step(entries)
         # one verify over both, then B's commit (segment 1) and A's (segment 0), in the
-        # scheduler's order; only the last commit of the round is the fence
-        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 16, True)])
+        # scheduler's order
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10), ('commit', 0, 16)])
         self.assertEqual(self.stepped, [], 'no request went through the sequential step')
         self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
         self.assertEqual(outputs[0], CommittedOutput('B', tuple(self.block.predictions_for(1)[:10]), 3010, False))
@@ -286,11 +292,11 @@ class PackedStepTests(unittest.TestCase):
             self.assertFalse(request.busy or request.cancelled)
         self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
         self.assertIsNone(verifier_engine._resident, 'slot 0 is nobody\'s after a packed round')
-        # the next round, presented the other way: A's commit first, B's is the fence
+        # the next round, presented the other way: A's commit first
         first.propose(self.block.predictions_for(0), accept=2)
         second.propose(self.block.predictions_for(1), accept=15)
         outputs = self.step([entry(first), entry(second)])
-        self.assertEqual(self.block.calls[3:], [('verify', ['A', 'B']), ('commit', 0, 3, False), ('commit', 1, 16, True)])
+        self.assertEqual(self.block.calls[3:], [('verify', ['A', 'B']), ('commit', 0, 3), ('commit', 1, 16)])
         self.assertEqual([(output.request_id, output.position) for output in outputs], [('A', 119), ('B', 3026)])
         self.assertEqual(self.block.rounds, 2)
 
@@ -322,8 +328,8 @@ class PackedStepTests(unittest.TestCase):
     def test_a_cancellation_after_the_verify_aborts_every_user_through_the_block(self):
         entries = self.two()
         outputs = self.step(entries, cancelled=answers(False, True))
-        # prefix 0 for both, in order, the last one still the round's fence
-        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 0, False), ('commit', 0, 0, True)])
+        # prefix 0 for both, in order
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 0), ('commit', 0, 0)])
         self.assertEqual(outputs, [CommittedOutput('B', (), 3000, True, True), CommittedOutput('A', (), 100, True, True)])
         for item in entries:
             request = item['request']
@@ -337,7 +343,7 @@ class PackedStepTests(unittest.TestCase):
     def test_a_cancellation_between_two_commits_aborts_only_the_users_still_pending(self):
         entries = self.two()
         outputs = self.step(entries, cancelled=answers(False, False, True))
-        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 0, True)])
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10), ('commit', 0, 0)])
         self.assertEqual(outputs, [CommittedOutput('B', tuple(self.block.predictions_for(1)[:10]), 3010, False),
                                    CommittedOutput('A', (), 100, True, True)])
         self.assertEqual([item['request'].cancelled for item in entries], [False, True])
@@ -355,7 +361,7 @@ class PackedStepTests(unittest.TestCase):
         self.assertEqual((second.session.phase, second.engine.phase), ('failed', 'failed'))
         self.assertEqual((first.session.phase, first.engine.phase, first.engine.adopted), ('failed', 'idle', []))
         # both segments released at prefix 0, so the block can serve or close; no trace ran
-        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 0, 0, False), ('commit', 1, 0, True)])
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 0, 0), ('commit', 1, 0)])
         self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
         self.assertFalse(first.busy or second.busy)
         self.assertIsNone(verifier_engine._resident)
@@ -366,7 +372,7 @@ class PackedStepTests(unittest.TestCase):
         entries[1]['request'].runtime.fail = RuntimeError('history publication failure')
         with self.assertRaises(RuntimeError):
             self.step(entries)
-        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 0, True)])
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10), ('commit', 0, 0)])
         self.assertEqual(entries[0]['request'].session.position, 3010)
         self.assertEqual(self.block.phase, 'idle')
 
@@ -462,6 +468,80 @@ class PackedStepTests(unittest.TestCase):
             self.assertIs(serving_packed_step.audit_enabled(), False)
         with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}):
             self.assertIs(serving_packed_step.audit_enabled(), True)
+
+
+class RealBlockTests(BlockFixture):
+    """The step over the real PackedVerifierEngine (test_packed_verifier's fakes underneath:
+    a fake ttnn, a fake ModelBatch retaining one record per layer, the commit DMA recorded).
+    What only the real block can show: the segment each entry is served by is the pool slot
+    its engine's carry came from, and the fence lands on the last commit of the round."""
+
+    def setUp(self):
+        super().setUp()
+        # The fixture's readback ids run from 1000, past its 100-token vocabulary. Here the
+        # tickets built from them go through the real block's staging validator, so the
+        # readback gives segment u the ids 16u + row instead.
+        self.ids.value = torch.arange(0, 32, dtype=torch.int32)
+
+    def requests(self):
+        """A admitted through pool slot 0 with page 7, B through slot 1 with page 11,
+        presented B first."""
+        stepped = []
+        first = FakeRequest('A', 100, stepped, carry=self.pool.slots[0].verifier.carry)
+        second = FakeRequest('B', 3000, stepped, carry=self.pool.slots[1].verifier.carry)
+        first.engine.pages = torch.full((1, PAGE_WIDTH), 7, dtype=torch.int32)
+        second.engine.pages = torch.full((1, PAGE_WIDTH), 11, dtype=torch.int32)
+        first.propose(list(range(0, 16)), accept=15)
+        second.propose(list(range(16, 32)), accept=9)
+        return first, second, stepped
+
+    def test_the_real_block_serves_each_entry_from_its_slots_segment_and_fences_the_last_commit(self):
+        block = self.build()
+        first, second, stepped = self.requests()
+        entries = [entry(second), entry(first)]
+        executed = len(self.ttnn.executed)
+        outputs = packed_device_step(entries, cancelled=lambda: False, block=block)
+        self.assertEqual(stepped, [])
+        self.assertEqual(outputs, [CommittedOutput('B', tuple(range(16, 26)), 3010, False),
+                                   CommittedOutput('A', tuple(range(0, 16)), 116, False)])
+        # B's ticket and pages were staged into segment 1's rows, A's into segment 0's
+        fixture = block.fixture
+        self.assertEqual(fixture.tokens.value[16:32, 0].tolist(), [5, *range(16, 25), 0, 0, 0, 0, 0, 0])
+        self.assertEqual(fixture.tokens.value[:16, 0].tolist(), [5, *range(0, 15)])
+        self.assertTrue(bool((fixture.pages.value[16:] == 11).all()) and bool((fixture.pages.value[:16] == 7).all()))
+        self.assertEqual(fixture.positions.value.tolist(), [*range(100, 116), *range(3000, 3016)])
+        # B, entry 0, was adopted at segment 1 (its carry is slot 1's); A, entry 1, at segment 0
+        self.assertEqual([(ticket.request_id, segment) for ticket, unused, segment in second.engine.adopted], [('B', 1)])
+        self.assertEqual([(ticket.request_id, segment) for ticket, unused, segment in first.engine.adopted], [('A', 0)])
+        # the one verify trace, then B's prefix-10 trace and A's prefix-16 trace, in entries order
+        self.assertEqual(self.ttnn.executed[executed:], ['trace1', block.commits[1][10], block.commits[0][16]])
+        # the block's own fence rule, seen through the retained block it commits to: the
+        # first commit of the round is not fenced, the last one is
+        retained = block.fixture.retained
+        self.assertEqual(retained.commits, [(1, 10), (0, 16)])
+        self.assertEqual([call.kwargs['synchronize'] for call in retained.commit_user.call_args_list], [False, True])
+        self.assertEqual((block.phase, block.pending_segments, block.rounds), ('idle', set(), 1))
+        self.assertIsNone(verifier_engine._resident)
+        # a cancellation after the verify: prefix 0 for both, the last one still the fence
+        first.propose(list(range(0, 16)), accept=15)
+        second.propose(list(range(16, 32)), accept=9)
+        outputs = packed_device_step([entry(first), entry(second)], cancelled=answers(False, True), block=block)
+        self.assertEqual([(output.request_id, output.cancelled) for output in outputs], [('A', True), ('B', True)])
+        self.assertEqual(retained.commits[2:], [(0, 0), (1, 0)])
+        self.assertEqual([call.kwargs['synchronize'] for call in retained.commit_user.call_args_list[2:]], [False, True])
+        self.assertEqual(self.ttnn.executed[executed + 3:], ['trace1'], 'prefix 0 runs no trace')
+        self.assertEqual(block.phase, 'idle')
+
+    def test_the_real_block_hands_a_narrow_ticket_round_to_the_sequential_step(self):
+        block = self.build()
+        first, second, stepped = self.requests()
+        first.session.pending, first.session.phase = None, 'idle'
+        first.propose(list(range(0, 8)), accept=7, rows=8)
+        executed = len(self.ttnn.executed)
+        outputs = packed_device_step([entry(second), entry(first)], cancelled=lambda: False, block=block)
+        self.assertEqual(stepped, [('B', False), ('A', False)])
+        self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
+        self.assertEqual((self.ttnn.executed[executed:], block.rounds, block.phase), ([], 0, 'idle'))
 
 
 if __name__ == '__main__':
