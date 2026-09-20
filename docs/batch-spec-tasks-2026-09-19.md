@@ -1540,3 +1540,16 @@ The packed step passes the gate when a run on the same lane with
 QWEN_FAST_PACKED_STEP=1 yields the same two hashes (the full texts are kept
 locally in runner-evidence.local/packed-gate/). Stream order is by request
 index, which the bench fixes; the scheduler's order does not matter to it.
+
+**The two users' texts differ (run 35492676194).** Same prompt, greedy decoding:
+the texts agree for the first 48 characters and then user 0 (stream 0, admitted
+first, idle through user 1's 14 s prefill) emits token soup for the rest of its
+64 tokens (240 chars) while user 1 emits coherent code with markdown and
+TypeScript (200 chars). At most one is right, and 'no error + draft shard checks
+equal' was never a check of the target's per-user state. Hypothesis to test:
+user 1's target prefill rewrites per-slot state that user 0's carry restore does
+not put back (the carry covers rec_state and conv_states; the decode kernel also
+reads packed conv states and the attention's per-slot tables). A single-user run
+of the same prompt is in flight to say which text is right; the GDN audit is
+ranking what the prefill overwrites. This is the first correctness signal beyond
+completion for the two-user path and it predates the packed step entirely.
