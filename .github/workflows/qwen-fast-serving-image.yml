@@ -25,8 +25,8 @@ jobs:
           context=$(mktemp -d "$RUNNER_TEMP/qwen-fast-image.XXXXXX")
           echo "QWEN_IMAGE_CONTEXT=$context" >> "$GITHUB_ENV"
           mkdir -p "$context/results" "$context/bundle" "$context/scripts/ci" "$context/docker"
-          gh run download 35328870330 --repo "$GITHUB_REPOSITORY" \
-            --name qwen-fast-serving-bundle-35328870330 --dir "$context/archive"
+          gh run download 35489235797 --repo "$GITHUB_REPOSITORY" \
+            --name qwen-fast-serving-bundle-35489235797 --dir "$context/archive"
           gh run download 35489185444 --repo "$GITHUB_REPOSITORY" \
             --name qwen-serving-image-inventory-35489185444 --dir "$context/inventory"
           echo "826ea8f04ae12dcc7f3000f30cc4bd714320e3da8402378990ab94043ab6e0f2  $context/inventory/serving-image-inventory.json" | sha256sum -c -
