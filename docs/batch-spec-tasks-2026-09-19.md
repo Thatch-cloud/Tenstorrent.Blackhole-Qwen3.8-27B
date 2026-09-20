@@ -990,3 +990,31 @@ the last two watcher dumps rather than the first 600 lines (one mid-prefill dump
 was 270 lines), surfaces `[PHASE]` and `[CARRY]` with the diagnostics bounded
 from both ends, and no longer shadows `re` inside main() (the
 `prefill_chunk_observed: UnboundLocalError` in this run's report).
+
+### Kernel-exit contract violation in fused_1d_input.cpp (audit, 2026-09-20)
+
+The collectives audit, before v37 named the sampler gather, ranked our own
+`scripts/ci/fused_1d_input.cpp` as the likeliest watcher trip, and the reason
+stands even though it was not this trip: the receivers issue
+`noc_semaphore_inc` every block (line 33) and never `noc_async_atomic_barrier()`,
+and worker 0's last action is `noc_semaphore_set_multicast` (line 31) with no
+write barrier after the final block. TT-Metal's watcher checks at every kernel
+exit that reads are flushed, non-posted writes and atomics acked, and reports a
+violation as a tripped assert. The newer `tensix_stream_matmul_sink.cpp:36`,
+`tensix_weight_stream_sink.cpp:28` and `tensix_weight_stream_writer.cpp:17,22`
+drain at exit; `tensix_stream_activation.cpp` shares the omission. It is
+behaviourally benign so far because the peer waits on the same semaphores before
+it exits, so the transactions land and only the issuing core's ack counters lag -
+but a late ack arriving after the NEXT kernel on that core has snapshotted its
+NoC counters would leave that kernel's first barrier waiting for an equality that
+never comes. Two lines fix it: `noc_async_atomic_barrier()` before exit on the
+receivers, `noc_async_write_barrier()` after the last multicast on worker 0.
+Not applied yet: the kernel is not in the image's copy list and
+`frozen_mlp_input_gate.py` pins its sha256 (`READER_SHA256`), so the change is a
+frozen-recipe revision with a rebuilt image, to be taken with whatever v38's
+stalled-core dump demands. Every other kernel of ours on the admission path
+(`gdn_state_copy`, `attention_fold_dma`, `attention_mask_replay`,
+`gdn_conv_windows`, `fused_1d_weights`, `gdn_commit_dma`,
+`draft_convolution_fused_io`) ends with the proper barriers. One sanitiser-class
+note for later: `gdn_state_copy.cpp:12-16` moves 32-byte sub-tile DRAM pieces
+from a scratch not rounded to 64 bytes (`:37`), unlike `gdn_slot_copy.cpp:41`.
