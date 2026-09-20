@@ -1514,3 +1514,13 @@ PreparedDraftWeights, before the lifecycle) is enforced: construction refuses
 a lent slot, a closed pool or weights, a differing page width, or a resident
 carry. Tests: 128 green across seven modules (12 new in test_packed_verifier,
 5 in test_verifier_carry). Combined with items 1-3 at HEAD: 223 green.
+
+Follow-up ff9ef4ef: after warming the 32 per-user commit traces at attach,
+`reseed()` restores native slot 0 from the initial snapshot and zeroes every
+carry (the pool re-zeroes on loan and the engine seeds at admission anyway).
+Corrections to the plan from the code: 32 commit traces, not 34 (prefix 0
+publishes nothing); packed staging is 69 host copies per round (5 inputs, 32
+singleton positions, 32 row tables) behind one fence - a cost to watch in the
+timings. The bench now keeps each stream's generated text (9720ac91) so the
+packed step's gate can be checked offline: run 35492676194 is the sequential
+reference on the two fp2u prompts.
