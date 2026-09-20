@@ -2048,6 +2048,70 @@ Corrected total 30.54 GB of 34.36 GB; headroom 3.8 GB (11%). Nothing the block a
 exceeds the budget's rows, so the per-request engines' 8/16-row captures (9.67 GB) are NOT
 trimmed here; they stay the lever if the device shows the headroom is not there.
 
+### Measured on the device (2026-09-21, image v52, run 35509307389): condition (2) is necessary
+
+The 64-row attach succeeded end to end on v52 (warm forward, verify trace, 64 commit
+traces, reseed, bindings) and the server became ready. The FIRST request then failed while
+its per-request engine captured its buckets, in layer 0 of the first bucket's warm forward,
+when the shared-QK scope allocated one (16, 24, 128, 128) bf16 state (12.6 MB):
+
+    TT_FATAL bank_manager.cpp:462 Out of Memory: Not enough space to allocate 12582912 B DRAM
+    buffer across 8 banks (1572864 B per bank); bank size 4138123648 B, allocated 4111316352 B,
+    free 26807296 B, largest free block 712896 B.
+
+Per chip, over the 8 banks: the allocator's DRAM is 33.10 GB (not the 34.36 GB nominal:
+about 1.25 GB sits outside it), 32.89 GB was allocated, 0.21 GB free, and the largest
+allocatable buffer 5.7 MB - 99.4 percent taken with ONE request admitted and its engine's
+captures not yet built. Against the table above: at that point none of the four engines'
+9.67 GB existed, so the non-engine terms measured about 32.9 GB where the table has
+20.9 GB (30.44 less 9.67), leaving roughly 12 GB the table did not count. The candidates,
+in the order they are allocated: the shared draft weights (PreparedDraftWeights, the table's
+first "not counted"), the model's own decode activations and the fused arms' scratch, the
+first request's draft device (DFlashDevice, its histories and K/V banks outside the pool),
+the first engine's partial allocation before the failing op, and the fragmentation the
+trace holes leave. The new `[PINDIAG] dram after attach` and `dram after engine <id>` lines
+(serving_runtime.py, `serving_buffer_pool.dram_statistics` through ttnn's memory view)
+split them on the next run; nothing more is asserted here.
+
+**The trim (packed_shapes.sequential_capture_rows).** Beside the four-user block the
+per-request engines capture only the sequential widths (1, 2, 4): the pool's buckets
+(`capture_bucket_rows(16, 256, 4)`), the engine's captures and its replay plan
+(`VerifierEngine(capture_rows=4)`, threaded from serving_runtime through from_prefill), logged
+at attach as `[PINDIAG] per-request captures trimmed to widths (1, 2, 4) for the four-user
+block`. The M1 block and the sequential default keep 16 (the same calls as before, no
+keyword). What it saves per chip, by the table's own rows: each engine's retained histories
+go from the (2, 4, 8, 8, 16, 16) buckets' 54 rows to the (2, 4) buckets' 6 rows -
+6 x 786,432 B x 48 = 0.23 GB plus 2 x 48 x 4 x 327,680 B = 0.13 GB of windows, 0.35 GB against
+2.42 GB - 2.07 GB per engine, 8.3 GB for four; and each pool slot drops four buckets (8, 8,
+16, 16), each a 100.7 MB GDN checkpoint set plus taps and inputs, about 0.41 GB per slot,
+1.6 GB for four. About 9.9 GB per chip in all, which is what the measured 0.21 GB of headroom
+needs. The engines' 1-, 2- and 4-row buckets are the same captures as before at those widths.
+
+**What the trim changes on the request path.** A ticket's width is decided at draft time by
+the engine's `proposal_rows`, before the step decides packed or sequential, so a trimmed
+engine left alone would draft 4-row tickets and every round would be ineligible for the
+block. The width is therefore decided per round where every live request is known: the
+worker hook asks the packed step (`serving_packed_step.PackedStep.proposal_rows`, over the
+live requests) before any proposal, and the answer - the block's 16 rows when the block
+will serve the round as one pass (exactly its users live, each with at least 16 tokens
+left, each engine bound to a segment, each frontier inside the block's family), else
+None - reaches each engine through `bridge.drafts(packed_rows)`, `request.prepare(...,
+packed_rows)`, `engine.proposal_rows(packed_rows)`. Without the hint every call is as
+before, so the sequential default is byte for byte unchanged and the M1 block, whose
+engines still capture 16, gets the same answer it always did. The draft returns exactly the
+rows asked of it (dflash_request_runtime.py:43-44 refuses fewer), so the decision IS the
+ticket width. A round drafted for the block whose entries then change before the step
+(the scheduler dropping a live request between drafting and stepping, which the KV pool
+sized for the four users does not do) holds tickets no engine captured, and the session
+cannot re-propose (`fail_verification` is final): `packed_device_step` fails that round
+loudly before any device work, naming the reason and the tickets, instead of the engine's
+own refusal one step later. Unchanged: `adopt_packed` (its rows check is the block's),
+`verify`'s bucket lookup (a trimmed engine verifies only the tickets it drafted), the
+narrow-ticket rule (a user with fewer than 16 tokens left makes the round sequential for
+all four, at each engine's captured width, exactly as `proposal_rows` narrowed it before).
+The survivors' tails: three users after the first finishes decode sequentially at four
+rows per round, token-exact and slower, until they finish.
+
 ## M1b on hardware (2026-09-20 08:55 UTC): bundled per-user replay readers, image v47, run 35500352729
 
 Image v47 = sha256:15ab61f8fc6e (build 35500138157; bc17a7e9 on 97935b94). Two users, prompt bases
