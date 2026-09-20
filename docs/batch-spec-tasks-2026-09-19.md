@@ -1832,3 +1832,19 @@ tests had ever disambiguated it; the test fixture modelled the count reading.
 Fixed: `adopt_slot` slices (index, index + 1) and the fixture narrows to stop -
 start. Without the self-check this would have written an empty tensor into row
 0 and decoded from garbage silently. Image v44 = the gate build.
+
+## Run 35496290854 (image v44): TOKEN-EXACT GATE PASSED for two users
+
+Two users on distinct prompts (base 1000 and 1001), sequential step, shared
+collectives, drift checks on. User 0: 64 tokens in 10 chunks, text sha
+66a5d0c2 = its single-user reference byte for byte. User 1: 64 tokens in 11
+chunks, sha 26c9c952 = its single-user reference byte for byte. Admission lines:
+'prefill slot 0, nothing to adopt' for user 0 and 'adopted GDN slot 1 into slot
+0: 48 layers, slices verified on both chips' for user 1. No page-table drift,
+K/V drift or shard-mismatch line. This is the first run in which two concurrent
+users on the fast path produce exactly what they would alone, and it closes
+both second-user bugs: the slot seeding (adoption at admission, self-verified)
+and the replay page tables in the trace holes (pooled). Image v44 =
+sha256:873a9103, built from 3db6e225 (with 89f13a27's fixture fix on the
+branch). The packed device step's gate is now meaningful; its run follows on the
+same image with QWEN_FAST_PACKED_STEP=1.
