@@ -1739,3 +1739,31 @@ states: a few hundred ms to a second over PCIe per second-user admission
 against a 14 s prefill. Kept for the gate run; after it, the rec_state check
 (page-aligned slice, never at risk) is to be dropped and only the unaligned
 conv-state proof retained.
+
+**Bug 2 fixed (d580f1c8):** the replay reader's page tables are pooled. They are
+not at the pool's page width: each is (batches, capacity // 64) for the
+capture's 256-position family, capacity = (position // 256 + 1) * 256 at
+admission (attention_replay.py:49), so `BucketSlot.batch.replay_pages` holds one
+set per family the reader can be captured in (`attention_replay.family_capacities`,
+the 50 capacities 4096..16640 the ticket validator admits, cut to the page
+table): 300 tables and 388,800 bytes per slot at page width 1024, ~1-2 s of
+uploads at attach for two users. Two bundles at T16 (3 groups + 1), not four.
+`ModelBatch.replay_storage` (model_batch.py:92) hands the family's list to
+`ReplayAttentionReader(storage=)`; the reader validates, borrows, stages with
+copy_host_to_device_tensor and never frees them; `VerifierPageBinding.refresh`
+already wrote in place, so block changes land in the pool. Row tables alias the
+pooled singleton pages - nothing to add; the reader's 8-word positions are
+restaged every verify and the masks recomputed in-trace. The drift check
+(serving_sequential_step.py:144-296) now snapshots every page table - fixture
+pages, singleton pages, each replay table - at the start of a checked round and
+after the owner's step and compares per chip after every other step, logging
+`[PINDIAG] page-table drift ...` in the K/V drift format; under
+QWEN_FAST_SHARD_CHECK=1 it raises. attention_replay.py joins the image lists
+(drift = this change only); serving_page_binding.py is unchanged and already in
+the bundle. 214 tests green (21 new); test_attention_replay registered.
+
+Image v42 (tag fast-serving-image-v42 at d580f1c8) carries both fixes, the
+packed step (off by default) and the audit instrument. Gate run configuration:
+two users on distinct prompts, QWEN_FAST_SHARD_CHECK=warn so the page-table
+drift check runs, shared collectives, no watcher. Pass = both texts equal their
+single-user references (66a5d0c2 and 26c9c952) and no drift line.
