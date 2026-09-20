@@ -32,7 +32,12 @@ OVERRIDDEN = ('attention_replay.py', 'gdn_snapshot.py', 'dflash_prefill_window.p
               'verifier_engine.py', 'dflash_device.py', 'draft_kv_history.py', 'serving_buffer_pool.py',
               'serving_vllm_contract.py', 'draft_attention_branch.py', 'draft_mlp_branch.py',
               'draft_convolution.py', 'draft_convolution_fused.py', 'draft_convolution_fused_io.cpp',
-              'dflash_t16_native_attention.py', 'verifier_pack.py')
+              'dflash_t16_native_attention.py', 'verifier_pack.py',
+              'packed_shapes.py', 'force_argmax.py', 'gdn_prefix.py', 'dflash_packed_proposal.py',
+              'target_packed_pages.py', 'dflash_batched_mask.py', 'serving_fast_policy.py',
+              'pooled_attention_replay.py', 'gdn_commit_dma.py', 'gdn_device_loop_state.py',
+              'attention_batch.py', 'serving_page_binding.py', 'verifier_inputs.py',
+              'gdn_batched_conv.py', 'gdn_multitoken_conv.py', 'draft_shared_head.py')
 
 
 def show(label, value):
