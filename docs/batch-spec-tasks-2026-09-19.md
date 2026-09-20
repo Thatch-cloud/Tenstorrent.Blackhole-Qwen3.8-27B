@@ -1631,3 +1631,28 @@ the eight step modules; test_serving_packed_step registered. NOT run on
 hardware: its gate (both users' texts equal to their single-user references)
 cannot be met until the slot-1 snapshot bug below is fixed on the sequential
 step, since the packed step inherits each user's carry from admission.
+
+### The slot bug, confirmed from the image's model source (probe cpu-probe-v20, run 35493486419)
+
+`qwen36_vllm._prefill_forward_tp_batched(model, tokens, page_table, prompt_lens,
+empty_slots)` (qwen36_vllm.py:271) takes `empty_slots` from vLLM's kwargs (:215) -
+the request's decode slot, [0] for the first resident request, [1] for the
+second - and calls `model.prefill_paged_slots(token_ids_list, page_table,
+empty_slots, valid_lens)` (:292), whose docstring: 'bind a B=1 GDN scratch, run
+the trace-safe pre-warmed masked-bucket prefill per user, snapshot its B=1
+state - but writes each snapshot into its slot via write_slot (preserving the
+live rows)'; 'GDN state is a fixed [B,...] buffer indexed by slot, not paged'.
+So the second user's post-prefill GDN state was written to row 1 and row 0 was
+left holding the first user's state; the fast path's `ActiveSnapshot` reads
+row 0 for the initial snapshot and the carry, so the second user decoded from
+the first user's recurrent state with its own attention pages. The chunk
+boundary the capture wraps (`_forward_prefill_chunk_masked_tp(token_buf,
+valid_len, chunk_start, page_table, bucket, flex_sdpa=True, vision_tokens=None)`)
+runs on the scratch and never sees the slot; `prefill_paged_slots` on the same
+model object does. The plugin also carries a `slot_remap` kwarg on decode
+(qwen36_vllm.py:309-311, `model._remap_gdn_slots`) that the bypassed decode
+would use to compact slots. Fix in progress (agent 'slotfix'): the capture
+records `empty_slots`; `ActiveSnapshot.adopt_slot(k)` copies row k into row 0
+through the slice path at admission, before the engine's first save; decode,
+restore and commit stay at slot 0. A follow-up probe prints `write_slot` so the
+adoption covers everything the prefill wrote.
