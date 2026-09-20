@@ -153,3 +153,24 @@ So the target needs three things at once, not one: bf4 KV, acceptance at or very
 16/16, and a roughly 74% cut in verifier overhead. The ceiling for the configuration as
 originally scoped - 4 users, 161k, bf8 - is **149 tok/s per user**, and no amount of
 scheduling or pin-lifting moves it.
+
+## MEASURED acceptance at long context (2026-09-21): the weakest link, resolved against the target
+
+This document called acceptance-at-161k "the largest single lever" and "unmeasured ... the weakest
+link." It is now measured at 33k context from the four-user packed runs' [PACKED] audit
+(emitted= = accepted tokens per round), run 35544598063: 24 rounds, mean 7.08, median 7, out of 16
+drafted. Against this document's own 12.1 at 4,096 context, acceptance nearly halves from 4k to 33k.
+
+Recomputing the per-user ceiling with measured acceptance (7.08) and the measured 405 GB/s floor:
+
+| 4 users @ target | Floor ms | accepted/round | per-user ceiling |
+| --- | ---: | ---: | ---: |
+| bf8 KV | 81.1 | 7.08 | ~87 tok/s |
+| bf4 KV | 67.9 | 7.08 | ~104 tok/s |
+
+200 tok/s would need >=16.2 (bf8) or >=13.6 (bf4) accepted tokens per round at 161k. Measured is 7.08
+at 33k and trending down with context. So the target's decisive assumption fails on measurement:
+the draft does not accept enough tokens per round at long context, and acceptance is a
+draft-model-quality property no serving-path change reaches. 200 tok/s per user at 161k is therefore
+unreachable on this model and hardware. Measured at 33k rather than 161k (fast path pinned to 32768);
+the trend makes 161k lower, not higher.
