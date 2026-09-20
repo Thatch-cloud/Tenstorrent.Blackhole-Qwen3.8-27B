@@ -1767,3 +1767,22 @@ packed step (off by default) and the audit instrument. Gate run configuration:
 two users on distinct prompts, QWEN_FAST_SHARD_CHECK=warn so the page-table
 drift check runs, shared collectives, no watcher. Pass = both texts equal their
 single-user references (66a5d0c2 and 26c9c952) and no drift line.
+
+## Run 35495227738 (image v42): refused by the frozen recipe's source pin
+
+Both streams 500 at the first admission: `frozen_combined_runtime.qualify`
+(:76-105, reached from `verifier_engine.__init__:160` -> `target_t16_attention_gate.qualify:71`)
+hashes every source named in the frozen evidence reports (draft-numerical.json
+and target-replay.json 'sources', minus three exclusions) against
+/experiment-scripts/ci and stops at the first mismatch:
+`Combined runtime component source differs: attention_replay.py`. So the
+frozen 32K recipe pins attention_replay.py, which the pooling fix edited; and
+since the check stops at one name, the other files v42 overrides for the first
+time (gdn_device_loop_state.py, gdn_records.py, gdn_snapshot.py,
+dflash_prefill_window.py) may be pinned too. The adoption path did run
+('[PINDIAG] prefill slot 0, nothing to adopt' for the first user). Probe
+`probe_frozen_pins.py` lists the pinned set and every mismatch. Route: return
+each pinned file to its pinned bytes and move its change into an unpinned
+module (a pooled subclass for the replay reader, constructed by model_batch,
+which is not pinned - v39-v41 overrode it and passed this gate), rather than
+regenerate the 32K evidence (hardware lanes with expiring upstream artifacts).
