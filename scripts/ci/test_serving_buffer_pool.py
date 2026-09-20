@@ -13,7 +13,10 @@ import torch
 
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
-from serving_buffer_pool import HISTORY_SHAPE, ServingBufferPool
+from serving_buffer_pool import DRAFT_LAYERS, HISTORY_SHAPE, KV_SHAPE, ServingBufferPool, bank_tensors
+
+# A slot: the history pair plus, per draft layer, active and spare k and v.
+SLOT_TENSORS = 2 + 4 * DRAFT_LAYERS
 
 
 class FakeShard:
@@ -93,12 +96,27 @@ class PoolTests(unittest.TestCase):
         operations = FakeOperations()
         pool = ServingBufferPool(operations, 'mesh', users=3)
         self.assertEqual(len(pool.slots), 3)
-        self.assertEqual([value.shape for value in operations.live], [HISTORY_SHAPE] * 6)
+        self.assertEqual([value.shape for value in operations.live],
+                         ([HISTORY_SHAPE] * 2 + [KV_SHAPE] * 4 * DRAFT_LAYERS) * 3)
+        for slot in pool.slots:
+            self.assertEqual(len(slot.tensors), SLOT_TENSORS)
+            self.assertEqual(slot.tensors[:2], (slot.history, slot.spare_history))
+            self.assertEqual(len(slot.kv), DRAFT_LAYERS)
+            self.assertEqual(list(slot.tensors[2:]), bank_tensors(slot.kv))
+            self.assertEqual(slot.tensors[2:6], (slot.kv[0]['active']['k'], slot.kv[0]['active']['v'],
+                                                 slot.kv[0]['spare']['k'], slot.kv[0]['spare']['v']))
         for chip in range(2):
-            self.assertEqual(len({slot.addresses[pair][chip] for slot in pool.slots for pair in range(2)}), 6)
+            self.assertEqual(len({address[chip] for slot in pool.slots for address in slot.addresses}), 3 * SLOT_TENSORS)
         report = pool.describe()
-        self.assertEqual((report['users'], report['bytes_per_slot']), (3, 2 * 2 * 2048 * 5120))
+        self.assertEqual((report['users'], report['layers'], report['kv_shape']), (3, DRAFT_LAYERS, list(KV_SHAPE)))
+        self.assertEqual(report['bytes_per_slot'], 2 * 2 * 2048 * 5120 + 4 * DRAFT_LAYERS * 2 * 4 * 2048 * 128)
         self.assertEqual([slot['lent'] for slot in report['slots']], [False] * 3)
+        # Every K/V address in the stage line, placed by layer, side and head.
+        for slot, described in zip(pool.slots, report['slots'], strict=True):
+            self.assertEqual(described['addresses'], [list(value) for value in slot.addresses[:2]])
+            self.assertEqual(described['kv'], [{side: {head: [shard.address for shard in bank[side][head].shards]
+                                                        for head in ('k', 'v')} for side in ('active', 'spare')}
+                                               for bank in slot.kv])
         self.assertEqual(operations.synchronized, 1)
 
     def test_users_must_be_an_explicit_count_within_the_native_slots(self):
@@ -127,7 +145,8 @@ class PoolTests(unittest.TestCase):
         operations = FakeOperations()
         pool = ServingBufferPool(operations, 'mesh', users=1)
         slot = pool.acquire()
-        self.assertEqual(operations.fills, [(slot.history, 0.0), (slot.spare_history, 0.0)])
+        self.assertEqual(operations.fills, [(value, 0.0) for value in slot.tensors])
+        self.assertEqual(len(operations.fills), SLOT_TENSORS)
 
     def test_moved_storage_is_refused_at_both_ends_of_the_loan(self):
         operations = FakeOperations()
@@ -143,6 +162,13 @@ class PoolTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'slot 0 moved'):
             slot.release()
         self.assertTrue(slot.lent)
+        slot.history.shards[0].address -= 1
+        slot.kv[3]['spare']['v'].shards[1].address += 1
+        with self.assertRaisesRegex(AssertionError, 'slot 0 moved'):
+            slot.release()
+        slot.kv[3]['spare']['v'].shards[1].address -= 1
+        slot.release()
+        self.assertFalse(slot.lent)
 
     def test_close_frees_everything_once_and_reports_slots_still_lent(self):
         operations = FakeOperations()
@@ -150,15 +176,15 @@ class PoolTests(unittest.TestCase):
         pool.acquire(owner='request-A')
         with self.assertRaisesRegex(ValueError, r"slots \[\(0, 'request-A'\)\] still lent"):
             pool.close()
-        self.assertEqual(len(operations.deallocated), 4)
+        self.assertEqual(len(operations.deallocated), 2 * SLOT_TENSORS)
         pool.close()
-        self.assertEqual(len(operations.deallocated), 4)
+        self.assertEqual(len(operations.deallocated), 2 * SLOT_TENSORS)
         with self.assertRaisesRegex(ValueError, 'Closed'):
             pool.acquire()
         operations = FakeOperations()
         pool = ServingBufferPool(operations, 'mesh', users=2)
         pool.close()
-        self.assertEqual(len(operations.deallocated), 4)
+        self.assertEqual(len(operations.deallocated), 2 * SLOT_TENSORS)
 
     def test_partial_allocation_is_freed_when_construction_fails(self):
         operations = FakeOperations()
@@ -182,7 +208,8 @@ class PoolTests(unittest.TestCase):
             self.assertEqual(pool.describe()['slots'][0]['owner'], 'request-A')
             slot.release()
         lines = [call.args[0].format(*call.args[1:]) for call in log.call_args_list]
-        self.assertEqual(lines, ['[PINDIAG] pool slot 0 acquired for request-A at %s' % (slot.addresses,),
+        self.assertEqual(lines, ['[PINDIAG] pool slot 0 acquired for request-A: history at %s, %d K/V banks from %s'
+                                 % (slot.addresses[:2], SLOT_TENSORS - 2, slot.addresses[2]),
                                  '[PINDIAG] pool slot 0 released by request-A'])
         self.assertIsNone(slot.owner)
 
@@ -209,6 +236,20 @@ def fake_mlp_branch(operations, mesh, mlp, convolution, retain):
 WEIGHT_UPLOADS = 5 * 2 + 4
 
 
+class FakeKVHistory:
+    """Records how the device constructs its draft cache; owns nothing."""
+
+    def __init__(self, operations, mesh, parameters, features, **options):
+        self.operations, self.mesh, self.parameters, self.features = operations, mesh, list(parameters), features
+        self.options = options
+        storage = options.get('storage')
+        self.active = [bank['active'] for bank in storage] if storage is not None else []
+        self.pending, self.closed = None, False
+
+    def close(self):
+        self.closed = True
+
+
 class DeviceFixture(unittest.TestCase):
     def setUp(self):
         self.layers = [('attention', 'convolution', 'mlp')] * 5
@@ -222,14 +263,14 @@ class DeviceFixture(unittest.TestCase):
         stack.enter_context(patch('dflash_device.prepare_mlp_branch', side_effect=fake_mlp_branch))
         stack.enter_context(patch('dflash_device.projection_shards', return_value=[torch.zeros(2, 4)]))
 
-    def device(self, operations, pool=None, weights=None, layers=None, projection=None, block_rows=16):
+    def device(self, operations, pool=None, weights=None, layers=None, projection=None, block_rows=16, **extra):
         model = SimpleNamespace(num_devices=2, vocab_size=248320, _lmhead_vocab_sharded=True, mesh_device='mesh')
         features = [SimpleNamespace(shape=(1, 1, 2048, 2560))] * 5
         return DFlashDevice(operations, model, Mock(), self.layers if layers is None else layers,
             self.projection if projection is None else projection, self.selector, features,
             position=4096, feature_start=2048, block_rows=block_rows,
             **(dict(buffer_pool=pool) if pool is not None else {}),
-            **(dict(shared_weights=weights) if weights is not None else {}))
+            **(dict(shared_weights=weights) if weights is not None else {}), **extra)
 
     def build(self, operations, pool=None, weights=None, project=None, **options):
         def project_features(device, features, count):
@@ -265,7 +306,7 @@ class DeviceLoanTests(DeviceFixture):
         device.close()
         self.assertFalse(slot.lent)
         self.assertFalse(any(value is pooled for value in operations.deallocated for pooled in slot.tensors))
-        self.assertEqual(len(operations.deallocated), len(operations.live) - 2)
+        self.assertEqual(len(operations.deallocated), len(operations.live) - SLOT_TENSORS)
         pool.close()
         self.assertEqual(len(operations.deallocated), len(operations.live))
 
@@ -305,11 +346,33 @@ class DeviceLoanTests(DeviceFixture):
             self.build(operations, pool, project=Mock(side_effect=RuntimeError('projection failed')))
         self.assertFalse(pool.slots[0].lent)
         self.assertFalse(any(value is pooled for value in operations.deallocated for pooled in pool.slots[0].tensors))
-        self.assertEqual(len(operations.deallocated), len(operations.live) - 2)
+        self.assertEqual(len(operations.deallocated), len(operations.live) - SLOT_TENSORS)
 
     def test_a_pool_without_a_loan_method_is_refused(self):
         with self.assertRaises(ValueError):
             self.build(FakeOperations(), pool=object())
+
+    def test_pooled_device_lends_its_kv_banks_to_the_draft_cache_and_an_unpooled_one_does_not(self):
+        # The serving geometry: cached native T16 proposals with the capture deferred.
+        serving = dict(cache_history=True, proposal_capture=True, defer_proposal_capture=True,
+                       native_proposal_attention=True)
+        operations = FakeOperations()
+        pool = ServingBufferPool(operations, 'mesh', users=1)
+        with patch('draft_kv_history.DraftKVHistory', FakeKVHistory):
+            device = self.build(operations, pool, **serving)
+            cache = device.kv_history
+            self.assertIs(cache.options['storage'], pool.slots[0].kv)
+            self.assertIs(cache.features, device.history)
+            self.assertEqual(cache.parameters, [layer[0] for layer in device.layers])
+            self.assertEqual((cache.options['position'], cache.options['history_rows'], cache.options['capture_projection']),
+                             (4096, 2048, False))
+            device.close()
+            self.assertTrue(cache.closed)
+            self.assertFalse(pool.slots[0].lent)
+            plain = self.build(operations, **serving)
+            self.assertNotIn('storage', plain.kv_history.options)
+            plain.close()
+            self.assertTrue(plain.kv_history.closed)
 
 
 class SharedWeightTests(DeviceFixture):

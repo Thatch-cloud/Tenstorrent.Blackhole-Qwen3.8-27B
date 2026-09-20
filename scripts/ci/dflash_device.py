@@ -253,8 +253,12 @@ class DFlashDevice:
             if cache_history:
                 from draft_kv_history import DraftKVHistory
 
+                # Pooled, the cache adopts the slot's K/V banks rather than allocating
+                # its own: run 35481466425 found kv_history[0].k of the other request
+                # overwritten by a step while its pooled history survived.
                 self.kv_history = DraftKVHistory(operations, self.mesh, [layer[0] for layer in self.layers], self.history,
-                    position=position, history_rows=self.history_rows, capture_projection=cache_projection_capture)
+                    position=position, history_rows=self.history_rows, capture_projection=cache_projection_capture,
+                    **(dict(storage=self.pool_slot.kv) if self.pool_slot is not None else {}))
                 if self.progress is not None:
                     self.kv_history.audit(self.history)
             if proposal_capture and not defer_proposal_capture:

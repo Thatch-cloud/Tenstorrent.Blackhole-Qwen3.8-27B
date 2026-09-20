@@ -8,8 +8,41 @@ from draft_kv_projection import project_key_value
 from gdn_multitoken_conv import addresses, release_owned
 
 
+KV_SHAPE = (1, 4, 2048, 128)
+
+
+def validate_storage(operations, storage, layers):
+    """Pre-trace K/V banks lent by the serving pool - per learned layer an active and a
+    spare bank of k and v, handed over zeroed - or None to allocate the banks here.
+
+    Allocated here, the banks are the buffers run 35481466425 found overwritten by the
+    other request's verify replay while that request's pooled history survived: they
+    were allocated after the replaying trace existed, into the holes it had baked
+    (serving_buffer_pool.py). Lent from the pool they predate every request trace.
+    """
+    if storage is None:
+        return None
+    banks = tuple(storage)
+    if (len(banks) != layers or any(not isinstance(bank, dict) or set(bank) != {'active', 'spare'}
+            or any(not isinstance(bank[side], dict) or set(bank[side]) != {'k', 'v'}
+                   or any(tuple(value.shape) != KV_SHAPE or value.dtype != operations.bfloat16
+                          for value in bank[side].values())
+                   for side in ('active', 'spare')) for bank in banks)):
+        raise ValueError('One active and one spare replicated BF16 (1, 4, 2048, 128) K/V bank per learned layer required')
+    identities = [addresses(operations, value) for value in bank_tensors(banks)]
+    if any(any(left == right for left, right in zip(identity, other, strict=True))
+           for index, identity in enumerate(identities) for other in identities[:index]):
+        raise ValueError('Lent K/V banks must own independent chip storage')
+    return banks
+
+
+def bank_tensors(banks):
+    return [bank[side][head] for bank in banks for side in ('active', 'spare') for head in ('k', 'v')]
+
+
 class DraftKVHistory:
-    def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False):
+    def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False,
+                 storage=None):
         import torch
 
         parameters = tuple(parameters)
@@ -17,9 +50,13 @@ class DraftKVHistory:
                 or type(history_rows) is not int or history_rows != min(position, 2048)
                 or not 1 <= len(parameters) <= 5 or type(capture_projection) is not bool):
             raise ValueError('Bounded absolute draft frontier and explicit learned layers required')
+        banks = validate_storage(operations, storage, len(parameters))
         self.operations, self.mesh, self.parameters = operations, mesh, parameters
         self.position, self.history_rows = position, history_rows
         self.owned, self.active, self.spare = [], [], []
+        # Lent banks: read and written here, protected from every temporary like the
+        # owned tensors are, never freed here.
+        self.borrowed = [] if banks is None else bank_tensors(banks)
         self.checks = []
         self.projection = None
         self.pending, self.closed = None, False
@@ -28,17 +65,26 @@ class DraftKVHistory:
             self.owned.append(self.query)
             with self.temporaries([features]) as retain:
                 inputs, tables = self.project_inputs(features, history_rows, position - history_rows, retain)
-                for parameter in parameters:
+                for layer, parameter in enumerate(parameters):
                     result = project_key_value(operations, inputs, self.query, tables, retain, parameters=parameter)
                     active, spare = {}, {}
                     for name in ('k', 'v'):
                         valid = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, history_rows, 128)))
-                        active[name] = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0))
-                        self.owned.append(active[name])
-                        spare[name] = operations.zeros_like(active[name])
-                        self.owned.append(spare[name])
+                        if banks is None:
+                            active[name] = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0))
+                            self.owned.append(active[name])
+                            spare[name] = operations.zeros_like(active[name])
+                            self.owned.append(spare[name])
+                            continue
+                        # Into the lent active bank; the padded source goes with the scope.
+                        operations.copy(retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0)),
+                                        banks[layer]['active'][name])
+                        active[name], spare[name] = banks[layer]['active'][name], banks[layer]['spare'][name]
                     self.active.append(active)
                     self.spare.append(spare)
+                if banks is not None:
+                    # Before the scope frees the padded sources the copies read from.
+                    operations.synchronize_device(mesh)
             operations.synchronize_device(mesh)
             if capture_projection:
                 from draft_kv_projection_trace import PreparedDraftKVProjection
@@ -58,7 +104,8 @@ class DraftKVHistory:
     def temporaries(self, protected):
         owned = []
         projection_owned = self.projection.owned if self.projection is not None else []
-        identities = [addresses(self.operations, value) for value in [*self.owned, *projection_owned, *protected]]
+        identities = [addresses(self.operations, value)
+                      for value in [*self.owned, *projection_owned, *self.borrowed, *protected]]
         def retain(value):
             identity = addresses(self.operations, value)
             if identity not in identities:
@@ -163,4 +210,5 @@ class DraftKVHistory:
         self.owned.clear()
         self.active.clear()
         self.spare.clear()
+        self.borrowed.clear()
         self.closed = True

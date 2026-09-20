@@ -33,10 +33,13 @@ than pooled: one PreparedDraftWeights (dflash_device.py) is uploaded at attach a
 lent to every device. This pool covers the history pair, which commit_publication
 writes and which the eager proposal path reads.
 
-NOT POOLED HERE. The DraftKVHistory active/spare K/V (draft_kv_history.py, allocated
-inline in its constructor with no injection point) stays per request in this pass;
-pooling it needs DraftKVHistory to accept pre-allocated active/spare tensors in place
-of the pad/zeros_like pair it allocates.
+AND THE K/V. Run 35481466425, on the history pool alone: after one request's step the
+shard check found the OTHER request's kv_history[0].k differing between the chips
+while its checked weights and its pooled history were still bit-identical. The pooled
+buffers survived the replay; the one persistent buffer still allocated per request did
+not. So each slot also carries the five draft layers' K/V banks - active and spare, k
+and v, (1, 4, 2048, 128) each - and DraftKVHistory adopts them through its `storage=`
+instead of padding and zeros_like-ing its own.
 """
 
 from dflash_device import pindiag
@@ -45,19 +48,34 @@ from serving_fast_policy import NATIVE_GDN_SLOTS
 
 
 HISTORY_SHAPE = (1, 1, 2048, 5120)
+KV_SHAPE = (1, 4, 2048, 128)
+DRAFT_LAYERS = 5
+SIDES, HEADS = ('active', 'spare'), ('k', 'v')
 
 
 def overlaps(left, right):
     return any(first == second for first, second in zip(left, right, strict=True))
 
 
-class HistorySlot:
-    """One request's history pair; the addresses are recorded at allocation and never move."""
+def tensor_bytes(shape):
+    count = 1
+    for size in shape:
+        count *= size
+    return 2 * count
 
-    def __init__(self, pool, index, history, spare_history):
+
+def bank_tensors(kv):
+    """Every K/V tensor of a slot in one fixed order: by layer, active then spare, k then v."""
+    return [bank[side][head] for bank in kv for side in SIDES for head in HEADS]
+
+
+class HistorySlot:
+    """One request's history pair and K/V banks; the addresses are recorded at allocation and never move."""
+
+    def __init__(self, pool, index, history, spare_history, kv):
         self.pool, self.index = pool, index
-        self.history, self.spare_history = history, spare_history
-        self.tensors = (history, spare_history)
+        self.history, self.spare_history, self.kv = history, spare_history, tuple(kv)
+        self.tensors = (history, spare_history, *bank_tensors(self.kv))
         self.addresses = tuple(addresses(pool.operations, value) for value in self.tensors)
         self.lent = False
         self.owner = None
@@ -70,6 +88,13 @@ class HistorySlot:
 
     def release(self):
         self.pool.release(self)
+
+    def describe(self):
+        banks = self.addresses[2:]
+        return dict(index=self.index, lent=self.lent, owner=self.owner,
+            addresses=[list(value) for value in self.addresses[:2]],
+            kv=[{side: {head: list(banks[layer * 4 + offset * 2 + position]) for position, head in enumerate(HEADS)}
+                 for offset, side in enumerate(SIDES)} for layer in range(len(self.kv))])
 
 
 class ServingBufferPool:
@@ -84,20 +109,26 @@ class ServingBufferPool:
         self.closed = False
         try:
             protected = []
+
+            def allocate(shape):
+                value = operations.from_torch(torch.zeros(shape, dtype=torch.bfloat16),
+                    device=mesh, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
+                    memory_config=operations.DRAM_MEMORY_CONFIG,
+                    mesh_mapper=operations.ReplicateTensorToMesh(mesh))
+                self.owned.append(value)
+                current = addresses(operations, value)
+                if any(overlaps(current, other) for other in protected):
+                    raise ValueError('Pooled draft buffers must own independent chip storage')
+                protected.append(current)
+                return value
+
             for index in range(users):
-                pair = []
-                for name in ('history', 'spare_history'):
-                    value = operations.from_torch(torch.zeros(HISTORY_SHAPE, dtype=torch.bfloat16),
-                        device=mesh, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
-                        memory_config=operations.DRAM_MEMORY_CONFIG,
-                        mesh_mapper=operations.ReplicateTensorToMesh(mesh))
-                    self.owned.append(value)
-                    current = addresses(operations, value)
-                    if any(overlaps(current, other) for other in protected):
-                        raise ValueError('Pooled draft buffers must own independent chip storage')
-                    protected.append(current)
-                    pair.append(value)
-                self.slots.append(HistorySlot(self, index, *pair))
+                pair = [allocate(HISTORY_SHAPE) for name in ('history', 'spare_history')]
+                # The K/V banks DraftKVHistory keeps for the request's whole life - the
+                # buffer run 35481466425 found overwritten while the pooled pair survived.
+                kv = [{side: {head: allocate(KV_SHAPE) for head in HEADS} for side in SIDES}
+                      for layer in range(DRAFT_LAYERS)]
+                self.slots.append(HistorySlot(self, index, *pair, kv))
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
@@ -116,8 +147,10 @@ class ServingBufferPool:
         for value in slot.tensors:
             self.operations.full_like(value, 0.0, optional_tensor=value)
         slot.lent, slot.owner = True, owner
-        # So the confirming run shows the slot in use, not a fresh allocation.
-        pindiag('[PINDIAG] pool slot {} acquired for {} at {}', slot.index, owner, slot.addresses)
+        # So the confirming run shows the slot in use, not a fresh allocation; every
+        # bank's address is in the stage line printed at attach.
+        pindiag('[PINDIAG] pool slot {} acquired for {}: history at {}, {} K/V banks from {}',
+                slot.index, owner, slot.addresses[:2], len(slot.addresses) - 2, slot.addresses[2])
         return slot
 
     def release(self, slot):
@@ -132,10 +165,9 @@ class ServingBufferPool:
         slot.lent, slot.owner = False, None
 
     def describe(self):
-        return dict(users=self.users, shape=list(HISTORY_SHAPE),
-            bytes_per_slot=2 * 2 * HISTORY_SHAPE[2] * HISTORY_SHAPE[3],
-            slots=[dict(index=slot.index, lent=slot.lent, owner=slot.owner,
-                        addresses=[list(value) for value in slot.addresses]) for slot in self.slots])
+        return dict(users=self.users, shape=list(HISTORY_SHAPE), kv_shape=list(KV_SHAPE), layers=DRAFT_LAYERS,
+            bytes_per_slot=2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(KV_SHAPE),
+            slots=[slot.describe() for slot in self.slots])
 
     def close(self):
         if self.closed:
