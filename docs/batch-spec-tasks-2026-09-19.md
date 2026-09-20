@@ -731,3 +731,40 @@ only by the packed edits made here. `dflash_combined_request` differs because th
 repo's copy is a strict superset - it also forwards `progressive_evidence` - so the
 bundle is simply older there. No core override would change behaviour beyond the
 packed changes themselves.
+
+## arXiv 2510.22876 (Zhang et al.), reviewed against the packed block (2026-09-20)
+
+A correctness paper on batched speculative decoding over a padded KV cache. Its
+two invariants: I1, rectangular alignment across the batch; I2, every row's
+position and KV entry derived from that row's OWN prefix, never from batch index.
+Existing batch-spec implementations scored 0-3.5% token-exact match against
+single-sequence decoding while reporting good throughput (Table 2).
+
+What carries over:
+
+- **I1 is free for us.** The packed block is a fixed 16 rows per user, so the
+  realignment cost their Theorem 3.1 charges - `B(E[max accept] - mean)` - never
+  arises.
+- **I2 is the trap a block-diagonal layout invites.** Position must come from each
+  user's own frontier, not the block row. `dflash_batched_mask.packed_rope_tables`
+  does exactly that and is byte-identical to the single-user tables at one user;
+  `target_packed_pages.packed_rows` does the same for the target. Keep it that way.
+- **Rows per user = K + 1**: the bonus token needs a row. T16 = 15 drafts + 1 is
+  right for two users. Four users at T8 means K = 7 and about 6 commits per cycle,
+  so 4-user per-user throughput is bounded BELOW half the 2-user figure at equal
+  cycle time - a correction to the earlier note that only said "half".
+- **Adopt their audit**: token-exact AND partial match of the packed block against
+  two independent single-user runs, per cycle. High partial with low exact means
+  drifting state; near-zero partial means immediate indexing error. This is the
+  gate on trusting any multi-user number.
+- **Adopt their numerical control**: a non-speculative packed pass as the baseline
+  before blaming the speculative path for a mismatch.
+
+What does not: their EqSpec repad machinery, and their EXSpec same-length
+scheduler, which cannot fill a window at four users and costs a 6x P99 at batch 2.
+
+The paper says nothing about recurrent state; it treats "rejected tokens left in
+the KV cache" as repairable by overwrite, which a destructive GDN update is not.
+That design already exists here: the verify recurrence emits a checkpoint at every
+candidate prefix (`conv_prefixes`, `states` per row in `run_batched_projected`) and
+`restore_prefix` recovers the accepted one at commit.
