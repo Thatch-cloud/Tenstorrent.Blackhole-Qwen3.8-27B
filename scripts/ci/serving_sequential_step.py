@@ -25,6 +25,12 @@ import os
 # buffers must still agree across the two chips. Read once at import and off by
 # default, so it can stay in.
 SHARD_CHECK = os.environ.get('QWEN_FAST_SHARD_CHECK') == '1'
+# Buffer addresses of every checked tensor, by request id, taken the first time
+# the step sees that request and logged once. This module cannot see
+# DFlashDevice construction, but these are persistent allocations, so the
+# address at first sight is the address at construction - what a trace's freed
+# regions are matched against later. Pruned to the live requests each step.
+RECORDED = {}
 
 
 def sequential_packed_step(entries, *, cancelled):
@@ -46,12 +52,31 @@ def sequential_packed_step(entries, *, cancelled):
 
 
 def replicated_buffers(device):
-    """Every buffer a DFlashDevice keeps replicated across the two chips, by name."""
-    buffers = [('history', device.history), ('spare_history', device.spare_history)]
+    """Every checked buffer a DFlashDevice keeps replicated across the two chips,
+    as (category, name, tensor), weights first.
+
+    The weights are a bounded subset: the ones uploaded FIRST at construction sit
+    at the lowest addresses, the deepest holes under a later request's capture.
+    The q/k/v/o and the three MLP projections are sharded across the chips
+    (draft_attention_branch.py:39-41, draft_mlp_branch.py:30), so they have no
+    cross-chip equality to check; the convolution kernel projection is the
+    largest replicated weight in a layer. About 79 MB of readback per device:
+    selector 2.6 MB, convolution 13 MB, the two histories 21 MB each, K/V 21 MB.
+    """
+    if device.closed:
+        return []
+    weights = [('selector_projection', device.selector_projection), ('final_norm', device.final_norm)]
+    if device.layers:
+        attention, mlp = device.layers[0][0], device.layers[0][1]
+        weights.extend([('layers[0].attention.norm', attention['norm']),
+                        ('layers[0].attention.convolution', attention['convolution']),
+                        ('layers[0].mlp.device_norm', mlp['device_norm'])])
+    buffers = [('weight', name, value) for name, value in weights]
+    buffers.extend([('history', 'history', device.history), ('history', 'spare_history', device.spare_history)])
     if device.kv_history is not None:
-        buffers.extend(('kv_history[%d].%s' % (layer, name), cache[name])
+        buffers.extend(('kv', 'kv_history[%d].%s' % (layer, name), cache[name])
                        for layer, cache in enumerate(device.kv_history.active) for name in ('k', 'v'))
-    return [(name, value) for name, value in buffers if value is not None]
+    return [(category, name, value) for category, name, value in buffers if value is not None]
 
 
 def check_shards(entries, stepped):
@@ -59,8 +84,12 @@ def check_shards(entries, stepped):
     must still be bit-identical on both chips. One that is not was written by
     something other than its own user."""
     import torch
+    from gdn_multitoken_conv import addresses
     from loguru import logger
 
+    live = [entry['request_id'] for entry in entries]
+    for stale in [request_id for request_id in RECORDED if request_id not in live]:
+        del RECORDED[stale]
     actor = entries[stepped]
     checked = 0
     for index, entry in enumerate(entries):
@@ -69,7 +98,13 @@ def check_shards(entries, stepped):
         # FastRequest.runtime is the DFlashRequestRuntime; its drafter is the DFlashDevice.
         device = entry['request'].runtime.drafter
         operations = device.operations
-        for name, value in replicated_buffers(device):
+        buffers = replicated_buffers(device)
+        recorded = RECORDED.get(entry['request_id'])
+        if recorded is None:
+            recorded = RECORDED[entry['request_id']] = {name: addresses(operations, value)
+                                                        for category, name, value in buffers}
+            logger.info('[PINDIAG] draft buffer addresses for {}: {}', entry['request_id'], recorded)
+        for category, name, value in buffers:
             shards = [operations.to_torch(shard).contiguous() for shard in operations.get_device_tensors(value)]
             if len(shards) != 2:
                 raise AssertionError('Both chips required')
@@ -78,14 +113,19 @@ def check_shards(entries, stepped):
                 checked += 1
                 continue
             difference = (left.float() - right.float()).abs()
+            # The histories and K/V swap roles on commit (dflash_device.py:193-195,
+            # draft_kv_history.py:118), so say which name this address was first
+            # seen under; None means it was allocated after first sight.
+            current = addresses(operations, value)
+            origin = next((seen for seen, address in recorded.items() if address == current), None)
             raise AssertionError(
-                '[PINDIAG] replicated draft buffer differs between chips after step of %s (entry %d): '
-                'victim=%s (entry %d) buffer=%s differing=%d of %d max_abs=%g; '
-                'scheduler order=%s proposal_calls=%s'
-                % (actor['request_id'], stepped, entry['request_id'], index, name,
+                '[PINDIAG] replicated draft %s differs between chips after step of %s (entry %d): '
+                'victim=%s (entry %d) buffer=%s shape=%s address=%s first_seen_as=%s '
+                'differing=%d of %d max_abs=%g; scheduler order=%s proposal_calls=%s'
+                % (category, actor['request_id'], stepped, entry['request_id'], index, name,
+                   tuple(value.shape), current, origin,
                    int((difference > 0).sum()), difference.numel(), float(difference.max()),
-                   [other['request_id'] for other in entries],
-                   [other['request'].runtime.drafter.proposal_calls for other in entries]))
+                   live, [other['request'].runtime.drafter.proposal_calls for other in entries]))
     logger.info('[PINDIAG] shards equal after step of {}: {} buffers', actor['request_id'], checked)
 
 
