@@ -389,9 +389,60 @@ class ReplayStorageTests(unittest.TestCase):
                       source)
         self.assertIn('from pooled_attention_replay import PooledReplayAttentionReader', source)
         self.assertIn('storage=tables', source)
-        self.assertEqual(source.count('ReplayAttentionReader('), 2)
+        # The pinned call, the pooled call and, packed, the per-user reader (M1b) over the
+        # block's lent table sets - the only three constructions.
+        self.assertEqual(source.count('ReplayAttentionReader('), 3)
+        self.assertEqual(source.count('PackedReplayAttentionReader('), 1)
+        self.assertIn('storage=packed_replay_pages', source)
         self.assertNotIn('storage', source[source.index('= ReplayAttentionReader('):source.index('else:', source.index('= ReplayAttentionReader('))],
                          'the pinned reader takes no storage keyword')
+        packed = source[source.index('if self.pack is not None:', source.index('def upload_replay')):source.index('elif tables is None:')]
+        self.assertIn("PackedReplayAttentionReader(ttnn, model.mesh_device, self.pack['segments']", packed)
+        self.assertIn("self.pack['tables']", packed)
+        self.assertIn('self.borrowed.extend(self.replay_reader.borrowed)', packed)
+
+    def test_a_pack_carries_each_users_own_table_and_its_replay_family_validates_every_segment(self):
+        """Packed, the block's family is the capture position's, as for one request; what
+        must lie inside it is each user's segment at that user's own start."""
+        from model_batch import packed_replay_family
+
+        users = [dict(start=4100, rows=16, pages=torch.full((1, 68), 7, dtype=torch.int32), prefix=0,
+                      checkpoints=['c'] * 48, slots=[['s'] * 5] * 48),
+                 dict(start=4200, rows=16, pages=torch.full((1, 68), 11, dtype=torch.int32), prefix=0,
+                      checkpoints=['c'] * 48, slots=[['s'] * 5] * 48)]
+        pack = validate_pack(users)
+        self.assertEqual(len(pack['tables']), 2)
+        self.assertIs(pack['tables'][0], users[0]['pages'])
+        self.assertIs(pack['tables'][1], users[1]['pages'])
+        self.assertEqual(pack['segments'], ((0, 16), (16, 32)))
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(packed_replay_family(4096, pack), 4352)
+            self.assertEqual(packed_replay_family(4300, pack), 4352)
+            # A user whose segment leaves the family is refused, whichever segment it is.
+            for start in (4090, 4340):
+                users[1]['start'] = start
+                with self.subTest(start=start), self.assertRaises(ValueError):
+                    packed_replay_family(4096, validate_pack(users))
+            users[1]['start'] = 4200
+            with self.assertRaisesRegex(ValueError, 'long-context only'):
+                packed_replay_family(4096, pack, short_context=True)
+
+    def test_packed_replay_tables_need_a_packed_replay_fixture(self):
+        """The block's lent table sets describe a packed replay fixture: without a pack, or
+        without replay attention, they are refused at construction, before any upload."""
+        options = dict(serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                       hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
+                       packed_checkpoints=True, retain_records=True, ordered_cache=True, norm_batch=True,
+                       commit_only_gdn=True)
+        pack = [dict(start=4096 + 16 * index, rows=16, pages=torch.full((1, 68), index + 1, dtype=torch.int32), prefix=0,
+                     checkpoints=['c'] * 48, slots=[['s%d' % index] * 5] * 48) for index in range(2)]
+        with patch.dict(sys.modules, {'ttnn': SimpleNamespace()}):
+            with self.assertRaisesRegex(ValueError, 'packed fixture with replay attention'):
+                ModelBatch(SimpleNamespace(), [1] * 32, 4096, torch.zeros(1, 68, dtype=torch.int32), [None] * 48, [None] * 48, 32,
+                           packed_replay_pages=[['t'], ['t']], **options)
+            with self.assertRaisesRegex(ValueError, 'packed fixture with replay attention'):
+                ModelBatch(SimpleNamespace(), [1] * 32, 4096, torch.zeros(1, 68, dtype=torch.int32), [None] * 48, [None] * 48, 32,
+                           pack=pack, packed_replay_pages=[['t'], ['t']], attention_replay=False, **options)
 
     def test_the_unpacked_row_tables_are_the_pooled_singleton(self):
         """Every row's table is the singleton page table, so pooling it pools them."""

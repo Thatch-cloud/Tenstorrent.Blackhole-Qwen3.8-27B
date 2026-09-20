@@ -6,7 +6,10 @@ ENTRIES, never by pool slot or registry order.
 The fixture is mocked the way test_target_packed_pages and test_gdn_packed_segments mock
 theirs: a fake ttnn whose tensors carry their values and addresses, a fake ModelBatch
 that records the pack it was built with and retains one record per GDN layer, and the
-commit DMA preparation recorded rather than run."""
+commit DMA preparation recorded rather than run. The fake ModelBatch builds the REAL
+per-user replay reader (pooled_attention_replay.PackedReplayAttentionReader, M1b) over
+the pool's lent tables, so what the block stages into each user's positions word and
+bundle tables, and which tickets it refuses as outside the family, is the real thing."""
 
 from contextlib import contextmanager
 from itertools import count
@@ -18,12 +21,18 @@ import torch
 
 import packed_verifier
 from packed_verifier import PackedFeatureTaps, PackedShape, PackedVerifierEngine, m1_shape, segment_rows, validate_shape
+from pooled_attention_replay import bundle_batches
+from serving_buffer_pool import PackedReplayTables
 import verifier_engine
 from verifier_pack import GDN_LAYERS
 
 _addresses = count(0x1000)
 PAGE_WIDTH = 68
 TAPS = (5, 19, 33, 47, 61)
+# The block's native chunk family at 68 pages: capture position 4096, family 4352; the
+# pool holds the families the table can hold, 4096 and 4352.
+FAMILY = 4352
+FAMILIES = (4096, 4352)
 
 
 class FakeShard:
@@ -45,6 +54,7 @@ class FakeTTNN:
         self.hosts, self.host_copies, self.executed, self.released, self.deallocated = [], [], [], [], []
         self.device_uploads, self.zeroed = [], []
         self.synchronized = 0
+        self.SDPAProgramConfig = Mock(return_value='sdpa-config')
 
     def full_like(self, tensor, fill, optional_tensor=None):
         if optional_tensor is not tensor:
@@ -117,10 +127,27 @@ def snapshot_set(ttnn):
     return [[tensor(ttnn) for part in range(5)] for layer in range(GDN_LAYERS)]
 
 
-def pool(ttnn, shared, users=2, page_width=PAGE_WIDTH):
+def packed_tables(ttnn, users=2, rows=16, families=FAMILIES):
+    """The pool's packed replay page tables for one shape (serving_buffer_pool.PackedReplayTables):
+    per family, per user, one (batches, capacity // 64) table per bundle of a rows-row reader."""
+    return PackedReplayTables(users, rows, {
+        capacity: [[ttnn.allocate((batches, capacity // 64), 'int32', 'row_major', torch.zeros(batches, capacity // 64, dtype=torch.int32))
+                    for batches in bundle_batches(rows, capacity)] for user in range(users)]
+        for capacity in families})
+
+
+def pool(ttnn, shared, users=2, page_width=PAGE_WIDTH, packed=None):
     slots = [SimpleNamespace(index=index, lent=False, verifier=SimpleNamespace(carry=snapshot_set(ttnn)))
              for index in range(users)]
-    return SimpleNamespace(closed=False, helpers=shared, page_width=page_width, slots=slots)
+    packed = {(2, 16): packed_tables(ttnn)} if packed is None else packed
+
+    def packed_replay(count, rows):
+        if (count, rows) not in packed:
+            raise ValueError('The pool holds packed replay page tables for shapes %r' % sorted(packed))
+        return packed[(count, rows)]
+
+    return SimpleNamespace(closed=False, helpers=shared, page_width=page_width, slots=slots, packed=packed,
+                           packed_replay=packed_replay)
 
 
 def weights():
@@ -128,7 +155,8 @@ def weights():
 
 
 def model():
-    return SimpleNamespace(mesh_device='mesh', layers=[object()] * 64,
+    return SimpleNamespace(mesh_device=SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10)),
+                           layers=[object()] * 64,
                            args=SimpleNamespace(rope_head_dim=64, rope_theta=1e6, vocab_size=100, max_seq_len=65536))
 
 
@@ -180,9 +208,30 @@ class FakeModelBatch:
         self.cos = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
         self.sin = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
         self.retained = FakeRetained(rows) if options.get('retain_records') else None
+        # The real per-user replay reader over the block's lent tables, as model_batch
+        # builds it packed: one pooled reader per segment in the capture's family.
+        self.replay_reader, self.readers, self.grouped_readers = None, [], []
+        if options.get('attention_replay'):
+            from pooled_attention_replay import PackedReplayAttentionReader
+            from target_packed_pages import segments
+
+            spans, total = segments(self.pack)
+            self.replay_capacity = (start // 256 + 1) * 256
+            self.replay_reader = PackedReplayAttentionReader(ttnn, model.mesh_device, spans, self.replay_capacity,
+                [user['pages'] for user in self.pack], self.upload_replay, storage=options.get('packed_replay_pages'),
+                max_group_rows=options.get('replay_group_rows', 4))
+            self.grouped_readers.append(self.replay_reader)
+            self.readers = [self.replay_reader] * 16
         self.run = Mock(side_effect=self.forward)
-        self.close = Mock()
+        self.close = Mock(side_effect=self.release)
         type(self).instances.append(self)
+
+    def upload_replay(self, value, dtype='bf16'):
+        return type(self).ttnn.allocate(value.shape, dtype, 'row_major' if dtype == 'int32' else 'tile', value.clone())
+
+    def release(self):
+        for reader in self.grouped_readers:
+            reader.close()
 
     def forward(self, *, sharded_logits):
         ttnn = type(self).ttnn
@@ -262,6 +311,10 @@ class BlockFixture(unittest.TestCase):
             patcher = patch.object(packed_verifier, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The pinned reader's mask program needs the real ttnn; the readers are otherwise real.
+        patcher = patch('attention_replay.prepare', return_value='mask-program')
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def build(self, **options):
         return PackedVerifierEngine(self.ttnn, self.model, self.helpers, 'sampler', pool=self.pool,
@@ -269,15 +322,16 @@ class BlockFixture(unittest.TestCase):
 
     def two(self, reversed_order=True, rows=16):
         """Two admitted requests: A in pool slot 0, B in pool slot 1, presented B first
-        (probe 35436807668 saw the scheduler present the pair as ['B', 'A'])."""
-        first = request('A', self.pool.slots[0], 100, 7)
-        second = request('B', self.pool.slots[1], 3000, 11)
+        (probe 35436807668 saw the scheduler present the pair as ['B', 'A']). Both inside
+        the block's native chunk family [4096, 4352), as the serving pin keeps them."""
+        first = request('A', self.pool.slots[0], 4100, 7)
+        second = request('B', self.pool.slots[1], 4200, 11)
         entries = [entry(second, range(50, 50 + rows)), entry(first, range(10, 10 + rows))]
         return entries if reversed_order else entries[::-1]
 
 
 class ConstructionTests(BlockFixture):
-    def test_the_block_is_the_retained_serial_attention_pack_over_the_pool_carries(self):
+    def test_the_block_is_the_retained_per_user_replay_pack_over_the_pool_carries(self):
         block = self.build()
         self.assertEqual(block.phase, 'idle')
         self.assertEqual(block.capture_position, PAGE_WIDTH * 64 - 256)
@@ -311,7 +365,12 @@ class ConstructionTests(BlockFixture):
             self.assertEqual((fixture.rows, fixture.start, fixture.prefix), (32, block.capture_position, 32))
             self.assertIs(fixture.positional_checkpoints, block.checkpoints[0])
             self.assertTrue(options['retain_records'])
-            self.assertFalse(options['attention_replay'])
+            # the attention is one bundled replay reader per user (M1b), four-row groups,
+            # masks refreshed per layer in-trace, over the pool's lent table sets
+            self.assertTrue(options['attention_replay'])
+            self.assertFalse(options['attention_mask_once'])
+            self.assertEqual(options['replay_group_rows'], 4)
+            self.assertIs(options['packed_replay_pages'], block.replay_tables)
             # commit-only is the deferred packed decode: per-user entries, decided by commit_user
             self.assertTrue(options['commit_only_gdn'])
             self.assertTrue(all(options[name] for name in ('serial_sdpa', 'ordered_cache', 'norm_batch', 'device_loop_gdn',
@@ -323,6 +382,28 @@ class ConstructionTests(BlockFixture):
                 lent = self.pool.slots[user].verifier.carry
                 self.assertTrue(all(a is b for mine, theirs in zip(participant['slots'], lent, strict=True)
                                     for a, b in zip(mine, theirs, strict=True)))
+        # the block took the pool's table set for its shape, in its family (the capture
+        # position's); the captured fixture's readers are one per user, each over that
+        # user's tables of that family and at the family start, each with its own word
+        tables = self.pool.packed[(2, 16)]
+        self.assertTrue(tables.taken)
+        self.assertIs(block.replay, tables)
+        self.assertEqual(block.replay_capacity, FAMILY)
+        self.assertEqual([[table is lent for table, lent in zip(mine, theirs, strict=True)]
+                          for mine, theirs in zip(block.replay_tables, tables.replay_pages[FAMILY], strict=True)],
+                         [[True, True], [True, True]])
+        reader = captured.replay_reader
+        self.assertEqual((reader.rows, reader.capacity, reader.starts, len(reader.readers)), (32, FAMILY, (4096, 4096), 2))
+        self.assertIsNot(reader.readers[0].positions, reader.readers[1].positions)
+        for user, own in enumerate(reader.readers):
+            self.assertEqual([entry[1] for entry in own.metadata], tables.replay_pages[FAMILY][user])
+            self.assertEqual([tuple(entry[1].shape) for entry in own.metadata], [(3, 68), (1, 68)])
+            self.assertEqual(own.positions.value.tolist(), [4096, 0, 0, 0, 0, 0, 0, 0])
+        self.assertTrue(warm.replay_reader.closed)
+        self.assertFalse(reader.closed)
+        self.assertEqual(block.describe()['attention'],
+                         dict(reader='per-user bundled replay', family=FAMILY, replay_group_rows=4, bundles_per_user=[2, 2],
+                              tables=[[[shard.address for shard in table.shards] for table in user] for user in block.replay_tables]))
         # one verify trace, then users x rows_per_user commit traces: prefix 0 runs nothing
         self.assertEqual(block.trace, 'trace1')
         self.assertEqual([sorted(commits) for commits in block.commits], [list(range(1, 17))] * 2)
@@ -369,6 +450,14 @@ class ConstructionTests(BlockFixture):
         cases['draft weights not yet uploaded'] = dict(shared_weights=SimpleNamespace(closed=False, tensors=[], lend=Mock()))
         cases['no sampler'] = dict(sampler=None)
         cases['a capture position past the pages'] = dict(capture_position=PAGE_WIDTH * 64 - 15)
+        # the readers' tables: the pool must hold a set for the shape, in the block's family, unlent
+        cases['a pool without packed replay tables for the shape'] = dict(pool=pool(self.ttnn, self.helpers, packed={}))
+        cases['packed replay tables lacking the block family'] = dict(
+            pool=pool(self.ttnn, self.helpers, packed={(2, 16): packed_tables(self.ttnn, families=(4096,))}))
+        lent = pool(self.ttnn, self.helpers)
+        lent.packed[(2, 16)].take()
+        cases['packed replay tables already lent'] = dict(pool=lent)
+        cases['a capture position outside every family'] = dict(capture_position=4090)
         for name, overrides in cases.items():
             with self.subTest(name=name):
                 options = dict(pool=self.pool, shared_weights=self.weights, sampler='sampler', capture_position=None)
@@ -384,6 +473,7 @@ class ConstructionTests(BlockFixture):
         for helper in self.helpers:
             helper.allocate.assert_not_called()
         self.assertEqual((self.ttnn.device_uploads, FakeModelBatch.instances, self.prepared), ([], [], []))
+        self.assertFalse(self.pool.packed[(2, 16)].taken, 'nothing refused took the pool set')
 
     def test_shapes_are_keyed_on_the_whole_block(self):
         self.assertEqual(m1_shape(PAGE_WIDTH), PackedShape(2, 16, 32, PAGE_WIDTH, PAGE_WIDTH * 64))
@@ -413,16 +503,28 @@ class RoundTests(BlockFixture):
         fixture = block.fixture
         self.assertEqual(fixture.tokens.value[16:32, 0].tolist(), list(range(50, 66)))
         self.assertEqual(fixture.tokens.value[:16, 0].tolist(), list(range(10, 26)))
-        self.assertEqual(fixture.positions.value.tolist(), [*range(100, 116), *range(3000, 3016)])
+        self.assertEqual(fixture.positions.value.tolist(), [*range(4100, 4116), *range(4200, 4216)])
         self.assertTrue(bool((fixture.pages.value[:16] == 7).all()))
         self.assertTrue(bool((fixture.pages.value[16:] == 11).all()))
         self.assertEqual([table.value[0, 0].item() for table in fixture.row_pages], [7] * 16 + [11] * 16)
         self.assertEqual([position.value.item() for position in fixture.singleton_positions],
-                         [*range(100, 116), *range(3000, 3016)])
+                         [*range(4100, 4116), *range(4200, 4216)])
         self.assertEqual((fixture.cos.value.shape, fixture.sin.value.shape), ((1, 32, 1, 64), (1, 32, 1, 64)))
-        # tokens, positions, cos, sin, pages, 32 singleton positions, 32 row tables; one fence for them
-        self.assertEqual(len(self.ttnn.host_copies) - copies, 69)
-        self.assertEqual(metrics['staged_buffers'], 69)
+        # and each user's own reader: its positions word at that user's start, its per-bundle
+        # tables holding that user's page table - B's pages in segment 1's reader, A's in segment 0's
+        reader = fixture.replay_reader
+        self.assertEqual(reader.starts, (4100, 4200))
+        self.assertEqual([own.positions.value.tolist() for own in reader.readers],
+                         [[4100, 0, 0, 0, 0, 0, 0, 0], [4200, 0, 0, 0, 0, 0, 0, 0]])
+        for own, page in zip(reader.readers, (7, 11), strict=True):
+            for bundle, table, mask, config in own.metadata:
+                self.assertEqual(tuple(table.value.shape), (len(bundle), 68))
+                self.assertTrue(bool((table.value == page).all()))
+        self.assertFalse(reader.failed)
+        # tokens, positions, cos, sin, pages, 32 singleton positions, 32 row tables, two positions
+        # words and two users x two bundle tables; one fence for all of them
+        self.assertEqual(len(self.ttnn.host_copies) - copies, 75)
+        self.assertEqual(metrics['staged_buffers'], 75)
         # exactly one weight pass: the verify trace once, eagerly then fenced on the first round
         self.assertEqual(self.ttnn.executed[executed:], ['trace1'])
         self.assertEqual(self.ttnn.synchronized - synchronized, 2)
@@ -510,11 +612,18 @@ class RoundTests(BlockFixture):
         mismatched = self.two()
         mismatched[0]['request_id'] = 'Z'
         cases['a ticket of another request'] = mismatched
+        # each user's reader is captured in the block's family [4096, 4352): a ticket
+        # outside it has no trace here, and is refused before anything is staged
+        cases['a ticket past the block family'] = [self.two()[0], entry(request('A', self.pool.slots[0], 4340, 7), range(16))]
+        cases['a ticket below the block family'] = [self.two()[0], entry(request('A', self.pool.slots[0], 4000, 7), range(16))]
         for name, entries in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):
                 block.verify(entries)
             self.assertEqual(block.phase, 'idle', name)
+        with self.assertRaisesRegex(ValueError, r'request A at 4340 leaves the block.s native chunk family \[4096, 4352\)'):
+            block.verify(cases['a ticket past the block family'])
         self.assertEqual((len(self.ttnn.executed), len(self.ttnn.host_copies)), (executed, copies))
+        self.assertFalse(block.fixture.replay_reader.failed)
         with self.assertRaises(ValueError):
             block.segment_of(SimpleNamespace(carry=[]))
 
@@ -541,7 +650,16 @@ class RoundTests(BlockFixture):
         self.assertEqual((block.phase, len(self.ttnn.host_copies), len(self.ttnn.executed)), ('failed', copies, executed))
         self.pool.slots[0].verifier.carry[5][2].shards[0].address = block.carry_addresses[0][5][2][0]
         block.phase = 'idle'
-        # an input buffer replaced while staging: caught after the fence, before the trace
+        # a pooled replay page table moved under the block: refused the same way
+        table = block.replay_tables[1][0]
+        table.shards[1].address = -3
+        with self.assertRaisesRegex(ValueError, 'replay page table moved'):
+            block.verify(self.two())
+        self.assertEqual((block.phase, len(self.ttnn.host_copies), len(self.ttnn.executed)), ('failed', copies, executed))
+        table.shards[1].address = block.replay_addresses[1][0][1]
+        block.phase = 'idle'
+        # an input buffer replaced while staging: caught after the fence, before the trace,
+        # and the readers are poisoned with it
         stage = self.ttnn.copy_host_to_device_tensor
 
         def replace(host, destination):
@@ -553,6 +671,7 @@ class RoundTests(BlockFixture):
         with self.assertRaisesRegex(AssertionError, 'replaced'):
             block.verify(self.two())
         self.assertEqual((block.phase, len(self.ttnn.executed)), ('failed', executed))
+        self.assertTrue(all(own.failed for own in block.fixture.replay_reader.readers))
 
     def test_close_releases_every_trace_and_owned_buffer_but_never_a_pooled_carry(self):
         block = self.build()
@@ -564,17 +683,27 @@ class RoundTests(BlockFixture):
         owned = [*block.taps, *(value for checkpoints in block.checkpoints for snapshot in checkpoints for value in snapshot),
                  *(value for snapshot in block.initial for value in snapshot), *block.output]
         fixture = block.fixture
+        # the readers' own uploads (each user's positions word and masks) go with the fixture;
+        # their page tables are the pool's, handed back
+        uploads = [value for own in fixture.replay_reader.readers for value in own.owned]
+        self.assertEqual(len(uploads), 6)
+        tables = self.pool.packed[(2, 16)]
         block.close()
         self.assertEqual(block.phase, 'closed')
         # the verify trace and the 32 commit traces, each once
         self.assertEqual(sorted(self.ttnn.released), sorted('trace%d' % index for index in range(1, 34)))
         fixture.close.assert_called_once()
+        self.assertTrue(fixture.replay_reader.closed)
         self.assertTrue(FakeFeatures.instances[0].closed)
         freed = self.ttnn.deallocated
         self.assertTrue(all(any(value is entry for entry in freed) for value in owned))
+        self.assertTrue(all(any(value is entry for entry in freed) for value in uploads))
         pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
         self.assertFalse(any(any(value is entry for entry in freed) for value in pooled))
+        self.assertFalse(any(any(value is entry for entry in freed) for value in tables.tensors))
+        self.assertFalse(tables.taken)
         self.assertEqual((block.taps, block.checkpoints, block.initial, block.carries, block.trace), ([], [], [], [], None))
+        self.assertEqual((block.replay, block.replay_tables, block.replay_addresses), (None, [], []))
         block.close()
 
 

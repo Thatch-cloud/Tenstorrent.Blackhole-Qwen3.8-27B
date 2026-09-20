@@ -38,6 +38,24 @@ that entry's segment rows, and `features` and `commit_user` take the segment tha
 `segment_of` named for that entry's engine. Neither registry nor pool order is ever
 used to index a result.
 
+THE ATTENTION (M1b). Run 35497378631 measured the packed verify at 150.6 ms against
+67 ms for a 16-row sequential verify, and the cost model puts ~56 ms of the difference
+in the attention: 16 full-attention layers each running 32 per-row serial SDPA launches
+at 32K context, where the sequential verify's bundled replay reader (four-row groups)
+takes 9.9 ms for all 16 layers. The pinned reader (attention_replay.py, frozen-recipe
+evidence) serves ONE user: one start word, one page table, bundles over its rows. So the
+block's fixture builds one reader PER USER, each over that user's own start word and its
+own page tables, captured in the block's native chunk family (the capture position's,
+which the serving pin - position 32768, budget 256 - makes the whole decode's), and
+dispatches each layer's 32-row query a segment at a time
+(pooled_attention_replay.PackedReplayAttentionReader): user u's rows through user u's
+bundles, results concatenated in row order. The masks are recomputed inside the trace
+from each reader's positions word. The readers' per-bundle page tables are the pool's
+(serving_buffer_pool.PackedReplayTables, one set per user for this shape, lent once to
+the block), and `stage_packed` restages every user's positions word and bundle tables
+before each verify along with its rows. Expected: attention back to ~2 x 9.9 ms, about
+46 ms saved per two-user round.
+
 THE CARRY. Sequentially, each engine restores its carry into slot 0 before its trace
 and saves slot 0 back after its commit, on the host, fenced (verifier_engine.py). Here
 the restore is captured in the trace and the save IS the commit DMA, so no host copy
@@ -53,6 +71,7 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 from attention_batch import capture_operation
+from attention_mask_replay import validate_ticket
 from force_argmax import sample_rows
 from gdn_commit_dma import prepare
 from gdn_multitoken_conv import addresses, release_owned
@@ -154,11 +173,21 @@ def stage_packed(operations, model, fixture, shape, users):
     one start and never restages pages. Here the tokens, the per-user positions, the rotary
     tables, every singleton position, the (block_rows, page_width) table AND every per-row
     table (attention_batch.SerialAttentionReader reads row_pages[i]) are restaged each
-    round, from each user's own host page table. Returns the number of buffers written.
+    round, from each user's own host page table; and, when the fixture's attention is the
+    per-user replay reader (M1b), each user's positions word and its reader's per-bundle
+    page tables, the way verifier_inputs.stage_inputs stages one request's word and
+    VerifierPageBinding.refresh rewrites its tables. One fence for all of it. Returns the
+    number of buffers written.
     """
+    import torch
+
     if fixture.rows != shape.block_rows or len(fixture.singleton_positions) != shape.block_rows \
             or len(fixture.row_pages) != shape.block_rows:
         raise ValueError('Every per-row attention position and page table of the block must be retained')
+    reader = getattr(fixture, 'replay_reader', None)
+    readers = () if reader is None else tuple(reader.readers)
+    if reader is not None and len(readers) != shape.users:
+        raise ValueError('One replay reader per packed user required')
     tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
                                                             model.args.rope_theta, model.args.vocab_size)
     values = [(fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT),
@@ -170,6 +199,14 @@ def stage_packed(operations, model, fixture, shape, users):
                   for index, destination in enumerate(fixture.singleton_positions))
     values.extend((destination, pages[index:index + 1], operations.int32, operations.ROW_MAJOR_LAYOUT)
                   for index, destination in enumerate(fixture.row_pages))
+    for own, (user_tokens, start, table) in zip(readers, users, strict=True):
+        # Host only, before any copy: this user's ticket inside its reader's family.
+        own.validate(start)
+        words = torch.zeros(8, dtype=torch.int32)
+        words[0] = start
+        values.append((own.positions, words, operations.int32, operations.ROW_MAJOR_LAYOUT))
+        values.extend((entry[1], table[:, :own.capacity // 64].repeat(len(entry[0]), 1).contiguous(),
+                       operations.int32, operations.ROW_MAJOR_LAYOUT) for entry in own.metadata)
     if any(tuple(destination.shape) != tuple(value.shape) or destination.dtype != dtype or destination.layout != layout
            for destination, value, dtype, layout in values):
         raise ValueError('Staged packed inputs must preserve every captured tensor signature')
@@ -181,12 +218,20 @@ def stage_packed(operations, model, fixture, shape, users):
                                     mesh_mapper=operations.ReplicateTensorToMesh(model.mesh_device))
               for destination, value, dtype, layout in values]
     try:
-        for source, destination in zip(staged, destinations, strict=True):
-            operations.copy_host_to_device_tensor(source, destination)
-    finally:
-        operations.synchronize_device(model.mesh_device)
-    if [addresses(operations, destination) for destination in destinations] != before:
-        raise AssertionError('Packed input staging replaced a captured buffer')
+        try:
+            for source, destination in zip(staged, destinations, strict=True):
+                operations.copy_host_to_device_tensor(source, destination)
+        finally:
+            operations.synchronize_device(model.mesh_device)
+        if [addresses(operations, destination) for destination in destinations] != before:
+            raise AssertionError('Packed input staging replaced a captured buffer')
+    except BaseException:
+        # A half-staged word or table poisons the readers, as stage_inputs poisons one.
+        for own in readers:
+            own.failed = True
+        raise
+    for own, (user_tokens, start, table) in zip(readers, users, strict=True):
+        own.start = start
     return len(destinations)
 
 
@@ -226,6 +271,20 @@ class PackedVerifierEngine:
             raise ValueError('The packed block must be built after the shared draft weights are uploaded')
         if verifier_engine._resident is not None:
             raise ValueError('The packed block must be built before any request engine exists: one is resident')
+        # The attention (M1b): one bundled replay reader per user, every one captured in the
+        # block's native chunk family - the capture position's, as for one request - over
+        # the pool's table sets for this shape (serving_buffer_pool.PackedReplayTables), lent
+        # once to this block. Refused, like everything above, before anything is allocated.
+        self.replay = None
+        self.replay_capacity = (capture_position // 256 + 1) * 256
+        packed = pool.packed_replay(shape.users, shape.rows_per_user)
+        if self.replay_capacity not in packed.replay_pages:
+            raise ValueError('The pool holds packed replay page tables for families %r; the block captures in family %d'
+                             % (sorted(packed.replay_pages), self.replay_capacity))
+        validate_ticket(capture_position, shape.rows_per_user, self.replay_capacity, short_context=False)
+        self.replay = packed.take()
+        self.replay_tables = [list(tables) for tables in packed.replay_pages[self.replay_capacity]]
+        self.replay_addresses = [[addresses(operations, table) for table in tables] for tables in self.replay_tables]
         self.operations, self.model, self.mesh, self.sampler = operations, model, model.mesh_device, sampler
         self.helpers = helpers
         self.name = 'PackedVerifierEngine@%x users=%d rows=%d' % (id(self), shape.users, shape.rows_per_user)
@@ -313,17 +372,17 @@ class PackedVerifierEngine:
         """The packed ModelBatch: retained records for the per-user commits; commit-only GDN,
         which packed is the DEFERRED decode (gdn_device_loop_state: one block-start entry per
         user, nothing restored or advanced at decode, every decision made by commit_user
-        after the readback); no replay attention (the per-row SerialAttentionReader takes
-        singleton_positions and row_pages, which are restaged per user); and no T16 gate
-        (it pins rows == 16)."""
+        after the readback); replay attention as one bundled reader PER USER over the
+        pool's lent table sets (M1b; four-row groups, masks refreshed in-trace per layer as
+        the sequential verify does); and no T16 gate (it pins rows == 16)."""
         pack = build_pack([participant(placeholder, self.rows_per_user, 0, self.checkpoints[user], self.carries[user])
                            for user, placeholder in enumerate(placeholders)], block_rows=self.block_rows)
         return ModelBatch(self.model, [1] * self.block_rows, self.capture_position, placeholders[0].pages, self.helpers,
-            self.checkpoints[0], self.block_rows, pack=pack,
+            self.checkpoints[0], self.block_rows, pack=pack, packed_replay_pages=self.replay_tables,
             serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=True, ordered_cache=True,
-            norm_batch=True, attention_replay=False, attention_mask_once=False, replay_group_rows=4,
+            norm_batch=True, attention_replay=True, attention_mask_once=False, replay_group_rows=4,
             short_context=False, attention_audit=False, commit_only_gdn=True)
 
     def operation(self, fixture):
@@ -361,6 +420,8 @@ class PackedVerifierEngine:
             raise ValueError('Native GDN buffers changed under the packed block')
         if self.slot_addresses() != self.carry_addresses:
             raise ValueError('A carried GDN state moved under the packed block')
+        if [[addresses(self.operations, table) for table in tables] for tables in self.replay_tables] != self.replay_addresses:
+            raise ValueError('A pooled replay page table moved under the packed block')
 
     def segment_of(self, engine):
         """The segment whose carry this request's engine borrowed."""
@@ -406,6 +467,14 @@ class PackedVerifierEngine:
                     or ticket.position != engine.position or len(ticket.tokens) != self.rows_per_user):
                 raise ValueError('Every packed entry needs an idle engine and a full %d-row ticket at its frontier'
                                  % self.rows_per_user)
+            # Each user's reader is captured in the block's one family; a ticket outside it
+            # (never under the serving pin: position 32768, budget 256) has no trace here.
+            try:
+                validate_ticket(ticket.position, self.rows_per_user, self.replay_capacity, short_context=False)
+            except ValueError:
+                raise ValueError("Packed ticket of request %s at %d leaves the block's native chunk family [%d, %d)"
+                                 % (str(entry['request_id'])[:48], ticket.position, self.replay_capacity - 256,
+                                    self.replay_capacity)) from None
         self.phase = 'verifying'
         try:
             binding_started = time.perf_counter()
@@ -503,6 +572,9 @@ class PackedVerifierEngine:
             taps=[list(addresses(operations, tap)) for tap in self.taps],
             checkpoints=[list(addresses(operations, checkpoints[0][0])) for checkpoints in self.checkpoints],
             carries=[list(carry[0][0]) for carry in self.carry_addresses],
+            attention=dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=4,
+                           bundles_per_user=[len(tables) for tables in self.replay_tables],
+                           tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds)
 
     def close(self):
@@ -527,6 +599,11 @@ class PackedVerifierEngine:
         if self.fixture is not None:
             self.fixture.close()
             self.fixture = None
+        # The readers' page tables are the pool's: handed back, never freed here.
+        if getattr(self, 'replay', None) is not None:
+            self.replay.release()
+            self.replay = None
+        self.replay_tables, self.replay_addresses = [], []
         release_owned(operations, self.taps)
         release_owned(operations, [value for checkpoints in self.checkpoints for snapshot in checkpoints for value in snapshot])
         release_owned(operations, [value for snapshot in self.initial for value in snapshot])

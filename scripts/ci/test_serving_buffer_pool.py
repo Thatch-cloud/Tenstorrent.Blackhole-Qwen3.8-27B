@@ -324,7 +324,10 @@ class VerifierStorageTests(unittest.TestCase):
         # The rotary builder was asked once per bucket per slot, for that bucket's rows.
         self.assertEqual([len(call.args[0]) for call in rope.call_args_list], list(BUCKET_ROWS) * 2)
         self.assertEqual([helper.allocate.call_count for helper in pool.helpers], [2 * (2 + len(BUCKET_ROWS))] * GDN_LAYERS)
-        self.assertEqual(len(operations.live), 2 * expected)
+        # Plus the packed block's per-user replay tables for the one shape two slots can fill
+        # (M1, two T16 users): per family, per user, one table per bundle.
+        packed = 2 * sum(len(bundle_batches(16, capacity)) for capacity in REPLAY_CAPACITIES)
+        self.assertEqual(len(operations.live), 2 * expected + packed)
         self.assertEqual(operations.synchronized, 1)
 
     def test_describe_reports_the_verifier_bytes_and_layout_per_slot(self):
@@ -542,6 +545,100 @@ class ReplayPageTableTests(unittest.TestCase):
                          4 * sum(batches * columns for rows in (8, 16) for batches, columns in replay_shapes(rows)))
         pool.close()
         self.assertEqual(len(operations.deallocated), len(operations.live))
+
+
+class PackedReplayTableTests(unittest.TestCase):
+    """The packed block's per-user replay page tables (M1b): allocated with the pool for
+    every packed shape its slots can fill, per family, per user, per bundle of a
+    rows_per_user-row reader; lent once to the block; never per slot, never zeroed."""
+
+    def test_the_default_shapes_follow_the_slots_and_each_set_is_shaped_per_user_per_bundle(self):
+        # One narrow bucket per slot: the pool's overlap check is quadratic in its tensors.
+        with patch.dict('os.environ', {}, clear=True):
+            for users, shapes in ((1, ()), (2, ((2, 16),)), (3, ((2, 16),)), (4, ((2, 16), (4, 8)))):
+                operations = FakeOperations()
+                pool = verifier_pool(operations, users=users, bucket_rows=(8,))
+                self.assertEqual(pool.packed_shapes, shapes, users)
+                self.assertEqual(sorted(pool.packed), sorted(shapes))
+                for count, rows in shapes:
+                    tables = pool.packed_replay(count, rows)
+                    self.assertEqual((tables.users, tables.rows, tables.taken), (count, rows, False))
+                    self.assertEqual(list(tables.replay_pages), list(REPLAY_CAPACITIES))
+                    for capacity, per_user in tables.replay_pages.items():
+                        self.assertEqual(len(per_user), count)
+                        for user_tables in per_user:
+                            self.assertEqual([value.shape for value in user_tables],
+                                             [(batches, capacity // 64) for batches in bundle_batches(rows, capacity)])
+                            for value in user_tables:
+                                self.assertEqual((value.dtype, value.layout, value.mapper), ('int32', 'row_major', ('replicate', 'mesh')))
+                    # In the pool's own record, on independent chip storage, and no two sets share a table.
+                    self.assertTrue(all(any(value is owned for owned in pool.owned) for value in tables.tensors))
+                    self.assertEqual(len(tables.tensors), count * sum(len(bundle_batches(rows, capacity)) for capacity in REPLAY_CAPACITIES))
+                every = [value for tables in pool.packed.values() for value in tables.tensors]
+                self.assertEqual(len({id(value) for value in every}), len(every))
+                self.assertEqual(pool.packed_bytes, sum(4 * value.shape[0] * value.shape[1] for value in every))
+                # Not in any slot: one block serves every slot, and the slot loan zeroes nothing of it.
+                self.assertFalse(any(any(value is entry for entry in slot.tensors) for slot in pool.slots for value in every))
+
+    def test_the_shapes_can_be_given_explicitly_and_a_set_is_lent_once(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=2, packed_shapes=((4, 8),))
+        self.assertEqual(pool.packed_shapes, ((4, 8),))
+        with self.assertRaisesRegex(ValueError, r'shapes \[\(4, 8\)\]; \(2, 16\) was asked for'):
+            pool.packed_replay(2, 16)
+        tables = pool.packed_replay(4, 8)
+        self.assertIs(tables.take(), tables)
+        self.assertTrue(tables.taken)
+        with self.assertRaisesRegex(ValueError, 'already lent'):
+            tables.take()
+        tables.release()
+        self.assertIs(tables.take(), tables)
+        none = verifier_pool(FakeOperations(), users=2, packed_shapes=())
+        self.assertEqual((none.packed_shapes, none.packed, none.packed_bytes), ((), {}, 0))
+        with self.assertRaisesRegex(ValueError, r'shapes \[\]'):
+            none.packed_replay(2, 16)
+        slot = pool.acquire()
+        self.assertFalse(any(table is value for value, zero in operations.fills for table in tables.tensors))
+        slot.release()
+        pool.close()
+        with self.assertRaisesRegex(ValueError, 'Closed'):
+            pool.packed_replay(4, 8)
+
+    def test_describe_and_close_cover_the_packed_sets(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=2)
+        report = pool.describe()
+        self.assertEqual(report['packed_shapes'], [[2, 16]])
+        tables = pool.packed_replay(2, 16)
+        self.assertEqual(report['packed_replay_bytes'], pool.packed_bytes)
+        self.assertEqual(report['packed_replay_bytes'], sum(4 * value.shape[0] * value.shape[1] for value in tables.tensors))
+        (described,) = report['packed_replay']
+        self.assertEqual((described['users'], described['rows'], described['taken'], described['bytes']),
+                         (2, 16, False, pool.packed_bytes))
+        self.assertEqual(described['replay_pages'],
+                         {capacity: [[[shard.address for shard in value.shards] for value in user_tables] for user_tables in per_user]
+                          for capacity, per_user in tables.replay_pages.items()})
+        tables.take()
+        self.assertTrue(pool.describe()['packed_replay'][0]['taken'])
+        pool.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+        self.assertTrue(all(any(value is freed for freed in operations.deallocated) for value in tables.tensors))
+        self.assertEqual(pool.packed, {})
+        plain = ServingBufferPool(FakeOperations(), 'mesh', users=2)
+        self.assertEqual((plain.packed_shapes, plain.packed), ((), {}))
+        self.assertNotIn('packed_replay', plain.describe())
+
+    def test_shapes_are_checked_before_anything_is_allocated(self):
+        operations = FakeOperations()
+        for shapes in (((2, 16), (2, 16)), ((3, 12),), ((2, 4),), ((4, 16),), ((0, 16),), ((2.0, 16),), ((2, 16, 32),), (2, 16)):
+            with self.subTest(shapes=shapes), self.assertRaisesRegex(ValueError, 'Packed replay shapes'):
+                verifier_pool(operations, users=4, packed_shapes=shapes)
+        with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
+            ServingBufferPool(operations, 'mesh', users=2, packed_shapes=((2, 16),))
+        self.assertEqual(operations.live, [])
+        # The M3 shape is not a 32-row block; four T16 users need 64 rows.
+        with self.assertRaises(ValueError):
+            verifier_pool(operations, users=4, packed_shapes=((4, 16),))
 
 
 class DiagnosticLineTests(unittest.TestCase):

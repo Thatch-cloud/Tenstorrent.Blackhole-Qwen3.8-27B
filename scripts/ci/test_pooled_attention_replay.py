@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 import torch
 
 from attention_replay import ReplayAttentionReader
-from pooled_attention_replay import (PooledReplayAttentionReader, bundle_batches, family_capacities, family_start,
-                                     validate_storage)
+from pooled_attention_replay import (PackedReplayAttentionReader, PooledReplayAttentionReader, bundle_batches,
+                                     family_capacities, family_start, validate_segments, validate_storage)
 
 
 class FamilyTests(unittest.TestCase):
@@ -215,6 +215,189 @@ class PooledReaderTests(unittest.TestCase):
         reader.validate(4103)
         self.assertEqual(reader.start, 4096)
         self.assertFalse(reader.failed)
+
+
+class PackedReaderTests(unittest.TestCase):
+    """One pooled reader per packed user, each over its own start word and lent tables;
+    a 32-row query dispatched a segment at a time and reassembled in row order (M1b)."""
+
+    SEGMENTS = ((0, 16), (16, 32))
+
+    def operations(self, copies, events=None):
+        events = [] if events is None else events
+
+        def copy(host, target):
+            target.value = host.value.clone()
+            copies.append(target)
+
+        def slice_rows(tensor, start, stop, memory_config):
+            events.append(('slice', start, stop, memory_config))
+            return SimpleNamespace(shape=(1, stop[1] - start[1], 12, 256), name='rows%d' % start[1])
+
+        def concat(parts, dim, memory_config):
+            events.append(('concat', [part.name for part in parts], dim, memory_config))
+            return SimpleNamespace(name='joined')
+
+        return SimpleNamespace(int32='int32', ROW_MAJOR_LAYOUT='row', DRAM_MEMORY_CONFIG='dram', SDPAProgramConfig=Mock(),
+            from_torch=Mock(side_effect=lambda value, **kwargs: SimpleNamespace(value=value.clone(), **kwargs)),
+            copy_host_to_device_tensor=Mock(side_effect=copy), synchronize_device=Mock(),
+            ReplicateTensorToMesh=lambda mesh: ('replicate', mesh), slice=Mock(side_effect=slice_rows),
+            concat=Mock(side_effect=concat), deallocate=Mock(side_effect=lambda value: events.append(('free', value.name))))
+
+    def tables(self, users=2):
+        return [pooled_tables([(3, 68), (1, 68)]) for user in range(users)]
+
+    def hosts(self, users=2):
+        return [torch.full((1, 68), 7 + 4 * user, dtype=torch.int32) for user in range(users)]
+
+    def build(self, storage='pooled', operations=None, segments=SEGMENTS, capacity=4352, prepare='program', hosts=None, **options):
+        copies, events = [], []
+        operations = self.operations(copies, events) if operations is None else operations
+        mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
+        upload = Mock(side_effect=lambda value, dtype=None: SimpleNamespace(value=value.clone(), dtype=dtype, name='upload',
+                                                                            shape=tuple(value.shape)))
+        storage = self.tables(len(segments)) if storage == 'pooled' else storage
+        with patch('attention_replay.prepare', **(dict(return_value=prepare) if not isinstance(prepare, list) else dict(side_effect=prepare))), \
+                patch('pooled_attention_replay.addresses', side_effect=fake_addresses):
+            reader = PackedReplayAttentionReader(operations, mesh, segments, capacity, self.hosts(len(segments)) if hosts is None else hosts,
+                                                 upload, storage=storage, **options)
+        return reader, storage, operations, copies, events
+
+    def test_each_user_gets_its_own_pooled_reader_over_its_own_tables_and_start(self):
+        reader, storage, operations, copies, events = self.build()
+        self.assertEqual(len(reader.readers), 2)
+        self.assertTrue(all(type(own) is PooledReplayAttentionReader for own in reader.readers))
+        self.assertEqual((reader.rows, reader.capacity, reader.segments), (32, 4352, self.SEGMENTS))
+        self.assertEqual([own.rows for own in reader.readers], [16, 16])
+        self.assertEqual(reader.starts, (4096, 4096))
+        # user u's reader reads user u's lent tables, staged with user u's own page table
+        for user, own in enumerate(reader.readers):
+            self.assertEqual([entry[1] for entry in own.metadata], storage[user])
+            self.assertEqual(own.borrowed, storage[user])
+            for table, batches in zip(storage[user], (3, 1), strict=True):
+                self.assertTrue(torch.equal(table.value, torch.full((batches, 68), 7 + 4 * user, dtype=torch.int32)))
+            self.assertEqual(own.positions.value.tolist(), [4096, 0, 0, 0, 0, 0, 0, 0])
+            self.assertIsNot(own.positions, reader.readers[1 - user].positions)
+        self.assertEqual(reader.borrowed, [*storage[0], *storage[1]])
+        self.assertEqual(reader.metadata, [*reader.readers[0].metadata, *reader.readers[1].metadata])
+        self.assertEqual(copies, [*storage[0], *storage[1]])
+        self.assertEqual((reader.calls, reader.refresh_calls, reader.failed, reader.closed, reader.audit), (0, 0, False, False, None))
+
+    def test_the_query_is_dispatched_a_segment_at_a_time_and_reassembled_in_row_order(self):
+        reader, storage, operations, copies, events = self.build()
+        query = SimpleNamespace(shape=(1, 32, 12, 256))
+        keys, values = object(), object()
+        served = []
+
+        def attention(mesh, ops, rows, keys, values, metadata, owned, **kwargs):
+            served.append((rows.name, [entry[1] for entry in metadata], kwargs))
+            result = SimpleNamespace(name='out%s' % rows.name[4:])
+            owned.append(result)
+            return result
+
+        with patch('attention_replay.addresses', side_effect=lambda operations, value: (id(value), id(value))), \
+                patch('attention_replay.refresh_mask', side_effect=lambda *args: events.append(('mask',))), \
+                patch('attention_replay.execute', side_effect=attention), patch('attention_replay.release_owned'):
+            result = reader(query, keys, values, page_table_tensor='ignored', cur_pos_tensor='ignored', scale=0.0625, memory_config='L1')
+        self.assertEqual(result.name, 'joined')
+        # user 0's rows [0, 16) through user 0's bundles, user 1's rows [16, 32) through user 1's
+        self.assertEqual([entry[:2] for entry in served], [('rows0', storage[0]), ('rows16', storage[1])])
+        self.assertTrue(all(entry[2] == dict(scale=0.0625, memory_config='L1') for entry in served))
+        self.assertEqual([event for event in events if event[0] == 'slice'],
+                         [('slice', (0, 0, 0, 0), (1, 16, 12, 256), 'dram'), ('slice', (0, 16, 0, 0), (1, 32, 12, 256), 'dram')])
+        self.assertEqual([event for event in events if event[0] == 'concat'], [('concat', ['out0', 'out16'], 1, 'L1')])
+        # masks refreshed per reader (two bundles each) before its attention; every slice and per-user output freed
+        self.assertEqual(events.count(('mask',)), 4)
+        self.assertEqual(sorted(event[1] for event in events if event[0] == 'free'), ['out0', 'out16', 'rows0', 'rows16'])
+        self.assertEqual((reader.calls, [own.calls for own in reader.readers], reader.refresh_calls), (1, [1, 1], 4))
+        with self.assertRaisesRegex(ValueError, 'query geometry'):
+            reader(SimpleNamespace(shape=(1, 16, 12, 256)), keys, values, scale=0.0625, memory_config='L1')
+
+    def test_a_failing_segment_frees_what_was_built_and_poisons_that_reader(self):
+        reader, storage, operations, copies, events = self.build()
+        query = SimpleNamespace(shape=(1, 32, 12, 256))
+        with patch('attention_replay.addresses', side_effect=lambda operations, value: (id(value), id(value))), \
+                patch('attention_replay.refresh_mask'), patch('attention_replay.release_owned'), \
+                patch('attention_replay.execute', side_effect=[SimpleNamespace(name='out0'), RuntimeError('sdpa failed')]), \
+                self.assertRaisesRegex(RuntimeError, 'sdpa failed'):
+            reader(query, object(), object(), scale=0.0625, memory_config='L1')
+        self.assertEqual(sorted(event[1] for event in events if event[0] == 'free'), ['out0', 'rows0', 'rows16'])
+        self.assertEqual([own.failed for own in reader.readers], [False, True])
+        self.assertTrue(reader.failed)
+        self.assertEqual(reader.calls, 0)
+        reader.failed = False
+        self.assertEqual([own.failed for own in reader.readers], [False, False])
+
+    def test_validate_stage_refresh_and_shared_masks_reach_every_reader(self):
+        reader, storage, operations, copies, events = self.build()
+        reader.validate((4100, 4200))
+        for starts in ((4095, 4200), (4100, 4337), (4100,), (4100, 4200, 4300)):
+            with self.subTest(starts=starts), self.assertRaises(ValueError):
+                reader.validate(starts)
+        with patch('attention_replay.addresses', side_effect=lambda operations, value: (id(value), id(value))):
+            reader.stage((4100, 4200))
+        self.assertEqual(reader.starts, (4100, 4200))
+        self.assertEqual([own.positions.value.tolist()[0] for own in reader.readers], [4100, 4200])
+        with patch('attention_replay.refresh_mask', side_effect=lambda *args: events.append(('mask',))):
+            reader.refresh()
+            self.assertEqual(events.count(('mask',)), 4)
+            with reader.shared_masks(16):
+                for own in reader.readers:
+                    own.calls += 16
+        self.assertEqual(events.count(('mask',)), 8)
+        self.assertEqual(reader.refresh_calls, 8)
+        self.assertIsNone(reader.readers[0].mask_scope)
+        self.assertFalse(reader.failed)
+
+    def test_close_closes_every_reader_keeps_the_pool_tables_and_refuses_further_use(self):
+        reader, storage, operations, copies, events = self.build()
+        released = []
+        with patch('attention_replay.release_owned', side_effect=lambda operations, tensors: released.extend(tensors)):
+            reader.close()
+            reader.close()
+        self.assertTrue(reader.closed and all(own.closed for own in reader.readers))
+        self.assertEqual(len(released), 6, 'two positions words and four masks')
+        self.assertFalse(any(value is table for value in released for tables in storage for table in tables))
+        for operation in (lambda: reader.validate((4100, 4200)), lambda: reader.refresh(),
+                          lambda: reader(SimpleNamespace(shape=(1, 32, 12, 256)), None, None, scale=1.0, memory_config='L1')):
+            with self.assertRaises(RuntimeError):
+                operation()
+
+    def test_a_failure_building_one_reader_closes_the_ones_built_and_frees_no_pool_table(self):
+        storage = self.tables()
+        released = []
+        with patch('attention_replay.release_owned', side_effect=lambda operations, tensors: released.extend(tensors)), \
+                self.assertRaisesRegex(RuntimeError, 'prepare failed'):
+            self.build(storage, prepare=['program', 'program', RuntimeError('prepare failed')])
+        # the first reader's positions word and two masks, the second's positions word and one mask
+        self.assertEqual(len(released), 5)
+        self.assertFalse(any(value is table for value in released for tables in storage for table in tables))
+
+    def test_geometry_and_storage_are_checked_before_anything_is_built(self):
+        copies = []
+        operations = self.operations(copies)
+        cases = {'one table set short': dict(storage=self.tables(1)), 'one table set over': dict(storage=self.tables(3)),
+                 'one host table short': dict(hosts=self.hosts(1)),
+                 'segments not from zero': dict(segments=((16, 32), (32, 48))), 'segments with a gap': dict(segments=((0, 16), (20, 36))),
+                 'a four-row segment': dict(segments=((0, 4), (4, 8))), 'past the block': dict(segments=((0, 32), (32, 64))),
+                 'no segments': dict(segments=()), 'short context': dict(short_context=True),
+                 'tables of another geometry': dict(storage=[pooled_tables([(3, 68), (1, 68)]), pooled_tables([(2, 68)])])}
+        for name, overrides in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.build(operations=operations, **overrides)
+        self.assertEqual(copies, [])
+        self.assertEqual(validate_segments(((0, 8), (8, 16), (16, 24), (24, 32))), ((0, 8), (8, 16), (16, 24), (24, 32)))
+        self.assertEqual(validate_segments([[0, 32]]), ((0, 32),))
+
+    def test_unpooled_segments_take_the_pinned_reader_and_upload_their_own_tables(self):
+        reader, storage, operations, copies, events = self.build(storage=None)
+        self.assertTrue(all(type(own) is ReplayAttentionReader for own in reader.readers))
+        self.assertEqual(reader.borrowed, [])
+        self.assertEqual(copies, [])
+        for user, own in enumerate(reader.readers):
+            self.assertEqual([tuple(entry[1].shape) for entry in own.metadata], [(3, 68), (1, 68)])
+            self.assertTrue(all(bool((entry[1].value == 7 + 4 * user).all()) for entry in own.metadata))
+            self.assertEqual(len(own.owned), 5)
 
 
 if __name__ == '__main__':

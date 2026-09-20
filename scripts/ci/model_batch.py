@@ -53,7 +53,27 @@ def validate_pack(pack, gdn_layers=48):
     packed['prefixes'] = tuple(user['prefix'] for user in users)
     packed['checkpoints'] = tuple(tuple(user['checkpoints']) for user in users)
     packed['slots'] = tuple(tuple(user['slots']) for user in users)
+    # Each user's own (1, blocks) table, for that user's replay reader (M1b).
+    packed['tables'] = tuple(user['pages'] for user in users)
     return packed
+
+
+def packed_replay_family(start, pack, *, short_context=False):
+    """The native chunk family of a packed replay block, and every segment's ticket in it.
+
+    The family is the capture position's, `(start // 256 + 1) * 256`, exactly as for one
+    request; but the block's attention is one pinned-geometry reader PER USER
+    (pooled_attention_replay.PackedReplayAttentionReader), so what must fit the family is
+    each user's segment at that user's own start - not the block as one ticket.
+    """
+    from attention_mask_replay import validate_ticket
+
+    if type(short_context) is not bool or short_context:
+        raise ValueError('Packed replay attention is long-context only')
+    capacity = (start // 256 + 1) * 256
+    for first, last in pack['segments']:
+        validate_ticket(int(pack['positions'][first]), last - first, capacity, short_context=False)
+    return capacity
 
 
 BATCH_INPUTS = ('tokens', 'positions', 'pages', 'singleton_pages', 'cos', 'sin')
@@ -214,7 +234,7 @@ class ModelBatch:
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
-                 attention_audit=False, commit_only_gdn=False, pack=None, storage=None):
+                 attention_audit=False, commit_only_gdn=False, pack=None, storage=None, packed_replay_pages=None):
         import torch
         import ttnn
 
@@ -243,6 +263,10 @@ class ModelBatch:
         if attention_replay and (not ordered_cache or not serial_sdpa or not norm_batch or profiler is not None or grouped_attention):
             raise ValueError('Replay attention requires standalone ordered-cache norm-batch verification')
         self.attention_replay = bool(attention_replay and self.rows >= 8)
+        # The packed block's lent per-user replay tables (serving_buffer_pool.PackedReplayTables)
+        # describe a packed replay fixture and nothing else.
+        if packed_replay_pages is not None and (self.pack is None or not self.attention_replay):
+            raise ValueError('Packed replay page tables need a packed fixture with replay attention')
         if type(replay_group_rows) is not int or replay_group_rows not in (4, 8) or (replay_group_rows == 8 and not attention_replay):
             raise ValueError('Eight-row replay grouping requires explicit replay attention')
         self.replay_group_rows = replay_group_rows
@@ -250,10 +274,14 @@ class ModelBatch:
             raise ValueError('Shared attention masks require explicit replay attention')
         self.attention_mask_once = attention_mask_once and self.attention_replay
         self.replay_reader = None
-        if self.attention_replay:
+        if self.attention_replay and self.pack is None:
             from attention_mask_replay import validate_ticket
             self.replay_capacity = (start // 256 + 1) * 256
             validate_ticket(start, self.rows, self.replay_capacity, short_context=short_context)
+        elif self.attention_replay:
+            # Packed: one family for the block, keyed on the capture position as unpacked,
+            # and each user's segment validated at that user's own start (its own reader).
+            self.replay_capacity = packed_replay_family(start, self.pack, short_context=short_context)
         if attention_parallel and not attention_dma:
             raise ValueError('Parallel attention requires DMA layout')
         self.attention_parallel = bool(attention_parallel and self.rows >= 8)
@@ -353,9 +381,19 @@ class ModelBatch:
             # and the reader is the pooled one (pooled_attention_replay.py), which stages
             # the request's table into them and frees none of them. attention_replay.py
             # is frozen-recipe evidence, pinned byte for byte, so the unpooled call is the
-            # pinned reader exactly as before.
-            tables = replay_storage(storage, self.replay_capacity)
-            if tables is None:
+            # pinned reader exactly as before. Packed (M1b), the rows belong to several
+            # users and the pinned reader takes one start and one table: one reader per
+            # user, over the block's lent table sets (packed_replay_pages,
+            # serving_buffer_pool.PackedReplayTables) or its own uploads when unpooled.
+            tables = None if self.pack is not None else replay_storage(storage, self.replay_capacity)
+            if self.pack is not None:
+                from pooled_attention_replay import PackedReplayAttentionReader
+
+                self.replay_reader = PackedReplayAttentionReader(ttnn, model.mesh_device, self.pack['segments'],
+                    self.replay_capacity, self.pack['tables'], upload_replay, storage=packed_replay_pages,
+                    max_group_rows=self.replay_group_rows)
+                self.borrowed.extend(self.replay_reader.borrowed)
+            elif tables is None:
                 self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
                     upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)
             else:
@@ -372,7 +410,11 @@ class ModelBatch:
                     SerialAttentionReader(ttnn, singleton_positions, self.row_pages),
                     pages=pages[:, :self.replay_capacity // 64],
                     output_directory='/experiment/results/attention-mismatch', masks=self.replay_reader.metadata)
-            if self.replay_reader.start != start:
+            if self.pack is not None:
+                starts = tuple(int(positions[first]) for first, last in self.pack['segments'])
+                if self.replay_reader.starts != starts:
+                    self.replay_reader.stage(starts)
+            elif self.replay_reader.start != start:
                 self.replay_reader.stage(start)
         gdn_index = 0
         for layer in model.layers:

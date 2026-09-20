@@ -73,6 +73,17 @@ width), `batch.replay_pages[capacity]`, and the fixture picks its family's and b
 the pooled reader over them (attention_replay.py itself is frozen-recipe evidence and
 stays byte-exact). The row tables need nothing: unpacked, every row's table is the
 pooled singleton page table.
+
+AND THE PACKED BLOCK'S. The packed verify block (packed_verifier.py) is built at attach,
+after this pool and before any request, so what it allocates itself is pre-trace by
+construction; its attention, though, is one replay reader PER USER (M1b,
+pooled_attention_replay.PackedReplayAttentionReader), and those readers' per-bundle page
+tables are the same kind of static-across-steps buffer the request buckets pool. They
+come from here too: per packed shape the serving block can take - M1 two T16 users, M2
+four T8 users, keyed (users, rows_per_user) - one table set per user per family, each
+shaped as a rows_per_user-row reader bundles it (`packed_replay(users, rows)`), lent once
+to the block for the pool's life. The block restages every user's table into them before
+each verify, so they are not zeroed.
 """
 
 from types import SimpleNamespace
@@ -91,6 +102,28 @@ DRAFT_LAYERS = 5
 GDN_LAYERS = 48
 SIDES, HEADS = ('active', 'spare'), ('k', 'v')
 BATCH_INPUTS = ('tokens', 'positions', 'pages', 'singleton_pages', 'cos', 'sin')
+# The packed shapes the serving block can take, (users, rows_per_user) in a 32-row block:
+# M1 two T16 users, M2 four T8 users (serving_fast_policy.packed_geometry).
+PACKED_REPLAY_SHAPES = ((2, 16), (4, 8))
+PACKED_BLOCK_ROWS = 32
+
+
+def default_packed_shapes(users):
+    """The packed shapes a pool for `users` scheduler slots can be asked to serve."""
+    return tuple(shape for shape in PACKED_REPLAY_SHAPES if shape[0] <= users)
+
+
+def validate_packed_shapes(shapes):
+    try:
+        shapes = tuple(tuple(shape) for shape in shapes)
+    except TypeError:
+        raise ValueError('Packed replay shapes must be (users, rows_per_user) pairs') from None
+    if (len(set(shapes)) != len(shapes)
+            or any(len(shape) != 2 or any(type(value) is not int for value in shape) or shape[0] < 1
+                   or shape[1] not in (8, 16, 32) or shape[0] * shape[1] > PACKED_BLOCK_ROWS for shape in shapes)):
+        raise ValueError('Packed replay shapes must be distinct (users, rows_per_user) pairs of T8/T16/T32 users '
+                         'within the %d-row block' % PACKED_BLOCK_ROWS)
+    return shapes
 
 
 def overlaps(left, right):
@@ -142,6 +175,39 @@ class BucketSlot:
     def batch_tensors(self):
         return (*(getattr(self.batch, name) for name in BATCH_INPUTS), *self.batch.singleton_positions,
                 *self.replay_tables())
+
+
+class PackedReplayTables:
+    """The packed block's per-user replay page tables for one shape: per family, one table
+    list per user, shaped as that user's rows_per_user-row reader bundles them (M1b,
+    pooled_attention_replay.PackedReplayAttentionReader). Lent once, to the block."""
+
+    def __init__(self, users, rows, replay_pages):
+        self.users, self.rows = users, rows
+        self.replay_pages = {capacity: [list(tables) for tables in per_user] for capacity, per_user in replay_pages.items()}
+        self.taken = False
+        self.tensors = tuple(self.tables())
+
+    def tables(self):
+        """Every table, by family then user then bundle."""
+        return tuple(table for capacity in sorted(self.replay_pages)
+                     for tables in self.replay_pages[capacity] for table in tables)
+
+    def take(self):
+        if self.taken:
+            raise ValueError('The pooled replay page tables for %d x T%d packed users are already lent'
+                             % (self.users, self.rows))
+        self.taken = True
+        return self
+
+    def release(self):
+        self.taken = False
+
+    def describe(self, operations):
+        return dict(users=self.users, rows=self.rows, taken=self.taken,
+            bytes=sum(tensor_bytes(tuple(table.shape), 4) for table in self.tensors),
+            replay_pages={capacity: [[list(addresses(operations, table)) for table in tables] for tables in per_user]
+                          for capacity, per_user in sorted(self.replay_pages.items())})
 
 
 class VerifierSlot:
@@ -229,7 +295,8 @@ class HistorySlot:
 
 class ServingBufferPool:
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
-                 feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None):
+                 feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
+                 packed_shapes=None):
         import torch
 
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
@@ -237,6 +304,10 @@ class ServingBufferPool:
                              % NATIVE_GDN_SLOTS)
         bucket_rows = tuple(bucket_rows)
         if helpers is not None:
+            # The packed block's per-user replay tables: by default every packed shape this
+            # many scheduler slots can fill (serving_runtime passes nothing and builds the M1
+            # block over the same pool), or an explicit tuple of (users, rows_per_user).
+            packed_shapes = validate_packed_shapes(default_packed_shapes(users) if packed_shapes is None else packed_shapes)
             helpers = tuple(helpers)
             if (len(helpers) != GDN_LAYERS or any(not callable(getattr(helper, 'allocate', None)) for helper in helpers)
                     or type(page_width) is not int or page_width < 1
@@ -259,13 +330,17 @@ class ServingBufferPool:
                 raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
                                  % (admitted,))
         elif (page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden
-                or replay_group_rows != 4 or replay_capacities is not None):
+                or replay_group_rows != 4 or replay_capacities is not None or packed_shapes):
             raise ValueError('Verifier storage geometry without the GDN helpers that shape it')
+        else:
+            packed_shapes = ()
         self.operations, self.mesh, self.users = operations, mesh, users
         self.helpers, self.page_width, self.bucket_rows = helpers, page_width, bucket_rows
         self.feature_taps, self.mtp_hidden = feature_taps, mtp_hidden
         self.replay_group_rows, self.replay_capacities = replay_group_rows, replay_capacities
+        self.packed_shapes = packed_shapes
         self.owned, self.slots = [], []
+        self.packed, self.packed_bytes = {}, 0
         self.closed = False
         try:
             protected = []
@@ -333,10 +408,32 @@ class ServingBufferPool:
                     query = allocate(QUERY_SHAPE)
                     verifier = VerifierSlot(snapshot_set(), snapshot_set(), [bucket_slot(rows) for rows in bucket_rows])
                 self.slots.append(HistorySlot(self, index, *pair, kv, query, verifier, counted[0]))
+            # The packed block's per-user replay page tables (PackedReplayTables): per shape,
+            # per family, one (batches, capacity // 64) table per bundle of a rows_per_user-row
+            # reader, for every user of the shape. Not per slot: one block serves them all.
+            for count, rows in packed_shapes:
+                counted[0] = 0
+                integers = dict(dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT, itemsize=4)
+                tables = {capacity: [[allocate((batches, capacity // 64), **integers)
+                                      for batches in bundle_batches(rows, capacity, max_group_rows=replay_group_rows)]
+                                     for user in range(count)]
+                          for capacity in replay_capacities}
+                self.packed[(count, rows)] = PackedReplayTables(count, rows, tables)
+                self.packed_bytes += counted[0]
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
             raise
+
+    def packed_replay(self, users, rows):
+        """The packed block's replay page tables for (users, rows_per_user), to be taken once."""
+        if self.closed:
+            raise ValueError('Closed serving buffer pool cannot lend packed replay page tables')
+        tables = self.packed.get((users, rows))
+        if tables is None:
+            raise ValueError('The pool holds packed replay page tables for shapes %r; %r was asked for'
+                             % (sorted(self.packed), (users, rows)))
+        return tables
 
     def acquire(self, *, owner='unnamed'):
         if self.closed:
@@ -386,7 +483,9 @@ class ServingBufferPool:
                 page_width=self.page_width, bucket_rows=list(self.bucket_rows),
                 gdn_snapshot_sets=2 + len(self.bucket_rows), feature_taps=self.feature_taps,
                 mtp_hidden=self.mtp_hidden, replay_group_rows=self.replay_group_rows,
-                replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes)
+                replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes,
+                packed_shapes=[list(shape) for shape in self.packed_shapes], packed_replay_bytes=self.packed_bytes,
+                packed_replay=[tables.describe(self.operations) for tables in self.packed.values()])
         return report
 
     def close(self):
@@ -398,5 +497,6 @@ class ServingBufferPool:
         release_owned(self.operations, self.owned)
         self.owned.clear()
         self.slots.clear()
+        self.packed.clear()
         if lent:
             raise ValueError('Serving buffer pool closed with slots %r still lent' % lent)

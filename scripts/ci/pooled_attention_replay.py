@@ -29,7 +29,23 @@ serving_page_binding.py and verifier_engine.py see the same reader. The tables c
 through `storage=`, allocated at attach before any trace; the request's page table is
 staged into them at construction the way refresh rewrites them, they are kept in
 `borrowed`, and close() frees only what the base uploaded.
+
+PER USER, FOR THE PACKED BLOCK (M1b). The pinned reader is one user's: one start word,
+one page table repeated per bundle, bundles of four rows over ITS rows. A packed verify
+block (packed_verifier.py) holds several users with different positions and page
+tables, so it cannot be served by one reader - and without a replay reader it ran the
+per-row SerialAttentionReader: 32 serial SDPA launches per full-attention layer at 32K
+context, ~65 ms of the 150.6 ms packed verify against 9.9 ms for the bundled reader
+(docs/batch-spec-tasks-2026-09-19.md, packed-round cost model). PackedReplayAttentionReader
+is the segment-granularity version of the serial reader's own mechanism: one pooled
+reader per user over that user's own start word and page tables, and a (1, block_rows,
+12, 256) query dispatched a segment at a time - slice the user's rows, that user's
+bundles, concatenate the results in row order. The masks are recomputed in-trace from
+each reader's positions word, so per-user masks cost nothing extra; the block restages
+every user's word and tables before each verify (packed_verifier.stage_packed).
 """
+
+from contextlib import ExitStack, contextmanager
 
 from attention_head_fold import parallel_groups
 from attention_mask_replay import validate_ticket
@@ -167,3 +183,164 @@ class PooledReplayAttentionReader(ReplayAttentionReader):
         # tables it was handed still in `owned`.
         self._disown_lent()
         super().close()
+
+
+PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH = 12, 256
+
+
+def validate_segments(segments, block_rows_limit=32):
+    """The packed block's row spans (target_packed_pages.segments): contiguous from row 0,
+    each one a width the pinned reader takes (8, 16 or 32 rows)."""
+    segments = tuple(tuple(span) for span in segments)
+    cursor = 0
+    for span in segments:
+        if (len(span) != 2 or any(type(value) is not int for value in span) or span[0] != cursor
+                or span[1] - span[0] not in (8, 16, 32)):
+            raise ValueError('Packed replay segments must tile the block from row 0 in T8/T16/T32 spans')
+        cursor = span[1]
+    if not segments or cursor > block_rows_limit:
+        raise ValueError('Packed replay segments must fill at most a %d-row block' % block_rows_limit)
+    return segments
+
+
+class PackedReplayAttentionReader:
+    """One replay reader per packed user, each over that user's own positions word and
+    page tables, serving the block's full-attention layers as one adapter.
+
+    `segments` are the pack's row spans in pack order; `tables_host` one (1, >= capacity // 64)
+    host page table per segment; `storage` None (each reader uploads its own tables through
+    `upload`, exactly as the pinned reader does) or one lent table list per segment, in
+    which case each reader is the pooled one and frees none of them. Every reader is
+    captured in the same native chunk family (`capacity`), the block's; a user whose
+    ticket leaves it is refused by that reader's own validate.
+    """
+
+    def __init__(self, operations, mesh, segments, capacity, tables_host, upload, *, storage=None, max_group_rows=4,
+                 short_context=False):
+        self.segments = validate_segments(segments)
+        tables_host = list(tables_host)
+        lent = None if storage is None else [list(tables) for tables in storage]
+        if len(tables_host) != len(self.segments) or (lent is not None and len(lent) != len(self.segments)):
+            raise ValueError('One page table per packed segment required, and one lent table set per segment when pooled')
+        if type(short_context) is not bool or short_context:
+            raise ValueError('Packed replay attention is long-context only')
+        if lent is not None:
+            # Every segment's lent tables against the bundles its reader will take, before
+            # any reader is built: a wrong set refuses the block with nothing staged.
+            if type(capacity) is not int or type(max_group_rows) is not int:
+                raise ValueError('Integer capacity and group width required')
+            first = family_start(capacity, short_context=False)
+            for (begin, end), tables in zip(self.segments, lent, strict=True):
+                validate_ticket(first, end - begin, capacity, short_context=False)
+                validate_storage(operations, tables, parallel_groups(first, end - begin, max_group_rows=max_group_rows), capacity)
+        self.operations, self.mesh, self.capacity = operations, mesh, capacity
+        self.rows = self.segments[-1][1]
+        self.readers = []
+        self.calls = 0
+        self.closed = False
+        self.audit = None
+        try:
+            for index, ((first, last), pages_host) in enumerate(zip(self.segments, tables_host, strict=True)):
+                if lent is None:
+                    reader = ReplayAttentionReader(operations, mesh, last - first, capacity, pages_host, upload,
+                                                   max_group_rows=max_group_rows, short_context=False)
+                else:
+                    reader = PooledReplayAttentionReader(operations, mesh, last - first, capacity, pages_host, upload,
+                                                         storage=lent[index], max_group_rows=max_group_rows,
+                                                         short_context=False)
+                self.readers.append(reader)
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def borrowed(self):
+        """Every pool-lent table of every reader, in segment then bundle order."""
+        return [table for reader in self.readers for table in getattr(reader, 'borrowed', ())]
+
+    @property
+    def metadata(self):
+        """Every reader's (bundle, pages, mask, config) entries, in segment then bundle order."""
+        return [entry for reader in self.readers for entry in reader.metadata]
+
+    @property
+    def starts(self):
+        return tuple(reader.start for reader in self.readers)
+
+    @property
+    def refresh_calls(self):
+        return sum(reader.refresh_calls for reader in self.readers)
+
+    @property
+    def failed(self):
+        return any(reader.failed for reader in self.readers)
+
+    @failed.setter
+    def failed(self, value):
+        for reader in self.readers:
+            reader.failed = value
+
+    def check_open(self):
+        if self.closed:
+            raise RuntimeError('Packed replay reader is closed')
+
+    def validate(self, starts):
+        """Every segment's start against its own reader, host only, before any copy."""
+        self.check_open()
+        starts = tuple(starts)
+        if len(starts) != len(self.readers):
+            raise ValueError('One start per packed segment required')
+        for reader, start in zip(self.readers, starts, strict=True):
+            reader.validate(start)
+
+    def stage(self, starts):
+        """Each reader's positions word, one fenced copy per reader (the pinned stage)."""
+        starts = tuple(starts)
+        self.validate(starts)
+        for reader, start in zip(self.readers, starts, strict=True):
+            reader.stage(start)
+
+    def refresh(self):
+        self.check_open()
+        for reader in self.readers:
+            reader.refresh()
+
+    @contextmanager
+    def shared_masks(self, expected_calls):
+        self.check_open()
+        with ExitStack() as scopes:
+            for reader in self.readers:
+                scopes.enter_context(reader.shared_masks(expected_calls))
+            yield
+
+    def __call__(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
+        self.check_open()
+        if tuple(query.shape) != (1, self.rows, PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH):
+            raise ValueError('Packed replay query geometry changed')
+        operations = self.operations
+        rows, outputs = [], []
+        try:
+            for reader, (first, last) in zip(self.readers, self.segments, strict=True):
+                # This user's rows, the way SerialAttentionReader takes one row: a DRAM slice on
+                # the row axis, so the reader sees exactly its (1, rows, 12, 256) query.
+                selected = operations.slice(query, (0, first, 0, 0), (1, last, PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH),
+                                            memory_config=operations.DRAM_MEMORY_CONFIG)
+                rows.append(selected)
+                outputs.append(reader(selected, keys, values, page_table_tensor=page_table_tensor,
+                                      cur_pos_tensor=cur_pos_tensor, **kwargs))
+            if len(outputs) == 1:
+                result, outputs = outputs[0], []
+            else:
+                result = operations.concat(outputs, dim=1, memory_config=kwargs['memory_config'])
+            self.calls += 1
+            return result
+        finally:
+            for value in (*outputs, *rows):
+                operations.deallocate(value)
+
+    def close(self):
+        if getattr(self, 'closed', True):
+            return
+        for reader in self.readers:
+            reader.close()
+        self.closed = True

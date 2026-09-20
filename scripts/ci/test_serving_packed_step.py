@@ -487,8 +487,9 @@ class RealBlockTests(BlockFixture):
         """A admitted through pool slot 0 with page 7, B through slot 1 with page 11,
         presented B first."""
         stepped = []
-        first = FakeRequest('A', 100, stepped, carry=self.pool.slots[0].verifier.carry)
-        second = FakeRequest('B', 3000, stepped, carry=self.pool.slots[1].verifier.carry)
+        # Both inside the block's native chunk family [4096, 4352), as the serving pin keeps them.
+        first = FakeRequest('A', 4100, stepped, carry=self.pool.slots[0].verifier.carry)
+        second = FakeRequest('B', 4200, stepped, carry=self.pool.slots[1].verifier.carry)
         first.engine.pages = torch.full((1, PAGE_WIDTH), 7, dtype=torch.int32)
         second.engine.pages = torch.full((1, PAGE_WIDTH), 11, dtype=torch.int32)
         first.propose(list(range(0, 16)), accept=15)
@@ -502,14 +503,18 @@ class RealBlockTests(BlockFixture):
         executed = len(self.ttnn.executed)
         outputs = packed_device_step(entries, cancelled=lambda: False, block=block)
         self.assertEqual(stepped, [])
-        self.assertEqual(outputs, [CommittedOutput('B', tuple(range(16, 26)), 3010, False),
-                                   CommittedOutput('A', tuple(range(0, 16)), 116, False)])
-        # B's ticket and pages were staged into segment 1's rows, A's into segment 0's
+        self.assertEqual(outputs, [CommittedOutput('B', tuple(range(16, 26)), 4210, False),
+                                   CommittedOutput('A', tuple(range(0, 16)), 4116, False)])
+        # B's ticket and pages were staged into segment 1's rows, A's into segment 0's -
+        # and into segment 1's and segment 0's own replay reader (its start word and tables)
         fixture = block.fixture
         self.assertEqual(fixture.tokens.value[16:32, 0].tolist(), [5, *range(16, 25), 0, 0, 0, 0, 0, 0])
         self.assertEqual(fixture.tokens.value[:16, 0].tolist(), [5, *range(0, 15)])
         self.assertTrue(bool((fixture.pages.value[16:] == 11).all()) and bool((fixture.pages.value[:16] == 7).all()))
-        self.assertEqual(fixture.positions.value.tolist(), [*range(100, 116), *range(3000, 3016)])
+        self.assertEqual(fixture.positions.value.tolist(), [*range(4100, 4116), *range(4200, 4216)])
+        self.assertEqual(fixture.replay_reader.starts, (4100, 4200))
+        self.assertEqual([bool((entry[1].value == page).all()) for own, page in zip(fixture.replay_reader.readers, (7, 11))
+                          for entry in own.metadata], [True] * 4)
         # B, entry 0, was adopted at segment 1 (its carry is slot 1's); A, entry 1, at segment 0
         self.assertEqual([(ticket.request_id, segment) for ticket, unused, segment in second.engine.adopted], [('B', 1)])
         self.assertEqual([(ticket.request_id, segment) for ticket, unused, segment in first.engine.adopted], [('A', 0)])
