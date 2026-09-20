@@ -252,7 +252,18 @@ def main():
         print(END)
         print(LOG_BEGIN)
         if log_path.is_file():
-            for line in log_path.read_text(errors='replace').splitlines()[-400:]:
+            lines = log_path.read_text(errors='replace').splitlines()
+            # Diagnostic lines first, from the WHOLE log: the attach-time stage line
+            # with the pooled and shared addresses prints thousands of lines before
+            # the tail below, and the container it lives in is discarded.
+            kept = 0
+            for line in lines:
+                if '[PINDIAG]' in line or '"stage"' in line:
+                    print(line[:600])
+                    kept += 1
+                    if kept >= 400:
+                        break
+            for line in lines[-400:]:
                 print(line[:300])
         print(LOG_END)
         sys.stdout.flush()
