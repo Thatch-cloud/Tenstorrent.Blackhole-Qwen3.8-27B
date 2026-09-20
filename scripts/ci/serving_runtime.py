@@ -190,6 +190,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # that every layer ran the fused candidate, which nothing has at attach), and
         # run 35496483954 logged only that, losing the attach failure it was
         # handling. Keep the original: log the closing error and re-raise the first.
+        # And log the failure BEFORE closing: the scopes' exits fence the device
+        # (the block's close, then the admitted runtime's shared-QK scope first), and a
+        # device left hung by the failed attach blocks the first fence for good - run
+        # 35507675630 (image v51) sat in gdn_shared_qk_scope's exit for the rest of its
+        # 900 s with nothing in the log to say so.
+        pindiag('[PINDIAG] attach failed with {}: {}; closing the attach scopes now (the packed block if built, '
+                'the draft weights, the admitted combined runtime from its shared-QK scope, the sampler links, '
+                'the pool) - their exits fence the device, and a hung device blocks the first fence',
+                type(failure).__name__, str(failure)[:300])
         try:
             scopes.close()
         except BaseException as closing:

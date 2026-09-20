@@ -20,13 +20,42 @@ tp_common.create_matmul_1d_decode_progcfg:137-166), per_core_M 1. A 1D mcast_in0
 computes every M tile on every core, so the block rebuilds that config at its rows:
 per_core_M = rows / 32 and out_subblock_h by the builder's own rule, everything else kept
 (two_tile_matmul_1d_progcfg), bound on the model args around the wide forward. One pass
-over the interleaved fused weight (attention/tp.py:65-72). The rest of the prep path is
-row-generic: `_kv_shard_cfg(64)` (:495-512) is an 8x8 height shard, one user per core;
-`_decode_from_prep` (:715-764) runs the block's writer and readers, then
-`_concat_heads_decode` (:375-409, 64 cores) and `_wo_proj` (:230-270), which at 64 rows
-takes its own prefill arm - `create_prefill_mlp_matmul_program_config` at M = 64 on the
-interleaved wo, L1 output - one pass; then tt_all_reduce (ccl.py:169-191 on this mesh: one
-reduce_scatter_minimal_async, shape-agnostic).
+over the interleaved fused weight (attention/tp.py:65-72); run 35507675630 (image v51)
+ran it on the device at per_core_M 2.
+
+Two ops of that path are one tile on the device itself, both found by v51:
+
+- `attn_decode_prep` at batch 64 HANGS: the watcher shows its reader, writer and compute
+  kernels resident with 23 worker cores per chip waiting on a circular buffer the reader
+  never fills at that batch. `prep_by_tile` runs the op once per 32-row tile - the fused
+  projection sliced at row 32 (tile-aligned), the rotary tables sliced per whole tile,
+  `_kv_shard_cfg(32)` (the 8x4 height shard, one user per core), batch=32: the 32-row
+  block's exact op twice - then joins the outputs on the user axis: q and the gate
+  concatenated in DRAM; K and V, height-sharded 32 users per call, each returned to
+  interleaved DRAM and concatenated into the (1, 64, 32, 256) DRAM tensor
+  `_decode_from_prep` hands the block's K/V writer (packed_cache_writer.py), which is the
+  layout that writer converted the 64-shard tensor to anyway before cutting it into its
+  two 32-row tiles; the conversion is now the only step that disappears. The halves are
+  joined rather than handed to the writer directly because `_decode_from_prep` frees its
+  K/V through the real ttnn (attention/tp.py:722-723; attention_batch.serial_tail's
+  Overlay replaces only the `experimental` and `transformer` namespaces), so what the
+  tail receives must be one real tensor.
+- `nlp_concat_heads_decode` refuses batch 64 on the host (TT_FATAL
+  nlp_concat_heads_decode_device_operation.cpp:39: input_shape[1] <= 32).
+  `TwoTileConcatHeads` binds `_concat_heads_decode` on the attention instance for the
+  wide block - `_decode_from_prep` looks it up on `self` at call time (:749) - and runs
+  the model's own method (:375-409) once per 32-user half of the gated SDPA output (a
+  whole-tile slice on the user axis in L1): gx 8 and the 8x4 grid, the 32-row block's
+  exact op twice, the (1, 32, 3072) outputs concatenated on the user axis in L1. The
+  native contract is kept: the input is consumed and freed here, the joined output is
+  the caller's.
+
+The rest of the prep path is row-generic: `_decode_from_prep` (:715-764) runs the
+block's writer and readers, then `_wo_proj` (:230-270), which at 64 rows takes its own
+prefill arm - `create_prefill_mlp_matmul_program_config` at M = 64 on the interleaved wo,
+L1 output - one pass (the same builder result the GDN out-projection ran on v51 in every
+layer before layer 3); then tt_all_reduce (ccl.py:169-191 on this mesh: one
+reduce_scatter_minimal_async, shape-agnostic; v51 ran it at 64 rows).
 
 GDN (gdn/tp.py). The block already replaces `forward_decode` whole
 (model_batch.gdn_forward). The two model-owned projections it calls route themselves
@@ -61,11 +90,10 @@ model_batch.instance_overrides around that block's forward, and counted: ModelBa
 demands one attention forward per full-attention layer and one MLP forward per layer.
 The 32-row block builds none of it.
 
-UNVERIFIED ON HARDWARE until the four-user gate: the 1D fused QKV matmul at per_core_M 2
-on its 64-core grid; attn_decode_prep at batch 64; nlp_concat_heads_decode at 64 users
-(its output is documented as batch padded to 32, attention/tp.py:403-408); the prefill
-2D program configs at M = 64 (wo, gdn in and out, w1, w3, w2), each a new M for a
-builder prefill runs at 128 and above.
+UNVERIFIED ON HARDWARE until the four-user gate: the two prep calls and the two head
+concats inside one 64-row forward and the joins between them; wo at M = 64. Run on the
+device by v51 before layer 3's prep: the fused QKV matmul at per_core_M 2, and the prefill
+2D program configs at M = 64 for the GDN in and out projections and w1, w3, w2.
 """
 
 from model_batch import instance_overrides
@@ -110,11 +138,120 @@ def two_tile_matmul_1d_progcfg(config, rows, operations):
         fuse_batch=True, fused_activation=config.fused_activation, mcast_in0=True)
 
 
+def prep_by_tile(operations, attention, qkv_raw, cos, sin, rows):
+    """ttnn.transformer.attn_decode_prep over the block as one call per 32-row tile, its
+    outputs joined on the user axis (attention/tp.py:535-548 at batch 32, twice).
+
+    The projection (1, 1, rows, width) is sliced at every tile row (aligned starts and
+    ends), the rotary tables (1, rows, 1, rope_dim) per whole tile, and each call takes
+    `_kv_shard_cfg(32)` at batch 32: the 32-row block's exact op. q and the gate come back
+    (1, 32, NH, HD) in DRAM and are concatenated to (1, rows, NH, HD); K and V come back
+    height-sharded one user per core, are returned to interleaved DRAM and concatenated to
+    (1, rows, 32, HD) - the layout the block's segmented K/V writer converts its input to
+    before cutting it into 32-row tiles, so that conversion becomes a no-op. Everything
+    made here but the four joined outputs is freed here; the joined outputs are the
+    caller's, as the native prep's are (`_decode_from_prep` frees them).
+    """
+    validate_two_tile_rows(rows)
+    dram = operations.DRAM_MEMORY_CONFIG
+    shape, rope = tuple(qkv_raw.shape), tuple(cos.shape)
+    if len(shape) != 4 or shape[:3] != (1, 1, rows):
+        raise ValueError('The fused QKV projection of a %d-row block must be (1, 1, %d, width); %r given' % (rows, rows, shape))
+    if len(rope) != 4 or rope[:2] != (1, rows) or tuple(sin.shape) != rope:
+        raise ValueError('The rotary tables of a %d-row block must be a (1, %d, 1, rope_dim) pair; %r and %r given'
+                         % (rows, rows, rope, tuple(sin.shape)))
+    config = attention._kv_shard_cfg(TILE)
+    owned, parts, joined = [], ([], [], [], []), []
+    try:
+        for first in range(0, rows, TILE):
+            last = first + TILE
+            piece = operations.slice(qkv_raw, (0, 0, first, 0), (1, 1, last, shape[3]), memory_config=dram)
+            owned.append(piece)
+            cos_piece = operations.slice(cos, (0, first, 0, 0), (1, last, rope[2], rope[3]), memory_config=dram)
+            owned.append(cos_piece)
+            sin_piece = operations.slice(sin, (0, first, 0, 0), (1, last, rope[2], rope[3]), memory_config=dram)
+            owned.append(sin_piece)
+            outputs = operations.transformer.attn_decode_prep(
+                piece, cos_piece, sin_piece, attention.tw['q_norm'], attention.tw['k_norm'],
+                attention.NH, attention.NKV, attention.HD, attention.rope_dim, config,
+                batch=TILE, memory_config=dram)
+            owned.extend(outputs)
+            q, gate, k_sh, v_sh = outputs
+            parts[0].append(q)
+            parts[1].append(gate)
+            for index, sharded in ((2, k_sh), (3, v_sh)):
+                interleaved = operations.sharded_to_interleaved(sharded, dram)
+                owned.append(interleaved)
+                parts[index].append(interleaved)
+        for pieces in parts:
+            joined.append(operations.concat(pieces, dim=1, memory_config=dram))
+        return tuple(joined)
+    except BaseException:
+        for value in joined:
+            operations.deallocate(value)
+        raise
+    finally:
+        for value in owned:
+            operations.deallocate(value)
+
+
+class TwoTileConcatHeads:
+    """One full-attention layer's `_concat_heads_decode` at the block's users, as two
+    32-user halves through the model's own method (attention/tp.py:375-409), whose op
+    refuses batch 64 on the host. Bound on the attention instance for the wide block;
+    `_decode_from_prep` looks it up on `self` at call time (:749)."""
+
+    def __init__(self, attention, rows, operations):
+        validate_two_tile_rows(rows)
+        native = getattr(type(attention), '_concat_heads_decode', None)
+        if not callable(native):
+            raise ValueError('The attention class no longer defines _concat_heads_decode; the two-tile head concat cannot mirror it')
+        if not getattr(attention, '_use_nlp_decode_heads', False):
+            raise ValueError('The two-tile head concat serves the nlp decode-heads path the serving model runs')
+        self.attention, self.rows, self.operations, self.native = attention, rows, operations, native
+        self.calls = 0
+
+    def __call__(self, gated, B):
+        operations = self.operations
+        shape = tuple(gated.shape)
+        if B != self.rows or len(shape) != 4 or shape[1] != self.rows:
+            raise ValueError('The two-tile head concat was bound for %d users; batch %r over %r given' % (self.rows, B, shape))
+        l1 = operations.L1_MEMORY_CONFIG
+        halves = []
+        try:
+            for first in range(0, self.rows, TILE):
+                halves.append(operations.slice(gated, (0, first, 0, 0), (1, first + TILE, shape[2], shape[3]), memory_config=l1))
+        except BaseException:
+            for half in halves:
+                operations.deallocate(half)
+            raise
+        # The native contract: the input is consumed and freed by the concat.
+        operations.deallocate(gated)
+        outputs = []
+        try:
+            for index, half in enumerate(halves):
+                # The native method frees the half it was given; one that fails leaves its
+                # half in an unknown state, so only the halves not yet handed over are freed.
+                try:
+                    outputs.append(self.native(self.attention, half, TILE))
+                except BaseException:
+                    for remaining in halves[index + 1:]:
+                        operations.deallocate(remaining)
+                    raise
+            joined = operations.concat(outputs, dim=1, memory_config=l1)
+        finally:
+            for value in outputs:
+                operations.deallocate(value)
+        self.calls += 1
+        return joined
+
+
 class TwoTileAttentionDecode:
     """One full-attention layer's forward_decode at the block's rows: the model's fused prep
-    path (attention/tp.py:533-557) - its projection under the rebuilt config, its prep op at
-    the block's batch, then its own `_decode_from_prep`, which the block has bound to its
-    K/V writer and readers."""
+    path (attention/tp.py:533-557) - its projection under the rebuilt config, its prep op
+    once per 32-row tile (prep_by_tile), then its own `_decode_from_prep`, which the block
+    has bound to its K/V writer and readers and which must take the layer's two-tile head
+    concat (`concat`) exactly once."""
 
     def __init__(self, attention, rows, operations, progcfg):
         validate_two_tile_rows(rows)
@@ -135,6 +272,9 @@ class TwoTileAttentionDecode:
             raise ValueError('The attention module no longer exposes integer NH, NKV, HD and rope_dim')
         if not callable(getattr(getattr(operations, 'transformer', None), 'attn_decode_prep', None)):
             raise ValueError('ttnn.transformer.attn_decode_prep is required for the two-tile attention forward')
+        if any(not callable(getattr(operations, name, None)) for name in ('slice', 'concat', 'sharded_to_interleaved')):
+            raise ValueError('ttnn slice, concat and sharded_to_interleaved are required to join the per-tile prep outputs')
+        self.concat = TwoTileConcatHeads(attention, rows, operations)
         self.attention = attention
         self.calls = 0
 
@@ -149,19 +289,22 @@ class TwoTileAttentionDecode:
         rows = self.rows
         qkv_raw = attention._qkv_raw_decode(x)
         try:
-            q, gate, k_sh, v_sh = operations.transformer.attn_decode_prep(
-                qkv_raw, cos_tt, sin_tt, attention.tw['q_norm'], attention.tw['k_norm'],
-                attention.NH, attention.NKV, attention.HD, attention.rope_dim, attention._kv_shard_cfg(rows),
-                batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG)
+            q, gate, k_sh, v_sh = prep_by_tile(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
         finally:
             operations.deallocate(qkv_raw)
+        concats = self.concat.calls
+        result = attention._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, rows)
+        if self.concat.calls - concats != 1:
+            raise AssertionError("The wide block's attention tail must take its two-tile head concat exactly once; "
+                                 "%d taken" % (self.concat.calls - concats))
         self.calls += 1
-        return attention._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, rows)
+        return result
 
 
 class TwoTileAttentionBinding:
-    """The wide block's attention bindings: the rebuilt fused-QKV config on the model args and
-    one two-tile forward per full-attention layer; `calls` counts the forwards."""
+    """The wide block's attention bindings: the rebuilt fused-QKV config on the model args
+    and, per full-attention layer, the two-tile forward and its head concat on the
+    attention instance; `calls` counts the forwards (each of which counted its concat)."""
 
     label = 'full-attention forward'
 
@@ -181,8 +324,9 @@ class TwoTileAttentionBinding:
         self.progcfg = two_tile_matmul_1d_progcfg(native, rows, operations)
         self.forwards = [TwoTileAttentionDecode(attention, rows, operations, self.progcfg) for attention in attentions]
         self.bindings = [(args, 'attn_qkv_decode_1d_progcfg', self.progcfg)]
-        self.bindings.extend((attention, 'forward_decode', forward)
-                             for attention, forward in zip(attentions, self.forwards))
+        for attention, forward in zip(attentions, self.forwards):
+            self.bindings.append((attention, 'forward_decode', forward))
+            self.bindings.append((attention, '_concat_heads_decode', forward.concat))
         self.expected_calls = len(self.forwards)
 
     @property

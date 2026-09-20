@@ -4,12 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from model_batch import instance_overrides
-from two_tile_decode import (TwoTileAttentionBinding, TwoTileAttentionDecode, TwoTileMLPBinding, TwoTileMLPForward,
-                             bind_two_tile_attention, bind_two_tile_mlp, two_tile_matmul_1d_progcfg,
-                             validate_two_tile_rows)
+from two_tile_decode import (TwoTileAttentionBinding, TwoTileAttentionDecode, TwoTileConcatHeads, TwoTileMLPBinding,
+                             TwoTileMLPForward, bind_two_tile_attention, bind_two_tile_mlp, prep_by_tile,
+                             two_tile_matmul_1d_progcfg, validate_two_tile_rows)
 
 
 class FakeTTNN:
+    """Device tensors carry a shape, a name and a placement, so the per-tile prep and the
+    two-half head concat can be checked call by call, free by free."""
+
     DRAM_MEMORY_CONFIG, L1_MEMORY_CONFIG = 'dram', 'l1'
 
     class TensorMemoryLayout:
@@ -19,8 +22,47 @@ class FakeTTNN:
         L1, DRAM = 'l1', 'dram'
 
     def __init__(self):
-        self.deallocated = []
-        self.transformer = SimpleNamespace(attn_decode_prep=Mock(return_value=('q', 'gate', 'k_sh', 'v_sh')))
+        self.deallocated, self.calls = [], []
+        self.transformer = SimpleNamespace(attn_decode_prep=Mock(side_effect=self.prep))
+
+    def tensor(self, shape, name, memory='dram'):
+        return SimpleNamespace(shape=tuple(shape), name=name, memory_config=lambda: memory)
+
+    def prep(self, qkv, cos, sin, q_norm, k_norm, NH, NKV, HD, rope_dim, config, *, batch, memory_config):
+        """The model's op at one tile: q and the gate (1, B, NH, HD) interleaved, K and V
+        (1, B, 32, HD) height-sharded per `config`. At batch 64 the device hung (v51)."""
+        if batch > 32:
+            raise RuntimeError('attn_decode_prep hangs at batch %d' % batch)
+        tag = qkv.name
+        return (self.tensor((1, batch, NH, HD), 'q(%s)' % tag, memory_config),
+                self.tensor((1, batch, NH, HD), 'gate(%s)' % tag, memory_config),
+                self.tensor((1, batch, 32, HD), 'k_sh(%s)' % tag, config),
+                self.tensor((1, batch, 32, HD), 'v_sh(%s)' % tag, config))
+
+    def slice(self, value, start, stop, memory_config=None):
+        shape = tuple(b - a for a, b in zip(start, stop))
+        axes = [index for index, (a, b) in enumerate(zip(start, stop)) if (a, b) != (0, value.shape[index])]
+        axis = axes[0] if axes else 0
+        self.calls.append(('slice', value.name, axis, start[axis], stop[axis], memory_config))
+        return self.tensor(shape, '%s[%d:%d]' % (value.name, start[axis], stop[axis]), memory_config)
+
+    def concat(self, parts, dim, memory_config=None):
+        shape = list(parts[0].shape)
+        shape[dim] = sum(part.shape[dim] for part in parts)
+        self.calls.append(('concat', [part.name for part in parts], dim, memory_config))
+        return self.tensor(shape, 'cat(%s)' % ','.join(part.name for part in parts), memory_config)
+
+    def sharded_to_interleaved(self, value, memory_config):
+        self.calls.append(('interleave', value.name, memory_config))
+        return self.tensor(value.shape, 'il(%s)' % value.name, memory_config)
+
+    def deallocate(self, value):
+        if any(value is seen for seen in self.deallocated):
+            raise AssertionError('Double free of %s' % getattr(value, 'name', value))
+        self.deallocated.append(value)
+
+    def freed(self):
+        return [getattr(value, 'name', value) for value in self.deallocated]
 
     @staticmethod
     def ShardSpec(grid, shape, orientation):
@@ -46,9 +88,6 @@ class FakeTTNN:
                                per_core_N=per_core_N, fuse_batch=fuse_batch, fused_activation=fused_activation,
                                mcast_in0=mcast_in0)
 
-    def deallocate(self, value):
-        self.deallocated.append(value)
-
 
 def one_tile_progcfg(ttnn, grid=(8, 8), in0_block_w=8, out_subblock_w=1, per_core_N=2, fused_activation=None,
                      per_core_M=1, out_subblock_h=1, fuse_batch=True, mcast_in0=True):
@@ -59,13 +98,38 @@ def one_tile_progcfg(ttnn, grid=(8, 8), in0_block_w=8, out_subblock_w=1, per_cor
         fused_activation=fused_activation, mcast_in0=mcast_in0)
 
 
-def fake_attention(args, rows=64, prep_layout=True):
-    attention = SimpleNamespace(args=args, use_paged=True, _fused_qkv=True, tw={'q_norm': 'qn', 'k_norm': 'kn'},
-                                NH=12, NKV=2, HD=256, rope_dim=64)
-    attention._qkv_raw_decode = Mock(return_value='qkv_raw')
-    attention._kv_shard_cfg = Mock(side_effect=lambda batch: 'kv-shard-%d' % batch)
-    attention._decode_from_prep = Mock(return_value='attention-output')
-    return attention
+class FakeAttention:
+    """The TPAttention surface the two-tile forward touches. `_decode_from_prep` stands for the
+    block-bound tail: it calls the head concat on `self`, as the model's does (attention/tp.py:749)."""
+
+    def __init__(self, args, ttnn, *, nlp_heads=True):
+        self.args, self.ttnn = args, ttnn
+        self.use_paged, self._fused_qkv, self._use_nlp_decode_heads = True, True, nlp_heads
+        self.tw = {'q_norm': 'qn', 'k_norm': 'kn'}
+        self.NH, self.NKV, self.HD, self.rope_dim = 12, 2, 256, 64
+        self._qkv_raw_decode = Mock(side_effect=lambda x: ttnn.tensor((1, 1, x.shape[-2], 7168), 'qkv_raw'))
+        self._kv_shard_cfg = Mock(side_effect=lambda batch: 'kv-shard-%d' % batch)
+        self._decode_from_prep = Mock(side_effect=self.tail)
+        self.native_concats = []
+
+    def tail(self, q, gate, k_sh, v_sh, positions, pages, B):
+        gated = self.ttnn.tensor((1, B, self.NH, self.HD), 'gated', 'l1')
+        flat = self._concat_heads_decode(gated, B)
+        self.ttnn.deallocate(flat)
+        return 'attention-output'
+
+    def _concat_heads_decode(self, gated, B):
+        """The model's method: consumes and frees its input, emits (1, B, NH * HD) in L1; its
+        op refuses more than one tile of users (v51's host raise)."""
+        if B > 32:
+            raise RuntimeError('TT_FATAL nlp_concat_heads_decode_device_operation.cpp:39: input_shape[1] <= 32')
+        self.native_concats.append((gated.name, B))
+        self.ttnn.deallocate(gated)
+        return self.ttnn.tensor((1, B, self.NH * self.HD), 'heads(%s)' % gated.name, 'l1')
+
+
+def fake_attention(args, ttnn, **options):
+    return FakeAttention(args, ttnn, **options)
 
 
 def fake_mlp(devices=2):
@@ -93,9 +157,14 @@ def fake_model(ttnn, layers=64, full=(3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 
     for index in range(layers):
         is_full = index in full
         model.layers.append(SimpleNamespace(is_full_attention=is_full,
-                                            attention=fake_attention(args) if is_full else SimpleNamespace(args=args),
+                                            attention=fake_attention(args, ttnn) if is_full else SimpleNamespace(args=args),
                                             feed_forward=fake_mlp()))
     return model
+
+
+def block_inputs(ttnn, rows=64):
+    return (SimpleNamespace(shape=(1, 1, rows, 5120)), 'positions',
+            ttnn.tensor((1, rows, 1, 64), 'cos'), ttnn.tensor((1, rows, 1, 64), 'sin'))
 
 
 class ProgramConfigTests(unittest.TestCase):
@@ -139,70 +208,253 @@ class ProgramConfigTests(unittest.TestCase):
 
 
 class AttentionForwardTests(unittest.TestCase):
-    def test_the_forward_is_the_models_prep_path_at_the_blocks_rows(self):
-        ttnn = FakeTTNN()
+    """The forward at 64 rows: the projection once, the prep per 32-row tile, the outputs joined,
+    the tail once with the joined outputs, and the tail's head concat as two halves."""
+
+    def forward(self, ttnn=None, rows=64, **options):
+        ttnn = ttnn or FakeTTNN()
         args = SimpleNamespace(proj_1d_decode=True)
-        attention = fake_attention(args)
+        attention = fake_attention(args, ttnn, **options)
         progcfg = two_tile_matmul_1d_progcfg(one_tile_progcfg(ttnn), 64, ttnn)
         args.attn_qkv_decode_1d_progcfg = progcfg
-        forward = TwoTileAttentionDecode(attention, 64, ttnn, progcfg)
-        x = SimpleNamespace(shape=(1, 1, 64, 5120))
-        self.assertEqual(forward(x, 'positions', 'cos', 'sin', page_table='pages'), 'attention-output')
+        return ttnn, attention, TwoTileAttentionDecode(attention, rows, ttnn, progcfg)
+
+    def test_the_forward_is_the_models_prep_path_once_per_tile_then_its_tail_with_the_joined_outputs(self):
+        ttnn, attention, forward = self.forward()
+        x, positions, cos, sin = block_inputs(ttnn)
+        with instance_overrides([(attention, '_concat_heads_decode', forward.concat)]):
+            self.assertEqual(forward(x, positions, cos, sin, page_table='pages'), 'attention-output')
         attention._qkv_raw_decode.assert_called_once_with(x)
-        attention._kv_shard_cfg.assert_called_once_with(64)
-        ttnn.transformer.attn_decode_prep.assert_called_once_with(
-            'qkv_raw', 'cos', 'sin', 'qn', 'kn', 12, 2, 256, 64, 'kv-shard-64', batch=64, memory_config='dram')
-        self.assertEqual(ttnn.deallocated, ['qkv_raw'])
-        attention._decode_from_prep.assert_called_once_with('q', 'gate', 'k_sh', 'v_sh', 'positions', 'pages', 64)
-        self.assertEqual(forward.calls, 1)
-        # the prep tail is whatever is bound on the instance at call time: the block's writer and readers
-        attention._decode_from_prep = Mock(return_value='bound-tail')
-        self.assertEqual(forward(x, 'positions', 'cos', 'sin', page_table='pages'), 'bound-tail')
-        self.assertEqual(forward.calls, 2)
+        # the K/V shard is the 32-row block's (8x4, one user per core), never a 64-user one
+        attention._kv_shard_cfg.assert_called_once_with(32)
+        prep = ttnn.transformer.attn_decode_prep
+        self.assertEqual(prep.call_count, 2)
+        for call, (first, last) in zip(prep.call_args_list, ((0, 32), (32, 64))):
+            piece, cos_piece, sin_piece = call.args[:3]
+            self.assertEqual((piece.shape, piece.name), ((1, 1, 32, 7168), 'qkv_raw[%d:%d]' % (first, last)))
+            self.assertEqual((cos_piece.shape, cos_piece.name), ((1, 32, 1, 64), 'cos[%d:%d]' % (first, last)))
+            self.assertEqual((sin_piece.shape, sin_piece.name), ((1, 32, 1, 64), 'sin[%d:%d]' % (first, last)))
+            self.assertEqual(call.args[3:], ('qn', 'kn', 12, 2, 256, 64, 'kv-shard-32'))
+            self.assertEqual(call.kwargs, dict(batch=32, memory_config='dram'))
+        # every slice is whole tiles: the projection at its tile rows, the tables and the gated
+        # SDPA output per 32-user tile
+        self.assertEqual([entry for entry in ttnn.calls if entry[0] == 'slice'],
+                         [('slice', 'qkv_raw', 2, 0, 32, 'dram'), ('slice', 'cos', 1, 0, 32, 'dram'),
+                          ('slice', 'sin', 1, 0, 32, 'dram'), ('slice', 'qkv_raw', 2, 32, 64, 'dram'),
+                          ('slice', 'cos', 1, 32, 64, 'dram'), ('slice', 'sin', 1, 32, 64, 'dram'),
+                          ('slice', 'gated', 1, 0, 32, 'l1'), ('slice', 'gated', 1, 32, 64, 'l1')])
+        # K and V back to interleaved DRAM per tile, then every output joined on the user axis
+        self.assertEqual([entry for entry in ttnn.calls if entry[0] == 'interleave'],
+                         [('interleave', 'k_sh(qkv_raw[0:32])', 'dram'), ('interleave', 'v_sh(qkv_raw[0:32])', 'dram'),
+                          ('interleave', 'k_sh(qkv_raw[32:64])', 'dram'), ('interleave', 'v_sh(qkv_raw[32:64])', 'dram')])
+        self.assertEqual([entry for entry in ttnn.calls if entry[0] == 'concat'],
+                         [('concat', ['q(qkv_raw[0:32])', 'q(qkv_raw[32:64])'], 1, 'dram'),
+                          ('concat', ['gate(qkv_raw[0:32])', 'gate(qkv_raw[32:64])'], 1, 'dram'),
+                          ('concat', ['il(k_sh(qkv_raw[0:32]))', 'il(k_sh(qkv_raw[32:64]))'], 1, 'dram'),
+                          ('concat', ['il(v_sh(qkv_raw[0:32]))', 'il(v_sh(qkv_raw[32:64]))'], 1, 'dram'),
+                          ('concat', ['heads(gated[0:32])', 'heads(gated[32:64])'], 1, 'l1')])
+        tail = attention._decode_from_prep
+        tail.assert_called_once()
+        q, gate, k, v, positions_given, pages, batch = tail.call_args.args
+        self.assertEqual([(value.shape, value.memory_config()) for value in (q, gate, k, v)],
+                         [((1, 64, 12, 256), 'dram'), ((1, 64, 12, 256), 'dram'),
+                          ((1, 64, 32, 256), 'dram'), ((1, 64, 32, 256), 'dram')])
+        self.assertEqual((positions_given, pages, batch), ('positions', 'pages', 64))
+        # the tail's head concat ran as two 32-user halves of the model's own method
+        self.assertEqual(attention.native_concats, [('gated[0:32]', 32), ('gated[32:64]', 32)])
+        self.assertEqual((forward.calls, forward.concat.calls), (1, 1))
+        # freed here: the projection, its tile pieces, the table pieces, every per-tile prep output
+        # and interleaved half, and the concat's input, halves and half outputs; the four joined
+        # prep outputs are the tail's (the fake tail frees only its flat heads)
+        freed = ttnn.freed()
+        for name in ('qkv_raw', 'qkv_raw[0:32]', 'qkv_raw[32:64]', 'cos[0:32]', 'cos[32:64]', 'sin[0:32]', 'sin[32:64]',
+                     'q(qkv_raw[0:32])', 'gate(qkv_raw[0:32])', 'k_sh(qkv_raw[0:32])', 'v_sh(qkv_raw[0:32])',
+                     'q(qkv_raw[32:64])', 'gate(qkv_raw[32:64])', 'k_sh(qkv_raw[32:64])', 'v_sh(qkv_raw[32:64])',
+                     'il(k_sh(qkv_raw[0:32]))', 'il(v_sh(qkv_raw[0:32]))', 'il(k_sh(qkv_raw[32:64]))',
+                     'il(v_sh(qkv_raw[32:64]))', 'gated', 'gated[0:32]', 'gated[32:64]',
+                     'heads(gated[0:32])', 'heads(gated[32:64])'):
+            self.assertIn(name, freed)
+        self.assertEqual([name for name in freed if name.startswith('cat(')], ['cat(heads(gated[0:32]),heads(gated[32:64]))'])
 
-    def test_a_forward_refuses_the_wrong_rows_an_unpaged_call_or_an_unbound_config_and_frees_the_projection(self):
-        ttnn = FakeTTNN()
-        args = SimpleNamespace(proj_1d_decode=True)
-        attention = fake_attention(args)
-        progcfg = two_tile_matmul_1d_progcfg(one_tile_progcfg(ttnn), 64, ttnn)
-        args.attn_qkv_decode_1d_progcfg = progcfg
-        forward = TwoTileAttentionDecode(attention, 64, ttnn, progcfg)
+    def test_a_tail_that_skips_the_head_concat_is_refused(self):
+        ttnn, attention, forward = self.forward()
+        attention._decode_from_prep = Mock(return_value='no-concat')
+        x, positions, cos, sin = block_inputs(ttnn)
+        with self.assertRaisesRegex(AssertionError, 'two-tile head concat exactly once; 0 taken'):
+            forward(x, positions, cos, sin, page_table='pages')
+        self.assertEqual(forward.calls, 0)
+
+    def test_a_failed_second_prep_frees_the_first_tiles_outputs_the_pieces_and_the_projection(self):
+        ttnn, attention, forward = self.forward()
+        seen = []
+
+        def prep(qkv, *args, **kwargs):
+            seen.append(qkv.name)
+            if len(seen) == 2:
+                raise RuntimeError('second tile refused')
+            return ttnn.prep(qkv, *args, **kwargs)
+
+        ttnn.transformer.attn_decode_prep = Mock(side_effect=prep)
+        x, positions, cos, sin = block_inputs(ttnn)
+        with self.assertRaisesRegex(RuntimeError, 'second tile refused'):
+            forward(x, positions, cos, sin, page_table='pages')
+        freed = ttnn.freed()
+        for name in ('qkv_raw', 'qkv_raw[0:32]', 'qkv_raw[32:64]', 'cos[0:32]', 'cos[32:64]', 'sin[0:32]', 'sin[32:64]',
+                     'q(qkv_raw[0:32])', 'gate(qkv_raw[0:32])', 'k_sh(qkv_raw[0:32])', 'v_sh(qkv_raw[0:32])',
+                     'il(k_sh(qkv_raw[0:32]))', 'il(v_sh(qkv_raw[0:32]))'):
+            self.assertIn(name, freed)
+        self.assertFalse(any(entry[0] == 'concat' for entry in ttnn.calls))
+        attention._decode_from_prep.assert_not_called()
+        self.assertEqual(forward.calls, 0)
+
+    def test_a_failed_join_frees_what_was_joined_so_far(self):
+        ttnn, attention, forward = self.forward()
+        original = ttnn.concat
+
+        def concat(parts, dim, memory_config=None):
+            if parts[0].name.startswith('gate('):
+                raise RuntimeError('join refused')
+            return original(parts, dim, memory_config)
+
+        ttnn.concat = concat
+        x, positions, cos, sin = block_inputs(ttnn)
+        with self.assertRaisesRegex(RuntimeError, 'join refused'):
+            forward(x, positions, cos, sin, page_table='pages')
+        self.assertIn('cat(q(qkv_raw[0:32]),q(qkv_raw[32:64]))', ttnn.freed())
+        self.assertIn('qkv_raw', ttnn.freed())
+        attention._decode_from_prep.assert_not_called()
+        self.assertEqual(forward.calls, 0)
+
+    def test_prep_by_tile_refuses_the_wrong_projection_or_table_geometry(self):
+        ttnn, attention, forward = self.forward()
+        cos, sin = ttnn.tensor((1, 64, 1, 64), 'cos'), ttnn.tensor((1, 64, 1, 64), 'sin')
+        with self.assertRaisesRegex(ValueError, 'fused QKV projection of a 64-row block'):
+            prep_by_tile(ttnn, attention, ttnn.tensor((1, 1, 32, 7168), 'qkv_raw'), cos, sin, 64)
+        with self.assertRaisesRegex(ValueError, 'rotary tables of a 64-row block'):
+            prep_by_tile(ttnn, attention, ttnn.tensor((1, 1, 64, 7168), 'qkv_raw'), ttnn.tensor((1, 32, 1, 64), 'cos'), sin, 64)
+        with self.assertRaisesRegex(ValueError, 'rotary tables of a 64-row block'):
+            prep_by_tile(ttnn, attention, ttnn.tensor((1, 1, 64, 7168), 'qkv_raw'), cos, ttnn.tensor((1, 64, 1, 32), 'sin'), 64)
+        with self.assertRaisesRegex(ValueError, 'beyond one tile'):
+            prep_by_tile(ttnn, attention, ttnn.tensor((1, 1, 32, 7168), 'qkv_raw'), cos, sin, 32)
+        ttnn.transformer.attn_decode_prep.assert_not_called()
+        self.assertEqual(ttnn.deallocated, [])
+
+    def test_a_forward_refuses_the_wrong_rows_an_unpaged_call_or_an_unbound_config_before_any_op(self):
+        ttnn, attention, forward = self.forward()
+        x, positions, cos, sin = block_inputs(ttnn)
         with self.assertRaisesRegex(ValueError, 'bound for 64 rows'):
-            forward(SimpleNamespace(shape=(1, 1, 32, 5120)), 'p', 'c', 's', page_table='pages')
+            forward(SimpleNamespace(shape=(1, 1, 32, 5120)), positions, cos, sin, page_table='pages')
         with self.assertRaisesRegex(ValueError, 'paged decode only'):
-            forward(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's')
-        args.attn_qkv_decode_1d_progcfg = one_tile_progcfg(ttnn)
+            forward(x, positions, cos, sin)
+        attention.args.attn_qkv_decode_1d_progcfg = one_tile_progcfg(ttnn)
         with self.assertRaisesRegex(AssertionError, 'not bound on the model args'):
-            forward(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's', page_table='pages')
+            forward(x, positions, cos, sin, page_table='pages')
         attention._qkv_raw_decode.assert_not_called()
-        self.assertEqual(forward.calls, 0)
-        args.attn_qkv_decode_1d_progcfg = progcfg
-        ttnn.transformer.attn_decode_prep = Mock(side_effect=RuntimeError('prep failed'))
-        with self.assertRaisesRegex(RuntimeError, 'prep failed'):
-            forward(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's', page_table='pages')
-        self.assertEqual(ttnn.deallocated, ['qkv_raw'])
+        ttnn.transformer.attn_decode_prep.assert_not_called()
         self.assertEqual(forward.calls, 0)
 
-    def test_construction_needs_the_paged_fused_1d_attention_the_serving_model_runs(self):
+    def test_construction_needs_the_paged_fused_1d_nlp_heads_attention_the_serving_model_runs(self):
         ttnn = FakeTTNN()
         progcfg = one_tile_progcfg(ttnn)
         for name, value, message in (('use_paged', False, 'paged fused-QKV'), ('_fused_qkv', False, 'paged fused-QKV'),
                                      ('tw', {'q_norm': 'qn'}, 'q_norm and k_norm'), ('NH', 0, 'integer NH'),
-                                     ('_decode_from_prep', None, 'no longer exposes _decode_from_prep')):
-            attention = fake_attention(SimpleNamespace(proj_1d_decode=True))
+                                     ('_decode_from_prep', None, 'no longer exposes _decode_from_prep'),
+                                     ('_use_nlp_decode_heads', False, 'nlp decode-heads path')):
+            attention = fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn)
             setattr(attention, name, value)
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
                 TwoTileAttentionDecode(attention, 64, ttnn, progcfg)
         with self.assertRaisesRegex(ValueError, '1D decode projection'):
-            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=False)), 64, ttnn, progcfg)
+            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=False), ttnn), 64, ttnn, progcfg)
         with self.assertRaisesRegex(ValueError, 'attn_decode_prep is required'):
-            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True)), 64, SimpleNamespace(), progcfg)
+            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn), 64, SimpleNamespace(), progcfg)
+        bare = SimpleNamespace(transformer=ttnn.transformer, slice=ttnn.slice, concat=ttnn.concat)
+        with self.assertRaisesRegex(ValueError, 'slice, concat and sharded_to_interleaved'):
+            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn), 64, bare, progcfg)
+
+        class NoConcat(FakeAttention):
+            _concat_heads_decode = None
+
+        with self.assertRaisesRegex(ValueError, 'no longer defines _concat_heads_decode'):
+            TwoTileAttentionDecode(NoConcat(SimpleNamespace(proj_1d_decode=True), ttnn), 64, ttnn, progcfg)
         with self.assertRaisesRegex(ValueError, 'beyond one tile'):
-            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True)), 32, ttnn, progcfg)
+            TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn), 32, ttnn, progcfg)
+
+
+class ConcatHeadsTests(unittest.TestCase):
+    """The head concat at 64 users: two 32-user halves of the model's own method, whose op
+    refuses more than one tile (v51), joined on the user axis in L1."""
+
+    def concat(self, ttnn=None, cls=FakeAttention):
+        ttnn = ttnn or FakeTTNN()
+        attention = cls(SimpleNamespace(proj_1d_decode=True), ttnn)
+        return ttnn, attention, TwoTileConcatHeads(attention, 64, ttnn)
+
+    def test_two_halves_of_the_models_method_joined_on_the_user_axis(self):
+        ttnn, attention, concat = self.concat()
+        gated = ttnn.tensor((1, 64, 12, 256), 'gated', 'l1')
+        joined = concat(gated, 64)
+        self.assertEqual((joined.shape, joined.memory_config()), ((1, 64, 3072), 'l1'))
+        self.assertEqual([entry for entry in ttnn.calls if entry[0] == 'slice'],
+                         [('slice', 'gated', 1, 0, 32, 'l1'), ('slice', 'gated', 1, 32, 64, 'l1')])
+        self.assertEqual(attention.native_concats, [('gated[0:32]', 32), ('gated[32:64]', 32)])
+        self.assertEqual([entry for entry in ttnn.calls if entry[0] == 'concat'],
+                         [('concat', ['heads(gated[0:32])', 'heads(gated[32:64])'], 1, 'l1')])
+        # consumed: the input (the native contract), each half (by the native method), each
+        # half's output once joined; the joined output is the caller's
+        self.assertEqual(ttnn.freed(), ['gated', 'gated[0:32]', 'gated[32:64]', 'heads(gated[0:32])', 'heads(gated[32:64])'])
+        self.assertEqual(concat.calls, 1)
+
+    def test_the_batch_and_the_shape_must_be_the_blocks(self):
+        ttnn, attention, concat = self.concat()
+        for shape, batch in (((1, 32, 12, 256), 32), ((1, 64, 12, 256), 32), ((1, 32, 12, 256), 64), ((64, 12, 256), 64)):
+            with self.subTest(shape=shape, batch=batch), self.assertRaisesRegex(ValueError, 'bound for 64 users'):
+                concat(ttnn.tensor(shape, 'gated', 'l1'), batch)
+        self.assertEqual((ttnn.calls, ttnn.deallocated, attention.native_concats, concat.calls), ([], [], [], 0))
+
+    def test_a_native_failure_frees_only_the_halves_not_yet_handed_over_and_never_twice(self):
+        class FailsFirst(FakeAttention):
+            def _concat_heads_decode(self, gated, B):
+                raise RuntimeError('concat refused')
+
+        ttnn, attention, concat = self.concat(cls=FailsFirst)
+        with self.assertRaisesRegex(RuntimeError, 'concat refused'):
+            concat(ttnn.tensor((1, 64, 12, 256), 'gated', 'l1'), 64)
+        # the input (consumed) and the second half (never handed over); the failing half's
+        # state is the native method's to know, so it is left alone
+        self.assertEqual(ttnn.freed(), ['gated', 'gated[32:64]'])
+        self.assertEqual(concat.calls, 0)
+
+        class FailsSecond(FakeAttention):
+            def _concat_heads_decode(self, gated, B):
+                if self.native_concats:
+                    raise RuntimeError('second concat refused')
+                return super()._concat_heads_decode(gated, B)
+
+        ttnn, attention, concat = self.concat(cls=FailsSecond)
+        with self.assertRaisesRegex(RuntimeError, 'second concat refused'):
+            concat(ttnn.tensor((1, 64, 12, 256), 'gated', 'l1'), 64)
+        # the first half's output is freed on the way out; nothing was joined
+        self.assertEqual(ttnn.freed(), ['gated', 'gated[0:32]', 'heads(gated[0:32])'])
+        self.assertFalse(any(entry[0] == 'concat' for entry in ttnn.calls))
+        self.assertEqual(concat.calls, 0)
+
+    def test_construction_needs_the_nlp_heads_path_and_the_native_method(self):
+        ttnn = FakeTTNN()
+        with self.assertRaisesRegex(ValueError, 'nlp decode-heads path'):
+            TwoTileConcatHeads(FakeAttention(SimpleNamespace(), ttnn, nlp_heads=False), 64, ttnn)
+
+        class NoConcat(FakeAttention):
+            _concat_heads_decode = None
+
+        with self.assertRaisesRegex(ValueError, 'no longer defines _concat_heads_decode'):
+            TwoTileConcatHeads(NoConcat(SimpleNamespace(), ttnn), 64, ttnn)
+        with self.assertRaisesRegex(ValueError, 'beyond one tile'):
+            TwoTileConcatHeads(FakeAttention(SimpleNamespace(), ttnn), 32, ttnn)
 
 
 class AttentionBindingTests(unittest.TestCase):
-    def test_the_binding_is_the_rebuilt_config_on_the_args_and_one_forward_per_full_attention_layer(self):
+    def test_the_binding_is_the_rebuilt_config_on_the_args_and_a_forward_and_a_head_concat_per_full_attention_layer(self):
         ttnn = FakeTTNN()
         model = fake_model(ttnn)
         native = model.args.attn_qkv_decode_1d_progcfg
@@ -213,16 +465,26 @@ class AttentionBindingTests(unittest.TestCase):
         self.assertEqual(binding.progcfg.per_core_M, 2)
         self.assertEqual(binding.bindings[0], (model.args, 'attn_qkv_decode_1d_progcfg', binding.progcfg))
         full = [layer.attention for layer in model.layers if layer.is_full_attention]
-        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]],
-                         [(attention, 'forward_decode') for attention in full])
-        self.assertTrue(all(isinstance(value, TwoTileAttentionDecode) for instance, name, value in binding.bindings[1:]))
+        expected = []
+        for attention in full:
+            expected += [(attention, 'forward_decode'), (attention, '_concat_heads_decode')]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected)
+        forwards = [value for instance, name, value in binding.bindings[1:] if name == 'forward_decode']
+        concats = [value for instance, name, value in binding.bindings[1:] if name == '_concat_heads_decode']
+        self.assertTrue(all(isinstance(value, TwoTileAttentionDecode) for value in forwards))
+        self.assertEqual(concats, [forward.concat for forward in forwards])
+        self.assertTrue(all(isinstance(value, TwoTileConcatHeads) for value in concats))
         with instance_overrides(binding.bindings):
             self.assertIs(model.args.attn_qkv_decode_1d_progcfg, binding.progcfg)
             for attention in full:
-                attention.forward_decode(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's', page_table='pages')
+                x, positions, cos, sin = block_inputs(ttnn)
+                attention.forward_decode(x, positions, cos, sin, page_table='pages')
             self.assertEqual(binding.calls, 16)
+            self.assertEqual(sum(forward.concat.calls for forward in forwards), 16)
         self.assertIs(model.args.attn_qkv_decode_1d_progcfg, native)
-        self.assertFalse(any('forward_decode' in attention.__dict__ for attention in full))
+        self.assertFalse(any(name in attention.__dict__ for attention in full for name in ('forward_decode', '_concat_heads_decode')))
+        # every layer's tail concatenated its heads as two halves of the model's method
+        self.assertTrue(all(attention.native_concats == [('gated[0:32]', 32), ('gated[32:64]', 32)] for attention in full))
 
     def test_a_model_without_full_attention_layers_or_with_foreign_args_is_refused(self):
         ttnn = FakeTTNN()
@@ -371,13 +633,17 @@ class ModelBatchWiringTests(unittest.TestCase):
         decode = DECODE
         seen = dict(block_h=[], fusion=[])
 
+        def attend(layer):
+            x, positions, cos, sin = block_inputs(ttnn)
+            return layer.attention.forward_decode(x, positions, cos, sin, page_table='pages')
+
         def forward(*args, **kwargs):
             fixture.gdn_calls += 48
             for layer in model.layers:
                 for unused in range(2):
                     seen['block_h'].append(model.args.get_norm_config('attn', decode)['sharded_program_config'].block_h)
                 if layer.is_full_attention:
-                    layer.attention.forward_decode(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's', page_table='pages')
+                    attend(layer)
                 layer.feed_forward.forward(SimpleNamespace(shape=(1, 1, 64, 5120)))
                 seen['fusion'].append(layer.feed_forward.seen[-1])
             seen['block_h'].append(model.args.get_norm_config('lm_head', decode)['sharded_program_config'].block_h)
@@ -387,14 +653,17 @@ class ModelBatchWiringTests(unittest.TestCase):
         self.assertEqual(fixture.run(), 'logits')
         self.assertEqual(seen, dict(block_h=[2] * 7, fusion=[False] * 3))
         self.assertEqual([binder.calls for binder in two_tile], [7, 1, 3])
+        # the attention tail took the two-half head concat under the binding
+        self.assertEqual(model.layers[1].attention.native_concats, [('gated[0:32]', 32), ('gated[32:64]', 32)])
         # everything is off again outside the forward
         self.assertEqual(model.args.get_norm_config('attn', decode)['sharded_program_config'].block_h, 1)
         self.assertEqual(model.args.attn_qkv_decode_1d_progcfg.per_core_M, 1)
         self.assertTrue(all(layer.feed_forward._fuse_gateup_agmm is True for layer in model.layers))
+        self.assertFalse('_concat_heads_decode' in model.layers[1].attention.__dict__)
         # a forward that skips one MLP is refused by count, naming the binder
         short = Mock(side_effect=lambda *a, **k: (setattr(fixture, 'gdn_calls', fixture.gdn_calls + 48),
                                                    [model.args.get_norm_config('attn', decode) for unused in range(7)],
-                                                   model.layers[1].attention.forward_decode(SimpleNamespace(shape=(1, 1, 64, 5120)), 'p', 'c', 's', page_table='pages'),
+                                                   attend(model.layers[1]),
                                                    [layer.feed_forward.forward(SimpleNamespace(shape=(1, 1, 64, 5120))) for layer in model.layers[:2]]))
         fixture.model = SimpleNamespace(_forward_decode=short)
         with self.assertRaisesRegex(AssertionError, 'Every MLP forward of the wide block must take its two-tile form: 2 engaged, 3 expected'):

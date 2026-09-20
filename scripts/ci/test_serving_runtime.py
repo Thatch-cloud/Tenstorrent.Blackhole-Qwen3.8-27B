@@ -20,8 +20,19 @@ SHAPES = {2: m1_shape(68), 4: m3_shape(68)}
 
 
 class RuntimeAttachmentTests(unittest.TestCase):
-    def exercise(self, fail=False, packed=False, users=1):
+    ATTACH_FAILED = ('[PINDIAG] attach failed with RuntimeError: attach failed; closing the attach scopes now (the '
+                     'packed block if built, the draft weights, the admitted combined runtime from its shared-QK '
+                     'scope, the sampler links, the pool) - their exits fence the device, and a hung device blocks '
+                     'the first fence')
+
+    def exercise(self, fail=False, packed=False, users=1, attach_fail=False):
         events = []
+
+        def diag(template, *values):
+            # the attach-failed line lands among the events, so its place before the scope
+            # closes is checked; every other line is inspected through the mock
+            if template.startswith('[PINDIAG] attach failed'):
+                events.append(('diag', template.format(*values)))
         shape = SHAPES.get(users) if packed else None
         built = shape is not None
         model = SimpleNamespace(args=object(), mesh_device=object(),
@@ -74,10 +85,11 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 patch.object(serving_runtime, 'ServingCacheOwner'), \
                 patch.object(serving_runtime, 'ServingBufferPool', side_effect=build_pool) as pooled, \
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
-                patch.object(serving_runtime, 'pindiag') as diagnostic, \
+                patch.object(serving_runtime, 'pindiag', side_effect=diag) as diagnostic, \
                 patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
-                patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle) as install, \
+                patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle,
+                             side_effect=RuntimeError('attach failed') if attach_fail else None) as install, \
                 patch('sys.stdout', new_callable=io.StringIO) as out:
             try:
                 with serving_runtime.attach_combined_runtime(worker, operations, directory='.', runtime_root='.',
@@ -160,10 +172,18 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 # Pool first and closed last; weights inside the admitted runtime; both
                 # outlive the lifecycle that lends them to devices. The block, when built,
                 # comes after the weights and before the lifecycle, and closes between them.
-                self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
-                                          *(['block_build'] if built else []), 'request', 'lifecycle_close',
-                                          *(['block_close'] if built else []), 'weights_close', 'runtime_exit',
-                                          'pool_close'])
+                # An attach that fails logs the failure BEFORE any scope closes (their exits
+                # fence the device, which a failed attach may have left hung: run 35507675630).
+                if attach_fail:
+                    self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                                              *(['block_build'] if built else []), ('diag', self.ATTACH_FAILED),
+                                              *(['block_close'] if built else []), 'weights_close', 'runtime_exit',
+                                              'pool_close'])
+                else:
+                    self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                                              *(['block_build'] if built else []), 'request', 'lifecycle_close',
+                                              *(['block_close'] if built else []), 'weights_close', 'runtime_exit',
+                                              'pool_close'])
 
     def test_combined_recipe_lives_until_request_traces_are_closed(self):
         self.exercise()
@@ -181,6 +201,11 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
     def test_four_scheduler_requests_take_the_sixty_four_row_block(self):
         self.exercise(packed=True, users=4)
+
+    def test_an_attach_failure_is_logged_before_the_scopes_whose_exits_fence_the_device_close(self):
+        for packed, users in ((True, 4), (False, 1)):
+            with self.subTest(packed=packed, users=users), self.assertRaisesRegex(RuntimeError, 'attach failed'):
+                self.exercise(packed=packed, users=users, attach_fail=True)
 
     def test_a_request_count_no_block_serves_stays_sequential_and_says_so(self):
         for users in (1, 3, 8):
