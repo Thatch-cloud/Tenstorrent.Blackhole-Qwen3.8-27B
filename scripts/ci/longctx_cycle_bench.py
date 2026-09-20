@@ -37,7 +37,7 @@ BLOCK_SIZE = 64
 TARGET_TOKS_PER_USER = 200.0
 
 
-def stream_once(port, prompt, max_tokens, results, index):
+def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
     """One streaming completion; record the gap between successive tokens."""
     payload = json.dumps(dict(model='qwen-longctx', prompt=prompt,
                               max_tokens=max_tokens, temperature=0.0,
@@ -57,7 +57,11 @@ def stream_once(port, prompt, max_tokens, results, index):
         # The socket timeout is the inactivity limit between chunks. At 900 s a hung
         # decode sat for fifteen minutes (run 35481903377) and produced no log; 180 s
         # is nine times the 32k-token TTFT and hundreds of times the inter-token gap.
-        with urlopen(request, timeout=180) as response:
+        # It is configurable because four users admit one prefill at a time (one-in-
+        # flight): the fourth user's first byte lands only after three ~78 s prefills,
+        # ~312 s, so measuring a four-user packed round needs the limit raised above
+        # that ramp until prefill/decode alternation removes it.
+        with urlopen(request, timeout=stream_timeout) as response:
             previous = None
             for raw in response:
                 line = raw.decode('utf-8', 'replace').strip()
@@ -126,6 +130,10 @@ def main():
     parser.add_argument('--prompt-base', type=int, default=1000)
     parser.add_argument('--prompt-user-offset', type=int, default=0)
     parser.add_argument('--max-tokens', type=int, default=64)
+    parser.add_argument('--stream-timeout', type=int, default=180,
+                        help='per-stream socket inactivity limit in seconds; raise above the '
+                             'one-in-flight prefill ramp (~(users-1) x 78 s) to measure a '
+                             'four-user packed round before alternation removes the ramp')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--l1-small-size', type=int, default=24576)
     parser.add_argument('--trace-region-size', type=int, default=1073741824)
@@ -222,7 +230,7 @@ def main():
         results = [None] * options.users
         threads = [threading.Thread(target=stream_once,
                                     args=(options.port, prompt_for(index), options.max_tokens,
-                                          results, index))
+                                          results, index, options.stream_timeout))
                    for index in range(options.users)]
         wall = time.perf_counter()
         for index, thread in enumerate(threads):
