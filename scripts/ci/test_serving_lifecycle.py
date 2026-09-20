@@ -226,6 +226,14 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle.decoding_ids, ['request'])
         lifecycle.close()
 
+    def test_a_prefill_displaces_the_resident_gdn_engine(self):
+        """A native prefill rewrites GDN slot 0, so the engine that was resident no
+        longer is; the next verify must restore its own carry (verifier_engine)."""
+        lifecycle, worker, bridge, capture, build, prefill, _ = self.fixture()
+        with patch('serving_lifecycle.note_prefill') as displace:
+            worker.execute_model(prefill)
+        displace.assert_called_once_with()
+
     def test_partial_prefill_rejected_without_device_execution(self):
         lifecycle, worker, _, capture, build, prefill, _ = self.fixture()
         prefill.total_num_scheduled_tokens = 2048

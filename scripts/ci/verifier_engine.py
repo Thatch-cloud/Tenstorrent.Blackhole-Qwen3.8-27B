@@ -11,6 +11,19 @@ from gdn_commit_dma import prepare
 from gdn_multitoken_conv import addresses, release_owned
 from model_batch import ModelBatch
 from verifier_inputs import stage_inputs
+from verifier_pack import allocate_slots, release_slots
+
+
+# Which engine's state native GDN slot 0 holds right now. Runs 35477522469 and
+# 35479238722 alternated two engines through that one slot with nothing restoring
+# it between them, so each user's second block ran on the other user's recurrence.
+_resident = None
+
+
+def note_prefill():
+    """A prefill overwrote slot 0: no engine is resident until one restores or publishes."""
+    global _resident
+    _resident = None
 
 
 def capture_widths(position, capacity, verifier_rows, remaining, max_verify_rows=32):
@@ -94,6 +107,7 @@ class VerifierEngine:
         self.position = session.position
         self.phase, self.pending = 'preparing', None
         self.initial, self.buckets = [], {}
+        self.carry = ()
         self.mtp_row_reader = None
         self.pending_key = None
         self.replay_plan = None
@@ -105,6 +119,9 @@ class VerifierEngine:
         self.widths = widths
         started = time.perf_counter()
         session.begin_preparation(session.request_id)
+        # The prefill before this engine and the capture below both rewrite slot 0:
+        # whoever was resident no longer is, even if construction fails part way.
+        note_prefill()
         try:
             for helper in helpers:
                 self.initial.append(helper.allocate())
@@ -183,6 +200,7 @@ class VerifierEngine:
             self.restore_initial()
             ttnn.synchronize_device(self.mesh)
             self.validate_bindings()
+            self.seed_carry()
             self.setup_ms = (time.perf_counter() - started) * 1000
             session.finish_preparation(session.request_id)
             self.phase = 'idle'
@@ -239,6 +257,35 @@ class VerifierEngine:
         for helper, snapshot in zip(self.helpers, self.initial, strict=True):
             helper.restore(snapshot)
 
+    def seed_carry(self):
+        # Slot 0 holds this request's own prefill state once capture has restored it,
+        # so the carry starts as a copy of that and this engine is the resident.
+        global _resident
+        self.carry = allocate_slots(self.helpers)
+        _resident = self
+
+    def restore_carry(self):
+        # Nothing to do while this engine is resident, so a lone request never pays.
+        # Eager: 48 copies per call. Capturing them as one trace is the follow-up.
+        global _resident
+        carry = getattr(self, 'carry', ())
+        if not carry or _resident is self:
+            return False
+        # Claimed before the copies: a failure part way leaves the slot as nobody's,
+        # and the next engine through must restore rather than trust old residency.
+        _resident = self
+        for helper, slot in zip(self.helpers, carry, strict=True):
+            helper.restore(slot)
+        return True
+
+    def save_carry(self):
+        global _resident
+        _resident = self
+        carry = getattr(self, 'carry', ())
+        if carry:
+            for helper, slot in zip(self.helpers, carry, strict=True):
+                helper.save(slot)
+
     def validate_bindings(self):
         if any(helper.gdn.B != 8 or not helper.gdn._stable_state for helper in self.helpers):
             raise ValueError('Native stable B8 state contract changed')
@@ -256,6 +303,8 @@ class VerifierEngine:
         try:
             binding_started = time.perf_counter()
             self.validate_bindings()
+            carry_started = time.perf_counter()
+            restored = self.restore_carry()
             started = time.perf_counter()
             stage_inputs(bucket['fixture'], ticket.tokens, ticket.position)
             staged = time.perf_counter()
@@ -289,7 +338,8 @@ class VerifierEngine:
             self.phase = 'verified'
             return predictions, dict(input_ms=(staged - started) * 1000,
                 verify_readback_ms=(finished - staged) * 1000,
-                binding_validation_ms=(started - binding_started) * 1000,
+                binding_validation_ms=(carry_started - binding_started) * 1000,
+                carry_restore_ms=(started - carry_started) * 1000, carry_restored=restored,
                 singleton_position_uploads=getattr(bucket['fixture'], 'last_singleton_uploads', None),
                 blocking_trace_host_ms=trace_ms,
                 replay_checks_sync_ms=(replay_finished - staged) * 1000 - trace_ms,
@@ -342,6 +392,7 @@ class VerifierEngine:
                     for helper, snapshot in zip(self.helpers, bucket['checkpoints'], strict=True):
                         helper.restore(snapshot)
                 self.operations.synchronize_device(self.mesh)
+            self.save_carry()
             self.position += prefix
             self.phase, self.pending = 'idle', None
             self.pending_key = None
@@ -350,6 +401,7 @@ class VerifierEngine:
             raise
 
     def close(self):
+        global _resident
         if self.phase == 'closed':
             return
         if self.phase not in ('idle', 'preparing', 'failed'):
@@ -374,6 +426,10 @@ class VerifierEngine:
                 bucket['fixture'].close()
             release_owned(self.operations, [value for snapshot in bucket['checkpoints'] for value in snapshot])
         release_owned(self.operations, [value for snapshot in self.initial for value in snapshot])
+        release_slots(self.operations, getattr(self, 'carry', ()))
+        self.carry = ()
+        if _resident is self:
+            _resident = None
         self.buckets.clear()
         self.initial.clear()
         self.phase, self.pending = 'closed', None

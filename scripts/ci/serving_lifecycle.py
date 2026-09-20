@@ -6,6 +6,16 @@ from serving_fast_policy import validate_fast_config, validate_request_sampling
 from serving_worker_hook import FastWorkerHook
 
 
+def note_prefill():
+    # verifier_engine is only importable where the target model is; elsewhere a
+    # prefill has no resident engine to displace.
+    try:
+        from verifier_engine import note_prefill as displace
+    except ImportError:
+        return
+    displace()
+
+
 class FastServingLifecycle:
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
                  packed_step=None):
@@ -107,6 +117,9 @@ class FastServingLifecycle:
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
             self.request_id = new.req_id
             self.capture = self.capture_factory(len(new.prompt_token_ids))
+            # A native prefill rewrites GDN slot 0, so whichever engine's state it
+            # held is gone; the next verify must restore its own carry.
+            note_prefill()
             with self.capture.capture():
                 result = self.original_execute(scheduled)
             if result is not None:
