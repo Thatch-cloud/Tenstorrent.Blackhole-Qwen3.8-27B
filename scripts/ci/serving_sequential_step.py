@@ -45,6 +45,17 @@ REPORTED = set()
 # between the chips by construction (see replicated_buffers), so what they are
 # checked for is a write between their owner's steps, chip by chip.
 SNAPSHOTS = {}
+# Per-chip host copies of each request's page tables - the verifier fixtures'
+# page table and row table, and the replay reader's per-bundle tables - taken at
+# the start of every checked round (the page bindings refresh them on a block
+# change just before the step, serving_packed_bridge.py) and again right after
+# the owner's own step. Static otherwise, so a change between the owner's steps
+# is another request's replay writing over them (attention_replay.py): from its
+# next verify on, every attention layer reads the wrong KV pages.
+PAGE_TABLES = {}
+# The diagnostic's line headers and the tag its detail lines carry, by kind.
+LABELS = dict(mismatch=('shard mismatch', 'mismatch'), drift=('kv drift', 'drift'),
+              pages=('page-table drift', 'page-table drift'))
 
 
 def sequential_packed_step(entries, *, cancelled):
@@ -57,6 +68,8 @@ def sequential_packed_step(entries, *, cancelled):
         for entry in entries:
             if entry['request_id'] not in SNAPSHOTS:
                 snapshot_kv(entry)
+            # Every round: the page bindings may have just rewritten them for new blocks.
+            snapshot_pages(entry)
     outputs = []
     for index, entry in enumerate(entries):
         request, ticket = entry['request'], entry['ticket']
@@ -128,9 +141,48 @@ def snapshot_kv(entry):
         for name, value in banks}
 
 
+def page_tables(engine):
+    """Every page table a request's verifier keeps across steps, by name: per captured
+    bucket, the fixture's page table and its row tables (unpacked, one singleton every
+    row's cache writer and reader binds - pooled with it), and the replay reader's
+    per-bundle tables. Named by bucket key, e.g. replay_pages[16,4352][1]."""
+    if engine is None or getattr(engine, 'phase', 'closed') == 'closed':
+        return []
+    tables = []
+    for key, bucket in getattr(engine, 'buckets', {}).items():
+        fixture = bucket.get('fixture')
+        if fixture is None:
+            continue
+        label = '[%s]' % ','.join(str(part) for part in (key if isinstance(key, tuple) else (key,)))
+        candidates = [('pages%s' % label, fixture.pages), ('singleton_pages%s' % label, fixture.singleton_pages)]
+        candidates.extend(('row_pages%s[%d]' % (label, index), table)
+                          for index, table in enumerate(getattr(fixture, 'row_pages', ())))
+        replay = getattr(fixture, 'replay_reader', None)
+        if replay is not None:
+            candidates.extend(('replay_pages%s[%d]' % (label, index), entry[1])
+                              for index, entry in enumerate(replay.metadata))
+        seen = set()
+        for name, table in candidates:
+            # The row tables alias the singleton: read each buffer once, under its first name.
+            if id(table) not in seen:
+                seen.add(id(table))
+                tables.append((name, table))
+    return tables
+
+
+def snapshot_pages(entry):
+    """Own host copies of each chip's page tables, whole - they are small."""
+    engine = getattr(entry['request'], 'engine', None)
+    tables = page_tables(engine)
+    PAGE_TABLES[entry['request_id']] = {
+        name: [engine.operations.to_torch(shard).contiguous().clone()
+               for shard in engine.operations.get_device_tensors(value)]
+        for name, value in tables}
+
+
 def forget_departed(entries):
     live = {entry['request_id'] for entry in entries}
-    for table in (RECORDED, SNAPSHOTS):
+    for table in (RECORDED, SNAPSHOTS, PAGE_TABLES):
         for stale in [request_id for request_id in table if request_id not in live]:
             del table[stale]
     REPORTED.difference_update([key for key in REPORTED if key[0] not in live])
@@ -138,9 +190,11 @@ def forget_departed(entries):
 
 def check_shards(entries, stepped):
     """After `entries[stepped]` ran, every OTHER entry's replicated draft buffers
-    must still be bit-identical on both chips, and each chip's K/V banks must
-    still hold what they held after that entry's own last step. One that does
-    not was written by something other than its own user."""
+    must still be bit-identical on both chips, each chip's K/V banks must still
+    hold what they held after that entry's own last step, and each chip's page
+    tables what they held at the start of the round or after that entry's own
+    last step. One that does not was written by something other than its own
+    user."""
     import torch
     from gdn_multitoken_conv import addresses
     from loguru import logger
@@ -149,16 +203,17 @@ def check_shards(entries, stepped):
     calls = [entry['request'].runtime.drafter.proposal_calls for entry in entries]
     actor = entries[stepped]
     snapshot_kv(actor)
+    snapshot_pages(actor)
     equal = diverged = 0
 
     def same(left, right):
         return torch.equal(left.view(torch.int16), right.view(torch.int16))
 
-    def report(kind, index, name, value, what, left, right, failure):
+    def report(kind, operations, index, name, value, what, left, right, failure):
         # Several short lines: the log capture truncates around 250 characters,
         # and run 35481466425 lost everything after the shape.
         victim = entries[index]['request_id']
-        operations = entries[index]['request'].runtime.drafter.operations
+        header, tag = LABELS[kind]
         difference = (left.float() - right.float()).abs()
         # The histories swap roles on commit (DFlashDevice.commit_publication) and
         # so do the K/V banks (DraftKVHistory.commit), so say which name this
@@ -166,28 +221,30 @@ def check_shards(entries, stepped):
         current = addresses(operations, value)
         origin = next((seen for seen, address in RECORDED[victim].items() if address == current), None)
         logger.info('[PINDIAG] {} after step of {} (entry {}): victim={} (entry {}) {}',
-                    'shard mismatch' if kind == 'mismatch' else 'kv drift', actor['request_id'], stepped,
-                    victim, index, what)
+                    header, actor['request_id'], stepped, victim, index, what)
         logger.info('[PINDIAG] {} buffer={} shape={} address={} first_seen_as={}',
-                    kind, name, tuple(value.shape), current, origin)
+                    tag, name, tuple(value.shape), current, origin)
         logger.info('[PINDIAG] {} differing={} of {} max_abs={:g}',
-                    kind, int((difference > 0).sum()), difference.numel(), float(difference.max()))
-        logger.info('[PINDIAG] {} scheduler order={} proposal_calls={}', kind, live, calls)
+                    tag, int((difference > 0).sum()), difference.numel(), float(difference.max()))
+        logger.info('[PINDIAG] {} scheduler order={} proposal_calls={}', tag, live, calls)
         if SHARD_CHECK == '1':
             raise AssertionError('%s: victim=%s buffer=%s; see the [PINDIAG] %s log lines'
-                                 % (failure, victim, name, kind))
+                                 % (failure, victim, name, tag))
 
     for index, entry in enumerate(entries):
         if index == stepped:
             continue
-        # FastRequest.runtime is the DFlashRequestRuntime; its drafter is the DFlashDevice.
+        # FastRequest.runtime is the DFlashRequestRuntime; its drafter is the DFlashDevice;
+        # FastRequest.engine is the VerifierEngine whose fixtures hold the page tables.
         device = entry['request'].runtime.drafter
+        engine = getattr(entry['request'], 'engine', None)
         operations, victim = device.operations, entry['request_id']
-        replicated, banks = replicated_buffers(device), kv_banks(device)
+        replicated, banks, tables = replicated_buffers(device), kv_banks(device), page_tables(engine)
         if victim not in RECORDED:
             RECORDED[victim] = {name: addresses(operations, value) for name, value in
                                 [*((name, value) for category, name, value in replicated),
                                  *banks, *kv_banks(device, spare=True)]}
+            RECORDED[victim].update({name: addresses(engine.operations, value) for name, value in tables})
             for name, (first, second) in RECORDED[victim].items():
                 logger.info('[PINDIAG] address {} {} {} {}', victim, name, first, second)
         for category, name, value in replicated:
@@ -201,7 +258,7 @@ def check_shards(entries, stepped):
             if SHARD_CHECK == 'warn' and (victim, name, None) in REPORTED:
                 continue
             REPORTED.add((victim, name, None))
-            report('mismatch', index, name, value, 'category=%s' % category, *shards,
+            report('mismatch', operations, index, name, value, 'category=%s' % category, *shards,
                    'Replicated draft %s differs between chips' % category)
         saved = SNAPSHOTS.get(victim, {})
         for name, value in banks:
@@ -217,8 +274,25 @@ def check_shards(entries, stepped):
                 if SHARD_CHECK == 'warn' and (victim, name, chip) in REPORTED:
                     continue
                 REPORTED.add((victim, name, chip))
-                report('drift', index, name, value, 'chip=%d rows=%d' % (chip, rows), current, before,
+                report('drift', operations, index, name, value, 'chip=%d rows=%d' % (chip, rows), current, before,
                        "Draft K/V drifted on chip %d between its owner's steps" % chip)
+            equal += not drifted
+            diverged += drifted
+        kept_tables = PAGE_TABLES.get(victim, {})
+        for name, value in tables:
+            if name not in kept_tables:
+                continue
+            drifted = False
+            for chip, (shard, before) in enumerate(zip(engine.operations.get_device_tensors(value), kept_tables[name], strict=True)):
+                current = engine.operations.to_torch(shard).contiguous()
+                if torch.equal(current, before):
+                    continue
+                drifted = True
+                if SHARD_CHECK == 'warn' and (victim, name, chip) in REPORTED:
+                    continue
+                REPORTED.add((victim, name, chip))
+                report('pages', engine.operations, index, name, value, 'chip=%d rows=%d' % (chip, tuple(value.shape)[0]),
+                       current, before, "Page table drifted on chip %d between its owner's steps" % chip)
             equal += not drifted
             diverged += drifted
     if diverged:

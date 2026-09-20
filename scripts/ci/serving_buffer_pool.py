@@ -56,10 +56,26 @@ snapshot sets (initial, carry) plus one BucketSlot per capture the engine can as
 every position), each with its checkpoint set, its feature taps and its fixture
 inputs at that width and the pool's page-table width. VerifierEngine and ModelBatch
 take them through `storage=`, borrow, and free none of them.
+
+AND THE REPLAY PAGE TABLES. With everything above pooled, runs 35492676194 and
+35493208438 still had the second-admitted user right for its first verify and wrong
+from its second - after the first user's first replay. The GDN audit found the one
+per-request buffer left that is static across steps: the replay attention reader's
+per-bundle page tables (attention_replay.py), uploaded at capture and rewritten only
+when the scheduler's blocks change (serving_page_binding.py). A replay of the earlier
+request's trace writes over them and every attention layer of the later request reads
+the wrong KV pages from its next verify on. They are not the request's page table:
+each is (batches, capacity // 64) for the capture's 256-position native chunk family,
+which the request's position fixes at admission and the pool cannot know at attach.
+So every replay-width bucket carries one page-table set per family the reader can be
+captured in (attention_replay.family_capacities, cut to the pool's page-table width),
+`batch.replay_pages[capacity]`, and the fixture picks its family's. The row tables need
+nothing: unpacked, every row's table is the pooled singleton page table.
 """
 
 from types import SimpleNamespace
 
+from attention_replay import bundle_batches, family_capacities
 from dflash_device import pindiag
 from gdn_multitoken_conv import addresses, release_owned
 from serving_fast_policy import NATIVE_GDN_SLOTS
@@ -98,7 +114,8 @@ def snapshot_tensors(snapshots):
 
 class BucketSlot:
     """One captured verify width of one request: its GDN checkpoints, the feature taps and
-    MTP hidden the target copies into, and the fixture inputs whose shapes the trace bakes."""
+    MTP hidden the target copies into, and the fixture inputs whose shapes the trace bakes -
+    including, at replay widths, the reader's per-bundle page tables for every family."""
 
     def __init__(self, rows, checkpoints, target_features, mtp_hidden, batch):
         self.rows = rows
@@ -110,12 +127,19 @@ class BucketSlot:
         self.tensors = (*snapshot_tensors(self.checkpoints), *self.target_features,
                         *(() if mtp_hidden is None else (mtp_hidden,)), *self.batch_tensors())
         # Fully rewritten before any read: the fixture stages every input at construction
-        # and before every verify; only the tiled BF16 buffers are zeroed on loan.
+        # and before every verify (the replay reader its page tables at construction);
+        # only the tiled BF16 buffers are zeroed on loan.
         self.zeroed = (*snapshot_tensors(self.checkpoints), *self.target_features,
                        *(() if mtp_hidden is None else (mtp_hidden,)), batch.cos, batch.sin)
 
+    def replay_tables(self):
+        """Every pooled replay page table of the bucket, by family then bundle."""
+        tables = getattr(self.batch, 'replay_pages', None) or {}
+        return tuple(table for capacity in sorted(tables) for table in tables[capacity])
+
     def batch_tensors(self):
-        return (*(getattr(self.batch, name) for name in BATCH_INPUTS), *self.batch.singleton_positions)
+        return (*(getattr(self.batch, name) for name in BATCH_INPUTS), *self.batch.singleton_positions,
+                *self.replay_tables())
 
 
 class VerifierSlot:
@@ -194,14 +218,16 @@ class HistorySlot:
                               target_features=[list(addresses(operations, value)) for value in bucket.target_features],
                               mtp_hidden=None if bucket.mtp_hidden is None else list(addresses(operations, bucket.mtp_hidden)),
                               batch={name: list(addresses(operations, getattr(bucket.batch, name))) for name in BATCH_INPUTS},
-                              singleton_positions=[list(addresses(operations, value)) for value in bucket.batch.singleton_positions])
+                              singleton_positions=[list(addresses(operations, value)) for value in bucket.batch.singleton_positions],
+                              replay_pages={capacity: [list(addresses(operations, table)) for table in tables]
+                                            for capacity, tables in sorted((getattr(bucket.batch, 'replay_pages', None) or {}).items())})
                          for bucket in self.verifier.buckets])
         return report
 
 
 class ServingBufferPool:
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
-                 feature_taps=0, rope=None, mtp_hidden=False):
+                 feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None):
         import torch
 
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
@@ -217,11 +243,26 @@ class ServingBufferPool:
                     or type(mtp_hidden) is not bool):
                 raise ValueError('Verifier storage needs all %d GDN helpers, a page-table width, the capture widths, '
                                  'a feature tap count and the rotary table builder' % GDN_LAYERS)
-        elif page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden:
+            # The replay reader's page tables: one set per native chunk family the request
+            # can be captured in - by default every family the regime admits that the
+            # page table can hold - each bundle's sized by the reader's own grouping.
+            if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
+                raise ValueError('Replay group width must be integer four or eight')
+            admitted = family_capacities(page_width=page_width)
+            if replay_capacities is None:
+                replay_capacities = admitted
+            replay_capacities = tuple(replay_capacities)
+            if (len(set(replay_capacities)) != len(replay_capacities)
+                    or any(type(capacity) is not int or capacity not in admitted for capacity in replay_capacities)):
+                raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
+                                 % (admitted,))
+        elif (page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden
+                or replay_group_rows != 4 or replay_capacities is not None):
             raise ValueError('Verifier storage geometry without the GDN helpers that shape it')
         self.operations, self.mesh, self.users = operations, mesh, users
         self.helpers, self.page_width, self.bucket_rows = helpers, page_width, bucket_rows
         self.feature_taps, self.mtp_hidden = feature_taps, mtp_hidden
+        self.replay_group_rows, self.replay_capacities = replay_group_rows, replay_capacities
         self.owned, self.slots = [], []
         self.closed = False
         try:
@@ -268,7 +309,12 @@ class ServingBufferPool:
                     positions=allocate((rows,), **integers),
                     pages=allocate((rows, page_width), **integers),
                     singleton_pages=allocate((1, page_width), **integers),
-                    singleton_positions=[allocate((1,), **integers) for row in range(rows)])
+                    singleton_positions=[allocate((1,), **integers) for row in range(rows)],
+                    # Replay widths only (ModelBatch replays from eight rows): per family,
+                    # one (batches, capacity // 64) table per reader bundle, in bundle order.
+                    replay_pages={capacity: [allocate((batches, capacity // 64), **integers)
+                                             for batches in bundle_batches(rows, capacity, max_group_rows=replay_group_rows)]
+                                  for capacity in (replay_capacities if rows >= 8 else ())})
                 cos, sin = rope(torch.arange(rows, dtype=torch.int32))
                 batch.cos, batch.sin = (adopt(value, tensor_bytes(tuple(value.shape))) for value in (cos, sin))
                 return BucketSlot(rows, checkpoints, features, hidden, batch)
@@ -330,12 +376,15 @@ class ServingBufferPool:
             bytes_per_slot=draft_bytes, slots=[slot.describe() for slot in self.slots])
         if self.helpers is not None:
             slot_bytes = self.slots[0].bytes if self.slots else draft_bytes
+            replay_bytes = sum(tensor_bytes(tuple(table.shape), 4) for bucket in self.slots[0].verifier.buckets
+                               for table in bucket.replay_tables()) if self.slots else 0
             report.update(bytes_per_slot=slot_bytes, draft_bytes_per_slot=draft_bytes,
                 verifier_bytes_per_slot=slot_bytes - draft_bytes - tensor_bytes(QUERY_SHAPE),
                 query_bytes_per_slot=tensor_bytes(QUERY_SHAPE), query_shape=list(QUERY_SHAPE),
                 page_width=self.page_width, bucket_rows=list(self.bucket_rows),
                 gdn_snapshot_sets=2 + len(self.bucket_rows), feature_taps=self.feature_taps,
-                mtp_hidden=self.mtp_hidden)
+                mtp_hidden=self.mtp_hidden, replay_group_rows=self.replay_group_rows,
+                replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes)
         return report
 
     def close(self):

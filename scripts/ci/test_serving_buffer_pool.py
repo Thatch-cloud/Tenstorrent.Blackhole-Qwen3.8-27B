@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from attention_replay import bundle_batches, family_capacities
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
 from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, ServingBufferPool,
@@ -25,6 +26,16 @@ ROPE_DIM = 64
 # The serving geometry: a T16 cap and a 256-token budget (verifier_engine.capture_bucket_rows).
 BUCKET_ROWS = (1, 2, 4, 8, 8, 16, 16)
 TAPS = 5
+# The native chunk families a 68-page table can hold, i.e. the pool's default here.
+REPLAY_CAPACITIES = (4096, 4352)
+
+
+def replay_shapes(rows, capacities=REPLAY_CAPACITIES, group_rows=4):
+    """The replay reader's page tables for a bucket: per family, one per bundle."""
+    if rows < 8:
+        return []
+    return [(batches, capacity // 64) for capacity in capacities
+            for batches in bundle_batches(rows, capacity, max_group_rows=group_rows)]
 
 
 def fake_helpers(operations):
@@ -49,9 +60,11 @@ def snapshot_set_bytes():
     return GDN_LAYERS * sum(tensor_bytes(shape) for shape in SNAPSHOT_SHAPES)
 
 
-def bucket_bytes(rows, page_width=68, taps=TAPS):
+def bucket_bytes(rows, page_width=68, taps=TAPS, capacities=REPLAY_CAPACITIES):
     integers = 4 * (rows + rows + rows * page_width + page_width + rows)
-    return snapshot_set_bytes() + taps * tensor_bytes((1, 1, rows, 5120)) + integers + 2 * tensor_bytes((1, rows, 1, ROPE_DIM))
+    replay = 4 * sum(batches * columns for batches, columns in replay_shapes(rows, capacities))
+    return (snapshot_set_bytes() + taps * tensor_bytes((1, 1, rows, 5120)) + integers + replay
+            + 2 * tensor_bytes((1, rows, 1, ROPE_DIM)))
 
 
 def verifier_slot_bytes(bucket_rows=BUCKET_ROWS):
@@ -292,10 +305,17 @@ class VerifierStorageTests(unittest.TestCase):
                                  [((1,), 'int32', 'row_major')] * rows)
                 for table in (batch.cos, batch.sin):
                     self.assertEqual((table.shape, table.mapper), ((1, rows, 1, ROPE_DIM), None))
+                # The replay reader's page tables, per family the 68-page table can hold,
+                # per bundle - at replay widths only; the pool's default enumerates the families.
+                self.assertEqual(list(batch.replay_pages), list(REPLAY_CAPACITIES) if rows >= 8 else [])
+                self.assertEqual([(value.shape, value.dtype, value.layout) for tables in batch.replay_pages.values()
+                                  for value in tables],
+                                 [(shape, 'int32', 'row_major') for shape in replay_shapes(rows)])
+                self.assertEqual(list(bucket.replay_tables()), [value for tables in batch.replay_pages.values() for value in tables])
                 self.assertFalse(bucket.taken)
             # Every tensor is in the slot's address record, once, on independent storage.
             expected = (2 + 4 * DRAFT_LAYERS + 1 + 2 * 5 * GDN_LAYERS
-                        + sum(5 * GDN_LAYERS + TAPS + 6 + rows for rows in BUCKET_ROWS))
+                        + sum(5 * GDN_LAYERS + TAPS + 6 + rows + len(replay_shapes(rows)) for rows in BUCKET_ROWS))
             self.assertEqual(len(slot.tensors), expected)
             for chip in range(2):
                 self.assertEqual(len({address[chip] for address in slot.addresses}), expected)
@@ -318,6 +338,9 @@ class VerifierStorageTests(unittest.TestCase):
         self.assertEqual(report['bytes_per_slot'], draft + verifier_slot_bytes())
         self.assertEqual((report['page_width'], report['bucket_rows'], report['gdn_snapshot_sets'],
                           report['feature_taps'], report['mtp_hidden']), (68, list(BUCKET_ROWS), 9, TAPS, False))
+        self.assertEqual((report['replay_group_rows'], report['replay_capacities']), (4, list(REPLAY_CAPACITIES)))
+        self.assertEqual(report['replay_page_bytes_per_slot'],
+                         4 * sum(batches * columns for rows in BUCKET_ROWS for batches, columns in replay_shapes(rows)))
         slot = pool.slots[0]
         described = report['slots'][0]
         self.assertEqual(described['query'], [shard.address for shard in slot.query.shards])
@@ -332,6 +355,9 @@ class VerifierStorageTests(unittest.TestCase):
             self.assertIsNone(described_bucket['mtp_hidden'])
             self.assertEqual(described_bucket['batch']['pages'], [shard.address for shard in bucket.batch.pages.shards])
             self.assertEqual(len(described_bucket['singleton_positions']), bucket.rows)
+            self.assertEqual(described_bucket['replay_pages'],
+                             {capacity: [[shard.address for shard in table.shards] for table in tables]
+                              for capacity, tables in bucket.batch.replay_pages.items()})
             self.assertFalse(described_bucket['taken'])
         # A plain pool still reports exactly what it did.
         plain = ServingBufferPool(FakeOperations(), 'mesh', users=1).describe()
@@ -373,9 +399,10 @@ class VerifierStorageTests(unittest.TestCase):
         for bucket in verifier.buckets:
             for value in (*snapshot_tensors(bucket.checkpoints), *bucket.target_features, bucket.batch.cos, bucket.batch.sin):
                 self.assertTrue(any(value is entry for entry in filled))
-            # Every integer input is fully restaged by the fixture before any read.
+            # Every integer input is fully restaged by the fixture before any read - the
+            # replay reader's page tables by the reader at construction.
             for value in (bucket.batch.tokens, bucket.batch.positions, bucket.batch.pages, bucket.batch.singleton_pages,
-                          *bucket.batch.singleton_positions):
+                          *bucket.batch.singleton_positions, *bucket.replay_tables()):
                 self.assertFalse(any(value is entry for entry in filled))
                 self.assertTrue(any(value is entry for entry in slot.tensors))
 
@@ -396,13 +423,18 @@ class VerifierStorageTests(unittest.TestCase):
         helpers = fake_helpers(operations)
         invalid = [dict(helpers=helpers[:47]), dict(helpers=[object()] * 48), dict(page_width=0), dict(page_width=68.0),
                    dict(bucket_rows=()), dict(bucket_rows=(1, 3)), dict(bucket_rows=(True,)), dict(feature_taps=-1),
-                   dict(feature_taps=5.0), dict(rope=None), dict(mtp_hidden=1)]
+                   dict(feature_taps=5.0), dict(rope=None), dict(mtp_hidden=1),
+                   # Replay families: distinct, admitted, and within the page table (4608 needs 72 pages).
+                   dict(replay_group_rows=6), dict(replay_group_rows=4.0), dict(replay_capacities=(4096, 4096)),
+                   dict(replay_capacities=(4608,)), dict(replay_capacities=(4000,)), dict(replay_capacities=(4096.0,)),
+                   dict(replay_capacities=(256,))]
         for overrides in invalid:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 verifier_pool(operations, **overrides)
         # Geometry without the helpers that shape it is a mistake, not a plain pool.
         for options in (dict(page_width=68), dict(bucket_rows=(1,)), dict(feature_taps=5),
-                        dict(rope=fake_rope(operations)), dict(mtp_hidden=True)):
+                        dict(rope=fake_rope(operations)), dict(mtp_hidden=True), dict(replay_group_rows=8),
+                        dict(replay_capacities=(4096,))):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
                 ServingBufferPool(operations, 'mesh', users=1, **options)
         self.assertEqual(operations.live, [])
@@ -444,6 +476,72 @@ class VerifierStorageTests(unittest.TestCase):
             slot.release()
         slot.verifier.carry[7][0].shards[0].address -= 1
         slot.release()
+
+
+class ReplayPageTableTests(unittest.TestCase):
+    """The replay reader's per-bundle page tables - the last per-request buffer that was
+    static across steps and allocated after an earlier request's traces (runs 35492676194
+    and 35493208438) - come from the slot: per replay-width bucket, one set per native
+    chunk family the request can be captured in, shaped exactly as the reader shapes its own."""
+
+    def test_replay_buckets_hold_one_table_set_per_family_the_page_table_can_hold(self):
+        operations = FakeOperations()
+        with patch.dict('os.environ', {}, clear=True):
+            pool = verifier_pool(operations, bucket_rows=(4, 8, 16), page_width=72)
+            families = family_capacities(page_width=72)
+        self.assertEqual(families, (4096, 4352, 4608))
+        self.assertEqual(pool.replay_capacities, families)
+        for bucket in pool.slots[0].verifier.buckets:
+            tables = bucket.batch.replay_pages
+            if bucket.rows < 8:
+                self.assertEqual(tables, {})
+                self.assertEqual(bucket.replay_tables(), ())
+                continue
+            self.assertEqual(list(tables), list(families))
+            for capacity, values in tables.items():
+                self.assertEqual([value.shape for value in values],
+                                 [(batches, capacity // 64) for batches in bundle_batches(bucket.rows, capacity)])
+                for value in values:
+                    self.assertEqual((value.dtype, value.layout, value.mapper), ('int32', 'row_major', ('replicate', 'mesh')))
+            # In the slot's record, and a moved one is refused like any other pooled buffer.
+            self.assertTrue(all(any(value is entry for entry in pool.slots[0].tensors) for value in bucket.replay_tables()))
+        moved = pool.slots[0].verifier.buckets[2].batch.replay_pages[4352][1].shards[0]
+        moved.address += 1
+        with self.assertRaisesRegex(AssertionError, 'slot 0 moved'):
+            pool.acquire()
+        moved.address -= 1
+        slot = pool.acquire()
+        # Not zeroed on loan: the reader stages the request's table before any read.
+        self.assertFalse(any(value is filled for value, zero in operations.fills
+                             for bucket in slot.verifier.buckets for filled in bucket.replay_tables()))
+
+    def test_the_families_and_grouping_can_be_given_explicitly_and_an_empty_set_pools_none(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, bucket_rows=(8, 16, 32), replay_capacities=(4352,), replay_group_rows=8)
+        self.assertEqual((pool.replay_capacities, pool.replay_group_rows), ((4352,), 8))
+        for bucket in pool.slots[0].verifier.buckets:
+            self.assertEqual(list(bucket.batch.replay_pages), [4352])
+            self.assertEqual([value.shape for value in bucket.batch.replay_pages[4352]],
+                             [(batches, 68) for batches in bundle_batches(bucket.rows, 4352, max_group_rows=8)])
+        report = pool.describe()
+        self.assertEqual((report['replay_capacities'], report['replay_group_rows']), ([4352], 8))
+        self.assertEqual(report['replay_page_bytes_per_slot'],
+                         4 * 68 * sum(sum(bundle_batches(rows, 4352, max_group_rows=8)) for rows in (8, 16, 32)))
+        none = verifier_pool(FakeOperations(), bucket_rows=(8, 16), replay_capacities=())
+        self.assertEqual([bucket.batch.replay_pages for bucket in none.slots[0].verifier.buckets], [{}, {}])
+        self.assertEqual(none.describe()['replay_page_bytes_per_slot'], 0)
+        self.assertEqual(none.slots[0].bytes, verifier_pool(FakeOperations(), bucket_rows=(8, 16)).slots[0].bytes
+                         - 4 * sum(batches * columns for rows in (8, 16) for batches, columns in replay_shapes(rows)))
+
+    def test_the_tables_are_counted_in_the_slot_bytes_and_freed_with_the_pool(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=2, bucket_rows=(8, 16))
+        self.assertEqual(pool.slots[0].bytes, 2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(KV_SHAPE)
+                         + verifier_slot_bytes((8, 16)))
+        self.assertEqual(pool.describe()['replay_page_bytes_per_slot'],
+                         4 * sum(batches * columns for rows in (8, 16) for batches, columns in replay_shapes(rows)))
+        pool.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
 
 
 class DiagnosticLineTests(unittest.TestCase):

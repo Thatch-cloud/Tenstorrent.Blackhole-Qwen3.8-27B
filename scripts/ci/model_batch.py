@@ -89,6 +89,27 @@ def validate_storage(ttnn, storage, rows, page_width):
     return storage
 
 
+def replay_storage(storage, capacity):
+    """The pooled replay page tables for this capture's native chunk family, or None
+    when the fixture uploads its own.
+
+    The trace bakes each bundle's page table (attention_replay.py) and the request keeps
+    it across steps, so pooled fixtures must borrow it: a pool that lends the other
+    fixture inputs but not these would leave the one persistent per-request allocation
+    that runs 35492676194 and 35493208438 found overwritten. The family is the capture
+    position's, `(start // 256 + 1) * 256`, so the pool holds one set per family it can
+    serve (serving_buffer_pool.py, attention_replay.family_capacities) and the fixture
+    picks its own; a family the pool lacks is refused here, before any upload.
+    """
+    if storage is None:
+        return None
+    tables = getattr(storage, 'replay_pages', None)
+    if not isinstance(tables, dict) or capacity not in tables:
+        raise ValueError('Pooled fixture holds replay page tables for families %r; this capture is in family %d'
+                         % (sorted(tables) if isinstance(tables, dict) else None, capacity))
+    return list(tables[capacity])
+
+
 def prepare_inputs(ttnn, model, rows, tokens, positions, page_rows, pages, *, storage=None, packed=False):
     """The fixture's device inputs, uploaded (owned) or staged into pooled buffers (borrowed).
 
@@ -132,7 +153,8 @@ def prepare_inputs(ttnn, model, rows, tokens, positions, page_rows, pages, *, st
     result.pages = place(page_rows, ttnn.int32, 'pages')
     result.singleton_pages = place(pages, ttnn.int32, 'singleton_pages')
     # Per row, so a packed row reads its own user's blocks rather than the first
-    # user's table repeated.
+    # user's table repeated. Unpacked, every row table IS the singleton page table -
+    # pooled with it, so no per-request row table outlives a trace.
     result.row_tables = ([upload(page_rows[index:index + 1], ttnn.int32) for index in range(rows)]
                          if packed else [result.singleton_pages] * rows)
     result.singleton_positions = [upload(position.reshape(1), ttnn.int32) if storage is None
@@ -327,8 +349,13 @@ class ModelBatch:
                     layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
 
+            # Pooled, the per-bundle page tables are the slot's for this capture's family;
+            # the reader stages the request's table into them and frees none of them.
+            tables = replay_storage(storage, self.replay_capacity)
             self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
-                upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)
+                upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context,
+                **({'storage': tables} if tables is not None else {}))
+            self.borrowed.extend(self.replay_reader.borrowed)
             self.grouped_readers.append(self.replay_reader)
             if attention_audit:
                 from attention_replay_audit import AttentionReplayAudit

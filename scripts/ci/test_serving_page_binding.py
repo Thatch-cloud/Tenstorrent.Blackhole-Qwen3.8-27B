@@ -80,6 +80,18 @@ class PageBindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             binding.refresh(tuple(range(4, 69)), position=4096, rows=16)
 
+    def test_refresh_writes_into_the_captured_tables_and_uploads_no_replacement(self):
+        """Pooled serving lends the fixture's page tables and the replay reader's per-bundle
+        tables from a pre-trace slot; a block change must land in those very buffers."""
+        binding, engine, tensors = self.fixture()
+        self.assertTrue(binding.refresh(tuple(range(4, 69)), position=4096, rows=16))
+        targets = [call.args[1] for call in engine.operations.copy_host_to_device_tensor.call_args_list]
+        self.assertEqual([id(target) for target in targets], [id(tensor) for tensor in tensors])
+        self.assertEqual({identity: id(tensor) for identity, (tensor, shape) in binding.bindings.items()},
+                         {tensor.identity: id(tensor) for tensor in tensors})
+        for target in targets:
+            self.assertEqual(tuple(target.data.shape), target.shape)
+
     def test_address_change_rejected_even_without_new_pages(self):
         binding, engine, tensors = self.fixture()
         tensors[0].identity = (999, 999)

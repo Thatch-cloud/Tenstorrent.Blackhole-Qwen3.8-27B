@@ -355,6 +355,42 @@ class FixtureInputTests(unittest.TestCase):
             self.assertEqual((fixture.buffers, fixture.borrowed), ([], []))
 
 
+class ReplayStorageTests(unittest.TestCase):
+    """A pooled fixture takes its capture family's replay page tables from the slot and
+    refuses a family the pool does not hold, before any upload; unpooled it uploads."""
+
+    def test_the_fixture_takes_its_familys_tables_and_refuses_a_family_the_pool_lacks(self):
+        from model_batch import replay_storage
+
+        self.assertIsNone(replay_storage(None, 4352))
+        tables = {4096: ['a'], 4352: ['b', 'c']}
+        storage = SimpleNamespace(replay_pages=tables)
+        self.assertEqual(replay_storage(storage, 4352), ['b', 'c'])
+        self.assertIsNot(replay_storage(storage, 4352), tables[4352])
+        with self.assertRaisesRegex(ValueError, r'families \[4096, 4352\]; this capture is in family 4608'):
+            replay_storage(storage, 4608)
+        # Pooled fixture inputs without the tables: the hole would stay open, so refused.
+        with self.assertRaisesRegex(ValueError, 'families None'):
+            replay_storage(SimpleNamespace(tokens=None), 4352)
+        with self.assertRaisesRegex(ValueError, 'families None'):
+            replay_storage(SimpleNamespace(replay_pages=['b']), 4352)
+
+    def test_the_unpacked_row_tables_are_the_pooled_singleton(self):
+        """Every row's table is the singleton page table, so pooling it pools them."""
+        import ast
+        import inspect
+
+        import model_batch
+
+        source = inspect.getsource(model_batch.prepare_inputs)
+        tree = ast.parse('if True:\n' + source if source.startswith(' ') else source)
+        assigned = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Attribute) and target.attr == 'row_tables' for target in node.targets)]
+        self.assertEqual(len(assigned), 1)
+        self.assertIsInstance(assigned[0].value, ast.IfExp)
+        self.assertEqual(ast.unparse(assigned[0].value.orelse), '[result.singleton_pages] * rows')
+
+
 class RowPagesAssignmentTests(unittest.TestCase):
     """The unpacked path must not read self.row_pages before assigning it.
 

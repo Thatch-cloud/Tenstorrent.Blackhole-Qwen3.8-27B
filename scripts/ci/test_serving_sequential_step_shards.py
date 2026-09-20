@@ -96,11 +96,11 @@ def closed_device(operations):
 
 
 def damage(tensor, count, *, row=0, chip=1):
-    """Change `count` elements of one row on one chip only."""
-    tensor.shards[chip].data[row, :count] += 2.0
+    """Change `count` elements of one row on one chip only (BF16 or int32 alike)."""
+    tensor.shards[chip].data[row, :count] += 2
 
 
-def entry(request_id, drafter, stepped, on_step=None):
+def entry(request_id, drafter, stepped, on_step=None, engine=None):
     def step(name, *, cancelled):
         stepped.append(name)
         if on_step is not None:
@@ -108,7 +108,44 @@ def entry(request_id, drafter, stepped, on_step=None):
         return SimpleNamespace(request_id=name, token_ids=[1])
 
     return dict(request_id=request_id, ticket=SimpleNamespace(request_id=request_id),
-                request=SimpleNamespace(step=step, runtime=SimpleNamespace(drafter=drafter)))
+                request=SimpleNamespace(step=step, runtime=SimpleNamespace(drafter=drafter),
+                                        **({} if engine is None else dict(engine=engine))))
+
+
+def table(address, rows):
+    """One int32 page table, identical on both chips (replicated), chip 1 one page up."""
+    values = torch.arange(rows * 8, dtype=torch.int32).reshape(rows, 8)
+    return FakeTensor([FakeShard(values.clone(), address), FakeShard(values.clone(), address + 0x100)], (rows, 8))
+
+
+def label(key):
+    return '[%s]' % ','.join(str(part) for part in (key if isinstance(key, tuple) else (key,)))
+
+
+def verifier(operations, keys=((16, 4352),), replay=True, base=0x40000, phase='idle'):
+    """A VerifierEngine stand-in: per captured bucket a fixture holding the page table,
+    the singleton row table every row aliases and, with replay, two bundle tables."""
+    named, buckets = {}, {}
+    for index, key in enumerate(keys):
+        start = base + index * 0x2000
+        pages, singleton = table(start, 16), table(start + 0x200, 1)
+        named['pages' + label(key)], named['singleton_pages' + label(key)] = pages, singleton
+        fixture = SimpleNamespace(pages=pages, singleton_pages=singleton, row_pages=[singleton] * 16, replay_reader=None)
+        if replay:
+            tables = [table(start + 0x400 + position * 0x200, batches) for position, batches in enumerate((3, 1))]
+            for position, value in enumerate(tables):
+                named['replay_pages%s[%d]' % (label(key), position)] = value
+            fixture.replay_reader = SimpleNamespace(metadata=[(None, value, None, None) for value in tables])
+        buckets[key] = dict(fixture=fixture)
+    return SimpleNamespace(phase=phase, operations=operations, buckets=buckets, named=named)
+
+
+def rebind(engine, offset):
+    """What the owner's page binding does before a round on a block change: every
+    table rewritten on both chips."""
+    for value in engine.named.values():
+        for shard in value.shards:
+            shard.data += offset
 
 
 def commit(drafter):
@@ -511,6 +548,144 @@ class PhaseLogTests(ShardCheckBase):
                          ['[PHASE] step', '[PHASE] step', '[PINDIAG] shards',
                           '[PHASE] step', '[PHASE] step', '[PINDIAG] shards'])
         self.assertEqual(self.logger.lines[1][:19], '[PHASE] step A end ')
+
+
+class PageTableDriftTests(ShardCheckBase):
+    """The page tables a request's verifier keeps across steps - its fixtures' page table
+    and row table, and the replay reader's per-bundle tables - are static between the
+    page binding's refresh (before the round) and the owner's next verify. Written over
+    in between, by an earlier request's replay into the holes its trace baked, they send
+    every attention layer to the wrong KV pages (runs 35492676194 and 35493208438)."""
+
+    NAMES = ['pages[16,4352]', 'singleton_pages[16,4352]', 'replay_pages[16,4352][0]', 'replay_pages[16,4352][1]']
+
+    def pair(self, stepped, operations, *, on_step=None):
+        first, second = verifier(operations, base=0x40000), verifier(operations, base=0x50000)
+        entries = [entry('A', device(operations), stepped, on_step=on_step, engine=first),
+                   entry('B', device(operations), stepped, engine=second)]
+        return entries, first, second
+
+    def test_page_tables_are_recorded_snapshotted_and_counted_with_the_shards(self):
+        stepped, operations = [], FakeOperations()
+        entries, first, second = self.pair(stepped, operations)
+        self.run_rounds(entries)
+        self.assertEqual(self.reports(), [])
+        self.assertEqual(self.lines('equal'), ['[PINDIAG] shards equal after step of A: 13 buffers proposal_calls=[1, 1]',
+                                              '[PINDIAG] shards equal after step of B: 13 buffers proposal_calls=[1, 1]'],
+                         'nine draft buffers and the four page tables: the row tables alias the singleton, read once')
+        self.assertEqual(list(module.RECORDED['B'])[-4:], self.NAMES)
+        for name in self.NAMES:
+            value = second.named[name]
+            self.assertIn('[PINDIAG] address B %s %d %d' % (name, value.shards[0].address, value.shards[1].address),
+                          self.lines('[PINDIAG] address '))
+        self.assertEqual((set(module.PAGE_TABLES), list(module.PAGE_TABLES['A'])), ({'A', 'B'}, self.NAMES))
+        for name in self.NAMES:
+            self.assertEqual([copy.shape for copy in module.PAGE_TABLES['B'][name]], [second.named[name].shape] * 2)
+
+    def test_a_replay_table_rewritten_by_the_other_users_step_is_a_page_table_drift_on_that_chip(self):
+        stepped, operations = [], FakeOperations()
+        victim = verifier(operations, base=0x50000)
+        struck = victim.named['replay_pages[16,4352][1]']
+        entries = [entry('A', device(operations), stepped, on_step=lambda _: damage(struck, 5, row=0, chip=0), engine=verifier(operations)),
+                   entry('B', device(operations), stepped, engine=victim)]
+        with self.assertRaises(AssertionError) as raised:
+            self.run_rounds(entries)
+        self.assertEqual(self.reports(), [
+            '[PINDIAG] page-table drift after step of A (entry 0): victim=B (entry 1) chip=0 rows=1',
+            '[PINDIAG] page-table drift buffer=replay_pages[16,4352][1] shape=(1, 8) address=(%d, %d) '
+            'first_seen_as=replay_pages[16,4352][1]' % (struck.shards[0].address, struck.shards[1].address),
+            '[PINDIAG] page-table drift differing=5 of 8 max_abs=2',
+            "[PINDIAG] page-table drift scheduler order=['A', 'B'] proposal_calls=[1, 1]"])
+        self.assertEqual(str(raised.exception), "Page table drifted on chip 0 between its owner's steps: victim=B "
+                                                'buffer=replay_pages[16,4352][1]; see the [PINDIAG] page-table drift log lines')
+        self.assertLess(len(str(raised.exception)), LINE_BUDGET)
+        for line in self.logger.lines:
+            self.assertLess(len(line), LINE_BUDGET, line)
+        self.assertEqual(stepped, ['A'], 'the victim is caught before it verifies on the wrong pages')
+
+    def test_the_fixture_page_table_and_row_table_are_checked_too(self):
+        for name, rows in (('pages[16,4352]', 16), ('singleton_pages[16,4352]', 1)):
+            with self.subTest(name=name):
+                self.setUp()
+                stepped, operations = [], FakeOperations()
+                victim = verifier(operations, base=0x50000)
+                struck = victim.named[name]
+                entries = [entry('A', device(operations), stepped, on_step=lambda _: damage(struck, 2, row=0, chip=1),
+                                 engine=verifier(operations)),
+                           entry('B', device(operations), stepped, engine=victim)]
+                with self.assertRaises(AssertionError):
+                    self.run_rounds(entries)
+                self.assertEqual(self.reports()[0],
+                                 '[PINDIAG] page-table drift after step of A (entry 0): victim=B (entry 1) chip=1 rows=%d' % rows)
+                self.assertIn('buffer=%s shape=(%d, 8)' % (name, rows), self.reports()[1])
+
+    def test_a_block_change_bound_before_the_round_is_not_a_drift(self):
+        """The bindings refresh every request's tables before the step runs
+        (serving_packed_bridge.py), so each round starts from what they hold then."""
+        stepped, operations = [], FakeOperations()
+        entries, first, second = self.pair(stepped, operations)
+        self.run_rounds(entries)
+        rebind(second, 7)
+        rebind(first, 3)
+        self.run_rounds(entries, 2)
+        self.assertEqual(self.reports(), [])
+        self.assertEqual(len(self.lines('shards equal after step')), 6)
+        for name in self.NAMES:
+            self.assertTrue(torch.equal(module.PAGE_TABLES['B'][name][0], second.named[name].shards[0].data))
+
+    def test_a_request_without_an_engine_or_with_a_closed_one_has_no_page_tables(self):
+        stepped, operations = [], FakeOperations()
+        entries = [entry('A', device(operations), stepped, engine=verifier(operations, phase='closed')),
+                   entry('B', device(operations), stepped)]
+        self.run_rounds(entries)
+        self.assertEqual(self.lines('equal'), ['[PINDIAG] shards equal after step of A: 9 buffers proposal_calls=[1, 1]',
+                                              '[PINDIAG] shards equal after step of B: 9 buffers proposal_calls=[1, 1]'])
+        self.assertEqual(module.PAGE_TABLES, {'A': {}, 'B': {}})
+        self.assertEqual(self.lines('address A replay'), [])
+
+    def test_a_bucket_without_replay_or_a_fixture_contributes_only_what_it_has(self):
+        stepped, operations = [], FakeOperations()
+        engine = verifier(operations, keys=(8, ('packed', 1)), replay=False)
+        engine.buckets[('packed', 1)] = dict(fixture=None)
+        entries = [entry('A', device(operations), stepped), entry('B', device(operations), stepped, engine=engine)]
+        self.run_rounds(entries)
+        self.assertEqual(list(module.PAGE_TABLES['B']), ['pages[8]', 'singleton_pages[8]'])
+        self.assertEqual(self.lines('equal')[0], '[PINDIAG] shards equal after step of A: 11 buffers proposal_calls=[1, 1]')
+
+    def test_page_tables_are_pruned_with_the_request(self):
+        stepped, operations = [], FakeOperations()
+        entries, first, second = self.pair(stepped, operations)
+        self.run_rounds(entries)
+        self.run_rounds([entries[0], entry('C', device(operations), stepped)])
+        self.assertEqual(set(module.PAGE_TABLES), {'A', 'C'})
+
+
+class PageTableWarnModeTests(ShardCheckBase):
+    mode = 'warn'
+
+    def test_a_page_table_drift_is_reported_once_per_chip_and_decoding_continues(self):
+        stepped, operations = [], FakeOperations()
+        victim = verifier(operations, base=0x50000)
+        struck = victim.named['replay_pages[16,4352][0]']
+
+        def strike(drafter):
+            damage(struck, 4, row=1, chip=0)
+            damage(struck, 6, row=2, chip=1)
+
+        entries = [entry('A', device(operations), stepped, on_step=strike, engine=verifier(operations)),
+                   entry('B', device(operations), stepped, engine=victim)]
+        self.run_rounds(entries, 2)
+        self.assertEqual(stepped, ['A', 'B'] * 2, 'decoding continued')
+        self.assertEqual([line for line in self.reports() if 'after step' in line], [
+            '[PINDIAG] page-table drift after step of A (entry 0): victim=B (entry 1) chip=0 rows=3',
+            '[PINDIAG] page-table drift after step of A (entry 0): victim=B (entry 1) chip=1 rows=3'])
+        self.assertEqual(len(self.reports()), 8, 'each chip once, not once per round')
+        self.assertEqual(module.REPORTED, {('B', 'replay_pages[16,4352][0]', 0), ('B', 'replay_pages[16,4352][0]', 1)})
+        self.assertEqual(self.lines('differ after'),
+                         ['[PINDIAG] shards differ after step of A: 12 equal, 1 diverged proposal_calls=[1, 1]'] * 2)
+        self.assertEqual(self.lines('equal after step of B'),
+                         ['[PINDIAG] shards equal after step of B: 13 buffers proposal_calls=[1, 1]'] * 2,
+                         "B's own step does not touch A's tables")
 
 
 if __name__ == '__main__':
