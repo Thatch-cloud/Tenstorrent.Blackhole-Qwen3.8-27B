@@ -1524,3 +1524,19 @@ singleton positions, 32 row tables) behind one fence - a cost to watch in the
 timings. The bench now keeps each stream's generated text (9720ac91) so the
 packed step's gate can be checked offline: run 35492676194 is the sequential
 reference on the two fp2u prompts.
+
+### Token-exact gate baseline: run 35492676194 (sequential step, image v41)
+
+Same lane and env as the timing run, plus the bench keeping each stream's text.
+Both users 64 tokens, no error; the same timing as run 35490648209.
+The prompts are the exact token-id arrays [1000 + i %% 64], so greedy output is
+deterministic nonsense - which is what a byte-exact comparison needs. The
+reference texts (utf-8) hash to:
+
+    stream 0: 64 tokens in 10 chunks, sha256 66a5d0c2a531af8bf65fc2cacbd1c952a413ee42bb7051ded6555b41384ea217
+    stream 1: 64 tokens in 23 chunks, sha256 481ea949857d4cce166dd9fb56048a88b016622b523ea2b18ad19f4c3a56fd6d
+
+The packed step passes the gate when a run on the same lane with
+QWEN_FAST_PACKED_STEP=1 yields the same two hashes (the full texts are kept
+locally in runner-evidence.local/packed-gate/). Stream order is by request
+index, which the bench fixes; the scheduler's order does not matter to it.
