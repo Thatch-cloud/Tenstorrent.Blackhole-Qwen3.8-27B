@@ -1275,3 +1275,20 @@ bundle v1, which run 35328870330 packaged after v18's hardware step had failed
 for the drained reader. Its device qualification is the two-user serving run on
 image v40, which is the workload the fix exists for. No evidence hash was
 hand-edited anywhere in this chain.
+
+Bundle v2, first attempt (run 35489107221): 'Staged source changed since
+inventory: dflash_combined_request.py' - `serving_bundle.py` fingerprints eight
+staged files against the 09-18 inventory, and two had legitimately changed on the
+runner's tree (`dflash_t16_native_scope.py` by its re-pinned reports,
+`dflash_combined_request.py` by the lane's adaptation from the newer
+orchestrator). Inventory lane serving-image-inventory-v3 (run 35489185444)
+re-inventoried that tree: cached binary matches, runtime 9f9cd4fd, eight
+fingerprints recorded; both the bundle and image workflows now restore and
+verify it (sha 826ea8f0, commit 77d6995a). Bundle v2, second attempt (run
+35489235797): success; `serving-bundle.json` lists 1335 sources with
+`fused_1d_input.cpp` = 3e907b91 at BOTH `experiment-scripts/ci/` and
+`experiment-scripts/ci/mlp-register-epilogue-candidate/`, the regenerated
+`fused-t16-target-simulator.json` (f9b9ce2d) and the three re-pinned gate
+modules. Image v40 (tag fast-serving-image-v40 at 1945b741, build run
+35489293275) restores bundle run 35489235797. Third allowlist PATCH for the
+inventory and a spare bundle tag; repositories verified after it.
