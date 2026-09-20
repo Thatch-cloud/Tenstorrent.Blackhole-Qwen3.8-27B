@@ -1322,3 +1322,28 @@ Next: (1) environment A/B with shared collectives (QWEN_FAST_SHARED_CCL=1) on
 the same image; (2) a first-divergent-stage audit inside the eager proposal
 (QWEN_FAST_PROPOSAL_AUDIT=1): compare every replicated input and per-layer
 output across the chips and name the first stage that differs.
+
+## Run 35489772960 (image v40, QWEN_FAST_SHARED_CCL=1): two users decode nine rounds each
+
+The environment A/B against 35489404340 - one shared collectives object instead
+of one per request, everything else identical - decoded NINE packed rounds for
+both users: 18 steps, `proposal_calls=[9, 9]`, every shard and drift check equal
+on every step, no hang, no divergence, 10 chunks per stream (TTFT 82 s and 164 s,
+serialised prefills; chunk gap median 2.3 s under the watcher's NoC sanitiser).
+The first user completed its 64-token budget (`ignore_eos`), the lifecycle
+detached it, and the survivor's next step -
+`[PHASE] execute total=16 new=0 cached=1 spec=1 finished=['cmpl-b1ac...']` - was
+refused by the packed contract, whose message now names the field:
+`finished=['cmpl-b1ac...']`. That also explains v38's refusal in hindsight.
+
+So the third-proposal divergence of v39 and v40 was the per-request TT_CCL
+instances (`QWEN_FAST_SHARED_CCL=0`): A's proposal through its own collectives
+leaves state that B's proposal through a second instance consumes differently
+per chip. Shared collectives are the correct configuration and the fp2u lane
+keeps them. The fix for the refusal: `step_refusals(scheduled, live=...)` counts
+a finished id only when it still names a request the contract holds; the
+packed contract prepares its tickets first to know that set (tests in both
+modules). Image v41 carries it; the next run is expected to complete both
+users' budgets. What the watcher-instrumented run already says about speed:
+sequential steps of 407-430 ms per user plus ~207 ms per eager proposal, i.e.
+the correctness scaffold, not the packed device step.
