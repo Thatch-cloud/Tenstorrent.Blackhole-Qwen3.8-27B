@@ -1606,3 +1606,28 @@ per-slot state. Note for the fix: serving builds `ActiveSnapshot(direct=True)`
 ttnn slice path at the prefill's index instead, leaving the per-step carry
 swaps at slot 0 untouched. `gdn_snapshot.py` is identical to the bundle's
 copy and not yet in the image lists.
+
+**Items 6-7 landed (fac52b81):** `serving_packed_step.packed_device_step(entries,
+*, cancelled, block)` (:78) - same contract as the sequential step; refuses
+before device work (:82-91); `ineligible` (:62: wrong user count, a narrow
+ticket, an unbound engine) or a pre-verify cancellation sends the WHOLE round
+to `sequential_packed_step` (:97; N=1 survivor included); one `block.verify`
+(:107, which stages internally - 69 host copies and one fence); then per entry
+in scheduler order `adopt_packed(ticket, block, metrics['segments'][i])` and
+commit or abort through `runtime.publish` (:132-146); `note_packed_step` after
+every round (:127); `fail_round` (:175) aborts adopted users, fails unadopted
+ones and releases every pending segment at prefix 0 so the block never stays
+'verified'; `[PACKED]` audit lines under QWEN_FAST_PACKED_AUDIT=1 (:149). The
+block fences only the commit that empties its pending segments
+(packed_verifier.py:483-485, 14bc5cf6). Wiring (serving_runtime.py:119-136,
+:167): under QWEN_FAST_PACKED_STEP=1 ONLY, the block is built after the draft
+weights and before the lifecycle, closed between them, and the lifecycle gets
+`partial(packed_device_step, block=block)`; the stage line always carries
+`device_step`. Default stays sequential. Image lists gained packed_verifier.py,
+serving_packed_step.py, gdn_device_loop_state.py and gdn_records.py (drift =
+packed commits only); dflash_request_runtime.py stays a bundle copy (its drift
+is 55e199ac's proposal_counts change, outside this work). 117 tests green in
+the eight step modules; test_serving_packed_step registered. NOT run on
+hardware: its gate (both users' texts equal to their single-user references)
+cannot be met until the slot-1 snapshot bug below is fixed on the sequential
+step, since the packed step inherits each user's carry from admission.
