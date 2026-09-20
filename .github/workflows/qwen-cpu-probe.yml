@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results
-          image=sha256:43cbdd84bca9975197f898d72d34e0e87392df6b5ac289f720e2bdfbf231f407
+          image=sha256:c33a006f3b4bd88ae4c89bae71a79cfaa40f7949960ab6110f0c2cad1074222c
           # Every probe_*.py in scripts/ci runs, so adding a probe needs no workflow
           # edit and a stale name cannot silently re-run yesterday's question. Each
           # must print VERDICT; the step fails if any does not.
