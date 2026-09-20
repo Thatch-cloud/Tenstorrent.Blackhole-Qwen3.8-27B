@@ -872,3 +872,31 @@ before it. The bench now errors a stream after 180 s of inactivity and keeps the
 tokens it saw, so a hang still yields the diagnostic lines up to the stall. The
 collectives audit had said the one semaphore-pool hazard it could construct was a
 hang rather than divergence; that analysis is being redone against v34's changes.
+
+## v35 on the rig (run 35482551725): protected buffers, and the second proposal stalls
+
+History and K/V pooled, draft weights uploaded once and shared (109 tensors lent
+to both devices), per-engine carry, warn-mode shard check. Both users admitted,
+two rounds each, TTFT 14.6 s and 28.6 s (serialised prefills), then generation
+went from 2.2 tok/s to 0.0 with both requests still Running - a step that never
+returned. The 180 s inactivity limit ended it with the log intact.
+
+Two corrections from the diagnostic:
+
+- Every step reported all ten draft K/V banks "diverged" across chips (~99.9% of
+  elements, both directions, from the first step) while the five checked weights
+  and both histories stayed bit-identical. That is structure, not damage: the
+  draft q/k/v projections are sharded across the chips, so each chip holds its
+  own K/V heads. The check must exclude the K/V, and v33's "kv_history[0].k
+  victim" was this false positive. What v33 actually showed - and v35 repeats - is
+  that the pooled history and the weights are intact.
+- `proposal_calls` stayed [1, 1] through both rounds: neither device proposed a
+  second time. Every earlier chip-divergence failure was at call=1 in
+  select_proposal; with the buffers protected, the second proposal now stops
+  instead of producing garbage. So the remaining fault is in whatever the second
+  eager proposal waits on after the other request's cycle has run - a collective
+  or a fence, not a buffer.
+
+Next run: QWEN_FAST_PHASE_LOG=1 wraps each proposal and each step in begin/end
+lines so the stall names its phase; the collectives audit is re-examining the
+semaphore state a trace replay leaves for the next eager gather.
