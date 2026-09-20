@@ -1347,3 +1347,32 @@ modules). Image v41 carries it; the next run is expected to complete both
 users' budgets. What the watcher-instrumented run already says about speed:
 sequential steps of 407-430 ms per user plus ~207 ms per eager proposal, i.e.
 the correctness scaffold, not the packed device step.
+
+## Run 35490298652 (image v41, shared collectives): both users complete, no error
+
+The first complete two-user serving cycle on the fast path. Image v41 =
+sha256:b11e22ae (657b2970: the finished-id rule). Stream 0: 10 chunks, done at
+178.9 s; stream 1: 23 chunks, done at 189.9 s; no error on either. Nine packed
+rounds while both were resident (`proposal_calls=[9, 9]`), every shard and drift
+check equal, then `[PHASE] execute total=16 new=0 cached=1 spec=1
+finished=['cmpl-879b...']` was ADMITTED and the survivor decoded alone to its
+budget (engine stats: Running 2 -> Running 1, 3.4 -> 5.2 -> 3.5 tok/s). Both
+prompts 32768 exact token ids, max_tokens 64, ignore_eos; TTFT 82 s and 164 s
+because the prefills are serialised (one in flight) and each takes ~77 s under
+the watcher.
+
+What this run measures and does not: chunk gap median 1627 ms, p90 1720 ms, with
+the watcher's NoC sanitiser on every kernel and ~58 MB of shard readback per
+device per step, through the sequential scaffold (one full weight pass per user
+per round). The bench's `tokens` counts SSE chunks, not tokens (stream 0's 64
+tokens arrived in 10 chunks, ~6.4 accepted tokens per verify), so
+`tokens_per_user_per_s` in this report is chunks per second. Next: the bench
+reads `usage.completion_tokens` via stream_options, and the timing run drops the
+watcher and the shard readbacks.
+
+Where the day ends against the goal: two users, 33024 context, 32768 prefill,
+correct end to end. 200 tok/s per user needs the packed device step (one weight
+pass for all users per round) in place of the sequential scaffold, 64-row blocks
+for four T16 users, and the prefill/decode interleave; none of those is measured
+yet. The concurrency pin (one hook, one bridge, one trace bucket) is lifted for
+two users by construction.
