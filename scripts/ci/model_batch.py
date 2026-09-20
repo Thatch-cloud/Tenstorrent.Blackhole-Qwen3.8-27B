@@ -279,15 +279,22 @@ def two_tile_bindings(rows, model, operations):
     at one tile, with a one-tile fused QKV config beneath it) and the MLP's first arm (the
     prefill all-gather fusion, taken above one tile). The block supplies each from its own
     side. Within one tile there is nothing: the 32-row block's calls stay exactly as the M1
-    gate ran them, and the modules are not imported."""
+    gate ran them, and the modules are not imported.
+
+    Two more of the model's own decode-mode linear projections take a slow prefill arm
+    above one tile: the attention output projection (`_wo_proj`, looked up by
+    `_decode_from_prep`) and the GDN output projection (`_row_proj`, looked up by
+    gdn_multitoken_conv.finish_output, FROZEN). Both are bound two-tile the same way as
+    the head concat and the MLP forward - `_wo_proj` alongside the attention binder,
+    `_row_proj` as its own GDN output binder."""
     validate_checkpoint(rows, rows)
     if rows <= TILE_ROWS:
         return ()
     from two_tile_norm import bind_two_tile_norms
-    from two_tile_decode import bind_two_tile_attention, bind_two_tile_mlp
+    from two_tile_decode import bind_two_tile_attention, bind_two_tile_gdn_output, bind_two_tile_mlp
 
     return (bind_two_tile_norms(model, rows, operations), bind_two_tile_attention(model, rows, operations),
-            bind_two_tile_mlp(model, rows))
+            bind_two_tile_mlp(model, rows, operations), bind_two_tile_gdn_output(model, rows, operations))
 
 
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):

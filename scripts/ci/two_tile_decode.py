@@ -96,8 +96,6 @@ device by v51 before layer 3's prep: the fused QKV matmul at per_core_M 2, and t
 2D program configs at M = 64 for the GDN in and out projections and w1, w3, w2.
 """
 
-from model_batch import instance_overrides
-
 TILE = 32
 SUBBLOCK_CAP = 4  # fp32 dest accumulation: the builder's cap on out_subblock_h * out_subblock_w
 
@@ -246,12 +244,63 @@ class TwoTileConcatHeads:
         return joined
 
 
+class TwoTileProjectionSplit:
+    """A linear (activation, weight) -> tensor projection at the block's rows, as two
+    32-row calls to the model's own method - its one-tile decode 1D arm, gated the same
+    way as every other decode matmul in this model (`x.shape[-2] <= TILE_SIZE`) - joined
+    on the row axis. Row-independent linear projection: two 32-row calls concatenated on
+    the row axis are bit for bit one call over the same rows.
+
+    Shared by `_row_proj` (GDN, gdn_multitoken_conv.finish_output, FROZEN) and `_wo_proj`
+    (attention, `_decode_from_prep`, model-owned): both are looked up by attribute at
+    call time on the instance they are bound to - the same mechanism
+    `_concat_heads_decode` is bound through - and neither frees the activation it is
+    given (proven for `_row_proj`: `finish_output` deallocates `result['output']` itself,
+    right after calling it, so the native method left it alone). So unlike
+    TwoTileConcatHeads and TwoTileMLPForward, the WHOLE activation is never freed here -
+    that stays whichever frozen or model-owned caller already owns it - only the halves
+    and their native outputs, which no one outside this wrapper ever sees, are freed here.
+    """
+
+    def __init__(self, instance, name, rows, operations):
+        validate_two_tile_rows(rows)
+        native = getattr(type(instance), name, None)
+        if not callable(native):
+            raise ValueError('%s no longer defines %s; the two-tile projection cannot mirror it'
+                             % (type(instance).__name__, name))
+        self.instance, self.name, self.rows, self.operations, self.native = instance, name, rows, operations, native
+        self.calls = 0
+
+    def __call__(self, activation, weight):
+        operations = self.operations
+        shape = tuple(activation.shape)
+        if len(shape) != 3 or shape[1] != self.rows:
+            raise ValueError('The two-tile %s was bound for %d rows; %r given' % (self.name, self.rows, shape))
+        width = shape[-1]
+        l1 = operations.L1_MEMORY_CONFIG
+        owned = []
+        try:
+            results = []
+            for first in range(0, self.rows, TILE):
+                half = operations.slice(activation, (0, first, 0), (1, first + TILE, width), memory_config=l1)
+                owned.append(half)
+                partial = self.native(self.instance, half, weight)
+                owned.append(partial)
+                results.append(partial)
+            joined = operations.concat(results, dim=1, memory_config=l1)
+        finally:
+            for value in owned:
+                operations.deallocate(value)
+        self.calls += 1
+        return joined
+
+
 class TwoTileAttentionDecode:
     """One full-attention layer's forward_decode at the block's rows: the model's fused prep
     path (attention/tp.py:533-557) - its projection under the rebuilt config, its prep op
     once per 32-row tile (prep_by_tile), then its own `_decode_from_prep`, which the block
-    has bound to its K/V writer and readers and which must take the layer's two-tile head
-    concat (`concat`) exactly once."""
+    has bound to its K/V writer, readers, two-tile head concat (`concat`) and two-tile
+    output projection (`wo`), each of which must run exactly once."""
 
     def __init__(self, attention, rows, operations, progcfg):
         validate_two_tile_rows(rows)
@@ -275,6 +324,7 @@ class TwoTileAttentionDecode:
         if any(not callable(getattr(operations, name, None)) for name in ('slice', 'concat', 'sharded_to_interleaved')):
             raise ValueError('ttnn slice, concat and sharded_to_interleaved are required to join the per-tile prep outputs')
         self.concat = TwoTileConcatHeads(attention, rows, operations)
+        self.wo = TwoTileProjectionSplit(attention, '_wo_proj', rows, operations)
         self.attention = attention
         self.calls = 0
 
@@ -292,19 +342,23 @@ class TwoTileAttentionDecode:
             q, gate, k_sh, v_sh = prep_by_tile(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
         finally:
             operations.deallocate(qkv_raw)
-        concats = self.concat.calls
+        concats, wo_calls = self.concat.calls, self.wo.calls
         result = attention._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, rows)
         if self.concat.calls - concats != 1:
             raise AssertionError("The wide block's attention tail must take its two-tile head concat exactly once; "
                                  "%d taken" % (self.concat.calls - concats))
+        if self.wo.calls - wo_calls != 1:
+            raise AssertionError("The wide block's attention tail must take its two-tile output projection exactly "
+                                 "once; %d taken" % (self.wo.calls - wo_calls))
         self.calls += 1
         return result
 
 
 class TwoTileAttentionBinding:
     """The wide block's attention bindings: the rebuilt fused-QKV config on the model args
-    and, per full-attention layer, the two-tile forward and its head concat on the
-    attention instance; `calls` counts the forwards (each of which counted its concat)."""
+    and, per full-attention layer, the two-tile forward, its head concat and its output
+    projection on the attention instance; `calls` counts the forwards (each of which
+    counted its concat and its output projection)."""
 
     label = 'full-attention forward'
 
@@ -327,6 +381,7 @@ class TwoTileAttentionBinding:
         for attention, forward in zip(attentions, self.forwards):
             self.bindings.append((attention, 'forward_decode', forward))
             self.bindings.append((attention, '_concat_heads_decode', forward.concat))
+            self.bindings.append((attention, '_wo_proj', forward.wo))
         self.expected_calls = len(self.forwards)
 
     @property
@@ -335,26 +390,71 @@ class TwoTileAttentionBinding:
 
 
 class TwoTileMLPForward:
-    """One layer's MLP forward at the block's rows: the model's `_forward_tp` with its prefill
-    all-gather fusion off for exactly this call, so 64 rows take the unfused prefill arm
-    (one pass over w1, w3 and w2) instead of gathering an already gathered input."""
+    """One layer's MLP forward at the block's rows: two 32-row calls to the model's own
+    `_forward_tp`, concatenated on the row axis, instead of one 64-row call with the
+    prefill all-gather fusion off.
 
-    def __init__(self, mlp, rows):
+    At 32 rows `x.shape[-2] > TILE_SIZE` is always false, so `_forward_tp`'s first arm
+    (the PREFILL fused all-gather + SwiGLU) is never reached regardless of
+    `_fuse_gateup_agmm` - the same fast one-tile DECODE arm the 2-user M1 block already
+    exercises through its own unwrapped `feed_forward.forward`. No flag override is
+    needed or made here. Row-independent linear projection: two 32-row calls
+    concatenated on the row axis are bit for bit one 64-row call - token-exactness
+    holds - at the cost of one extra tt_all_reduce per layer (each 32-row half reduces
+    inside its own `_forward_tp`), the accepted trade for landing in the decode arm.
+
+    `_forward_tp` reads its activation for both w1 and w3 before it is done with it, so
+    the CALLEE - not some shared low-level matmul primitive - must be the one freeing
+    it; nothing external ever frees `x` today (the unmodified single 64-row call above
+    this one never did either). Once `x` is only ever handed over as tile slices,
+    nothing else frees the whole tensor, so it is freed here right after the slices are
+    cut, the same discipline TwoTileConcatHeads uses for its own input.
+    """
+
+    def __init__(self, mlp, rows, operations):
         validate_two_tile_rows(rows)
         if getattr(mlp, 'num_devices', 1) <= 1 or not callable(getattr(mlp, '_forward_tp', None)):
             raise ValueError('The two-tile MLP forward serves the tensor-parallel MLP')
         if '_fuse_gateup_agmm' not in getattr(mlp, '__dict__', {}):
             raise ValueError('The MLP no longer keeps its gate/up all-gather fusion switch on the instance; the model changed')
-        self.mlp, self.rows = mlp, rows
+        self.mlp, self.rows, self.operations = mlp, rows, operations
         self.calls = 0
 
     def __call__(self, x):
-        if tuple(x.shape)[-2] != self.rows:
-            raise ValueError('The two-tile MLP forward was bound for %d rows; %r given' % (self.rows, tuple(x.shape)))
-        with instance_overrides([(self.mlp, '_fuse_gateup_agmm', False)]):
-            result = self.mlp._forward_tp(x)
+        operations = self.operations
+        shape = tuple(x.shape)
+        if len(shape) < 2 or shape[-2] != self.rows:
+            raise ValueError('The two-tile MLP forward was bound for %d rows; %r given' % (self.rows, shape))
+        axis = len(shape) - 2
+        l1 = operations.L1_MEMORY_CONFIG
+        halves = []
+        try:
+            for first in range(0, self.rows, TILE):
+                start = [0] * len(shape)
+                stop = list(shape)
+                start[axis], stop[axis] = first, first + TILE
+                halves.append(operations.slice(x, tuple(start), tuple(stop), memory_config=l1))
+        except BaseException:
+            for half in halves:
+                operations.deallocate(half)
+            raise
+        # x is never handed to _forward_tp whole any more; freed here (see docstring).
+        operations.deallocate(x)
+        outputs = []
+        try:
+            for index, half in enumerate(halves):
+                try:
+                    outputs.append(self.mlp._forward_tp(half))
+                except BaseException:
+                    for remaining in halves[index + 1:]:
+                        operations.deallocate(remaining)
+                    raise
+            joined = operations.concat(outputs, dim=axis, memory_config=l1)
+        finally:
+            for value in outputs:
+                operations.deallocate(value)
         self.calls += 1
-        return result
+        return joined
 
 
 class TwoTileMLPBinding:
@@ -362,13 +462,13 @@ class TwoTileMLPBinding:
 
     label = 'MLP forward'
 
-    def __init__(self, model, rows):
+    def __init__(self, model, rows, operations):
         validate_two_tile_rows(rows)
         layers = list(getattr(model, 'layers', ()))
         if not layers or any(getattr(layer, 'feed_forward', None) is None for layer in layers):
             raise ValueError('A model whose every layer carries a feed_forward MLP is required')
         self.rows = rows
-        self.forwards = [TwoTileMLPForward(layer.feed_forward, rows) for layer in layers]
+        self.forwards = [TwoTileMLPForward(layer.feed_forward, rows, operations) for layer in layers]
         self.bindings = [(layer.feed_forward, 'forward', forward) for layer, forward in zip(layers, self.forwards)]
         self.expected_calls = len(self.forwards)
 
@@ -377,9 +477,38 @@ class TwoTileMLPBinding:
         return sum(forward.calls for forward in self.forwards)
 
 
+class TwoTileGDNOutputBinding:
+    """The wide block's GDN output-projection bindings: one two-tile `_row_proj` wrapper
+    per GDN layer, bound on the gdn instance the way `_concat_heads_decode` is bound on
+    the attention instance - `gdn_multitoken_conv.finish_output` (FROZEN) looks
+    `_row_proj` up on the gdn instance by attribute at call time and cannot be edited.
+    The single all-reduce after it, in that frozen file, still runs once over the full
+    concatenated block; `calls` counts the two-tile projections."""
+
+    label = 'GDN output projection'
+
+    def __init__(self, model, rows, operations):
+        validate_two_tile_rows(rows)
+        layers = [layer.attention for layer in getattr(model, 'layers', ()) if not getattr(layer, 'is_full_attention', True)]
+        if not layers:
+            raise ValueError('A model with at least one GDN layer is required')
+        self.rows = rows
+        self.projections = [TwoTileProjectionSplit(gdn, '_row_proj', rows, operations) for gdn in layers]
+        self.bindings = [(gdn, '_row_proj', projection) for gdn, projection in zip(layers, self.projections)]
+        self.expected_calls = len(self.projections)
+
+    @property
+    def calls(self):
+        return sum(projection.calls for projection in self.projections)
+
+
 def bind_two_tile_attention(model, rows, operations):
     return TwoTileAttentionBinding(model, rows, operations)
 
 
-def bind_two_tile_mlp(model, rows):
-    return TwoTileMLPBinding(model, rows)
+def bind_two_tile_mlp(model, rows, operations):
+    return TwoTileMLPBinding(model, rows, operations)
+
+
+def bind_two_tile_gdn_output(model, rows, operations):
+    return TwoTileGDNOutputBinding(model, rows, operations)

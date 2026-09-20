@@ -5,6 +5,56 @@ from gdn_prefix import validate_rows
 from gdn_state_copy import copy_compact
 from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 
+TILE = 32
+
+
+def project_qkvzab_by_tile(operations, layer, packed, rows):
+    """The block's one input-projection weight pass, at one native call within a tile or
+    one call per 32-row tile beyond it, joined on the row axis.
+
+    Beyond one tile, `layer._project_qkvzab_raw` takes the model's prefill 2D branch
+    (tp_common.sharded_decode_matmul's `seq > TILE_SIZE` arm): DRAM output, ~13x slower
+    at M=64 than the cost model. Every 32-row tile stays inside `S <= TILE_SIZE`, so it
+    takes the same one-tile 1D decode arm the 2-user M1 block already runs (L1 output).
+    The projection is a row-independent linear map, so two 32-row calls concatenated on
+    the row axis are bit for bit one call over the same rows - token-exactness holds -
+    at the cost of reading the projection weight twice instead of once per 64-row block
+    (the accepted trade, same as the MLP and attention two-tile forms).
+
+    `_project_qkvzab_raw` consumes and frees whatever tensor it is given (`packed` is
+    never present in any owned/release list across every caller in this file or
+    gdn_prefix.decode_projected, so the native op must be freeing it). Once `packed` is
+    only ever handed over as tile slices, nothing else frees the whole tensor, so it is
+    freed here right after the slices are cut - the same discipline
+    two_tile_decode.TwoTileConcatHeads and TwoTileMLPForward use for their own inputs.
+    """
+    l1 = operations.L1_MEMORY_CONFIG
+    if rows <= TILE:
+        return layer._project_qkvzab_raw(packed, rows, l1)
+    width = packed.shape[-1]
+    slices = []
+    try:
+        for first in range(0, rows, TILE):
+            slices.append(operations.slice(packed, (0, first, 0), (1, first + TILE, width)))
+    except BaseException:
+        for piece in slices:
+            operations.deallocate(piece)
+        raise
+    operations.deallocate(packed)
+    tiles = []
+    try:
+        for index, piece in enumerate(slices):
+            try:
+                tiles.append(layer._project_qkvzab_raw(piece, TILE, l1))
+            except BaseException:
+                for remaining in slices[index + 1:]:
+                    operations.deallocate(remaining)
+                raise
+        return operations.concat(tiles, dim=1)
+    finally:
+        for value in tiles:
+            operations.deallocate(value)
+
 
 def validate_segments(segments, checkpoint, prefix, rows, slots):
     """Either today's single sequence, or one contiguous span per packed user."""
@@ -38,12 +88,15 @@ def resident_piece(operations, piece, owned):
 
     Within one tile the model's decode projection is already L1 (the 1D decode matmul's
     output placement, gdn/tp.py:1036-1042) and every slice inherits it, so nothing moves
-    and the slice is owned as before. Beyond one tile (the 64-row M3 block) the model's
-    prefill branch returns the projection DRAM-interleaved (tp_common.sharded_decode_matmul,
-    its `seq > TILE_SIZE` arm) and each 16-row slice inherits that; run 35504864400 (image
-    v49) stopped at the scope's check. The slice is then copied to L1 and the DRAM slice
-    freed: the same values, only the placement the kernel reads changes. The scope's check
-    stays as it is; it is the qualification.
+    and the slice is owned as before. Beyond one tile (the 64-row M3 block), the block's
+    own projection (project_qkvzab_by_tile) now runs the same one-tile decode arm per
+    32-row tile and joins the L1 halves, so every 16-row slice inherits L1 there too and
+    this stays a no-op. The DRAM branch below is kept as the general fallback for
+    whatever placement `_project_qkvzab_raw` actually returns - run 35504864400 (image
+    v49) stopped at the scope's check when the model's own prefill branch (since
+    replaced here) returned DRAM at M = 64: the slice was copied to L1 and the DRAM
+    slice freed, same values, only the placement the kernel reads changes. The scope's
+    check stays as it is; it is the qualification.
     """
     if piece.memory_config() == operations.L1_MEMORY_CONFIG:
         owned.append(piece)
@@ -133,11 +186,12 @@ class DeviceLoopState:
         A advanced by the whole block.
 
         What does NOT change is where the weights are read. The input projection
-        `_project_qkvzab_raw` runs ONCE across all rows here, and `finish_output`
-        runs the single output projection over the concatenated rows afterwards.
-        Only the recurrence, which is elementwise and carries no weights, runs once
-        per segment. That is the whole point of packing: one pass over the weights
-        serving every user.
+        (project_qkvzab_by_tile) runs across all rows here - one native call within a
+        tile, one call per 32-row tile beyond it, joined on the row axis, never one per
+        packed user - and `finish_output` runs the single output projection over the
+        concatenated rows afterwards. Only the recurrence, which is elementwise and
+        carries no weights, runs once per segment. That is the whole point of packing:
+        the weight passes stay tied to tile count, not user count.
 
         `deferred` is the packed serving step: the accepted prefixes are known only
         after the verify readback, so nothing is restored or advanced here. Every
@@ -158,7 +212,7 @@ class DeviceLoopState:
         defer_publication = (self.defer_conv_publication or self.commit_only) and rows > 1
         if spans is not None:
             return self._decode_packed(packed, rows, spans, checkpoints, prefixes, slots, defer_publication, deferred)
-        projected = layer._project_qkvzab_raw(packed, rows, operations.L1_MEMORY_CONFIG)
+        projected = project_qkvzab_by_tile(operations, layer, packed, rows)
         result = None
         try:
             result = self._recurrence(projected, rows, prefix, defer_publication)
@@ -182,7 +236,7 @@ class DeviceLoopState:
         entries = self.segment_entries
         if deferred and (entries is None or len(entries) != len(spans)):
             raise ValueError('Deferred packed decode needs one entry per packed user, allocated at construction')
-        projected = layer._project_qkvzab_raw(packed, rows, operations.L1_MEMORY_CONFIG)
+        projected = project_qkvzab_by_tile(operations, layer, packed, rows)
         results, owned, outputs = [], [projected], []
         try:
             for index, ((start, stop), slot, point, accepted) in enumerate(zip(spans, slots, checkpoints, prefixes)):

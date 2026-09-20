@@ -5,11 +5,15 @@ per user, so the recurrence has to restart from that user's own carried state at
 every boundary - otherwise user B continues user A's recurrence, which is wrong
 for every row of B and leaves A advanced by the whole block.
 
-What must NOT change is where the weights are read. `_project_qkvzab_raw` runs
-once across all rows and `finish_output` runs the single output projection over
-the concatenated rows, so packing still costs one pass over the weights. If either
-of those ran per segment the pack would buy nothing, which is why both are asserted
-here rather than assumed.
+What must NOT change is where the weights are read. `_project_qkvzab_raw` runs once
+per 32-row TILE of the block, never once per packed USER - within one tile that is a
+single native call; beyond it (gdn_device_loop_state.project_qkvzab_by_tile), one call
+per tile, joined on the row axis, landing every call in the model's fast one-tile
+decode arm instead of its slow prefill branch at M = 64 - and `finish_output` runs the
+single output projection over the concatenated rows. So a 64-row, four-user block still
+costs two weight passes, not four: tied to tile count, not user count. If either
+projection ran once per packed segment instead the pack would buy nothing, which is why
+both are asserted here rather than assumed.
 """
 
 from types import SimpleNamespace
@@ -23,15 +27,22 @@ class PackedFixture(unittest.TestCase):
     """One GDN layer's device-loop state over fakes that record every device call."""
 
     def build(self, projection_memory='l1', **options):
-        """`projection_memory` is where the model's projection lands: 'l1' within one tile
-        (the 1D decode matmul), 'dram' beyond it (the prefill branch, the 64-row block).
-        Slices inherit it, as ttnn's do."""
+        """`projection_memory` is where each native `_project_qkvzab_raw` call lands: 'l1'
+        is the model's one-tile decode arm every call takes now (within one tile or per
+        32-row tile beyond it); 'dram' exercises resident_piece's general fallback as a
+        defensive case (the model's old prefill branch, replaced, used to return this at
+        M = 64). Slices inherit it, as ttnn's do."""
         calls = []
         operations = SimpleNamespace(L1_MEMORY_CONFIG='l1', DRAM_MEMORY_CONFIG='dram')
 
         def record_slice(value, start, stop, *args, **kwargs):
             calls.append(('slice', start[1], stop[1]))
-            return SimpleNamespace(shape=(1, stop[1] - start[1], 5120), name='piece:%d' % start[1],
+            # Slicing the (single- or joined-) projection keeps the historical 'piece:N'
+            # names every existing assertion checks; slicing anything else (the packed
+            # block itself, tile by tile, beyond one 32-row tile) is named for its source
+            # so the two never collide.
+            prefix = 'piece' if getattr(value, 'name', None) == 'projected' else getattr(value, 'name', '?')
+            return SimpleNamespace(shape=(1, stop[1] - start[1], 5120), name='%s:%d' % (prefix, start[1]),
                                    memory_config=value.memory_config)
 
         def record_move(value, memory):
@@ -40,8 +51,14 @@ class PackedFixture(unittest.TestCase):
 
         operations.slice = Mock(side_effect=record_slice)
         operations.to_memory_config = Mock(side_effect=record_move)
+        # Named and placed like the single-call projection: beyond one tile this joins two
+        # 32-row tile projections, and everything downstream (the per-user slices,
+        # resident_piece) must not be able to tell the difference. Also used to join the
+        # per-segment recurrence outputs (PackedSegmentTests etc.), whose own width - not
+        # the projection's - it must keep.
         operations.concat = Mock(side_effect=lambda parts, **kwargs: SimpleNamespace(
-            shape=(1, sum(part.shape[1] for part in parts), 5120), name='joined'))
+            shape=(1, sum(part.shape[1] for part in parts), parts[0].shape[-1]), name='projected',
+            memory_config=getattr(parts[0], 'memory_config', lambda: None)))
         # addresses() runs in __init__, before any patch a test could install
         operations.get_device_tensors = Mock(side_effect=lambda tensor: [
             SimpleNamespace(buffer_address=lambda value=str(tensor): hash(value)) for _ in range(2)])
@@ -83,6 +100,7 @@ class PackedFixture(unittest.TestCase):
         return run
 
     def run_packed(self, state, operations, calls, spans, prefixes, slots, checkpoints, rows=32, **options):
+        packed = SimpleNamespace(shape=(1, rows, 5120), name='packed', memory_config=lambda: 'l1')
         with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
                 patch('gdn_device_loop_state.restore_prefix',
                       side_effect=lambda ops, result, entry, destination, accepted:
@@ -90,8 +108,7 @@ class PackedFixture(unittest.TestCase):
                 patch('gdn_device_loop_state.copy_compact'), \
                 patch('gdn_device_loop_state.release_owned'), \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
-            return state.decode(SimpleNamespace(shape=(1, rows, 5120)), checkpoints, prefixes,
-                                segments=spans, slots=slots, **options)
+            return state.decode(packed, checkpoints, prefixes, segments=spans, slots=slots, **options)
 
 
 class PackedSegmentTests(PackedFixture):
@@ -230,10 +247,15 @@ class FourUserBlockTests(PackedFixture):
         state, operations, layer, active, calls = self.build(commit_only=True, users=4)
         result = self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
                                  rows=64, deferred=True)
-        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 64)],
-                         'the weight pass runs once over the whole 64-row block')
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 32), ('project', 32)],
+                         'the weight pass runs once per 32-row tile of the block - twice at 64 rows - never once per user')
         self.assertEqual([entry for entry in calls if entry[0] == 'slice'],
-                         [('slice', 0, 16), ('slice', 16, 32), ('slice', 32, 48), ('slice', 48, 64)])
+                         [('slice', 0, 32), ('slice', 32, 64),
+                          ('slice', 0, 16), ('slice', 16, 32), ('slice', 32, 48), ('slice', 48, 64)],
+                         'the block is split at its two tile boundaries before the per-user pieces are cut')
+        # the packed block and both per-tile projections are intermediates, freed once joined
+        self.assertEqual([entry for entry in calls if entry[0] == 'free' and entry[1] in ('packed', 'projected')],
+                         [('free', 'packed'), ('free', 'projected'), ('free', 'projected')])
         entries = state.segment_entries
         self.assertEqual(len(entries), 4)
         self.assertEqual(len({entry[0] for entry in entries}), 4, 'one block-start entry per user')
@@ -246,23 +268,29 @@ class FourUserBlockTests(PackedFixture):
         self.assertEqual(result['segments'], self.spans)
         self.assertEqual([piece['states'].shape[0] for piece in state.segment_results], [16] * 4)
         self.assertEqual((state.calls, state.checkpoint_calls), (1, 4))
+        # every 32-row tile projection already lands in L1 (the model's one-tile decode
+        # arm), so no per-user piece of the joined result ever needs moving
         operations.to_memory_config.assert_not_called()
 
     def test_a_dram_projection_is_moved_to_l1_one_piece_at_a_time(self):
-        """Beyond one tile the model's prefill branch lands the projection in DRAM and every
-        slice inherits it (run 35504864400 stopped at the direct-window scope's L1 check):
-        each 16-row slice is copied to L1 right after it is cut, the DRAM slice freed, and
-        the recurrence - hence the scope - sees only the L1 copy. One weight pass still."""
+        """Beyond one tile each 32-row tile projection can still - defensively - come back
+        DRAM-interleaved (resident_piece's general fallback, kept as its qualification
+        whatever placement `_project_qkvzab_raw` actually returns): every 16-row user
+        slice of the joined result inherits it (run 35504864400 stopped at the direct-
+        window scope's L1 check), is copied to L1 right after it is cut, and the DRAM
+        slice freed, so the recurrence - hence the scope - sees only the L1 copy. Two
+        weight passes still - one per 32-row tile, never one per packed user."""
         state, operations, layer, active, calls = self.build(commit_only=True, users=4, projection_memory='dram')
         result = self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
                                  rows=64, deferred=True)
-        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 64)])
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 32), ('project', 32)])
         self.assertEqual([entry for entry in calls if entry[0] in ('slice', 'move', 'free', 'recur')],
-                         [('slice', 0, 16), ('move', 'piece:0', 'l1'), ('free', 'piece:0'), ('recur', 16),
+                         [('slice', 0, 32), ('slice', 32, 64), ('free', 'packed'), ('free', 'projected'), ('free', 'projected'),
+                          ('slice', 0, 16), ('move', 'piece:0', 'l1'), ('free', 'piece:0'), ('recur', 16),
                           ('slice', 16, 32), ('move', 'piece:16', 'l1'), ('free', 'piece:16'), ('recur', 16),
                           ('slice', 32, 48), ('move', 'piece:32', 'l1'), ('free', 'piece:32'), ('recur', 16),
                           ('slice', 48, 64), ('move', 'piece:48', 'l1'), ('free', 'piece:48'), ('recur', 16)],
-                         'each slice is moved and its DRAM copy freed before its own recurrence')
+                         'each user slice of the joined projection is moved and its DRAM copy freed before its own recurrence')
         self.assertEqual([entry for entry in calls if entry[0] == 'input'],
                          [('input', 'resident:piece:%d' % first, 'l1') for first in (0, 16, 32, 48)])
         # the block owns the L1 copies (freed with the result), never the freed DRAM slices
@@ -275,14 +303,17 @@ class FourUserBlockTests(PackedFixture):
         operations.to_memory_config = Mock(side_effect=[
             SimpleNamespace(shape=(1, 16, 5120), name='resident:piece:0', memory_config=lambda: 'l1'),
             RuntimeError('no L1 left')])
+        packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
         with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
                 patch('gdn_device_loop_state.release_owned') as release, \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
             with self.assertRaisesRegex(RuntimeError, 'no L1 left'):
-                state.decode(SimpleNamespace(shape=(1, 64, 5120)), self.checkpoints, [0] * 4,
+                state.decode(packed, self.checkpoints, [0] * 4,
                              segments=self.spans, slots=self.slots, deferred=True)
-        self.assertEqual([entry for entry in calls if entry[0] == 'free'], [('free', 'piece:0'), ('free', 'piece:16')],
-                         'the DRAM slice of the failed move is freed too')
+        self.assertEqual([entry for entry in calls if entry[0] == 'free'],
+                         [('free', 'packed'), ('free', 'projected'), ('free', 'projected'),
+                          ('free', 'piece:0'), ('free', 'piece:16')],
+                         'the two tile projections and the DRAM slice of the failed move are all freed')
         release.assert_called_once()
         released = [getattr(value, 'name', value) for value in release.call_args.args[1]]
         self.assertIn('projected', released)
@@ -325,7 +356,7 @@ class FourUserBlockTests(PackedFixture):
         self.run_packed(state, operations, calls, ((0, 32), (32, 64)), [0, 0], self.slots[:2],
                         self.checkpoints[:2], rows=64, deferred=True)
         self.assertEqual([entry for entry in calls if entry[0] in ('project', 'recur')],
-                         [('project', 64), ('recur', 32), ('recur', 32)])
+                         [('project', 32), ('project', 32), ('recur', 32), ('recur', 32)])
 
 
 class SegmentValidationTests(unittest.TestCase):
