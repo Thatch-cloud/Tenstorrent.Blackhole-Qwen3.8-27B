@@ -24,9 +24,9 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           output=$(mktemp -d "$RUNNER_TEMP/qwen-serving-bundle.XXXXXX")
           echo "QWEN_SERVING_BUNDLE=$output" >> "$GITHUB_ENV"
-          gh run download 35328435640 --repo "$GITHUB_REPOSITORY" \
-            --name qwen-serving-image-inventory-35328435640 --dir "$output/inventory"
-          echo "9a812503335cf2792e08b70e9aaf3e46c32bf66cfbf5a4d54cc1016533455ee3  $output/inventory/serving-image-inventory.json" | sha256sum -c -
+          gh run download 35489185444 --repo "$GITHUB_REPOSITORY" \
+            --name qwen-serving-image-inventory-35489185444 --dir "$output/inventory"
+          echo "826ea8f04ae12dcc7f3000f30cc4bd714320e3da8402378990ab94043ab6e0f2  $output/inventory/serving-image-inventory.json" | sha256sum -c -
           python3 -B serving-bundle-orchestrator/scripts/ci/serving_bundle.py \
             --staged "$GITHUB_WORKSPACE/read-combined" --updates serving-bundle-orchestrator \
             --inventory "$output/inventory/serving-image-inventory.json" --output "$output/bundle"
