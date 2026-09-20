@@ -209,7 +209,7 @@ class ModelBatch:
         # Per row, so a packed row reads its own user's blocks rather than the first
         # user's table repeated.
         self.row_pages = ([upload(page_rows[index:index + 1], ttnn.int32) for index in range(self.rows)]
-                          if self.pack is not None else self.row_pages)
+                          if self.pack is not None else [singleton_pages] * self.rows)
         singleton_positions = [upload(position.reshape(1), ttnn.int32) for position in positions]
         self.singleton_positions = singleton_positions
         self.cos, self.sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,

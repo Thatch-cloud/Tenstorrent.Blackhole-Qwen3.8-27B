@@ -153,3 +153,34 @@ class ModelBatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RowPagesAssignmentTests(unittest.TestCase):
+    """The unpacked path must not read self.row_pages before assigning it.
+
+    A blanket text replacement of `[singleton_pages] * self.rows` rewrote the
+    right-hand side of the assignment that defines self.row_pages, so pack=None
+    raised AttributeError at construction. The module is not overridden into the
+    image, which is the only reason hardware never saw it.
+    """
+
+    def test_row_pages_is_defined_before_it_is_read(self):
+        import ast
+        import inspect
+
+        import model_batch
+
+        source = inspect.getsource(model_batch.ModelBatch.__init__)
+        tree = ast.parse('if True:\n' + source if source.startswith(' ') else source)
+        assigned = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (isinstance(target, ast.Attribute) and target.attr == 'row_pages'
+                            and isinstance(target.value, ast.Name) and target.value.id == 'self'):
+                        assigned = node
+                        break
+        self.assertIsNotNone(assigned, 'self.row_pages must be assigned in __init__')
+        reads = [node for node in ast.walk(assigned.value)
+                 if isinstance(node, ast.Attribute) and node.attr == 'row_pages']
+        self.assertEqual(reads, [], 'the assignment must not read self.row_pages')
