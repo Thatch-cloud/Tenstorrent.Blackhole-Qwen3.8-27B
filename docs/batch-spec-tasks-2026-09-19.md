@@ -1786,3 +1786,17 @@ each pinned file to its pinned bytes and move its change into an unpinned
 module (a pooled subclass for the replay reader, constructed by model_batch,
 which is not pinned - v39-v41 overrode it and passed this gate), rather than
 regenerate the 32K evidence (hardware lanes with expiring upstream artifacts).
+
+**Pin probe (run 35495461481, `probe_frozen_pins.py`):** the frozen evidence in the
+image holds three reports with sources (draft-diagnostics 48, draft-numerical 48,
+target-replay 8); `qualify()` pins 42 sources. Of the twenty files the fast-
+serving image overrides, exactly ONE is pinned: attention_replay.py. Not pinned:
+gdn_snapshot, dflash_prefill_window, packed_verifier, serving_packed_step,
+gdn_device_loop_state, gdn_records, model_batch, verifier_engine, dflash_device,
+draft_kv_history, serving_buffer_pool, serving_vllm_contract, the draft branches
+and convolutions, dflash_t16_native_attention, verifier_pack. (The probe lane
+runs an older image, so its 'every pinned source matches' verdict is about that
+image, not v42; the pinned SET is what it measured.) So the slot fix and the
+packed step are clear of the recipe; only the pooled replay reader has to live
+in an unpinned module with attention_replay.py restored to its 8c102b20 bytes -
+the relocation in progress. Image v43 follows.
