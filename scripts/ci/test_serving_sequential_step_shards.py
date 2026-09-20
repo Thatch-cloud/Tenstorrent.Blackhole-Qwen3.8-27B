@@ -57,20 +57,22 @@ def replicated(address, rows=4, columns=8):
 def device(operations, *, kv_layers=1, corrupt=None, proposal_calls=1):
     """`corrupt` is (buffer name, elements): change that many on chip 1 only.
     Addresses follow construction order: layer-0 weights lowest, K/V highest."""
-    named = [('layers[0].attention.norm', 0x1000), ('layers[0].attention.convolution', 0x2000),
-             ('layers[0].mlp.device_norm', 0x3000), ('final_norm', 0x4000), ('selector_projection', 0x5000),
-             ('history', 0x6000), ('spare_history', 0x7000)]
+    named = [('weight.layers[0].attention.norm', 0x1000), ('weight.layers[0].attention.convolution', 0x2000),
+             ('weight.layers[0].mlp.device_norm', 0x3000), ('weight.final_norm', 0x4000),
+             ('weight.selector_projection', 0x5000), ('history', 0x6000), ('spare_history', 0x7000)]
     named.extend(('kv_history[%d].%s' % (layer, head), 0x8000 + layer * 0x1000 + index * 0x800)
                  for layer in range(kv_layers) for index, head in enumerate(('k', 'v')))
     tensors = {name: replicated(address) for name, address in named}
     if corrupt is not None:
         name, count = corrupt
         tensors[name].shards[1].data[0, :count] += 2.0
-    attention = dict(norm=tensors['layers[0].attention.norm'], convolution=tensors['layers[0].attention.convolution'])
-    mlp = dict(device_norm=tensors['layers[0].mlp.device_norm'])
+    attention = dict(norm=tensors['weight.layers[0].attention.norm'],
+                     convolution=tensors['weight.layers[0].attention.convolution'])
+    mlp = dict(device_norm=tensors['weight.layers[0].mlp.device_norm'])
     active = [{head: tensors['kv_history[%d].%s' % (layer, head)] for head in ('k', 'v')} for layer in range(kv_layers)]
     return SimpleNamespace(operations=operations, closed=False, layers=[(attention, mlp, None, None)],
-                           selector_projection=tensors['selector_projection'], final_norm=tensors['final_norm'],
+                           selector_projection=tensors['weight.selector_projection'],
+                           final_norm=tensors['weight.final_norm'],
                            history=tensors['history'], spare_history=tensors['spare_history'],
                            kv_history=SimpleNamespace(active=active), proposal_calls=proposal_calls)
 
@@ -120,11 +122,11 @@ class ShardCheckTests(unittest.TestCase):
         recorded = [line for line in self.logger.lines if 'addresses' in line]
         self.assertEqual(len(recorded), 2, 'once per request, not once per step')
         self.assertTrue(recorded[0].startswith('[PINDIAG] draft buffer addresses for B: {'))
-        self.assertIn("'layers[0].attention.norm': (4096, 4352)", recorded[0])
+        self.assertIn("'weight.layers[0].attention.norm': (4096, 4352)", recorded[0])
         self.assertIn("'kv_history[0].v': (34816, 35072)", recorded[0])
-        self.assertEqual(list(module.RECORDED['B']), ['selector_projection', 'final_norm', 'layers[0].attention.norm',
-            'layers[0].attention.convolution', 'layers[0].mlp.device_norm', 'history', 'spare_history',
-            'kv_history[0].k', 'kv_history[0].v'])
+        self.assertEqual(list(module.RECORDED['B']), ['weight.selector_projection', 'weight.final_norm',
+            'weight.layers[0].attention.norm', 'weight.layers[0].attention.convolution',
+            'weight.layers[0].mlp.device_norm', 'history', 'spare_history', 'kv_history[0].k', 'kv_history[0].v'])
 
     def test_records_are_pruned_to_the_live_requests(self):
         stepped, operations = [], FakeOperations()
@@ -148,16 +150,27 @@ class ShardCheckTests(unittest.TestCase):
         self.assertEqual(stepped, ['A'], 'the victim is caught before it steps on the damage')
         self.assertEqual([line for line in self.logger.lines if 'equal' in line], [])
 
-    def test_a_diverged_weight_is_named_by_category_key_and_shape(self):
+    def test_a_diverged_weight_is_named_weight_dot_key_with_shape_and_address(self):
         stepped, operations = [], FakeOperations()
         entries = [entry('A', device(operations), stepped),
-                   entry('B', device(operations, corrupt=('layers[0].attention.convolution', 7)), stepped)]
+                   entry('B', device(operations, corrupt=('weight.layers[0].attention.convolution', 7)), stepped)]
         with self.assertRaises(AssertionError) as raised:
             module.sequential_packed_step(entries, cancelled=lambda: False)
         self.assertIn('replicated draft weight differs', str(raised.exception))
-        self.assertIn('buffer=layers[0].attention.convolution shape=(1, 1, 4, 8) address=(8192, 8448)',
+        self.assertIn('buffer=weight.layers[0].attention.convolution shape=(1, 1, 4, 8) address=(8192, 8448)',
                       str(raised.exception))
         self.assertIn('differing=7 of 32', str(raised.exception))
+
+    def test_the_selector_projection_is_checked_first(self):
+        stepped, operations = [], FakeOperations()
+        entries = [entry('A', device(operations), stepped),
+                   entry('B', device(operations, corrupt=('weight.selector_projection', 1)), stepped)]
+        with self.assertRaises(AssertionError) as raised:
+            module.sequential_packed_step(entries, cancelled=lambda: False)
+        self.assertIn('buffer=weight.selector_projection shape=(1, 1, 4, 8) address=(20480, 20736)',
+                      str(raised.exception))
+        self.assertEqual(operations.reads, 9 + 1 + 1,
+                         'nine addresses recorded, the first comparison fires, its address is re-read for the message')
 
     def test_a_kv_layer_is_named_with_its_index_and_head(self):
         stepped, operations = [], FakeOperations()

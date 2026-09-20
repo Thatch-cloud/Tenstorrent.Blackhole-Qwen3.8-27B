@@ -65,12 +65,12 @@ def replicated_buffers(device):
     """
     if device.closed:
         return []
-    weights = [('selector_projection', device.selector_projection), ('final_norm', device.final_norm)]
+    weights = [('weight.selector_projection', device.selector_projection), ('weight.final_norm', device.final_norm)]
     if device.layers:
         attention, mlp = device.layers[0][0], device.layers[0][1]
-        weights.extend([('layers[0].attention.norm', attention['norm']),
-                        ('layers[0].attention.convolution', attention['convolution']),
-                        ('layers[0].mlp.device_norm', mlp['device_norm'])])
+        weights.extend([('weight.layers[0].attention.norm', attention['norm']),
+                        ('weight.layers[0].attention.convolution', attention['convolution']),
+                        ('weight.layers[0].mlp.device_norm', mlp['device_norm'])])
     buffers = [('weight', name, value) for name, value in weights]
     buffers.extend([('history', 'history', device.history), ('history', 'spare_history', device.spare_history)])
     if device.kv_history is not None:
