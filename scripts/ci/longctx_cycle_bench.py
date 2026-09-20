@@ -264,13 +264,19 @@ def main():
             # Diagnostic lines first, from the WHOLE log: the attach-time stage line
             # with the pooled and shared addresses prints thousands of lines before
             # the tail below, and the container it lives in is discarded.
-            kept = 0
-            for line in lines:
-                if '[PINDIAG]' in line or '"stage"' in line:
-                    print(line[:600])
-                    kept += 1
-                    if kept >= 400:
-                        break
+            # [PHASE] and [CARRY] too: run 35483704438 had none in the tail, and
+            # whether they were never written or scrolled off is the finding.
+            # Bounded from both ends: the first lines hold the attach-time
+            # addresses, the last ones hold the step the run died in.
+            diagnostic = [line[:600] for line in lines
+                          if '[PINDIAG]' in line or '"stage"' in line
+                          or '[PHASE]' in line or '[CARRY]' in line]
+            if len(diagnostic) > 800:
+                omitted = len(diagnostic) - 800
+                diagnostic = (diagnostic[:400] + ['... %d diagnostic lines omitted' % omitted]
+                              + diagnostic[-400:])
+            for line in diagnostic:
+                print(line)
             for line in lines[-400:]:
                 print(line[:300])
         print(LOG_END)
@@ -283,17 +289,35 @@ def main():
             # only idle cores and the kernel table. Keep the lines that carry the
             # finding: the assert text, any core not parked at a wait, the kernel id
             # table, and the dump headers - from the whole file, bounded.
-            import re
             idle = re.compile(r'^Device \d+ worker core.*:\s+GW,\s+W,\s+W,\s+W,\s+W\s')
             keep = re.compile(r'assert|tripped|halt|exception|Last waypoint|k_id\[|Dump #|^Legend|noc|sanit|stalled', re.I)
-            kept = 0
-            for line in watcher.read_text(errors='replace').splitlines():
-                if keep.search(line) or (line.startswith('Device') and 'worker core' in line and not idle.match(line)):
+            finding = re.compile(r'assert|tripped|halt|exception|Last waypoint|sanit|stalled|While running', re.I)
+            text = watcher.read_text(errors='replace')
+            # Every dump repeats the kernel table, so 600 lines from the FRONT of a
+            # long run end before the dump that matters: in run 35483704438 one
+            # mid-prefill dump alone was 270 lines. Findings from anywhere, then
+            # the last two dumps.
+            dumps = re.split(r'(?m)^(?=Dump #\d+ at )', text)
+            printed = 0
+            for line in text.splitlines():
+                if finding.search(line):
                     print(line[:300])
-                    kept += 1
-                    if kept >= 600:
-                        print('... watcher lines truncated')
+                    printed += 1
+                    if printed >= 80:
+                        print('... watcher finding lines truncated')
                         break
+            print('--- last %d of %d watcher dumps ---' % (min(2, len(dumps)), len(dumps)))
+            kept = 0
+            for dump in dumps[-2:]:
+                for line in dump.splitlines():
+                    if keep.search(line) or (line.startswith('Device') and 'worker core' in line and not idle.match(line)):
+                        print(line[:300])
+                        kept += 1
+                        if kept >= 600:
+                            break
+                if kept >= 600:
+                    print('... watcher lines truncated')
+                    break
         print('<<<CYCLE_BENCH_WATCHER_END>>>')
         sys.stdout.flush()
     return 0 if report.get('ready') else 1

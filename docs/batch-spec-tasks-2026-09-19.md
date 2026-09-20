@@ -945,3 +945,48 @@ the assert. The bench's 200-line tail held only idle cores and the kernel table
 extracts it from the whole log. This precedes and may underlie both the
 second-proposal divergence and the hang. The per-request-collectives A/B did not
 run and is still pending.
+
+**Run 35483704438 (v37, watcher on, assert extracted):** the watcher named it.
+`Device 0 worker core(x=0,y=0)`, BRISC, `tripped an assert on line 119`, kernels
+`all_gather_async/device/kernels/minimal_default_writer.cpp` (BRISC) and
+`minimal_default_reader.cpp` (NCRISC), last waypoint `K,CRBW,W,W,W`. Timeline:
+gate at 02:23:48.078 (first request, position 32768), the target decode ops'
+"engaged" lines, then at 02:23:49.172 the last host lines,
+`tt_sampling:forward:711 Forcing argmax sampling` and `:720 Force argmax sampling
+all-gather: cluster_axis=None, num_links=4, topology=Topology.Linear`; the next
+watcher poll at 02:24:09 found the hang. No `[PHASE]` line was ever written, so
+this is inside admission (the verifier's first target decode, sampling
+included), before the first proposal - the same place as v36. Both streams got
+the engine's 500; no tokens.
+
+What line 119 is, read at the image's tt-metal `9f9cd4fd`: the writer's own line
+119 is a runtime-arg read, so the line belongs to an included header, and exactly
+two of its headers carry an `ASSERT` at line 119 -
+`tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp:119`
+`ASSERT(has_forward_connection())` inside `get_forward_connection()`, and
+`tt_metal/fabric/hw/inc/packet_header_pool.h:119` `ASSERT(route_id < route_id_)`
+inside `for_each_header`. The writer (`minimal_default_writer.cpp:226-227`) takes
+`direction ? get_backward_connection() : get_forward_connection()`
+UNCONDITIONALLY, right after `fabric_connection.open()`. On a two-chip line one
+chip has no forward neighbour, and the writer launched for that direction has
+`num_targets_forward_direction == 0` at compile time, so `valid_targets()`
+(lines 80-101) is false and it never sends through the reference it took - it
+only joins the semaphore accounting (lines 483-489). Without the watcher the
+ASSERT is compiled out and a reference to the member object is harmless; with
+it, the core hangs at the assert and the poll stops the device. That is a
+pre-existing wart of this tt-metal revision, not a corruption path and not our
+bug: the connection is never used. It fires on the sampler's all-gather and not
+on the projection gathers during the 77 s prefill (watcher dumps 3-5 cover it),
+so the projection path reaches the fabric differently (the writer's
+`USE_WORKER_MUX` branch skips lines 224-227 altogether).
+
+Consequence: the watcher as configured cannot get past admission on this stack,
+and v36's trip was this same line. `tt_metal/llrt/rtoptions.cpp:161` at the same
+revision reads `TT_METAL_WATCHER_DISABLE_ASSERT`, which drops only the assert
+feature and keeps NoC sanitisation, waypoints and stack checks - the parts that
+would name a bad address or a stalled kernel at the second proposal. Next run
+(v38 = the v37 image unchanged, env only): that variable added; the bench keeps
+the last two watcher dumps rather than the first 600 lines (one mid-prefill dump
+was 270 lines), surfaces `[PHASE]` and `[CARRY]` with the diagnostics bounded
+from both ends, and no longer shadows `re` inside main() (the
+`prefill_chunk_observed: UnboundLocalError` in this run's report).
