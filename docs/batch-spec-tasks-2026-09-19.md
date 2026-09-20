@@ -1710,3 +1710,18 @@ internal unaligned slice no path exercises today. `adopt_slot` therefore
 verifies each device slice against a host readback of the full tensor's row k
 on both chips before writing row 0, and raises otherwise - once per admission,
 unconditional, so the gate run is also the proof of the slice.
+
+**Bug 1 fixed (d65773d5):** `PrefillWindowCapture` also wraps
+`prefill_paged_slots` on the model (dflash_prefill_window.py:163; wrapper
+:137-149) and records `capture.prefill_slot` (exactly one user per call, ints
+only; None on the single-sequence path). `ActiveSnapshot.adopt_slot(index)`
+(gdn_snapshot.py:47) slices row `index` of rec_state (dim 0) and each conv
+state (dim 1) and writes them into row 0 through the model's own
+`_write_recurrent_state_prefix` / `_write_index`, freeing the slices; a no-op
+for 0. `serving_request_factory.from_prefill` calls it on all 48 helpers at :80,
+after the host-side refusals and before the drafter and the engine (whose
+constructor makes the initial save and seeds the carry from slot 0), logging
+'[PINDIAG] adopted GDN slot k into slot 0'. 12 new tests; test_dflash_prefill_window
+and test_gdn_snapshot had never been registered in CI and now are; both
+modules join the image lists (drift from the bundle = this change only). A
+follow-up adds the host-readback equality check on each unaligned slice.
