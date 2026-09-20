@@ -47,6 +47,10 @@ def stream_once(port, prompt, max_tokens, results, index):
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})
     gaps, tokens, started = [], 0, time.perf_counter()
+    # The whole generated text, so two runs on the same prompts can be compared
+    # token for token offline: the packed step's gate is equality with the
+    # sequential step's output, and greedy decoding makes that exact.
+    pieces = []
     first_token_at = None
     entry = {}
     try:
@@ -81,12 +85,13 @@ def stream_once(port, prompt, max_tokens, results, index):
                     continue
                 now = time.perf_counter()
                 tokens += 1
+                pieces.append(text)
                 if first_token_at is None:
                     first_token_at = now
                 elif previous is not None:
                     gaps.append(now - previous)   # first token deliberately dropped
                 previous = now
-        entry.update(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps],
+        entry.update(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                      ttft_s=(first_token_at - started) if first_token_at else None,
                      wall_s=time.perf_counter() - started)
         results[index] = entry
@@ -94,7 +99,7 @@ def stream_once(port, prompt, max_tokens, results, index):
         # Keep what arrived before the failure: a hang after N tokens and a refusal
         # at admission are different findings.
         results[index] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]),
-                              tokens=tokens, gaps_ms=[1000.0 * g for g in gaps],
+                              tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                               ttft_s=(first_token_at - started) if first_token_at else None,
                               wall_s=time.perf_counter() - started)
 
