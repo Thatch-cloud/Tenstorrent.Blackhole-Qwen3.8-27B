@@ -27,7 +27,8 @@ import sys
 
 MODEL = '/opt/tt-metal/models/demos/blackhole/qwen36/tt/qwen36_vllm.py'
 CANDIDATES = (MODEL, '/opt/tt-metal/models/demos/blackhole/qwen36/tt/model.py')
-METHODS = ('_forward_prefill_chunk_masked_tp', '_prefill_forward_tp_batched', 'prefill_paged_slots_range',
+METHODS = ('write_slot', '_remap_gdn_slots', 'snapshot_slot', 'read_slot', '_snapshot_b1_state', 'bind_gdn_scratch',
+           '_forward_prefill_chunk_masked_tp', '_prefill_forward_tp_batched', 'prefill_paged_slots_range',
            'prefill_paged_slots', '_prefill_forward_tp', 'prefill_forward')
 
 
@@ -35,7 +36,7 @@ def show(label, value):
     print('%-44s %s' % (label, value))
 
 
-def method_block(text, name, limit=40):
+def method_block(text, name, limit=70):
     match = re.search(r'^([ \t]*)def %s\s*\(' % re.escape(name), text, re.M)
     if not match:
         return None
