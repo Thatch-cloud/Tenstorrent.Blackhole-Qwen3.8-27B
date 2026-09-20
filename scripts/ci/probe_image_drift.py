@@ -14,6 +14,7 @@ CPU only: no device, no weights.
 """
 
 import hashlib
+import io
 import os
 import sys
 
@@ -58,6 +59,22 @@ def main():
     print('  core modules identical to the bundle (safe to override): %s' % ' '.join(core_same))
     print('  core modules that DIFFER (override would change behaviour): %s' % ' '.join(core_differ))
     print('  core modules absent: %s' % ' '.join(core_absent))
+    # The diffs themselves, bounded, so an override is a decision rather than a bet.
+    import difflib
+    for name in core_differ:
+        here = io.open(os.path.join(repo, name), encoding='utf-8').read().replace('
+', '
+').splitlines()
+        there = io.open(os.path.join(image, name), encoding='utf-8').read().replace('
+', '
+').splitlines()
+        lines = list(difflib.unified_diff(there, here, 'image/' + name, 'repo/' + name, lineterm='', n=1))
+        print()
+        print('----- DIFF %s (%d lines) -----' % (name, len(lines)))
+        for line in lines[:160]:
+            print(line)
+        if len(lines) > 160:
+            print('... %d more lines' % (len(lines) - 160))
     return 0
 
 
