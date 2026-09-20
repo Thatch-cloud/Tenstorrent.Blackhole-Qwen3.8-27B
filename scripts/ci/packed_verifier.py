@@ -78,6 +78,7 @@ sequential step of any user restores first (`verifier_engine.note_packed_step`).
 """
 
 from contextlib import ExitStack
+import os
 import sys
 import time
 import traceback
@@ -546,11 +547,24 @@ class PackedVerifierEngine:
             self.pending_segments = set(segments)
             self.rounds += 1
             self.phase = 'verified'
-            return predictions, dict(segments=segments, staged_buffers=staged,
+            metrics = dict(segments=segments, staged_buffers=staged,
                 binding_validation_ms=(started - binding_started) * 1000,
                 input_ms=(staged_at - started) * 1000, verify_readback_ms=(finished - staged_at) * 1000,
                 blocking_trace_host_ms=trace_ms, replay_checks_sync_ms=(replayed - staged_at) * 1000 - trace_ms,
                 output_readback_host_ms=(finished - replayed) * 1000, users=self.users)
+            # Under QWEN_FAST_PACKED_AUDIT=1: the round's host-visible phase split, so a slow
+            # round's log says whether the cost sits in staging, the blocking trace replay
+            # (attention, GDN, MLP, norm and the LM head are one opaque number here - a
+            # captured trace's Python call graph runs once at attach, not per round; this
+            # cannot attribute time inside it) or readback. Pure logging: the returned dict
+            # is unchanged in keys or values.
+            if os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1':
+                diagnostic('[PACKED-PHASE] round=%d users=%d bind_ms=%.2f input_ms=%.2f trace_ms=%.2f '
+                           'sync_ms=%.2f readback_ms=%.2f'
+                           % (self.rounds, self.users, metrics['binding_validation_ms'], metrics['input_ms'],
+                              metrics['blocking_trace_host_ms'], metrics['replay_checks_sync_ms'],
+                              metrics['output_readback_host_ms']))
+            return predictions, metrics
         except BaseException:
             self.phase = 'failed'
             for entry in entries:
