@@ -21,6 +21,39 @@ def device_components():
         runtime=DFlashRequestRuntime, session=GreedySession, engine=VerifierEngine, collectives=TT_CCL)
 
 
+def _log(message, *values):
+    try:
+        from loguru import logger
+    except ImportError:
+        print(message.format(*values), flush=True)
+        return
+    logger.info(message, *values)
+
+
+def adopt_prefill_slot(helpers, capture, request_id):
+    """Bring the prefill's GDN state to slot 0 before anything reads it.
+
+    The plugin's batched prefill writes the admitted user's recurrent and conv state
+    into its decode slot - empty_slots, [1] for the second concurrent user - and leaves
+    the live rows alone, while the engine's initial snapshot, its carry and every
+    per-step save and restore read native index 0 (gdn_snapshot.ActiveSnapshot). Runs
+    35492676194 and 35493208438: the second user's admission snapshot was the FIRST
+    user's post-prefill state and its own sat unread in slot 1. Copy it over once,
+    here, so the initial save the engine makes next reads this request's own state;
+    decode, restore and commit stay at slot 0. Slot 0 and a single-sequence prefill
+    (prefill_slot None) have nothing to adopt, so a single user runs exactly as before.
+    """
+    if not hasattr(capture, 'prefill_slot'):
+        raise ValueError('Prefill capture must record the native slot the batched prefill wrote')
+    slot = capture.prefill_slot
+    if slot is None or slot == 0:
+        _log('[PINDIAG] prefill slot {}, nothing to adopt for request {}', slot, request_id)
+        return
+    for helper in helpers:
+        helper.adopt_slot(slot)
+    _log('[PINDIAG] adopted GDN slot {} into slot 0 for request {}', slot, request_id)
+
+
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
                  collectives=None, buffer_pool=None, shared_weights=None):
     from dflash_request_runtime import TARGET_TAPS
@@ -42,6 +75,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     if len(state.block_ids) != 1:
         raise ValueError('One scheduler-owned KV group required')
     validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=256)
+    # After the host-side refusals, so a rejected request touches no device state, and
+    # before the drafter, the engine and every other reader of slot 0.
+    adopt_prefill_slot(helpers, capture, state.req_id)
     components = device_components()
     _, layers, projection, selector = fixtures
     capture_released = False

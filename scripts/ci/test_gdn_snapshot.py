@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from gdn_snapshot import ActiveSnapshot
 from gdn_state_copy import page_counts, transfer_counts
@@ -67,6 +67,67 @@ class SnapshotTests(unittest.TestCase):
         layer._stable_state = False
         with self.assertRaises(ValueError):
             ActiveSnapshot(layer, operations)
+
+    def adoption_fixture(self, direct):
+        # Slices are distinguishable per tensor and row, and every device call records
+        # its order, so the copy sequence can be read back exactly.
+        order = []
+
+        def slice_along(tensor, dimension, start, count):
+            order.append("slice")
+            return ("slice", tensor, dimension, start, count)
+
+        layer = SimpleNamespace(B=8, _stable_state=True, rec_state="rec", conv_states=["conv0", "conv1"],
+                                _slice_along=Mock(side_effect=slice_along),
+                                _write_recurrent_state_prefix=Mock(side_effect=lambda *args: order.append("write")),
+                                _write_index=Mock(side_effect=lambda *args: order.append("write")))
+        operations = SimpleNamespace(clone=Mock(side_effect=lambda source, **kwargs: ("clone", source)),
+                                     copy=Mock(), deallocate=Mock(side_effect=lambda value: order.append("free")),
+                                     DRAM_MEMORY_CONFIG="DRAM")
+        return layer, operations, order, ActiveSnapshot(layer, operations, direct=direct)
+
+    def test_adopt_slot_copies_the_prefill_row_into_slot_zero_over_the_slice_path(self):
+        # The batched prefill wrote the user's state into its decode slot; serving builds
+        # the helpers direct=True, and the DMA kernel copies slot 0 only, so adoption
+        # takes the ttnn slice path whatever the mode: slice row k of every live tensor,
+        # then the writes restore() makes, then release the slices.
+        for direct in (False, True):
+            layer, operations, order, snapshots = self.adoption_fixture(direct)
+            with self.subTest(direct=direct), patch("gdn_state_copy.copy_active") as dma:
+                snapshots.adopt_slot(1)
+            dma.assert_not_called()
+            slices = [("slice", "rec", 0, 1, 1), ("slice", "conv0", 1, 1, 1), ("slice", "conv1", 1, 1, 1)]
+            self.assertEqual([call.args for call in layer._slice_along.call_args_list],
+                             [sliced[1:] for sliced in slices])
+            layer._write_recurrent_state_prefix.assert_called_once_with(("clone", slices[0]), 1)
+            self.assertEqual([call.args for call in layer._write_index.call_args_list],
+                             [("conv0", ("clone", slices[1]), 0, 1), ("conv1", ("clone", slices[2]), 0, 1)])
+            self.assertEqual([call.args for call in operations.deallocate.call_args_list],
+                             [(sliced,) for sliced in slices])
+            self.assertEqual(order, ["slice"] * 3 + ["write"] * 3 + ["free"] * 3)
+            operations.copy.assert_not_called()
+
+    def test_adopt_slot_zero_touches_nothing(self):
+        # The first user prefills into slot 0: the single-user path is unchanged.
+        layer, operations, order, snapshots = self.adoption_fixture(True)
+        snapshots.adopt_slot(0)
+        self.assertEqual(order, [])
+        operations.clone.assert_not_called()
+
+    def test_adopt_slot_refuses_indices_outside_the_eight_slot_batch(self):
+        layer, operations, order, snapshots = self.adoption_fixture(True)
+        for index in (-1, 8, True, 1.0, None, "1"):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                snapshots.adopt_slot(index)
+        self.assertEqual(order, [])
+
+    def test_adopt_slot_releases_its_slices_when_a_write_fails(self):
+        layer, operations, order, snapshots = self.adoption_fixture(True)
+        layer._write_index.side_effect = RuntimeError("write failed")
+        with self.assertRaises(RuntimeError):
+            snapshots.adopt_slot(2)
+        self.assertEqual([call.args[2] for call in layer._slice_along.call_args_list], [2, 2, 2])
+        self.assertEqual(operations.deallocate.call_count, 3)
 
 
 if __name__ == "__main__":

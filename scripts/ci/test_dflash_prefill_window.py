@@ -123,6 +123,89 @@ class PrefillWindowTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 chunk_window(4093, start, valid)
 
+    def storage_addresses(self):
+        # Snapshots must own storage distinct from the layer output they were cut from.
+        return patch('dflash_prefill_window.addresses',
+                     side_effect=lambda operations, tensor: (tensor.untyped_storage().data_ptr(),) * 2)
+
+    def batched_model(self):
+        # The plugin's batched entry: prefill_paged_slots runs the chunks and writes the
+        # result into the user's decode slot (empty_slots) on the way out.
+        model, calls = self.model(), []
+
+        def prefill_paged_slots(token_ids_list, page_table, empty_slots, valid_lens=None):
+            calls.append((token_ids_list, page_table, empty_slots, valid_lens))
+            value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
+            model._forward_prefill_chunk_masked_tp(value, 2048, 0, page_table, 2048)
+            return 'logits'
+
+        model.prefill_paged_slots = prefill_paged_slots
+        return model, calls
+
+    def test_batched_prefill_records_its_one_slot_and_restores_the_hook(self):
+        # vLLM hands the request's decode slot as a one-element list - [0] for the first
+        # user, [1] for the second - and a tensor or tuple element records as a plain int.
+        for slots, expected in (([0], 0), ([1], 1), ((3,), 3), (torch.tensor([2]), 2)):
+            operations, (model, calls) = self.operations(), self.batched_model()
+            original = model.prefill_paged_slots
+            capture = PrefillWindowCapture(operations, model, 2048, (1, 3))
+            self.assertIsNone(capture.prefill_slot)
+            with self.subTest(slots=slots), self.storage_addresses():
+                with capture.capture():
+                    self.assertEqual(model.prefill_paged_slots('tokens', 'pages', slots, valid_lens=[2048]), 'logits')
+                self.assertEqual(capture.prefill_slot, expected)
+                self.assertIs(type(capture.prefill_slot), int)
+                self.assertEqual(len(calls), 1)
+                self.assertIs(calls[0][2], slots, 'the native prefill sees its own arguments')
+                self.assertEqual(calls[0][3], [2048])
+                self.assertTrue(capture.complete)
+            self.assertIs(model.prefill_paged_slots, original)
+            capture.close()
+
+    def test_single_sequence_prefill_leaves_the_slot_unrecorded(self):
+        # No batched entry point on the model: nothing is wrapped and nothing recorded.
+        operations, model = self.operations(), self.model()
+        capture = PrefillWindowCapture(operations, model, 2048, (1, 3))
+        with self.storage_addresses(), capture.capture():
+            self.assertFalse(hasattr(model, 'prefill_paged_slots'))
+            model._forward_prefill_chunk_masked_tp(torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16), 2048, 0, None, 2048)
+        self.assertIsNone(capture.prefill_slot)
+        capture.close()
+        # The entry point exists but the single-sequence prefill_traced_chunked path ran.
+        operations, (model, calls) = self.operations(), self.batched_model()
+        capture = PrefillWindowCapture(operations, model, 2048, (1, 3))
+        with self.storage_addresses(), capture.capture():
+            model._forward_prefill_chunk_masked_tp(torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16), 2048, 0, None, 2048)
+        self.assertIsNone(capture.prefill_slot)
+        self.assertEqual(calls, [])
+        capture.close()
+
+    def test_more_or_fewer_than_one_user_per_prefill_is_refused(self):
+        # The lifecycle admits one fresh prompt per prefill; anything else is a broken
+        # contract, refused before the native prefill runs, with the hooks restored.
+        for slots in ([], [0, 1], [True], ['1'], [None], [-1], 5, None):
+            operations, (model, calls) = self.operations(), self.batched_model()
+            original = model.prefill_paged_slots
+            capture = PrefillWindowCapture(operations, model, 2048, (1, 3))
+            with self.subTest(slots=slots), self.assertRaises(ValueError):
+                with capture.capture():
+                    model.prefill_paged_slots('tokens', 'pages', slots)
+            self.assertIsNone(capture.prefill_slot)
+            self.assertEqual(calls, [])
+            self.assertTrue(capture.closed)
+            self.assertIs(model.prefill_paged_slots, original)
+            self.assertFalse(hasattr(model, '_qwen_dflash_prefill_capture'))
+
+    def test_a_second_batched_prefill_in_one_capture_is_refused(self):
+        operations, (model, calls) = self.operations(), self.batched_model()
+        capture = PrefillWindowCapture(operations, model, 2048, (1, 3))
+        with self.assertRaises(ValueError), self.storage_addresses():
+            with capture.capture():
+                model.prefill_paged_slots('tokens', 'pages', [1])
+                model.prefill_paged_slots('tokens', 'pages', [1])
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(capture.closed)
+
 
 if __name__ == '__main__':
     unittest.main()

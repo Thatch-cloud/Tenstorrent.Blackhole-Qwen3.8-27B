@@ -2,8 +2,31 @@
 
 from gdn_multitoken_conv import addresses
 from contextlib import contextmanager
+import operator
 from model_batch import instance_overrides
 from target_features import LayerOutputCapture
+
+
+def prefill_slot(empty_slots):
+    """The one native GDN slot a batched prefill writes.
+
+    The lifecycle admits one fresh prompt per prefill, so the plugin's empty_slots
+    names exactly one decode slot - [0] for the first user, [1] for the second. Any
+    other count is a broken serving contract, not a batch to record.
+    """
+    try:
+        slots = list(empty_slots)
+    except TypeError:
+        slots = None
+    if slots is None or len(slots) != 1 or isinstance(slots[0], bool):
+        raise ValueError('Fast serving prefills exactly one user per call; got slots %r' % (empty_slots,))
+    try:
+        slot = operator.index(slots[0])
+    except TypeError:
+        raise ValueError('Integer native GDN slot required; got %r' % (slots[0],)) from None
+    if slot < 0:
+        raise ValueError('Non-negative native GDN slot required; got %r' % (slot,))
+    return slot
 
 
 def prefill_window(position):
@@ -83,6 +106,9 @@ class PrefillWindowCapture:
         self.cursor = 0
         self.started = self.active = self.complete = self.closed = False
         self.result = None
+        # The native GDN slot the batched prefill wrote this user's state into, or
+        # None when the single-sequence prefill_traced_chunked path ran instead.
+        self.prefill_slot = None
 
     def wrap(self, original):
         def chunk(token_buf, valid_len, chunk_start, page_table, bucket, *args, **kwargs):
@@ -108,14 +134,34 @@ class PrefillWindowCapture:
             return output
         return chunk
 
+    def wrap_slots(self, original):
+        # The plugin's _prefill_forward_tp_batched calls prefill_paged_slots, which
+        # runs the prompt on a B=1 scratch and writes the result into row
+        # empty_slots[0] of the live GDN buffers, leaving the other rows alone. The
+        # fast path snapshots, carries and steps at row 0 (gdn_snapshot.ActiveSnapshot),
+        # so the second concurrent user's admission read the FIRST user's state and
+        # its own sat unread in slot 1 (runs 35492676194, 35493208438). Record the
+        # slot so admission can adopt it into slot 0 before anything reads it.
+        def slots(token_ids_list, page_table, empty_slots, *args, **kwargs):
+            if not self.active or self.prefill_slot is not None:
+                raise ValueError('One batched prefill per capture required')
+            self.prefill_slot = prefill_slot(empty_slots)
+            return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
+        return slots
+
     @contextmanager
     def capture(self):
         if self.started or self.closed or hasattr(self.model, '_qwen_dflash_prefill_capture') or hasattr(self.model, '_qwen_target_feature_capture'):
             raise ValueError('One non-nested native prefill capture required')
         self.started = self.active = True
         try:
-            with instance_overrides([(self.model, '_qwen_dflash_prefill_capture', self),
-                    (self.model, '_forward_prefill_chunk_masked_tp', self.wrap(self.model._forward_prefill_chunk_masked_tp))]):
+            bindings = [(self.model, '_qwen_dflash_prefill_capture', self),
+                        (self.model, '_forward_prefill_chunk_masked_tp', self.wrap(self.model._forward_prefill_chunk_masked_tp))]
+            # A model without the batched entry point prefills one sequence through
+            # prefill_traced_chunked, whose state lands where the fast path reads it.
+            if callable(getattr(self.model, 'prefill_paged_slots', None)):
+                bindings.append((self.model, 'prefill_paged_slots', self.wrap_slots(self.model.prefill_paged_slots)))
+            with instance_overrides(bindings):
                 yield self
             validate_prefill_chunks(self.position, self.chunks)
             self.complete = True

@@ -3,7 +3,7 @@ import sys
 from types import SimpleNamespace
 import unittest
 import torch
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding/harness'))
 
@@ -34,15 +34,20 @@ class RequestFactoryTests(unittest.TestCase):
         components = SimpleNamespace(device=Mock(return_value=device), proposal=Mock(),
             runtime=DFlashRequestRuntime, session=GreedySession,
             engine=Mock(side_effect=engine_factory), collectives=Mock())
-        capture = SimpleNamespace(outputs=Mock(return_value=('features',)), close=Mock())
+        # prefill_slot: the native GDN slot the batched prefill wrote; 0 is the first
+        # user's, which is where the fast path reads, so there is nothing to adopt.
+        capture = SimpleNamespace(outputs=Mock(return_value=('features',)), close=Mock(), prefill_slot=0)
         arguments = dict(state=state, capture=capture, fixtures=({}, [], {}, {}), eos_ids=(99,))
         return components, device, engines, arguments
 
-    def build(self, components, arguments):
+    def helpers(self):
+        return [Mock(spec=['adopt_slot']) for _ in range(48)]
+
+    def build(self, components, arguments, helpers=None):
         with patch('serving_request_factory.device_components', return_value=components):
             return from_prefill(object(), SimpleNamespace(args=SimpleNamespace(vocab_size=100),
                 mesh_device=object()), object(), torch.tensor([list(range(65)) + [0] * 3], dtype=torch.int32),
-                [object()] * 48, **arguments)
+                [object()] * 48 if helpers is None else helpers, **arguments)
 
     def test_prefilled_seed_not_emitted_or_prefilled_twice(self):
         components, device, engines, arguments = self.fixture()
@@ -89,9 +94,75 @@ class RequestFactoryTests(unittest.TestCase):
         for tokens in ([99], [10, 11], []):
             components, _, _, arguments = self.fixture()
             arguments['state'].output_token_ids = tokens
+            arguments['capture'].prefill_slot = 1
+            helpers = self.helpers()
             with self.assertRaises(ValueError):
-                self.build(components, arguments)
+                self.build(components, arguments, helpers)
             components.device.assert_not_called()
+            self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [0] * 48,
+                             'a refused request must not touch native GDN state')
+
+    def test_the_prefill_slot_is_adopted_into_slot_zero_before_the_engine_saves_its_initial_state(self):
+        # The batched prefill wrote the second user's GDN state into slot 1, and the
+        # engine's initial save, its carry and every step read slot 0 (runs 35492676194,
+        # 35493208438: the second user decoded from the first's state). The copy must
+        # precede the engine - and the drafter, the first device work of admission.
+        components, device, engines, arguments = self.fixture()
+        arguments['capture'].prefill_slot = 1
+        helpers, seen = self.helpers(), []
+        engine_factory = components.engine.side_effect
+
+        def adopted():
+            return [helper.adopt_slot.call_args_list for helper in helpers]
+
+        def device_factory(*args, **kwargs):
+            seen.append(('device', adopted()))
+            return device
+
+        def engine_after_adoption(model, session, pages, given, **options):
+            seen.append(('engine', adopted()))
+            self.assertIs(given, helpers)
+            return engine_factory(model, session, pages, given, **options)
+
+        components.device.side_effect = device_factory
+        components.engine.side_effect = engine_after_adoption
+        request = self.build(components, arguments, helpers)
+        self.assertEqual(seen, [('device', [[call(1)]] * 48), ('engine', [[call(1)]] * 48)])
+        self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [1] * 48, 'adopted exactly once')
+        self.assertIs(request.runtime.engine, engines[0])
+        request.close('request')
+
+    def test_slot_zero_and_a_single_sequence_prefill_adopt_nothing(self):
+        # The first user prefills into slot 0, and a single-sequence prefill records no
+        # slot at all: single-user behaviour is unchanged, no native copy is made.
+        for slot in (0, None):
+            components, _, engines, arguments = self.fixture()
+            arguments['capture'].prefill_slot = slot
+            helpers = self.helpers()
+            request = self.build(components, arguments, helpers)
+            with self.subTest(slot=slot):
+                self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [0] * 48)
+                self.assertIs(request.runtime.engine, engines[0])
+            request.close('request')
+
+    def test_a_capture_without_a_recorded_slot_is_refused_before_device_allocation(self):
+        components, _, _, arguments = self.fixture()
+        arguments['capture'] = SimpleNamespace(outputs=Mock(return_value=('features',)), close=Mock())
+        helpers = self.helpers()
+        with self.assertRaisesRegex(ValueError, 'record the native slot'):
+            self.build(components, arguments, helpers)
+        components.device.assert_not_called()
+        self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [0] * 48)
+
+    def test_a_refused_adoption_allocates_no_device_or_engine(self):
+        components, _, _, arguments = self.fixture()
+        arguments['capture'].prefill_slot = 9
+        helpers = self.helpers()
+        helpers[0].adopt_slot.side_effect = ValueError('outside the eight-slot batch')
+        with self.assertRaisesRegex(ValueError, 'outside the eight-slot batch'):
+            self.build(components, arguments, helpers)
+        components.device.assert_not_called()
+        components.engine.assert_not_called()
 
     def test_prompt_only_allocation_cannot_be_used_for_trace_warmup(self):
         components, _, _, arguments = self.fixture()

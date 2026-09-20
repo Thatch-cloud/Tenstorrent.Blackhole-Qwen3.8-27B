@@ -61,6 +61,9 @@ jobs:
           for name in packed_verifier.py serving_packed_step.py gdn_device_loop_state.py gdn_records.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in gdn_snapshot.py dflash_prefill_window.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"
