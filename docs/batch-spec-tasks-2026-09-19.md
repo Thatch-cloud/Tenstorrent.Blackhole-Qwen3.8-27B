@@ -1292,3 +1292,33 @@ verify it (sha 826ea8f0, commit 77d6995a). Bundle v2, second attempt (run
 modules. Image v40 (tag fast-serving-image-v40 at 1945b741, build run
 35489293275) restores bundle run 35489235797. Third allowlist PATCH for the
 inventory and a spare bundle tag; repositories verified after it.
+
+## Run 35489404340 (image v40, drained reader): the divergence is not the reader's exit race
+
+Same shape as 35486440095: both users admitted, two full packed rounds (steps
+407-430 ms), carry restored and saved every step, every shard and drift check
+equal (17 buffers, proposal_calls [2, 2]), no hang, and then
+
+    AssertionError: Replicated learned selector features differ: call=2
+    position=32780 rows=2048 max_abs=0.132812 mean_abs=0.0136247 differing=6712 of 8192
+
+The order in the last round matters: step B, shards equal; step A (restore from
+B), shards equal - B's buffers included, since the check covers every OTHER
+entry; propose A (call 2) PASSED, 206 ms; propose B (call 2) FAILED. So B's
+persistent inputs were verified equal on both chips immediately before A's
+third proposal, and the only device work between that check and B's failure is
+A's eager proposal. All traces execute on cq_id=0 (`verifier_engine.py:430,503`),
+so nothing overlaps on a second queue. The divergence differs run to run
+(max_abs 0.496 in v39, 0.133 here; 7391 vs 6712 of 8192 elements), so it is
+timing- or content-dependent, and the affected elements are most of the tensor,
+not a few rows. Conclusion: the fused input reader's exit race was real
+(watcher-proven hang signature) and is closed, but it did not cause this
+divergence. What remains is state that A's proposal leaves and B's proposal
+consumes on one chip differently: something shared between the two DFlashDevice
+instances (module-level caches keyed by position or shape - both users sit at
+position 32780 - shared scratch, the program cache) or a per-chip transient.
+
+Next: (1) environment A/B with shared collectives (QWEN_FAST_SHARED_CCL=1) on
+the same image; (2) a first-divergent-stage audit inside the eager proposal
+(QWEN_FAST_PROPOSAL_AUDIT=1): compare every replicated input and per-layer
+output across the chips and name the first stage that differs.
