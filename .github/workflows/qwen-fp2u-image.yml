@@ -28,7 +28,7 @@ jobs:
           # QWEN_DSPARK_REQUEST_CONTEXT, which defaults to 8192. So the context is
           # selected explicitly and the prompt matches it exactly. qualify() also
           # wants QWEN_FROZEN_COMBINED_RUNTIME=1 with that same 32768 geometry.
-          - {users: 1, context: 33024, product: 33024, prompt: 32768, stagger: 0}
+          - {users: 2, context: 33024, product: 66048, prompt: 32768, stagger: 0, prompt_base: 1000, prompt_user_offset: 1}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -156,7 +156,7 @@ jobs:
             -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B /bench/longctx_cycle_bench.py \
-            --users ${{ matrix.users }} --context ${{ matrix.context }} --prompt-tokens ${{ matrix.prompt }} --max-tokens 64 --stagger ${{ matrix.stagger }} \
+            --users ${{ matrix.users }} --context ${{ matrix.context }} --prompt-tokens ${{ matrix.prompt }} --max-tokens 64 --prompt-base ${{ matrix.prompt_base }} --prompt-user-offset ${{ matrix.prompt_user_offset }} --stagger ${{ matrix.stagger }} \
             > experiment-results/cycle-stdout.log 2>&1 || true
           sed -n '/CYCLE_BENCH_JSON_BEGIN/,/CYCLE_BENCH_JSON_END/p' \
             experiment-results/cycle-stdout.log | sed '1d;$d' \

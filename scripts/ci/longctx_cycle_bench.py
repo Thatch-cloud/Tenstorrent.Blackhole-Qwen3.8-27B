@@ -120,6 +120,11 @@ def main():
                              'how decode cost scales with concurrent users on this stack')
     parser.add_argument('--context', type=int, default=163840)
     parser.add_argument('--prompt-tokens', type=int, default=512)
+    # Exact token ids [base + i % 64]; a per-user offset gives each user its own
+    # prompt, which is how a corrupted user is told apart from a coincidence: two
+    # users on ONE prompt (run 35492676194) agreed for a chunk before differing.
+    parser.add_argument('--prompt-base', type=int, default=1000)
+    parser.add_argument('--prompt-user-offset', type=int, default=0)
     parser.add_argument('--max-tokens', type=int, default=64)
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--l1-small-size', type=int, default=24576)
@@ -203,7 +208,11 @@ def main():
         # server reported position=20488. Every qualification gate on this path
         # compares position for EQUALITY, so an approximate prompt can never
         # satisfy one, at any user count.
-        prompt = [1000 + (index % 64) for index in range(options.prompt_tokens)]
+        def prompt_for(user):
+            base = options.prompt_base + user * options.prompt_user_offset
+            return [base + (index % 64) for index in range(options.prompt_tokens)]
+        report['prompt_base'] = options.prompt_base
+        report['prompt_user_offset'] = options.prompt_user_offset
         # ignore_eos is what makes this a latency measurement rather than a content
         # one. Run 35418922350 accepted a 79,368-token prompt, spent 33.4 s on it and
         # returned zero tokens with no error: the stream completed normally because
@@ -212,7 +221,7 @@ def main():
         # the inter-token latency needs regardless.
         results = [None] * options.users
         threads = [threading.Thread(target=stream_once,
-                                    args=(options.port, prompt, options.max_tokens,
+                                    args=(options.port, prompt_for(index), options.max_tokens,
                                           results, index))
                    for index in range(options.users)]
         wall = time.perf_counter()
