@@ -1731,3 +1731,11 @@ tensor per chip and requires equality with the full tensor's row k before
 writing row 0; a mismatch raises with the tensor index, chip and max_abs and
 frees the slices. Unconditional, once per admission. The gate run is therefore
 also the device proof of the unaligned conv slice.
+
+Cost of the self-check (slotfix): the rec_state readback is whole-tensor per
+chip - eight slots x 24 heads x 128 x 128 bf16 = 6.3 MB per layer per chip, so
+~604 MB per admission across 48 layers and two chips, plus ~31 MB for the conv
+states: a few hundred ms to a second over PCIe per second-user admission
+against a 14 s prefill. Kept for the gate run; after it, the rec_state check
+(page-aligned slice, never at risk) is to be dropped and only the unaligned
+conv-state proof retained.
