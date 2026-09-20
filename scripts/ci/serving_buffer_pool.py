@@ -24,16 +24,22 @@ that device's lifetime. A slot is handed over zeroed and returned on device clos
 acquisition fails loudly when every slot is lent, and pooled addresses are checked
 unchanged at both ends of the loan.
 
-NOT POOLED HERE. Two other per-request allocations share the hazard and stay per
-request in this pass: the learned layer parameters every DFlashDevice uploads
-(dflash_device.py prepare_attention_branch/prepare_mlp_branch, the projection and
-norms) and the DraftKVHistory active/spare K/V (draft_kv_history.py, allocated inline
-in its constructor with no injection point). Pooling the K/V needs DraftKVHistory to
-accept pre-allocated active/spare tensors in place of the pad/zeros_like pair it
-allocates; pooling the parameters needs one prepared parameter set shared by every
-device. Both are noted rather than done, so that this pass changes one thing.
+THE WEIGHTS COME FIRST. The draft weights a proposal reads - five layers of attention
+and MLP parameters, the projection, the norms and the selector projection - are the
+first thing a request allocates, so they take the lowest hole an earlier request's
+trace left, before the history does; and on the cached serving path the proposal
+reads them and the K/V cache rather than `history` at all. They are hoisted rather
+than pooled: one PreparedDraftWeights (dflash_device.py) is uploaded at attach and
+lent to every device. This pool covers the history pair, which commit_publication
+writes and which the eager proposal path reads.
+
+NOT POOLED HERE. The DraftKVHistory active/spare K/V (draft_kv_history.py, allocated
+inline in its constructor with no injection point) stays per request in this pass;
+pooling it needs DraftKVHistory to accept pre-allocated active/spare tensors in place
+of the pad/zeros_like pair it allocates.
 """
 
+from dflash_device import pindiag
 from gdn_multitoken_conv import addresses, release_owned
 from serving_fast_policy import NATIVE_GDN_SLOTS
 
@@ -54,6 +60,7 @@ class HistorySlot:
         self.tensors = (history, spare_history)
         self.addresses = tuple(addresses(pool.operations, value) for value in self.tensors)
         self.lent = False
+        self.owner = None
 
     def verify(self):
         current = tuple(addresses(self.pool.operations, value) for value in self.tensors)
@@ -96,7 +103,7 @@ class ServingBufferPool:
             self.close()
             raise
 
-    def acquire(self):
+    def acquire(self, *, owner='unnamed'):
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot lend a slot')
         slot = next((candidate for candidate in self.slots if not candidate.lent), None)
@@ -108,7 +115,9 @@ class ServingBufferPool:
         # into the next, and the spare reads exactly as the zeros_like it replaces.
         for value in slot.tensors:
             self.operations.full_like(value, 0.0, optional_tensor=value)
-        slot.lent = True
+        slot.lent, slot.owner = True, owner
+        # So the confirming run shows the slot in use, not a fresh allocation.
+        pindiag('[PINDIAG] pool slot {} acquired for {} at {}', slot.index, owner, slot.addresses)
         return slot
 
     def release(self, slot):
@@ -119,19 +128,20 @@ class ServingBufferPool:
         if not slot.lent:
             raise ValueError('Pooled draft history slot %d is not lent' % slot.index)
         slot.verify()
-        slot.lent = False
+        pindiag('[PINDIAG] pool slot {} released by {}', slot.index, slot.owner)
+        slot.lent, slot.owner = False, None
 
     def describe(self):
         return dict(users=self.users, shape=list(HISTORY_SHAPE),
             bytes_per_slot=2 * 2 * HISTORY_SHAPE[2] * HISTORY_SHAPE[3],
-            slots=[dict(index=slot.index, lent=slot.lent,
+            slots=[dict(index=slot.index, lent=slot.lent, owner=slot.owner,
                         addresses=[list(value) for value in slot.addresses]) for slot in self.slots])
 
     def close(self):
         if self.closed:
             return
         self.closed = True
-        lent = [slot.index for slot in self.slots if slot.lent]
+        lent = [(slot.index, slot.owner) for slot in self.slots if slot.lent]
         self.operations.synchronize_device(self.mesh)
         release_owned(self.operations, self.owned)
         self.owned.clear()

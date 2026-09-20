@@ -1,13 +1,18 @@
-"""The pre-trace draft history pool: sized for the scheduler, lent once per device,
-loud when exhausted, exact about its addresses, and invisible to a device without one."""
+"""The pre-trace draft history pool and the shared draft weights: sized for the
+scheduler, lent once per device, loud when exhausted, exact about their addresses,
+logged when lent, and invisible to a device that has neither."""
 
+from contextlib import ExitStack
+import io
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import torch
 
-from dflash_device import DFlashDevice
+import dflash_device
+from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
 from serving_buffer_pool import HISTORY_SHAPE, ServingBufferPool
 
 
@@ -142,8 +147,8 @@ class PoolTests(unittest.TestCase):
     def test_close_frees_everything_once_and_reports_slots_still_lent(self):
         operations = FakeOperations()
         pool = ServingBufferPool(operations, 'mesh', users=2)
-        pool.acquire()
-        with self.assertRaisesRegex(ValueError, r'slots \[0\] still lent'):
+        pool.acquire(owner='request-A')
+        with self.assertRaisesRegex(ValueError, r"slots \[\(0, 'request-A'\)\] still lent"):
             pool.close()
         self.assertEqual(len(operations.deallocated), 4)
         pool.close()
@@ -169,35 +174,87 @@ class PoolTests(unittest.TestCase):
             ServingBufferPool(operations, 'mesh', users=2)
         self.assertEqual(operations.deallocated, operations.live)
 
+    def test_every_loan_and_return_is_logged_with_its_owner(self):
+        with patch('serving_buffer_pool.pindiag') as log:
+            pool = ServingBufferPool(FakeOperations(), 'mesh', users=1)
+            slot = pool.acquire(owner='request-A')
+            self.assertEqual(slot.owner, 'request-A')
+            self.assertEqual(pool.describe()['slots'][0]['owner'], 'request-A')
+            slot.release()
+        lines = [call.args[0].format(*call.args[1:]) for call in log.call_args_list]
+        self.assertEqual(lines, ['[PINDIAG] pool slot 0 acquired for request-A at %s' % (slot.addresses,),
+                                 '[PINDIAG] pool slot 0 released by request-A'])
+        self.assertIsNone(slot.owner)
 
-class DeviceLoanTests(unittest.TestCase):
-    def device(self, operations, pool=None):
+
+class DiagnosticLineTests(unittest.TestCase):
+    def test_loguru_carries_the_line_when_present_and_print_when_absent(self):
+        logger = Mock()
+        with patch.dict(sys.modules, {'loguru': SimpleNamespace(logger=logger)}):
+            pindiag('[PINDIAG] pool slot {} acquired for {}', 0, 'A')
+        logger.info.assert_called_once_with('[PINDIAG] pool slot {} acquired for {}', 0, 'A')
+        with patch.dict(sys.modules, {'loguru': None}), patch('sys.stdout', new_callable=io.StringIO) as out:
+            pindiag('[PINDIAG] pool slot {} acquired for {}', 0, 'A')
+        self.assertEqual(out.getvalue(), '[PINDIAG] pool slot 0 acquired for A\n')
+
+
+def fake_attention_branch(operations, mesh, attention, convolution, retain, **options):
+    return dict(norm=retain(operations.allocate((1, 1, 160, 32))), block_rows=options['block_rows'])
+
+
+def fake_mlp_branch(operations, mesh, mlp, convolution, retain):
+    return dict(device_norm=retain(operations.allocate((1, 1, 160, 32))))
+
+
+WEIGHT_UPLOADS = 5 * 2 + 4
+
+
+class DeviceFixture(unittest.TestCase):
+    def setUp(self):
+        self.layers = [('attention', 'convolution', 'mlp')] * 5
+        self.projection = {'fc.weight': torch.zeros(4, 4), 'hidden_norm.weight': torch.zeros(5120)}
+        self.selector = {'norm.weight': torch.zeros(5120), 'candidate_selector.hidden_projection.weight': torch.zeros(2, 2),
+                         'candidate_selector.predecessor_codebook': torch.zeros(1),
+                         'candidate_selector.successor_codebook': torch.zeros(1)}
+
+    def patches(self, stack):
+        stack.enter_context(patch('dflash_device.prepare_attention_branch', side_effect=fake_attention_branch))
+        stack.enter_context(patch('dflash_device.prepare_mlp_branch', side_effect=fake_mlp_branch))
+        stack.enter_context(patch('dflash_device.projection_shards', return_value=[torch.zeros(2, 4)]))
+
+    def device(self, operations, pool=None, weights=None, layers=None, projection=None, block_rows=16):
         model = SimpleNamespace(num_devices=2, vocab_size=248320, _lmhead_vocab_sharded=True, mesh_device='mesh')
-        projection = {'fc.weight': torch.zeros(4, 4), 'hidden_norm.weight': torch.zeros(5120)}
-        selector = {'norm.weight': torch.zeros(5120), 'candidate_selector.hidden_projection.weight': torch.zeros(2, 2),
-                    'candidate_selector.predecessor_codebook': torch.zeros(1),
-                    'candidate_selector.successor_codebook': torch.zeros(1)}
         features = [SimpleNamespace(shape=(1, 1, 2048, 2560))] * 5
-        return DFlashDevice(operations, model, Mock(), [('attention', 'convolution', 'mlp')] * 5, projection,
-            selector, features, position=4096, feature_start=2048, block_rows=16,
-            **(dict(buffer_pool=pool) if pool is not None else {}))
+        return DFlashDevice(operations, model, Mock(), self.layers if layers is None else layers,
+            self.projection if projection is None else projection, self.selector, features,
+            position=4096, feature_start=2048, block_rows=block_rows,
+            **(dict(buffer_pool=pool) if pool is not None else {}),
+            **(dict(shared_weights=weights) if weights is not None else {}))
 
-    def build(self, operations, pool=None, project=None):
+    def build(self, operations, pool=None, weights=None, project=None, **options):
         def project_features(device, features, count):
             return device.operations.allocate((1, 1, count, 5120))
 
-        with patch('dflash_device.prepare_attention_branch', return_value='attention'), \
-                patch('dflash_device.prepare_mlp_branch', return_value='mlp'), \
-                patch('dflash_device.projection_shards', return_value=[torch.zeros(2, 4)]), \
-                patch.object(DFlashDevice, 'project_features', project or project_features):
-            return self.device(operations, pool)
+        with ExitStack() as stack:
+            self.patches(stack)
+            stack.enter_context(patch.object(DFlashDevice, 'project_features', project or project_features))
+            return self.device(operations, pool, weights, **options)
 
+    def prepare(self, operations, **geometry):
+        with ExitStack() as stack:
+            self.patches(stack)
+            return PreparedDraftWeights(operations, 'mesh', self.layers, self.projection, self.selector,
+                                        **dict(dict(block_rows=16), **geometry))
+
+
+class DeviceLoanTests(DeviceFixture):
     def test_device_borrows_the_slot_and_never_frees_the_pool(self):
         operations = FakeOperations()
         pool = ServingBufferPool(operations, 'mesh', users=1)
         device = self.build(operations, pool)
         slot = pool.slots[0]
         self.assertTrue(slot.lent)
+        self.assertEqual(slot.owner, device.name)
         self.assertIs(device.history, slot.history)
         self.assertIs(device.spare_history, slot.spare_history)
         self.assertEqual(operations.zeros_like_calls, 0)
@@ -253,6 +310,152 @@ class DeviceLoanTests(unittest.TestCase):
     def test_a_pool_without_a_loan_method_is_refused(self):
         with self.assertRaises(ValueError):
             self.build(FakeOperations(), pool=object())
+
+
+class SharedWeightTests(DeviceFixture):
+    def test_private_weights_go_through_the_device_in_the_old_order_and_are_freed_by_it(self):
+        operations = FakeOperations()
+        device = self.build(operations)
+        self.assertIsNone(device.shared_weights)
+        self.assertEqual(device.borrowed, [])
+        self.assertEqual(device.owned, operations.live[:WEIGHT_UPLOADS])
+        self.assertEqual([layer[0]['norm'] for layer in device.layers], operations.live[0:WEIGHT_UPLOADS - 4:2])
+        self.assertEqual([device.projection, device.feature_norm, device.final_norm, device.selector_projection],
+                         operations.live[WEIGHT_UPLOADS - 4:WEIGHT_UPLOADS])
+        self.assertEqual([layer[2:] for layer in device.layers], [('mlp', 'convolution')] * 5)
+        device.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+
+    def test_shared_weights_are_uploaded_once_and_lent_to_every_device(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        self.assertEqual(len(weights.tensors), WEIGHT_UPLOADS)
+        self.assertEqual(weights.owned, weights.tensors)
+        uploaded = len(operations.live)
+        first, second = self.build(operations, weights=weights), self.build(operations, weights=weights)
+        # Only the history pair and its projection per device; not one weight.
+        self.assertEqual(len(operations.live), uploaded + 2 * 3)
+        for device in (first, second):
+            self.assertIs(device.shared_weights, weights)
+            self.assertIs(device.layers, weights.layers)
+            for name in ('projection', 'feature_norm', 'final_norm', 'selector_projection', 'predecessors', 'successors'):
+                self.assertIs(getattr(device, name), getattr(weights, name))
+            self.assertEqual(device.borrowed, weights.tensors)
+            self.assertFalse(any(value is weight for value in device.owned for weight in weights.tensors))
+        self.assertEqual(weights.borrowers, [first, second])
+        first.close()
+        self.assertEqual(weights.borrowers, [second])
+        self.assertFalse(any(value is weight for value in operations.deallocated for weight in weights.tensors))
+        second.close()
+        self.assertEqual(weights.borrowers, [])
+        self.assertEqual(len(operations.deallocated), len(operations.live) - WEIGHT_UPLOADS)
+        weights.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+        weights.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+
+    def test_borrowed_weights_are_protected_from_the_device_temporaries(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        device = self.build(operations, weights=weights)
+        owned, retain = device.temporaries([])
+        self.assertIs(retain(weights.selector_projection), weights.selector_projection)
+        self.assertEqual(owned, [])
+        aliased = FakeTensor((1, 1, 32, 32), [FakeShard(weights.projection.shards[0].address), FakeShard(0xdead)])
+        with self.assertRaisesRegex(ValueError, 'partially alias'):
+            retain(aliased)
+        fresh = operations.allocate((1, 1, 32, 32))
+        self.assertEqual([retain(fresh)], owned)
+
+    def test_lend_refuses_another_geometry_or_other_learned_layers(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        with self.assertRaisesRegex(ValueError, 'another mesh or proposal geometry'):
+            self.build(operations, weights=weights, block_rows=8)
+        with self.assertRaisesRegex(ValueError, 'other learned layers'):
+            self.build(operations, weights=weights, layers=[('attention', 'convolution', {'other': 1})] * 5)
+        with self.assertRaisesRegex(ValueError, 'other learned layers'):
+            self.build(operations, weights=weights, projection=dict(self.projection))
+        with self.assertRaises(ValueError):
+            self.build(operations, weights=object())
+        self.assertEqual(weights.borrowers, [])
+        weights.close()
+        with self.assertRaisesRegex(ValueError, 'Closed'):
+            self.build(operations, weights=weights)
+
+    def test_geometry_and_layer_count_are_checked_before_any_upload(self):
+        operations = FakeOperations()
+        for options in (dict(block_rows=7), dict(live_query_qk=1), dict(native_proposal_attention='yes')):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.prepare(operations, **options)
+        with self.assertRaises(ValueError), ExitStack() as stack:
+            self.patches(stack)
+            PreparedDraftWeights(operations, 'mesh', self.layers[:4], self.projection, self.selector, block_rows=16)
+        self.assertEqual(operations.live, [])
+
+    def test_closing_lent_weights_frees_them_and_names_the_borrowers(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        device = self.build(operations, weights=weights)
+        with self.assertRaisesRegex(ValueError, device.name):
+            weights.close()
+        self.assertTrue(all(any(value is weight for value in operations.deallocated) for weight in weights.tensors))
+
+    def test_a_device_that_fails_after_borrowing_returns_the_weights_unfreed(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        with self.assertRaisesRegex(RuntimeError, 'projection failed'):
+            self.build(operations, weights=weights, project=Mock(side_effect=RuntimeError('projection failed')))
+        self.assertEqual(weights.borrowers, [])
+        self.assertFalse(any(value is weight for value in operations.deallocated for weight in weights.tensors))
+
+    def test_failed_preparation_frees_the_uploads_it_made(self):
+        operations = FakeOperations()
+        with self.assertRaisesRegex(RuntimeError, 'no DRAM'), ExitStack() as stack:
+            self.patches(stack)
+            stack.enter_context(patch('dflash_device.prepare_mlp_branch', side_effect=RuntimeError('no DRAM')))
+            PreparedDraftWeights(operations, 'mesh', self.layers, self.projection, self.selector, block_rows=16)
+        self.assertEqual(operations.deallocated, operations.live)
+        self.assertEqual(len(operations.live), 1)
+
+    def test_describe_names_every_weight_by_its_place_in_the_prepared_dicts(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        report = weights.describe()
+        self.assertEqual(report['tensors'], WEIGHT_UPLOADS)
+        self.assertEqual([entry['name'] for entry in report['weights']],
+                         [name for index in range(5) for name in ('layer%d.attention.norm' % index, 'layer%d.mlp.device_norm' % index)]
+                         + ['projection', 'feature_norm', 'final_norm', 'selector_projection'])
+        self.assertEqual([entry['addresses'] for entry in report['weights']],
+                         [[shard.address for shard in tensor.shards] for tensor in weights.tensors])
+        self.assertEqual(report['borrowers'], [])
+        device = self.build(operations, weights=weights)
+        self.assertEqual(weights.describe()['borrowers'], [device.name])
+        device.close()
+
+    def test_loans_and_returns_are_logged_with_the_device_name(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        with patch.object(dflash_device, 'pindiag') as log:
+            device = self.build(operations, weights=weights)
+            device.close()
+        lines = [call.args[0].format(*call.args[1:]) for call in log.call_args_list]
+        self.assertEqual(lines, ['[PINDIAG] draft weights lent to %s (borrowers=1 tensors=%d)' % (device.name, WEIGHT_UPLOADS),
+                                 '[PINDIAG] draft weights returned by %s (borrowers=0)' % device.name])
+
+    def test_pooled_history_and_shared_weights_leave_the_device_owning_nothing_persistent(self):
+        operations = FakeOperations()
+        weights = self.prepare(operations)
+        pool = ServingBufferPool(operations, 'mesh', users=1)
+        device = self.build(operations, pool=pool, weights=weights)
+        self.assertEqual(device.owned, [])
+        self.assertIs(device.history, pool.slots[0].history)
+        self.assertIs(device.layers, weights.layers)
+        device.close()
+        self.assertEqual(weights.borrowers, [])
+        self.assertFalse(pool.slots[0].lent)
+        persistent = [*weights.tensors, *pool.slots[0].tensors]
+        self.assertFalse(any(value is kept for value in operations.deallocated for kept in persistent))
 
 
 if __name__ == '__main__':

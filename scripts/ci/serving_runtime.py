@@ -3,6 +3,7 @@
 from contextlib import ExitStack, contextmanager
 import json
 
+from dflash_device import PreparedDraftWeights
 from serving_buffer_pool import ServingBufferPool
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import validate_fast_config
@@ -31,72 +32,90 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         raise ValueError('Native T16, direct KV publication and serial weight-stream recipe required')
     runner = worker.model_runner
     model = runner.model.model[0]
-    owner = ServingCacheOwner(operations, runner, model)
-    layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
-    if len(layers) != 48:
-        raise ValueError('All forty-eight native GDN layers required')
-    helpers = [ActiveSnapshot(layer, operations, direct=True) for layer in layers]
-    # Built once and shared by every request: two TT_CCL objects cycling semaphore
-    # handles over one mesh is cross-request interference, not concurrency.
-    collectives = TT_CCL(model.mesh_device)
-    sampler = SamplingGenerator(args=model.args, mesh_device=model.mesh_device,
-        tt_ccl=TT_CCL(model.mesh_device))
-    sampler.set_trace_bucket(1)
-    from serving_gather_experiment import from_environment
-
-    experiment = from_environment(directory, runtime_root)
-
-    # The page table has to cover the admitted context. It was a fixed 68 pages,
-    # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
-    # 32768 - so the fast path could not decode at ANY context, at one user or two
-    # (runs 35472072127, 35473307362). 68 stays the floor because
-    # ServingCacheOwner requires at least that many physical pages.
-    page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
-    # One draft history pair per scheduler slot, allocated NOW: no request exists
+    # One draft history pair per scheduler slot, allocated FIRST: no request exists
     # yet, so no request trace does either. A request's verify trace bakes the
     # addresses of the intermediates its capture frees; the next request's
     # persistent history, allocated afterwards, lands in those holes and every
     # replay of the first trace overwrites it - per chip, since each chip's
     # allocator reuses independently (runs 35477522469, 35479238722; precedent
-    # docs/experiment-execution.md, feature_prefix.py). Registered first so it
-    # closes last, after the lifecycle has closed every device that borrows from it.
-    pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'])
+    # docs/experiment-execution.md, feature_prefix.py). Nothing earlier in this
+    # attachment captures a trace, and the plugin's own warmup is replaced by
+    # serving_startup.warmup, so this is the earliest point the fast path controls.
+    # Registered first so it closes last, after the lifecycle has closed every
+    # device that borrows from it.
     scopes = ExitStack()
-    scopes.callback(pool.close)
-    print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe())), flush=True)
-
-    def capture_factory(position):
-        owner.validate()
-        return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
-
-    def bridge_factory(state, capture):
-        owner.validate()
-        if len(state.block_ids) != 1:
-            raise ValueError('One scheduler KV group required')
-        blocks = tuple(state.block_ids[0])
-        if (not blocks or len(blocks) > page_width or len(set(blocks)) != len(blocks)
-                or any(type(block) is not int or not 0 <= block < owner.physical_pages for block in blocks)):
-            raise ValueError('Unique physical pages from the admitted cache required')
-        pages = torch.full((1, page_width), blocks[0], dtype=torch.int32)
-        pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
-        def create_request():
-            return from_prefill(operations, model, sampler, pages, helpers,
-                state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
-                collectives=collectives, buffer_pool=pool)
-
-        request = create_request() if experiment is None else experiment.create(create_request)
-        try:
-            binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
-            return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
-        except BaseException:
-            request.close(state.req_id)
-            raise
-
     try:
+        pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'])
+        scopes.callback(pool.close)
+        owner = ServingCacheOwner(operations, runner, model)
+        layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
+        if len(layers) != 48:
+            raise ValueError('All forty-eight native GDN layers required')
+        helpers = [ActiveSnapshot(layer, operations, direct=True) for layer in layers]
+        # Built once and shared by every request: two TT_CCL objects cycling semaphore
+        # handles over one mesh is cross-request interference, not concurrency.
+        collectives = TT_CCL(model.mesh_device)
+        sampler = SamplingGenerator(args=model.args, mesh_device=model.mesh_device,
+            tt_ccl=TT_CCL(model.mesh_device))
+        sampler.set_trace_bucket(1)
+        from serving_gather_experiment import from_environment
+
+        experiment = from_environment(directory, runtime_root)
+
+        # The page table has to cover the admitted context. It was a fixed 68 pages,
+        # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
+        # 32768 - so the fast path could not decode at ANY context, at one user or two
+        # (runs 35472072127, 35473307362). 68 stays the floor because
+        # ServingCacheOwner requires at least that many physical pages.
+        page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
             block_stream=block_stream, kv_publication_evidence=kv_publication_evidence))
+        # The draft weights, uploaded once for every request: they are the first
+        # buffers a request allocates, so they took the lowest hole an earlier
+        # request's verify trace left, ahead of the history (PreparedDraftWeights).
+        # After combined_runtime, because T16 native proposal preparation must run
+        # inside its source-bound admission scope; still before any request. The
+        # geometry is the one from_prefill asks every device for, and lend() refuses
+        # a device asking for anything else.
+        _, draft_layers, projection, selector = fixtures
+        weights = PreparedDraftWeights(operations, model.mesh_device, draft_layers, projection, selector,
+            block_rows=16, live_query_qk=False, native_proposal_attention=True)
+        scopes.callback(weights.close)
+        # One line with every pre-trace address - the pooled history pairs and each
+        # named shared weight - so a diverged address from the shard check can be
+        # placed against what was allocated before any request.
+        print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe(), draft_weights=weights.describe())),
+              flush=True)
+
+        def capture_factory(position):
+            owner.validate()
+            return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
+
+        def bridge_factory(state, capture):
+            owner.validate()
+            if len(state.block_ids) != 1:
+                raise ValueError('One scheduler KV group required')
+            blocks = tuple(state.block_ids[0])
+            if (not blocks or len(blocks) > page_width or len(set(blocks)) != len(blocks)
+                    or any(type(block) is not int or not 0 <= block < owner.physical_pages for block in blocks)):
+                raise ValueError('Unique physical pages from the admitted cache required')
+            pages = torch.full((1, page_width), blocks[0], dtype=torch.int32)
+            pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
+            def create_request():
+                return from_prefill(operations, model, sampler, pages, helpers,
+                    state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
+                    collectives=collectives, buffer_pool=pool, shared_weights=weights)
+
+            request = create_request() if experiment is None else experiment.create(create_request)
+            try:
+                binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
+                return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
+            except BaseException:
+                request.close(state.req_id)
+                raise
+
         # Correct, not yet fast: one weight pass per user per round. The batched
         # verifier replaces this behind the same parameter, and describe() records
         # the cost so a benchmark reading it is not mistaken for the goal.

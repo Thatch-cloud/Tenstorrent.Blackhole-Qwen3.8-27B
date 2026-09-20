@@ -17,11 +17,158 @@ from projection_link_policy import projection_links
 from dflash_prefill_window import prefill_window
 
 
+def pindiag(template, *values):
+    """One loguru INFO line, brace-formatted, so the server log carries it; plain print
+    where loguru is absent (host tests)."""
+    try:
+        from loguru import logger
+    except ImportError:
+        print(template.format(*values), flush=True)
+        return
+    logger.info(template, *values)
+
+
+class PreparedDraftWeights:
+    """Every device tensor a DFlashDevice reads as a weight - the five learned layers'
+    attention and MLP parameters, the feature projection and its norm, the final norm
+    and the selector projection - uploaded once.
+
+    A device without a shared set prepares its own, through its own `retain`, in
+    exactly the order the constructor always used. On the serving path one set is
+    prepared at attach and lent to every device, because these are the FIRST buffers
+    a request allocates, and a request admitted after another request's verify trace
+    was captured allocates them into the addresses that trace baked for the
+    intermediates it freed: first-fit hands the lowest freed hole to the first
+    allocation. Every later replay of that trace then writes over the weights, per
+    chip, and the two replicas of a replicated weight no longer agree - which is
+    what runs 35477522469 and 35479238722 measured in the selector projection, at
+    the second-admitted user's second proposal. Prepared once, before any request,
+    the set predates every request trace (serving_buffer_pool.py has the full
+    account; precedent docs/experiment-execution.md, feature_prefix.py).
+    """
+
+    def __init__(self, operations, mesh, layers, projection, selector, *, block_rows, live_query_qk=False,
+                 native_proposal_attention=False, retain=None):
+        import torch
+
+        layers = tuple(layers)
+        if (len(layers) != 5 or type(block_rows) is not int or block_rows not in (8, 16, 32)
+                or type(live_query_qk) is not bool or type(native_proposal_attention) is not bool
+                or (retain is not None and not callable(retain))):
+            raise ValueError('All five DFlash2 layers and an explicit proposal geometry required')
+        self.operations, self.mesh, self.block_rows = operations, mesh, block_rows
+        self.live_query_qk, self.native_proposal_attention = live_query_qk, native_proposal_attention
+        self.sources = (layers, projection, selector)
+        self.owned, self.tensors, self.borrowers = [], [], []
+        self.closed = False
+        keep = self.retain if retain is None else retain
+
+        def own(value):
+            self.tensors.append(value)
+            return keep(value)
+
+        def upload(value, *, sharded=False, row_major=False):
+            return own(operations.from_torch(value, device=mesh, dtype=operations.bfloat16,
+                layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
+                memory_config=operations.DRAM_MEMORY_CONFIG,
+                mesh_mapper=operations.ShardTensorToMesh(mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(mesh)))
+
+        try:
+            self.layers = []
+            for attention, convolution, mlp in layers:
+                self.layers.append((prepare_attention_branch(operations, mesh, attention, convolution, own,
+                    native_head_layout=True, block_rows=block_rows, live_query_qk=live_query_qk,
+                    **(dict(native_proposal_attention=True) if native_proposal_attention else {})),
+                    prepare_mlp_branch(operations, mesh, mlp, convolution, own), mlp, convolution))
+            shards = projection_shards(projection['fc.weight'])
+            self.projection = upload(torch.cat(shards, dim=0), sharded=True)
+            self.feature_norm = upload(projection['hidden_norm.weight'].reshape(1, 1, 160, 32), row_major=True)
+            self.final_norm = upload(selector['norm.weight'].reshape(1, 1, 160, 32), row_major=True)
+            self.selector_projection = upload(selector['candidate_selector.hidden_projection.weight'].T.contiguous())
+            self.predecessors = selector['candidate_selector.predecessor_codebook'].double()
+            self.successors = selector['candidate_selector.successor_codebook'].double()
+        except BaseException:
+            self.close()
+            raise
+
+    def retain(self, value):
+        self.owned.append(value)
+        return value
+
+    def names(self):
+        """A name per uploaded tensor, in upload order, from where each sits in the
+        prepared dicts - so a diverged address in a shard check can be placed."""
+        located = {}
+
+        def visit(prefix, value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    visit('%s.%s' % (prefix, key), item)
+            elif isinstance(value, (list, tuple)):
+                for index, item in enumerate(value):
+                    visit('%s[%d]' % (prefix, index), item)
+            elif any(value is tensor for tensor in self.tensors):
+                located.setdefault(id(value), prefix)
+
+        for index, (attention, mlp, _, _) in enumerate(self.layers):
+            visit('layer%d.attention' % index, {key: item for key, item in attention.items()
+                                                if key not in ('operations', 'mesh', 'source_weights', 'source_convolution')})
+            visit('layer%d.mlp' % index, {key: item for key, item in mlp.items()
+                                          if key not in ('operations', 'mesh', 'source_weights', 'source_convolution')})
+        for name in ('projection', 'feature_norm', 'final_norm', 'selector_projection'):
+            visit(name, getattr(self, name))
+        return [located.get(id(tensor), 'unnamed[%d]' % index) for index, tensor in enumerate(self.tensors)]
+
+    def describe(self):
+        return dict(tensors=len(self.tensors), borrowers=[getattr(borrower, 'name', str(borrower)) for borrower in self.borrowers],
+            weights=[dict(name=name, addresses=list(addresses(self.operations, tensor)))
+                     for name, tensor in zip(self.names(), self.tensors, strict=True)])
+
+    def lend(self, borrower, *, mesh, layers, projection, selector, block_rows, live_query_qk, native_proposal_attention):
+        layers = tuple(layers)
+        if self.closed:
+            raise ValueError('Closed shared draft weights cannot be lent')
+        if (mesh is not self.mesh or block_rows != self.block_rows or live_query_qk != self.live_query_qk
+                or native_proposal_attention != self.native_proposal_attention):
+            raise ValueError('Shared draft weights were prepared for another mesh or proposal geometry')
+        shared_layers, shared_projection, shared_selector = self.sources
+        if (len(layers) != len(shared_layers) or projection is not shared_projection or selector is not shared_selector
+                or any(len(layer) != 3 or any(mine is not theirs for mine, theirs in zip(shared, layer))
+                       for shared, layer in zip(shared_layers, layers))):
+            raise ValueError('Shared draft weights were prepared from other learned layers')
+        if any(borrower is other for other in self.borrowers):
+            raise ValueError('Shared draft weights are already lent to this borrower')
+        self.borrowers.append(borrower)
+        pindiag('[PINDIAG] draft weights lent to {} (borrowers={} tensors={})',
+                getattr(borrower, 'name', borrower), len(self.borrowers), len(self.tensors))
+        return self
+
+    def release(self, borrower):
+        index = next((position for position, other in enumerate(self.borrowers) if other is borrower), None)
+        if index is None:
+            raise ValueError('Shared draft weights were not lent to this borrower')
+        del self.borrowers[index]
+        pindiag('[PINDIAG] draft weights returned by {} (borrowers={})',
+                getattr(borrower, 'name', borrower), len(self.borrowers))
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        borrowers = [getattr(borrower, 'name', borrower) for borrower in self.borrowers]
+        release_owned(self.operations, self.owned)
+        self.owned.clear()
+        self.tensors.clear()
+        self.borrowers.clear()
+        if borrowers:
+            raise ValueError('Shared draft weights closed while lent to %r' % borrowers)
+
+
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
                  cache_history=False, cache_projection_capture=False, live_query_qk=False, native_proposal_attention=False,
-                 defer_proposal_capture=False, buffer_pool=None):
+                 defer_proposal_capture=False, buffer_pool=None, shared_weights=None):
         import torch
 
         window = prefill_window(position)
@@ -37,15 +184,20 @@ class DFlashDevice:
                 or type(live_query_qk) is not bool or (live_query_qk and (not proposal_capture or block_rows != 8))
                 or type(native_proposal_attention) is not bool or (native_proposal_attention and
                     (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))
-                or (buffer_pool is not None and not callable(getattr(buffer_pool, 'acquire', None)))):
+                or (buffer_pool is not None and not callable(getattr(buffer_pool, 'acquire', None)))
+                or (shared_weights is not None and not callable(getattr(shared_weights, 'lend', None)))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
         self.block_rows, self.max_drafts = block_rows, block_rows - 1
         self.owned, self.layers = [], []
+        # Device tensors this device reads but does not own: never freed here, and
+        # protected from every temporary the same way the owned ones are.
+        self.borrowed = []
+        self.name = 'DFlashDevice@%x position=%d' % (id(self), position)
         self.history = self.pending = None
         self.spare_history = None
-        self.pool_slot = None
+        self.pool_slot = self.shared_weights = None
         self.proposal_capture = None
         self.kv_history = None
         self.cache_history = cache_history
@@ -62,19 +214,24 @@ class DFlashDevice:
         try:
             if buffer_pool is not None:
                 # First, so an exhausted pool refuses the request before any upload.
-                self.pool_slot = buffer_pool.acquire()
-            for attention, convolution, mlp in layers:
-                self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain,
-                    native_head_layout=True, block_rows=block_rows, live_query_qk=live_query_qk,
-                    **(dict(native_proposal_attention=True) if native_proposal_attention else {})),
-                    prepare_mlp_branch(operations, self.mesh, mlp, convolution, self.retain), mlp, convolution))
-            shards = projection_shards(projection['fc.weight'])
-            self.projection = self.upload(torch.cat(shards, dim=0), sharded=True)
-            self.feature_norm = self.upload(projection['hidden_norm.weight'].reshape(1, 1, 160, 32), row_major=True)
-            self.final_norm = self.upload(selector['norm.weight'].reshape(1, 1, 160, 32), row_major=True)
-            self.selector_projection = self.upload(selector['candidate_selector.hidden_projection.weight'].T.contiguous())
-            self.predecessors = selector['candidate_selector.predecessor_codebook'].double()
-            self.successors = selector['candidate_selector.successor_codebook'].double()
+                self.pool_slot = buffer_pool.acquire(owner=self.name)
+            geometry = dict(block_rows=block_rows, live_query_qk=live_query_qk,
+                            native_proposal_attention=native_proposal_attention)
+            if shared_weights is None:
+                weights = PreparedDraftWeights(operations, self.mesh, layers, projection, selector,
+                                               retain=self.retain, **geometry)
+            else:
+                # Borrowed, not uploaded: the weights are the first thing a request
+                # allocates, so they take the lowest hole an earlier request's verify
+                # trace left behind, and its replays overwrite them (PreparedDraftWeights).
+                weights = shared_weights.lend(self, mesh=self.mesh, layers=layers, projection=projection,
+                                              selector=selector, **geometry)
+                self.shared_weights = weights
+                self.borrowed.extend(weights.tensors)
+            self.layers = weights.layers
+            self.projection, self.feature_norm = weights.projection, weights.feature_norm
+            self.final_norm, self.selector_projection = weights.final_norm, weights.selector_projection
+            self.predecessors, self.successors = weights.predecessors, weights.successors
             self.history = self.project_features(features, self.history_rows)
             padded = operations.pad(self.history, [(0, 0), (0, 0), (0, 2048 - self.history_rows), (0, 0)], 0.0)
             if addresses(operations, padded) != addresses(operations, self.history):
@@ -121,7 +278,8 @@ class DFlashDevice:
 
     def temporaries(self, protected):
         owned = []
-        protected_ids = [addresses(self.operations, value) for value in protected]
+        # getattr, as execute_proposal reads its flags: fixtures stand a bare namespace in for the device.
+        protected_ids = [addresses(self.operations, value) for value in [*protected, *getattr(self, 'borrowed', ())]]
         def retain(value):
             identity = addresses(self.operations, value)
             if identity not in protected_ids:
@@ -416,6 +574,10 @@ class DFlashDevice:
                     setattr(self, name, None)
             self.pool_slot.release()
             self.pool_slot = None
+        if self.shared_weights is not None:
+            self.shared_weights.release(self)
+            self.shared_weights = None
+        self.borrowed.clear()
         if self.history is not None:
             self.operations.deallocate(self.history)
             self.history = None

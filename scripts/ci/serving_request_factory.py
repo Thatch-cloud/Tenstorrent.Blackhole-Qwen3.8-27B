@@ -22,7 +22,7 @@ def device_components():
 
 
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
-                 collectives=None, buffer_pool=None):
+                 collectives=None, buffer_pool=None, shared_weights=None):
     from dflash_request_runtime import TARGET_TAPS
 
     prompt = tuple(state.prompt_token_ids)
@@ -81,7 +81,8 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             block_rows=16, proposal_capture=True, max_new_tokens=256,
             fused_convolution=True, feature_start=len(prompt) - 2048,
             cache_history=True, cache_projection_capture=False, live_query_qk=False,
-            native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool)
+            native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool,
+            shared_weights=shared_weights)
         owned.callback(device.close)
         release_capture()
         runtime = components.runtime(device, position=len(prompt))
