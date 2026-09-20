@@ -1109,3 +1109,51 @@ outside the change's file list that are the next hole candidates -
 `ReplayAttentionReader` positions/pages/masks (`attention_replay.py`; pages and
 masks are NOT restaged before every verify) and `DeviceLoopState` entry/state per
 GDN layer. Image v39 carries this on top of v38's evidence-carrying refusals.
+
+## Run 35485758177 (image v38): two users, one full round, then the fused input kernel's exit race
+
+The v38 refusal did not recur: this time the second prompt was waiting when the
+first was admitted, so the step after A's admission was B's prefill
+(`[PHASE] execute total=32768 new=1 cached=0 spec=0 finished=[] preempted=[]`), the
+v35 order. Timeline: A admitted 03:11:22 (pool slot 0, TTFT 82 s), eager proposal
+287.6 ms (12.3 s in v38 was the first JIT under the watcher); B prefilled
+03:11:27-03:12:44 (77 s) and admitted (pool slot 1); both proposals; then the first
+packed step `total=32 cached=2 spec=2`: sequential step B (3244 ms, its first
+verify replay), `[CARRY] save B`, shards equal (17 buffers), step A with
+`[CARRY] restore A from B` (407 ms), save A, shards equal; both second proposals
+(207 ms each); the second packed step; `[PHASE] step B begin`, `[CARRY] restore B
+from A enqueue 8.1 ms fence 0.2 ms` - and nothing after. Both streams: 2 tokens,
+then the 180 s inactivity limit. vLLM stats: 2.3 tok/s at 03:12:54, 0.0 after. So
+round one is correct end to end with the carry swapped both ways, and the hang is
+B's SECOND verify, the first verify replay after the other user's whole cycle
+has run on the same cores.
+
+The watcher names the kernel. Dump #22 (at 425 s, mid-hang), device 0:
+
+    core(0..4,0)   R,   R,  W,  W,  W   rmsg D1D h_id 190271   done, a LATER program
+    core(5,0)   NWBW,   W,  K,  D,  K   rmsg D0G h_id 190270   writer at noc_async_write_barrier
+    core(6,0),(7,0),(0..7,1)
+                CWFW, NSW,  K,  K,  K   rmsg D0G h_id 190270   reader at noc_semaphore_wait
+    k_id 1431-1433: Kernel_Source_Code (three inline-source kernels)
+
+(NSW = `noc_semaphore_wait`, dataflow_api.h:1946; NWBW = `noc_async_write_barrier`,
+:1783; CWFW = `cb_wait_front`.) Device 1 shows the same class on eleven cores
+(NSMW/NWID/CWFW). This is `fused_1d_input.cpp`: its input kernel runs on RISCV_1
+over the 11 x rows grid (`fused_1d.py:155-163`), worker 0 is core (0,0), and worker
+0's last act is `noc_semaphore_set_multicast` of the `received` signal with no
+barrier before the kernel exits (line 31). Core (0,0) had exited and started the
+next program while ten receivers still waited at `noc_semaphore_wait(received, 1)`
+(line 35): the final signal never landed. A single user runs the same trace and
+never trips it because the programs before and after are always the same; a
+second user's cycle on the same cores changes the timing of that window. This is
+the hang v34 and v35 hit, now with a name.
+
+Fix: `noc_async_write_barrier()` after the last multicast on worker 0 and
+`noc_async_atomic_barrier()` before exit on the receivers, in
+`scripts/ci/fused_1d_input.cpp`. It is a frozen-recipe revision: the kernel's
+sha256 is pinned by `fused_1d.py:116` into the manifest and checked by
+`fused_t16_admission.py:30`, `full_model_fusion.py:51`, `frozen_mlp_input_gate.py`
+and the wait-zone gates, and none of those modules nor the kernel are in the
+image copy lists; the collectives audit is mapping every pin before the edit.
+Image v39 (the pooled verifier) runs first, unchanged env, to qualify the pool on
+hardware up to the same round.
