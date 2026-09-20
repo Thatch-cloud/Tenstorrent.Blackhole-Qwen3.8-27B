@@ -2632,3 +2632,28 @@ builder result, which ran). (6) The remaining fifteen full-attention layers repe
 (7) The final norm on `lm_head_core_grid` at 64 rows and the auto LM head at M = 64. (8) The
 two sampler tiles. (9) The 64-row taps. (10) The trace capture, its memory, the four
 in-trace restores on replay. (11) The per-user commits.
+
+## Run 35511198252 (image v53): the 64-row block runs, memory fits, the 4-wide round never forms
+
+The capture trim fixed the OOM. Allocator DRAM per chip: 29.99 GB after attach (free 3.12,
+largest block 3022 MB); 30.44 after engine 1; 31.02 after engine 2; 31.60 after engine 3 (free
+1.51 GB). Four per-request engines fit beside the block.
+
+Two of four users decoded byte-identical to their single-user references (streams 0 and 1, sha
+66a5d0c2 and 26c9c952, 64 tokens each). Streams 2 and 3 returned 0 tokens at the bench's 180 s
+client inactivity timeout.
+
+packed_verify rounds: ZERO. The four-user block never engaged. Each per-request VerifierEngine
+takes about 80 s to build at admission (three warm forwards and their trace captures for widths
+1, 2 and 4, then the commit traces), and the one-in-flight scheduler serialises that on the
+device: the engines were built 81 s apart (12:42:40, 12:44:01, 12:45:22). While users 3 and 4
+were admitted, users 1 and 2 barely advanced (0.33 and 0.59 tok/s, ttft 80 s and 161 s). Four
+users never decode at once, so `serving_packed_step.proposal_rows` never returns 16 and every
+round is the sequential `step` (mean 572 ms). The block is pinned to the four-user shape, so the
+two-user overlap does not use it either.
+
+Verdict: the 64-row packed block is built, attaches and runs correctly on hardware, and its memory
+fits, but four concurrent decoders never form under serial admission, so the 4-wide round cannot
+be exercised. This is the admission/prefill serialisation that Lever N (resumable prefill) and M2
+(batched admission / scheduler alternation) remove. M3's device work is complete and proven; its
+throughput benefit is gated on that interleave, as the programme's remaining path already stated.
