@@ -22,6 +22,37 @@ def phase(name, request_id, call):
     return result
 
 
+def discard_stale_ticket(request, packed_rows):
+    """A pending ticket the coming round's shared width would replace.
+
+    A request can go several ticks between drafting a ticket and being stepped on it -
+    a tick that turns out to be some other request's prefill, or bookkeeping for a
+    partner finishing (`FastWorkerHook._execute`) - so its pending ticket can still be
+    the width every OTHER live request drafted THEN, not the width `proposal_rows`
+    decides for every live request NOW. Left alone, that stale ticket rides into a
+    round every other entry drafts at `packed_rows`: `serving_packed_step.ineligible`
+    refuses the round for the width mismatch, and beside the four-user block the
+    per-request engines capture only the sequential widths
+    (packed_shapes.sequential_capture_rows), so the fresh block-width tickets have no
+    capture anywhere to fall back to - `packed_device_step`'s hard ValueError (run
+    35535533720). Discarding the stale ticket here, before drafting, keeps every live
+    request's pending ticket at one width per step, so that round is never formed.
+
+    Never verified - drafting only runs the draft device and caches a proposal, never
+    the target verifier or the block - so dropping it is a pure host-side reset back to
+    `idle`; the request's own `drafts()` then redrafts fresh at `packed_rows`, exactly
+    as it would with no pending ticket at all.
+    """
+    session = request.session
+    ticket = session.pending
+    if ticket is None or session.phase != 'pending' or len(ticket.tokens) == packed_rows:
+        return
+    discard = getattr(request.runtime, 'discard_proposal', None)
+    if callable(discard):
+        discard()
+    session.pending, session.phase = None, 'idle'
+
+
 class FastWorkerHook:
     def __init__(self, worker, bridge, *, cancelled, packed_step=None):
         runner = worker.model_runner
@@ -142,6 +173,13 @@ class FastWorkerHook:
         packed_rows = policy([bridge.request for bridge in self.bridges.values()]) if callable(policy) else None
         request_ids, tokens = [], []
         for bridge in self.bridges.values():
+            # Before drafting, not after: a bridge whose pending ticket is already
+            # this round's width is untouched (the two-user block and the sequential
+            # default never trim their engines' captures, so this never fires for
+            # them - packed_shapes.sequential_capture_rows), and one that is not gets
+            # a clean redraft at packed_rows instead of riding into a mixed round.
+            if packed_rows is not None:
+                discard_stale_ticket(bridge.request, packed_rows)
             # Phase lines around each proposal: run 35482551725 stalled with both
             # requests still running and neither device past its FIRST proposal, so
             # the next run has to say whether it is a proposal or a step that never

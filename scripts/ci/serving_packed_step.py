@@ -162,12 +162,14 @@ def packed_device_step(entries, *, cancelled, block):
         # step: its tickets have no capture anywhere, and the session cannot re-propose
         # (fail_verification is final), so the round is failed here, before any device
         # work, with the reason - rather than by the engine's own refusal one step later.
+        # serving_worker_hook.discard_stale_ticket keeps every live request's pending
+        # ticket at one width per step, so this is unreachable in normal steady-state
+        # and transition operation; kept only as a last-resort guard, it degrades this
+        # round (refuse_round) instead of raising past the step - a scheduler race must
+        # never crash the engine for every OTHER live user (run 35535533720).
         refused = unservable(entries)
         if refused:
-            fail_round(entries, block)
-            raise ValueError('A round the block cannot serve (%s) holds tickets no request engine captured (%s): '
-                             'it was drafted for the block but its entries changed before the step'
-                             % (reason, '; '.join(refused)))
+            return refuse_round(entries, block, reason, refused)
     elif cancelled():
         # Each request's own step answers a cancellation without touching the device.
         reason = 'cancelled before the verify'
@@ -276,6 +278,30 @@ def fail_round(entries, block):
             block.commit_user(segment, 0)
         except BaseException:
             pass
+
+
+def refuse_round(entries, block, reason, refused):
+    """A round drafted for the block that the block cannot serve, whose tickets no
+    request engine captures either - so the sequential step cannot take it either.
+
+    `serving_worker_hook.discard_stale_ticket` keeps every live request's pending
+    ticket at one width per step, so this is unreachable in normal steady-state and
+    transition operation: reaching it means a scheduler race put a mixed round here
+    anyway, not that the hardware or a request failed. Fails every request of the
+    round exactly as `fail_round` always has, but returns their outputs instead of
+    raising past the step, so the race costs this round for these requests rather
+    than the engine for every other live user (run 35535533720)."""
+    message = ('A round the block cannot serve (%s) holds tickets no request engine captured (%s): '
+              'it was drafted for the block but its entries changed before the step'
+              % (reason, '; '.join(refused)))
+    try:
+        from loguru import logger
+        logger.warning('[PACKED] {}', message)
+    except ImportError:
+        print('[PACKED] %s' % message, flush=True)
+    fail_round(entries, block)
+    return [CommittedOutput(entry['request_id'], (), entry['request'].session.position, True, True)
+            for entry in entries]
 
 
 def describe():

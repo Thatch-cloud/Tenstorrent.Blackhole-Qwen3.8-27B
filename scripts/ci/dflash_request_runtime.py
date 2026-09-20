@@ -51,6 +51,21 @@ class DFlashRequestRuntime:
             self.phase = 'failed'
             raise
 
+    def discard_proposal(self):
+        """Drop a proposal made for a ticket that will never reach the target verifier:
+        superseded by a round every OTHER live request drafts at a different width
+        before this one is ever stepped (serving_worker_hook.discard_stale_ticket).
+        `propose` (`__call__`) only ran the draft device and cached its candidates
+        here - nothing published, the target's history and the drafter's own
+        committed suffix untouched - so unwinding it is a pure host-side reset; the
+        request's next proposal runs exactly as if this one had never happened."""
+        if self.phase == 'idle':
+            return
+        if self.phase != 'proposed':
+            raise ValueError('An idle or unpublished proposal is required to discard')
+        self.proposed = ()
+        self.phase = 'idle'
+
     def publish(self, prefix):
         ticket = self.session.pending
         if (self.phase not in ('idle', 'proposed') or ticket is None or self.session.phase != 'committing'

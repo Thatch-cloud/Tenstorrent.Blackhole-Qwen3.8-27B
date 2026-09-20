@@ -378,17 +378,24 @@ class PackedStepTests(unittest.TestCase):
                 self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in entries])
                 self.assertEqual(self.block.calls, [], 'the block was not touched')
 
-    def test_a_round_drafted_for_the_block_that_the_block_cannot_serve_fails_loudly_before_any_device_work(self):
+    def test_a_round_drafted_for_the_block_that_the_block_cannot_serve_degrades_without_raising_past_the_step(self):
         """Beside the 64-row block the engines capture only (1, 2, 4): a 16-row ticket the
         block does not serve (its entries changed after drafting) has no capture anywhere and
-        cannot be re-proposed, so the round fails here, naming the reason and the tickets."""
+        cannot be re-proposed. serving_worker_hook.discard_stale_ticket keeps this mix from
+        ever forming in normal steady-state or transition operation; reached anyway (a
+        scheduler race, not a hardware fault), the round degrades - failed exactly as a
+        refused verify would fail it, naming the reason and the tickets, but returned rather
+        than raised, so a race costs this round for this request, not the engine for every
+        other live user."""
         request = FakeRequest('A', 100, self.stepped)
         request.engine.widths = (1, 2, 4)
         self.block.bind(request.engine, 0)
         request.propose(self.block.predictions_for(0), accept=15)
-        with self.assertRaisesRegex(ValueError, r'cannot serve \(entries=1 block_users=2\) holds tickets no request '
-                                                r'engine captured \(request=A rows=16\)'):
-            self.step([entry(request)])
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = self.step([entry(request)])
+        self.assertEqual(outputs, [CommittedOutput('A', (), 100, True, True)])
+        self.assertIn('cannot serve (entries=1 block_users=2) holds tickets no request '
+                      'engine captured (request=A rows=16)', output.getvalue())
         self.assertEqual((self.stepped, self.block.calls), ([], []))
         self.assertEqual(request.session.phase, 'failed', 'the round is failed, as a refused verify would fail it')
         self.assertEqual(request.engine.adopted, [])
@@ -639,6 +646,60 @@ class FourUserStepTests(unittest.TestCase):
         self.step([*entries, entry(fifth)])
         self.assertEqual([item[0] for item in self.stepped], ['C', 'A', 'D', 'B', 'E'])
         self.assertEqual(self.block.calls, [])
+
+    def test_a_mixed_round_from_the_three_to_four_live_transition_degrades_without_raising(self):
+        """The exact shape of run 35535533720: at the 3->4-live transition, D keeps a stale
+        narrower ticket - drafted while fewer than four were live - while A, B and C draft
+        fresh at the block's width once proposal_rows sees all four bound and live. Beside
+        the real 64-row block every engine is trimmed to its sequential captures (1, 2, 4)
+        (packed_shapes.sequential_capture_rows), so D's own ticket is servable standalone but
+        A, B and C's 16-row tickets - captured only on the block - are not.
+        serving_worker_hook.discard_stale_ticket keeps this mix from ever forming in normal
+        steady-state or transition operation; reached anyway, the round degrades every
+        request rather than raising past the step and crashing the engine for every live
+        user."""
+        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
+                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
+        for owner in owners:
+            owner.engine.widths = (1, 2, 4)
+        # D's ticket is stale: drafted narrow, before it shared the others' width
+        owners[3].session.pending, owners[3].session.phase = None, 'idle'
+        owners[3].propose(self.block.predictions_for(3), accept=3, rows=4)
+        entries = [entry(owners[index]) for index in (2, 0, 3, 1)]
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = self.step(entries)
+        self.assertEqual(outputs, [CommittedOutput('C', (), 700, True, True), CommittedOutput('A', (), 100, True, True),
+                                   CommittedOutput('D', (), 5000, True, True), CommittedOutput('B', (), 3000, True, True)])
+        self.assertIn('request=D rows=4 rows_per_user=16', output.getvalue())
+        self.assertIn('request=C rows=16', output.getvalue())
+        self.assertEqual(self.block.calls, [], 'the block was never touched')
+        for owner in owners:
+            self.assertEqual(owner.session.phase, 'failed')
+            self.assertEqual(owner.engine.adopted, [])
+
+    def test_discarding_the_stale_ticket_lets_the_transition_round_reach_the_block(self):
+        """The other half of the previous test: `serving_worker_hook.discard_stale_ticket`
+        applied to D's stale narrow ticket before the round, exactly as the worker hook
+        applies it every tick, replaces it with a fresh one at the block's width - and the
+        round it drafts into is uniform again and reaches block.verify. The transition
+        makes progress within this one extra draft, not never."""
+        from serving_worker_hook import discard_stale_ticket
+
+        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
+                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
+        for owner in owners:
+            owner.engine.widths = (1, 2, 4)
+        owners[3].session.pending, owners[3].session.phase = None, 'idle'
+        owners[3].propose(self.block.predictions_for(3), accept=3, rows=4)
+        discard_stale_ticket(owners[3], 16)
+        self.assertIsNone(owners[3].session.pending, 'a stale ticket mismatching the round is discarded')
+        owners[3].propose(self.block.predictions_for(3), accept=12, rows=16)
+        entries = [entry(owners[index]) for index in (2, 0, 3, 1)]
+        outputs = self.step(entries)
+        self.assertEqual(self.block.calls[0], ('verify', ['C', 'A', 'D', 'B']))
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D', 'B'])
+        for owner in owners:
+            self.assertEqual(owner.session.phase, 'idle')
 
     def test_a_cancellation_between_commits_aborts_the_users_still_pending(self):
         entries = self.four()

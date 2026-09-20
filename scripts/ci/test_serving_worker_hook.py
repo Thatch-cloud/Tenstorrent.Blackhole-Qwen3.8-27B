@@ -100,7 +100,7 @@ class WorkerHookTests(unittest.TestCase):
         policy = Mock(return_value=16)
         hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=policy))
         original = hook.bridges
-        bridges = {name: SimpleNamespace(request=SimpleNamespace(session=SimpleNamespace(request_id=name)),
+        bridges = {name: SimpleNamespace(request=SimpleNamespace(session=SimpleNamespace(request_id=name, pending=None)),
                                          drafts=Mock(return_value=SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
                    for name in 'ab'}
         hook.bridges = bridges
@@ -129,6 +129,66 @@ class WorkerHookTests(unittest.TestCase):
                 worker.take_draft_token_ids()
             for name in 'ab':
                 bridges[name].drafts.assert_called_once_with()
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_a_stale_pending_ticket_narrower_than_the_rounds_width_is_discarded_and_redrafted(self):
+        """A request can go several ticks between drafting a ticket and being stepped on
+        it - a tick that turns out to be some other request's prefill, or bookkeeping for
+        a partner finishing - so it can still hold a ticket narrower than the width every
+        OTHER live request drafts once proposal_rows decides the round is the block's:
+        left alone that mix is exactly what packed_device_step refuses (run 35535533720).
+        Discarded here, before drafting, the request's own drafts() redrafts fresh at the
+        round's width, same as if nothing had been pending."""
+        worker, bridge, events, scheduled = self.fixture()
+        policy = Mock(return_value=16)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=policy))
+        original = hook.bridges
+        stale_ticket = SimpleNamespace(tokens=(0, 0, 0, 0))
+        stale_session = SimpleNamespace(request_id='a', pending=stale_ticket, phase='pending')
+        stale_runtime = SimpleNamespace(discard_proposal=Mock())
+        fresh_session = SimpleNamespace(request_id='b', pending=None, phase='idle')
+        bridges = {
+            'a': SimpleNamespace(request=SimpleNamespace(session=stale_session, runtime=stale_runtime),
+                                 drafts=Mock(return_value=SimpleNamespace(req_ids=['a'], draft_token_ids=[[1]]))),
+            'b': SimpleNamespace(request=SimpleNamespace(session=fresh_session, runtime=SimpleNamespace()),
+                                 drafts=Mock(return_value=SimpleNamespace(req_ids=['b'], draft_token_ids=[[2]]))),
+        }
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b'], [[1], [2]]))
+            stale_runtime.discard_proposal.assert_called_once_with()
+            self.assertEqual((stale_session.pending, stale_session.phase), (None, 'idle'))
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+            # a ticket already at the round's width is untouched: no discard, no reset,
+            # and the same object is handed on to the next drafts() call
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            matched_ticket = SimpleNamespace(tokens=(0,) * 16)
+            stale_session.pending, stale_session.phase = matched_ticket, 'pending'
+            stale_runtime.discard_proposal.reset_mock()
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            stale_runtime.discard_proposal.assert_not_called()
+            self.assertIs(stale_session.pending, matched_ticket)
+            bridges['a'].drafts.assert_called_once_with(packed_rows=16)
+            # no policy decision (a sequential round): nothing is ever discarded here,
+            # exactly as before - each engine's own capture stays the deciding word
+            policy.return_value = None
+            stale_session.pending, stale_session.phase = stale_ticket, 'pending'
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            stale_runtime.discard_proposal.assert_not_called()
+            self.assertIs(stale_session.pending, stale_ticket)
+            bridges['a'].drafts.assert_called_once_with()
         finally:
             hook.bridges = original
             hook.close()
