@@ -75,6 +75,7 @@ def stream_once(port, prompt, max_tokens, results, index):
                 usage = chunk.get('usage')
                 if usage:
                     entry['prompt_tokens'] = usage.get('prompt_tokens')
+                    entry['completion_tokens'] = usage.get('completion_tokens')
                 text = (chunk.get('choices') or [{}])[0].get('text', '')
                 if not text:
                     continue
@@ -232,6 +233,23 @@ def main():
             report['fraction_of_target'] = round(
                 (1000.0 / statistics.median(gaps)) / TARGET_TOKS_PER_USER, 3)
         report['total_tokens'] = total_tokens
+        # Chunks are not tokens: one verify commits several accepted tokens in one
+        # SSE chunk (run 35490298652: 64 tokens in 10 chunks), so the gap-based rate
+        # above is chunks per second. The rate that matters is completion tokens
+        # over each user's decode window, from the server's own usage report.
+        rates = []
+        for entry in results:
+            if (not entry or not entry.get('completion_tokens') or entry.get('ttft_s') is None
+                    or not entry.get('wall_s')):
+                continue
+            window = entry['wall_s'] - entry['ttft_s']
+            if window > 0 and entry['completion_tokens'] > 1:
+                rates.append((entry['completion_tokens'] - 1) / window)
+        if rates:
+            report['decode_tokens_per_user_per_s'] = [round(rate, 2) for rate in rates]
+            report['decode_tokens_per_user_per_s_median'] = round(statistics.median(rates), 2)
+            report['decode_tokens_aggregate_per_s'] = round(sum(rates), 2)
+            report['fraction_of_target_tokens'] = round(statistics.median(rates) / TARGET_TOKS_PER_USER, 4)
         # Positive control for any experiment that retunes the prefill chunk. The model
         # does chunk_size = self._chunked_chunk_size or 2048, so a constant that never
         # reaches the warmup falls back silently and two arms measure the same thing.
