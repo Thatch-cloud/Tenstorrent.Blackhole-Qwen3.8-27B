@@ -977,8 +977,18 @@ it, the core hangs at the assert and the poll stops the device. That is a
 pre-existing wart of this tt-metal revision, not a corruption path and not our
 bug: the connection is never used. It fires on the sampler's all-gather and not
 on the projection gathers during the 77 s prefill (watcher dumps 3-5 cover it),
-so the projection path reaches the fabric differently (the writer's
-`USE_WORKER_MUX` branch skips lines 224-227 altogether).
+so the projection path reaches the fabric differently: the collectives audit
+read the program factory and found that `tt_sampling.py:187,193` passes
+`num_workers_per_link=1`, and `all_gather_async_default_program_factory.cpp`
+drops the mux cores exactly then (:254-257, :272-273, :438-440) while still
+launching a direction-0 worker on the chip with no forward neighbour with both
+connection flags false (:380-393, :797-806); our drafter gathers pass 2
+(`feature_collective.py:55`, `dflash_device.py:242`), get a mux core and take the
+writer's `USE_WORKER_MUX` branch (:126-199, :219-222), which never touches the
+connection manager - so they passed under the same watcher before the gate.
+The other line-119 candidate, `packet_header_pool.h:119`, is unreachable from
+this writer (pointer-based header API). One open point: the plugin's prefill
+sampling did not trip, so it does not reach `tt_sampling.forward:711-737`.
 
 Consequence: the watcher as configured cannot get past admission on this stack,
 and v36's trip was this same line. `tt_metal/llrt/rtoptions.cpp:161` at the same
