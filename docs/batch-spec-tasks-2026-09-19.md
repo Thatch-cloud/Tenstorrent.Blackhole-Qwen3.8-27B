@@ -1669,3 +1669,12 @@ overwrote slot 0 is the reverse of reality and costs one extra restore, nothing
 more; and serving's prefill is the untraced chunked fallback (:361-366), an
 eager path that allocates only free memory and cannot scribble the first
 user's live buffers - which the first user's byte-exact text confirms.
+
+Follow-up probe (run 35493717058): `model._remap_gdn_slots(remap)` applies vLLM's
+batch-condense slot_remap to every GDN layer's batched decode state through
+`layer.attention.remap_slots(remap)` ('slot i takes the state at slot remap[i]';
+the plugin's own slot_remap does not move GDN state). `write_slot` is a method
+of the GDN layer, not the model, so its body was not printed; the audit's
+reading of the patched prefill (scratch rec/conv read back, then written into
+the slot) and the per-slot inventory (rec + four conv taps) stand. The fix's
+`adopt_slot` copies exactly those five rows.
