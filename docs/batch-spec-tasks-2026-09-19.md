@@ -1678,3 +1678,24 @@ of the GDN layer, not the model, so its body was not printed; the audit's
 reading of the patched prefill (scratch rec/conv read back, then written into
 the slot) and the per-slot inventory (rec + four conv taps) stand. The fix's
 `adopt_slot` copies exactly those five rows.
+
+### Two bugs, not one (GDN audit re-rank, 2026-09-20)
+
+On the SAME-prompt run the slot bug is masked: user 1's seed from slot 0 is
+user 0's post-prefill state, numerically identical to user 1's own (same
+prompt, user 0 had not verified). Yet user 1 still went wrong after its first
+verify - i.e. after user 0's FIRST trace replay (round 1 order: step B right,
+step A = A's first replay since B's buffers were allocated; round 2: B wrong).
+That is the trace-hole class once more, on the one per-request allocation the
+pool never covered: the ReplayAttentionReader's per-bundle page tables
+(attention_replay.py:47-48, uploaded per request, 4 bundles at T16), rewritten
+only by `VerifierPageBinding.refresh` on a block change (serving_page_binding.py:
+91-101) - static across steps, so a clobber sends the user's 16 attention layers
+to wrong KV pages from the next verify on, exposing only the LATER-admitted
+user and only after the earlier user's first step. Possibly also ModelBatch's
+row_tables (model_batch.py:319, not in BATCH_INPUTS). Replay masks are
+recomputed in-trace from the positions word and the word is re-uploaded per
+verify, so they are safe; so are the GDN entry/state (written in-trace before
+read) and every pooled buffer. Both bugs are being fixed before the gate run:
+slot adoption at admission (agent 'slotfix') and pooled replay page tables plus
+a page-table drift check under QWEN_FAST_SHARD_CHECK (agent 'replaypool').
