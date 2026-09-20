@@ -279,8 +279,21 @@ def main():
         watcher = Path('/opt/tt-metal/generated/watcher/watcher.log')
         print('<<<CYCLE_BENCH_WATCHER_BEGIN>>>')
         if watcher.is_file():
-            for line in watcher.read_text(errors='replace').splitlines()[-200:]:
-                print(line[:300])
+            # Run 35483320919 tripped a kernel assert, and a blind 200-line tail held
+            # only idle cores and the kernel table. Keep the lines that carry the
+            # finding: the assert text, any core not parked at a wait, the kernel id
+            # table, and the dump headers - from the whole file, bounded.
+            import re
+            idle = re.compile(r'^Device \d+ worker core.*:\s+GW,\s+W,\s+W,\s+W,\s+W\s')
+            keep = re.compile(r'assert|tripped|halt|exception|Last waypoint|k_id\[|Dump #|^Legend|noc|sanit|stalled', re.I)
+            kept = 0
+            for line in watcher.read_text(errors='replace').splitlines():
+                if keep.search(line) or (line.startswith('Device') and 'worker core' in line and not idle.match(line)):
+                    print(line[:300])
+                    kept += 1
+                    if kept >= 600:
+                        print('... watcher lines truncated')
+                        break
         print('<<<CYCLE_BENCH_WATCHER_END>>>')
         sys.stdout.flush()
     return 0 if report.get('ready') else 1
