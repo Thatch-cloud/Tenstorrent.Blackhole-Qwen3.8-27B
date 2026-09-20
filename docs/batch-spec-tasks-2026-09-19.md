@@ -1028,3 +1028,44 @@ stalled-core dump demands. Every other kernel of ours on the admission path
 `draft_convolution_fused_io`) ends with the proper barriers. One sanitiser-class
 note for later: `gdn_state_copy.cpp:12-16` moves 32-byte sub-tile DRAM pieces
 from a scratch not rounded to 64 bytes (`:37`), unlike `gdn_slot_copy.cpp:41`.
+
+**Run 35484349353 (v38 = the v37 image, watcher on, asserts off):** the first
+run to get past admission under the watcher. Server ready at 120 s; the first
+request prefilled (gate 02:39:35.760, position 32768, emitted=1); the verifier
+built and warm-verified, sampler gather included, without a stop; `[CARRY]
+op=save layers=48 enqueue_ms=7.3 fence_ms=0.2`; then the first eager proposal
+`[PHASE] propose ... end 12283.1 ms` - the first proposal ever to return under
+the watcher. The next line, `[PHASE] execute total=16 new=0 cached=1 spec=1`,
+was followed at once by
+
+    ValueError: Resident decode requests at the exact scheduled frontier required
+
+from `serving_vllm_packed.ordered_tickets` line 31, reached through
+`serving_packed_bridge.execute_packed_decode:33` and
+`admit_packed_scheduler_output:55`. A Python refusal in our code, not a device
+hang: the watcher's last two dumps hold only the dispatch cores and the
+`sdpa_decode` and `slice` kernels of the last op, no NoC finding. Stream 1 got
+one token (TTFT 171 s, the admission token) and then the engine's 500; stream 0
+got nothing and hit the 180 s inactivity limit. vLLM's stats at 02:40:30 said
+`Running: 1 reqs, Waiting: 0 reqs`, and only one request id appears in the log,
+so the second prompt had NOT reached the scheduler when that step was built -
+the opposite order from v35, where B was prefilled before A's first decode.
+
+The raise at line 31 guards five things at once - a new request, finished ids,
+preempted ids, structured output, encoder inputs - and its message names none.
+`serving_vllm_contract.admit_scheduler_output` carries the same five, and the
+single-user run 35475120459 passed them ten times, so something in THIS step
+differs. The plugin's rule (`_local_prefill_intent`: prefill when a partial
+prefill exists, or a request waits and there is capacity; otherwise decode) put
+the scheduler on its decode-only branch, and `docs/lever-n-plugin-contract` notes
+that its prefill-to-decode fallback carries `finished_req_ids`,
+`free_encoder_mm_hashes` and `preempted_req_ids` across a discarded pass - the
+very fields the clause refuses. Rather than guess, `probe_frontier_refusal.py`
+(cpu-probe-v20) replays both arrival orders at the fp2u geometry against stock
+vllm, TTScheduler and the one-in-flight subclass, prints every field the clause
+reads per step, runs the packed contract on the real outputs, and prints the
+plugin's negotiation source. The fix follows the probe: whichever field it is,
+both contracts will also carry their values in the refusal.
+
+Diagnostic-mode costs seen, not serving numbers: verifier build 48 s and the
+eager proposal 12.3 s under the watcher's NoC sanitiser.
