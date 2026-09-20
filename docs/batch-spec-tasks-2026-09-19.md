@@ -1971,3 +1971,13 @@ outside the frozen recipe); per-user attention at 32K under ~2 ms instead of
 user; and acceptance holding near 7 at 32K, which the packed run already shows
 slipping (prefixes 11,10,5 vs 7,4,8). That is a kernel programme, not a serving
 change. Recommended order: L2, then L3 with L4a folded in, then L4b.
+
+**M3 gate references (single user, image v46, sequential):** the four-user gate
+compares user u's text with the single-user text of prompt base 1000 + u.
+Bases 1000 and 1001 were recorded above; the two new ones:
+
+    base 1002: run 35498370154, 11 chunks, sha256 c8a2c0af832a3877720108e9577a217f3e6beaf57d7ba81565c863df803c7911
+    base 1003: run 35498374589, 10 chunks, sha256 ab0cf286264a6a22cfa394c3fa51b7cdeb9e61b06707c3bde1ae66e8c375568b
+
+Kept in runner-evidence.local/packed-gate/; the compare script picks the
+reference by each run's prompt_base and prompt_user_offset.
