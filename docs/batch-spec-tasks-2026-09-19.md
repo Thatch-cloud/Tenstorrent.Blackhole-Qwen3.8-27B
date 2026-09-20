@@ -1157,3 +1157,56 @@ and the wait-zone gates, and none of those modules nor the kernel are in the
 image copy lists; the collectives audit is mapping every pin before the edit.
 Image v39 (the pooled verifier) runs first, unchanged env, to qualify the pool on
 hardware up to the same round.
+
+## Run 35486440095 (image v39, verifier pooled): two rounds, then the divergence returns one round later
+
+Pool at attach: `bytes_per_slot 444,409,204` (draft 84 MB, query 128 KB, verifier
+360 MB), both slots lent. Timeline: A admitted 03:27:20 (TTFT 82 s), B prefilled and
+admitted 03:28:42; round one: step B 433 ms, step A (restore from B) 415 ms, shards
+equal; round two: step B (restore from A) 1527 ms - the verify that hung in
+35485758177 completed - shards equal, `proposal_calls=[2, 2]`; step A (restore from
+B) with its carry saved 03:28:52.892; then the third proposal:
+
+    AssertionError: Replicated learned selector features differ: call=2
+    position=32780 rows=2048 max_abs=0.496094 mean_abs=0.0312087 differing=7391 of 8192
+
+from `dflash_device.select_proposal` (via `_drafts` -> `serving_runner_bridge.drafts`
+-> `serving_fast_request.prepare` -> `dflash_request_runtime` -> `propose`). Both
+streams: 3 chunks each, then the engine's 500. This is the ORIGINAL two-user
+failure (v33: call=1), now at call=2 with every persistent buffer pooled and every
+shard and drift check equal immediately before it. What differs between the chips
+is therefore a transient of the eager proposal, not a buffer a request keeps.
+
+One cause for both symptoms. `fused_1d_input.cpp`'s worker 0 exits with its final
+signal multicast in flight, and the receivers' last block multicast
+(`noc_async_write_multicast`, 8 x 2048 bytes into each receiver's circular buffer
+region) is only barriered by worker 0, not acknowledged by the receivers before
+they exit. When the last signal is lost the receivers hang (35485758177); when the
+data lands late it lands in whatever the next program on those cores has placed at
+that L1 address - with two users, the other user's or the same user's eager
+proposal - and one chip's intermediate is scribbled, hence replicated features
+that differ. A single user never reorders the programs after the fused MLP, so the
+window never opens. The pool did its job: the divergence moved from a persistent
+buffer to a transient, which is what a pooled-but-still-diverging run had to show.
+
+The fix stays the two barriers, under the frozen recipe. The collectives audit's
+pin map: the kernel serving runs is the staged copy
+`mlp-register-epilogue-candidate/fused_1d_input.cpp` (staged byte-for-byte from
+`scripts/ci`, `mlp_register_epilogue_gate.stage_candidate:44-45`), exec'd through
+`mlp_block_stream_runtime.py:100-113`; five startup pins - P1
+`fused_t16_admission.py:10,30-32` (REPORT_SHA256 of
+`fused-t16-target-simulator.json`, six kernels' reader hashes), P2
+`mlp_register_epilogue_gate.py:13,76,82,86-88` (`register-epilogue-evidence/
+fused-batch.json`), P3 `mlp_block_stream_gate.py:13,62-79` (`block-stream-evidence/
+fused-batch.json`), P4 `mlp_block_stream_runtime.py:161-163` live manifest, P5
+`fused_t16_scope.py:30-33` - and none of those files, nor the evidence directories,
+are in either image copy list; they ride in the bundle cut from the runner's
+`read-combined` tree. Hand-editing the recorded hashes would assert probes that
+never ran, so the route is: fix the kernel, re-run the three evidence lanes
+(cumulative-t16 7 min, register-epilogue-combined 7 min, block-stream), update the
+three REPORT_SHA256 constants to the regenerated reports, re-cut the bundle
+(serving-bundle, 1 min), pin it in the image workflow, build v40. Gate-only pins
+(full_model_fusion.py:51, mlp_progressive_input.py, frozen_mlp_input_gate.py, the
+wait-zone gates, frozen_recipe_context.py:225,304, cumulative_t16_experiment.py:28)
+follow for lane hygiene. `tensix_stream_activation.cpp` has the same exit defect
+but is not on the serving path.
