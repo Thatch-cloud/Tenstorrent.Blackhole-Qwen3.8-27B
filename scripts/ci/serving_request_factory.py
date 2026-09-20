@@ -83,6 +83,14 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         def prepare_proposal(engine):
             if device.proposal_capture is not None:
                 raise ValueError('Proposal trace already captured before verifier allocation')
+            if os.environ.get('QWEN_FAST_EAGER_PROPOSAL') == '1':
+                # Each request captures its own device trace for the proposal pass.
+                # Two requests mean two traces on one mesh, and run 35477522469 had
+                # the draft vocabulary head refuse its own candidates after two
+                # committed blocks - which is what a clobbered trace would look
+                # like. DFlashDevice.propose already runs eagerly when this is None,
+                # so leaving it unset isolates the trace as a variable.
+                return
             device.proposal_capture = components.proposal(device, max_new_tokens=256)
 
         # The T16 gate compares these four for equality and run 35474038724 passed
