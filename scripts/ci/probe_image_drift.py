@@ -62,12 +62,9 @@ def main():
     # The diffs themselves, bounded, so an override is a decision rather than a bet.
     import difflib
     for name in core_differ:
-        here = io.open(os.path.join(repo, name), encoding='utf-8').read().replace('
-', '
-').splitlines()
-        there = io.open(os.path.join(image, name), encoding='utf-8').read().replace('
-', '
-').splitlines()
+        CRLF, LF = chr(13) + chr(10), chr(10)
+        here = io.open(os.path.join(repo, name), encoding='utf-8').read().replace(CRLF, LF).splitlines()
+        there = io.open(os.path.join(image, name), encoding='utf-8').read().replace(CRLF, LF).splitlines()
         lines = list(difflib.unified_diff(there, here, 'image/' + name, 'repo/' + name, lineterm='', n=1))
         print()
         print('----- DIFF %s (%d lines) -----' % (name, len(lines)))
