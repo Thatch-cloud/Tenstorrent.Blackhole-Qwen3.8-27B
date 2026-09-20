@@ -75,8 +75,16 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # selector features disagree. Both are what interleaved collectives look
         # like. The sequential step runs users one at a time, so a shared object is
         # used exactly as serially as it is with a single request.
+        # QWEN_FAST_SHARED_CCL=0 gives each request its own TT_CCL for the drafter.
+        # Run 35478872085 ran that way with unprotected buffers and diverged but never
+        # hung; every hang (35481903377, 35482551725) has been on the shared object
+        # with the buffers protected. A trace replay does not advance the host's
+        # semaphore counter, so the next EAGER gather may reuse a handle the other
+        # request's trace just used - the one hazard the collectives audit could
+        # construct was a hang. This is the A/B for it.
+        shared_ccl = os.environ.get('QWEN_FAST_SHARED_CCL', '1') == '1'
         device = components.device(operations, model,
-            collectives if collectives is not None else components.collectives(model.mesh_device),
+            collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
             layers, projection, selector, _qwen_outputs, position=len(prompt),
             block_rows=16, proposal_capture=True, max_new_tokens=256,
             fused_convolution=True, feature_start=len(prompt) - 2048,
