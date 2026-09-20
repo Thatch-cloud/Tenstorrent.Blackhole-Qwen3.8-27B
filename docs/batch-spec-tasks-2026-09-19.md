@@ -2425,3 +2425,84 @@ tiles, four 16-row pooled readers over their bundles, `nlp_concat_heads_decode` 
 M = 64 (rows 13-14). (8) Two sampler tiles and their output identity. (9) The 64-row taps.
 (10) The trace capture of all of it, its memory, and the four in-trace restores on replay.
 (11) The per-user commits (M1's traces at a fourth carry).
+
+### Run 35505708710 (image v50): the device hung inside the 64-row warm forward, the cause unlogged
+
+No crash: the server never became ready in 900 s. Every faulthandler dump (ten, one a
+minute) shows the main thread in `packed_verifier.py` close -> `operations.synchronize_device`,
+entered from the except path of `PackedVerifierEngine.__init__`. So the 64-row warm forward
+RAISED on the host after its ops were enqueued, and the device never completed one of them:
+close's fence blocked for the rest of the timeout. The exception itself was never logged:
+serving_runtime's [PINDIAG] attach-failed line comes after the block's close. The dumps put
+the raise inside `operation(warm)` (the forward plus the two sampler tiles), before the warm
+fence at packed_verifier.py `self.stage = 'warm forward fence'`: had the fence been reached
+first, the dumps would show it, not close. The lane reset both cards; v51 runs with
+`TT_METAL_WATCHER=20`.
+
+**Logged before close, and a close that never fences (commit below).** The except path now
+calls `report_failure` first: one `[PINDIAG] packed block warm failed with <type>: <message>;
+stage <stage>; closing without the device fence` line and the full traceback, through loguru
+when it exists and stderr otherwise (`diagnostic`, which never raises), with `stage` one of
+allocating / warm forward / warm forward fence / verify trace capture / commit trace capture /
+reseeding / validating bindings. Then `close(wait=False)`: no `synchronize_device`, and any
+captured trace is abandoned rather than released (a trace release may itself fence);
+everything else is released as before - the frees are host-side allocator bookkeeping (v50
+itself freed the warm fixture's buffers with the device hung, in `operation`'s finally, and
+returned), the pool's tables are handed back, and a process whose attach failed does not
+allocate again, so a freed address cannot be re-issued under a kernel still running. Every
+other close keeps the fence: an idle block has nothing in flight (the fence returns at once)
+and a block that failed in verify or commit was fenced by its blocking trace or its staging
+before it failed. A [PINDIAG] line also records the no-fence close and how many traces it
+abandoned.
+
+**Fail early instead of late (same commit).** `bind_two_tile_norms` now rebuilds both decode
+norm configs the forward will ask for ("attn", "lm_head") at attach, before any device op:
+a config the rebuild refuses (a shard that is not WIDTH, a program that is not one tile)
+fails the attach by name. Without this, the final norm's config - the LAST getter call of
+the forward, model.py:521 - would be refused on the host after every op of the forward was
+enqueued: exactly the shape of v50's failure. The tt_transformers dump shows the lm_head
+input config's shape and grid (model_config.py:2297-2311) but not its strategy keyword, so
+this was the one config the review could not clear from the text.
+
+**Review of every op the 64-row warm forward reaches after v49's proven point** (the GDN
+in-projection at 64 rows, landed in DRAM), from the second dump and our code. Host raise /
+device hang / fine, with the reason; "proven" means run on the device in an earlier gate.
+
+| Op (forward order) | Host raise? | Device hang? | Reason |
+| --- | --- | --- | --- |
+| `ttnn.slice` of the (1, 64, 8240) tiled DRAM projection: rows [0,16) (aligned start, unaligned end), [16,32) (unaligned start, tile row 0), [32,48), [48,64) (unaligned start inside tile row 1) | no: slice validation does not depend on the buffer type, and the same unaligned call passed at M1 from L1 | plausible, unevidenced | [0,16) from DRAM RAN on v49 (the scope raised after it and v49's close fenced cleanly); [16,32) ran at M1 from L1; new: DRAM source for an unaligned start, and a start inside tile row 1. Watcher would show the slice's data-movement kernel (or the untilize/tilize pair it lowers to) waiting on a NoC read. Fallback: slice the tile-aligned halves [0,32) and [32,64) from DRAM (both ends aligned), move each half to L1, then cut each half at 16 IN L1 - byte for byte M1's proven op - at two 1 MB copies per layer |
+| `to_memory_config(piece, L1)` (1, 16, 8240) tiled DRAM -> L1 interleaved, then the DRAM slice freed | no | low | a plain interleaved copy of 258 tiles (516 KB per chip); the same op class the 1D decode arm (tp_common.py:172) and the norm hand-off run |
+| direct-window candidate x4: `gdn_direct_window_device.execute` on the L1 piece, the entry's compact states, taps, dt_bias, neg_exp_A | no: shapes, dtype, layout, placement (L1 accepted) and aliasing checked in Python | low | per piece IDENTICAL to M1: the accessor compile-time args are built from an L1 piece as at M1 (had the piece stayed in DRAM the kernel's accessor args would have differed - the placement fix keeps them the same); then the z slice and `gdn_vsplit.execute` per piece as at M1 |
+| `finish_output`: `concat` of four (1, 16, 3072) L1 pieces on dim 1 -> (1, 64, 3072) | no | low | M1 concatenated two such half-tile pieces the same way; four is the same kernel over more inputs |
+| `_row_proj` at M = 64: `create_prefill_mlp_matmul_program_config(64, 3072, 5120, max_cols=11, tuning TP4)` -> cols 10 (per_core_N 16, out_subblock 1x4), grid (10, 10), in0_block_w 4, per_core_M 1 -> 2 x 10 blocks on 20 cores; DRAM out | unlikely: M 2 % 1, K 96 % 4, N 160 % 16, subblock 4 within the fp32 cap; the same config at N = 5120 runs at prefill M (wo, gdn out, w2) | low-medium | first run of this builder at M_tiles = 2 (two of the ten grid rows active); prefill runs it at >= 4 |
+| `tt_all_reduce` x3 per layer pair (gdn out, wo, MLP w2): ccl.py:169-191 `reduce_scatter_minimal_async` on a (1, 1, 64, 5120) interleaved partial (DRAM or L1), dim 3 -> 2560 per chip, `num_links = tt_ccl.get_num_links(0)`, chunks_per_sync 10, 2 workers per link | no: 5120 divides by 2; the input is interleaved (:170 not taken); nothing in the Python is sized to rows | low | the same call, links and chunking run at 32 rows (decode) and at 128-2048 rows (prefill: the unfused GDN out-projection path gdn/tp.py:197-201 is silicon-proven on this mesh, the MLP down at every chunk); 64 sits between two proven sizes |
+| MLP unfused prefill arm at M = 64 (11b): w1 `create_prefill_mlp_matmul_program_config(64, 5120, 8704, SILU, 11, TP4)` -> cols 10, per_core_N 28 (272 tiles: 9 full blocks + 20), subblock 1x4, in0_block_w 4, L1 out; w3 the same without SILU; `mul` -> DRAM; w2 (64, 8704, 5120) -> cols 10, per_core_N 16, in0_block_w 4 (272 % 4), L1 out; decode compute config (fp32 acc, packer_l1_acc) | unlikely: partial last N blocks are what the builder makes for the frozen TP=4 shapes and what the TP=8 sweep measured (tp_common.py:255-263: mlp_gate at 68 tiles, per_core_N 8 = 8 full + 4), so the 2D kernel accepts them; SILU in the 2D config is the builder's documented contract (:217) | low-medium | w1/w3 through this builder have NEVER run at TP > 1 in this image (prefill takes the fused AGMM, mlp.py:227), at any M: first run of the config, not only of M = 64 |
+| layer 3 `_qkv_raw_decode`: `matmul_1d_decode` with the rebuilt 1D config (8x8, in0_block_w 8, per_core_M 2, out_subblock 1x4, per_core_N 4 over 224 tiles = 56 cores) on the L1-interleaved input (its own `to_memory_config(x, L1)` a no-op) | unlikely: per_core_M = M tiles as the builder sets it, K 160 % 8, subblock within the fp32 cap; the partial last core is M1's | medium-low | first run of the 1D mcast_in0 kernel at two M tiles per core (the in0 multicast carries 2 tile rows per K block). Watcher: the 1D matmul's in0 sender/receiver kernels on the 8x8 grid |
+| layer 3 `attn_decode_prep(qkv_raw (1,1,64,7168) DRAM, cos/sin (1,64,1,64), q_norm, k_norm, 12, 2, 256, 64, kv_cfg 8x8, batch=64)` | UNKNOWABLE: the op is the project's own (optimisation/ttnn-op/test_attn_prep.py tests batch 1, 3, 8 and 32, never above 32; its C++ is not in the repo). If it validates batch <= 32 it raises on the host at layer 3 | TOP CANDIDATE | the batch sits in the tile-height dim of qkv_raw and spans two tile rows for the first time; K and V come out height-sharded one user per core over 64 cores (8x8, `_kv_shard_cfg(64)`). Watcher: the prep op's reader/writer on the 8x8 K/V shard cores or its compute cores. Fallback: two prep calls at batch 32 - slice qkv_raw at row 32 (tile-aligned), cos/sin per tile (dim 1 is whole tiles), `_kv_shard_cfg(32)` (8x4: M1's exact op); q and gate concatenated on dim 1; K/V as two 32-shard tensors, each `sharded_to_interleaved` to DRAM and concatenated, which is the DRAM (1, 64, 32, 256) the segmented writer converts to anyway before cutting it back into the same two tiles |
+| `_decode_from_prep`: `paged_update_cache` -> `SegmentedOrderedCacheWriter`: shape (1, 64, 32, 256); height-sharded (64 cores) -> DRAM; two dim-1 slices (whole tiles); `ordered_cache.update` per tile | no, if the prep emits (1, B, 32, 256) as at M1 | low | `sharded_to_interleaved` of 64 shards vs 32; the audited kernel exactly as qualified, twice |
+| SDPA -> `PackedReplayAttentionReader`: (1, 64, 12, 256) DRAM query; four dim-1 slices (whole tiles: heads pad to 32); four pinned 16-row readers; concat in L1 | no | low | per reader M1's op; concat of four vs two |
+| `multiply(attn_out, sigmoid(gate))` (1, 64, 12, 256) L1 | no | no | elementwise |
+| `_concat_heads_decode(gated, 64)`: gx 8 (11 -> 8 by divisibility with 64 / 8 <= 10), 8x8 `num_to_corerange`, height shard (32, 256) over 64 cores, `nlp_concat_heads_decode(num_heads=12)`, `sharded_to_interleaved`, the `out.shape[-2] != 64` slice | UNKNOWABLE: an upstream op whose source is not in the dump; the model's own comment (attention/tp.py:403-408) says it "always emits batch padded to 32". If it validates batch <= 32: host raise. If it emits one 32-row tile regardless of B: the model's own slice to (1, 1, 64, 3072) raises on the host (end past the tensor). If it emits 64 rows: fine | SECOND CANDIDATE | the output's batch sits in a tile row; at 64 it needs two. Watcher: the concat-heads reader/writer on the 8x8 shard cores. Fallback: two 32-user halves - slice gated on dim 1 at 32 (whole tiles), `_concat_heads_decode(half, 32)` twice (M1's exact op: gx 8, 8x4), concat the (1, 32, 3072) outputs on dim 1 - bound on the attention instance as `_concat_heads_decode` for the wide block, which `_decode_from_prep` looks up on `self` at call time |
+| `_wo_proj(gated_flat (1, 64, 3072) L1)`: the prefill 2D config as gdn out (cols 10, per_core_N 16, in0_block_w 4, per_core_M 1), L1 out | unlikely (as `_row_proj`) | low-medium | first run at M_tiles = 2 |
+| residual adds; ff norm with the "attn" config | no | no | the ff norm's config IS the attention norm's, which v49 ran at 64 rows |
+| final norm: gather into `get_lm_head_input_mem_config`'s shard rebuilt (64, nearest_32(5120 / cores)) on `lm_head_core_grid`, `rms_norm` at block_h 2, `to_memory_config(DRAM)` | was: our rebuild refuses a non-WIDTH strategy at the END of the forward (the shape and grid are in the dump, the strategy keyword is not); now refused at attach, before any op | low | the same op class v49 ran at 64 rows on the attn grid, on a different grid |
+| LM head `ttnn.linear` auto at M = 64, DRAM in and out | no | low | ttnn's own program choice at a new M; 15.9 MB of logits per chip |
+| `force_argmax.sample_rows(64)`: two tile-aligned row slices, `sampler.sample(enable_trace=False)` twice at M1's exact 32-row geometry, `row_axis`, the output-identity check, concat | no: the untraced sampler allocates fresh ids per call - scripts/ci/sampling-kernel.py:85-87 frees each eager output after use and then runs the traced path, which a persistent buffer would not survive - so the identity check passes | no | two instances of a proven op |
+| feature taps `copy` x5, `run()`'s counts (129 / 16 / 64 and the M1 counts) | no | no | shapes equal by construction; the counts were checked in the previous scan |
+
+**Ranked hang candidates for the watcher run** (what stalls the device first decides
+everything after it; the host raise the new log will name may be a later op's validation
+or our own): 1. `attn_decode_prep` at batch 64 (layer 3). 2. `nlp_concat_heads_decode` at 64
+users (layer 3). 3. The unaligned-start tiled DRAM slices at rows 16 and 48 (layer 0, the
+first novel op of the forward). 4. The fused QKV 1D matmul at per_core_M 2 (layer 3). 5. The
+2D prefill configs at M_tiles = 2 (gdn out and w1/w3/w2 in layer 0, wo in layer 3; w1/w3 a
+first run of the config at TP = 2 at any M). 6. `reduce_scatter_minimal_async` at two tile
+rows (layer 0). 7. The four-piece concat, the DRAM -> L1 move and the candidate x4 (layer 0).
+8. The final norm on the lm_head grid, the LM head at M = 64, the sampler tiles.
+
+**Host-raise candidates, in the order the forward would meet them:** a 2D prefill program
+config refused for a first-run shape (layer 0 w1/w3 most likely; the frozen builder's
+partial-N configs are measured, so unlikely); `attn_decode_prep`'s own validation at batch
+> 32 (layer 3); `nlp_concat_heads_decode`'s validation, or the model's own out slice if the
+op emits one tile (layer 3); our lm_head norm rebuild (end of the forward; now moved to
+attach). The v51 log names it in one run.
