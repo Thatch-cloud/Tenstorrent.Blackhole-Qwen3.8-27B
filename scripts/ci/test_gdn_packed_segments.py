@@ -16,33 +16,43 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from gdn_device_loop_state import DeviceLoopState, validate_segments
+from gdn_device_loop_state import DeviceLoopState, resident_piece, validate_segments
 
 
 class PackedFixture(unittest.TestCase):
     """One GDN layer's device-loop state over fakes that record every device call."""
 
-    def build(self, **options):
+    def build(self, projection_memory='l1', **options):
+        """`projection_memory` is where the model's projection lands: 'l1' within one tile
+        (the 1D decode matmul), 'dram' beyond it (the prefill branch, the 64-row block).
+        Slices inherit it, as ttnn's do."""
         calls = []
         operations = SimpleNamespace(L1_MEMORY_CONFIG='l1', DRAM_MEMORY_CONFIG='dram')
 
         def record_slice(value, start, stop, *args, **kwargs):
             calls.append(('slice', start[1], stop[1]))
-            return SimpleNamespace(shape=(1, stop[1] - start[1], 5120), name='piece')
+            return SimpleNamespace(shape=(1, stop[1] - start[1], 5120), name='piece:%d' % start[1],
+                                   memory_config=value.memory_config)
+
+        def record_move(value, memory):
+            calls.append(('move', value.name, memory))
+            return SimpleNamespace(shape=value.shape, name='resident:' + value.name, memory_config=lambda: memory)
 
         operations.slice = Mock(side_effect=record_slice)
+        operations.to_memory_config = Mock(side_effect=record_move)
         operations.concat = Mock(side_effect=lambda parts, **kwargs: SimpleNamespace(
             shape=(1, sum(part.shape[1] for part in parts), 5120), name='joined'))
         # addresses() runs in __init__, before any patch a test could install
         operations.get_device_tensors = Mock(side_effect=lambda tensor: [
             SimpleNamespace(buffer_address=lambda value=str(tensor): hash(value)) for _ in range(2)])
-        operations.deallocate = Mock()
+        operations.deallocate = Mock(side_effect=lambda value: calls.append(('free', getattr(value, 'name', value))))
 
         layer = SimpleNamespace(B=8, _stable_state=True, rec_state='rec',
             conv_states=['c0', 'c1', 'c2', 'c3'], mesh='mesh',
             tw={'conv_taps': (), 'dt_bias': None, 'neg_exp_A': None, 'norm_w': None, 'out': None})
         layer._project_qkvzab_raw = Mock(side_effect=lambda packed, rows, memory: (
-            calls.append(('project', rows)) or SimpleNamespace(shape=(1, rows, 8240), name='projected')))
+            calls.append(('project', rows)) or SimpleNamespace(shape=(1, rows, 8240), name='projected',
+                                                                memory_config=lambda: projection_memory)))
 
         allocations = []
 
@@ -62,6 +72,7 @@ class PackedFixture(unittest.TestCase):
     def recurrence(self, calls):
         def run(mesh, projected, initial, conv_states, *args, **kwargs):
             calls.append(('recur', projected.shape[1]))
+            calls.append(('input', projected.name, projected.memory_config()))
             calls.append(('history', initial, tuple(conv_states)))
             return dict(output=SimpleNamespace(shape=(1, projected.shape[1], 5120), name='out'),
                         states=SimpleNamespace(shape=(projected.shape[1], 24, 128, 128)),
@@ -95,6 +106,13 @@ class PackedSegmentTests(PackedFixture):
         self.assertEqual([entry for entry in calls if entry[0] == 'recur'], [('recur', 16), ('recur', 16)])
         self.assertEqual([entry for entry in calls if entry[0] == 'slice'],
                          [('slice', 0, 16), ('slice', 16, 32)])
+        # within one tile the projection is L1 already: every slice is fed as it is, nothing moves or is freed
+        self.assertEqual([entry for entry in calls if entry[0] == 'input'],
+                         [('input', 'piece:0', 'l1'), ('input', 'piece:16', 'l1')])
+        operations.to_memory_config.assert_not_called()
+        operations.deallocate.assert_not_called()
+        self.assertEqual([value.name for value in result['owned'] if getattr(value, 'name', '').startswith('piece')],
+                         ['piece:0', 'piece:16'])
         self.assertEqual(result['output'].shape, (1, 32, 5120))
         self.assertEqual(result['segments'], ((0, 16), (16, 32)))
         self.assertIs(result['segment_results'], state.segment_results)
@@ -228,6 +246,69 @@ class FourUserBlockTests(PackedFixture):
         self.assertEqual(result['segments'], self.spans)
         self.assertEqual([piece['states'].shape[0] for piece in state.segment_results], [16] * 4)
         self.assertEqual((state.calls, state.checkpoint_calls), (1, 4))
+        operations.to_memory_config.assert_not_called()
+
+    def test_a_dram_projection_is_moved_to_l1_one_piece_at_a_time(self):
+        """Beyond one tile the model's prefill branch lands the projection in DRAM and every
+        slice inherits it (run 35504864400 stopped at the direct-window scope's L1 check):
+        each 16-row slice is copied to L1 right after it is cut, the DRAM slice freed, and
+        the recurrence - hence the scope - sees only the L1 copy. One weight pass still."""
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4, projection_memory='dram')
+        result = self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
+                                 rows=64, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 64)])
+        self.assertEqual([entry for entry in calls if entry[0] in ('slice', 'move', 'free', 'recur')],
+                         [('slice', 0, 16), ('move', 'piece:0', 'l1'), ('free', 'piece:0'), ('recur', 16),
+                          ('slice', 16, 32), ('move', 'piece:16', 'l1'), ('free', 'piece:16'), ('recur', 16),
+                          ('slice', 32, 48), ('move', 'piece:32', 'l1'), ('free', 'piece:32'), ('recur', 16),
+                          ('slice', 48, 64), ('move', 'piece:48', 'l1'), ('free', 'piece:48'), ('recur', 16)],
+                         'each slice is moved and its DRAM copy freed before its own recurrence')
+        self.assertEqual([entry for entry in calls if entry[0] == 'input'],
+                         [('input', 'resident:piece:%d' % first, 'l1') for first in (0, 16, 32, 48)])
+        # the block owns the L1 copies (freed with the result), never the freed DRAM slices
+        owned = [value.name for value in result['owned'] if 'piece' in getattr(value, 'name', '')]
+        self.assertEqual(owned, ['resident:piece:%d' % first for first in (0, 16, 32, 48)])
+        self.assertEqual((state.calls, state.checkpoint_calls), (1, 4))
+
+    def test_a_failed_move_frees_its_dram_slice_and_the_block(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4, projection_memory='dram')
+        operations.to_memory_config = Mock(side_effect=[
+            SimpleNamespace(shape=(1, 16, 5120), name='resident:piece:0', memory_config=lambda: 'l1'),
+            RuntimeError('no L1 left')])
+        with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
+                patch('gdn_device_loop_state.release_owned') as release, \
+                patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'no L1 left'):
+                state.decode(SimpleNamespace(shape=(1, 64, 5120)), self.checkpoints, [0] * 4,
+                             segments=self.spans, slots=self.slots, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] == 'free'], [('free', 'piece:0'), ('free', 'piece:16')],
+                         'the DRAM slice of the failed move is freed too')
+        release.assert_called_once()
+        released = [getattr(value, 'name', value) for value in release.call_args.args[1]]
+        self.assertIn('projected', released)
+        self.assertIn('resident:piece:0', released)
+        self.assertNotIn('piece:16', released, 'never freed twice')
+        self.assertEqual(state.calls, 0)
+
+    def test_resident_piece_moves_only_what_is_not_in_l1(self):
+        operations = SimpleNamespace(L1_MEMORY_CONFIG='l1', to_memory_config=Mock(), deallocate=Mock())
+        owned = []
+        resident = SimpleNamespace(memory_config=lambda: 'l1')
+        self.assertIs(resident_piece(operations, resident, owned), resident)
+        self.assertEqual(owned, [resident])
+        operations.to_memory_config.assert_not_called()
+        operations.deallocate.assert_not_called()
+        moved = SimpleNamespace(memory_config=lambda: 'l1')
+        operations.to_memory_config.return_value = moved
+        dram = SimpleNamespace(memory_config=lambda: 'dram')
+        self.assertIs(resident_piece(operations, dram, owned), moved)
+        operations.to_memory_config.assert_called_once_with(dram, 'l1')
+        operations.deallocate.assert_called_once_with(dram)
+        self.assertEqual(owned, [resident, moved])
+        # a sharded piece is not L1-interleaved either: it moves too
+        sharded = SimpleNamespace(memory_config=lambda: 'l1-width-sharded')
+        resident_piece(operations, sharded, owned)
+        self.assertEqual(operations.to_memory_config.call_args.args, (sharded, 'l1'))
 
     def test_the_sixty_four_row_block_needs_covering_spans_and_one_entry_per_user(self):
         for users, spans, rows in ((3, self.spans, 64), (4, self.spans[:3], 64), (4, self.spans, 128),

@@ -31,6 +31,31 @@ def validate_segments(segments, checkpoint, prefix, rows, slots):
     return spans, checkpoints, prefixes
 
 
+def resident_piece(operations, piece, owned):
+    """One user's slice of the block projection, interleaved in L1: the placement the
+    qualified T16 direct-window candidate is admitted on (gdn_direct_window_scope.run
+    demands `projected.memory_config() == ttnn.L1_MEMORY_CONFIG` of every piece).
+
+    Within one tile the model's decode projection is already L1 (the 1D decode matmul's
+    output placement, gdn/tp.py:1036-1042) and every slice inherits it, so nothing moves
+    and the slice is owned as before. Beyond one tile (the 64-row M3 block) the model's
+    prefill branch returns the projection DRAM-interleaved (tp_common.sharded_decode_matmul,
+    its `seq > TILE_SIZE` arm) and each 16-row slice inherits that; run 35504864400 (image
+    v49) stopped at the scope's check. The slice is then copied to L1 and the DRAM slice
+    freed: the same values, only the placement the kernel reads changes. The scope's check
+    stays as it is; it is the qualification.
+    """
+    if piece.memory_config() == operations.L1_MEMORY_CONFIG:
+        owned.append(piece)
+        return piece
+    try:
+        resident = operations.to_memory_config(piece, operations.L1_MEMORY_CONFIG)
+    finally:
+        operations.deallocate(piece)
+    owned.append(resident)
+    return resident
+
+
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
                  packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False,
@@ -166,8 +191,8 @@ class DeviceLoopState:
                 # the recurrence starts where that user left off rather than where the
                 # user packed above it ended.
                 self.active.restore(slot)
-                piece = operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1]))
-                owned.append(piece)
+                piece = resident_piece(operations,
+                                       operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
                 result = self._recurrence(piece, width, accepted, defer_publication,
                                           None if entries is None else entries[index])
                 owned.extend(result['owned'])
