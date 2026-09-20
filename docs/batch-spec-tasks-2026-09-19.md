@@ -1570,3 +1570,21 @@ Identical prompts make the two post-prefill states coincide, which is why user
 whether user 1 is wrong from its first token. Single user on the fast path:
 46.7 tok/s over its decode window (64 tokens; 90 ms verify + 41 ms proposal per
 chunk of ~6.4 accepted tokens).
+
+**Distinct prompts (run 35493208438, users 2, base 1000 and 1001):** user 0 again
+BYTE-IDENTICAL to its single-user reference (sha 66a5d0c2). User 1, on its own
+prompt, opens with user 0's continuation - ' “veniss ourclassraw yearData' are
+user 0's tokens 2-5 - and then drifts into a coherent assessment of its prompt
+as 'repeated and consistent use of the same ... likely a form of spam or a test
+of the AI' (29 chunks for 64 tokens). That is what decoding from user 0's GDN
+state with user 1's own attention pages looks like: the recurrent layers carry
+user 0's prompt, the KV pages carry user 1's. The code agrees:
+`gdn_snapshot.ActiveSnapshot` allocates, saves and restores at native index 0
+unconditionally (`_slice_along(tensor, dimension, 0, 1)` at :18 and :31,
+`_write_recurrent_state_prefix(..., 1)` / `_write_index(target, saved, 0, 1)`
+at :43-45), while the plugin prefilled user 1 'into slots [1]'. So user 1's
+initial snapshot and carry at admission were user 0's post-prefill state, and
+user 1's true state, written to slot 1, was never read. The single-user run on
+base 1001 (queued) is the formal check that user 1 is wrong from its first
+token. Fix shape: the admission snapshot must read the slot the prefill wrote;
+decode, restore and commit stay at slot 0.
