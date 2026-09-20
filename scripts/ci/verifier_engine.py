@@ -45,6 +45,35 @@ def capture_widths(position, capacity, verifier_rows, remaining, max_verify_rows
     return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining, max_verify_rows))
 
 
+def capture_bucket_rows(verifier_rows, remaining, max_verify_rows=32):
+    """Every width a request's captures can ask for, with multiplicity, over every position.
+
+    The serving pool allocates one BucketSlot per entry before any request exists, so it
+    cannot know the position. Without replay there is one capture per width. With replay
+    (attention_request_plan.capture_plan) widths below eight are captured once and each
+    wider one once per 256-position mask family whose share of the budget holds a whole
+    block: a budget of `remaining` tokens starting anywhere touches at most
+    ceil((remaining - 1) / 256) + 1 families, and its disjoint shares of them hold at
+    most remaining // rows blocks. test_verifier_carry checks the bound against the
+    plan itself, at every offset within a family.
+    """
+    if type(remaining) is not int or remaining < 1:
+        raise ValueError('Positive decode budget required')
+    widths = capture_widths(0, remaining, verifier_rows, remaining, max_verify_rows)
+    families = (remaining + 254) // 256 + 1
+    return (tuple(rows for rows in widths if rows < 8)
+            + tuple(rows for rows in widths if rows >= 8 for family in range(min(families, remaining // rows))))
+
+
+def validate_snapshots(snapshots, helpers, name):
+    """A pooled GDN snapshot set: one list per helper, shaped like the helper's live state."""
+    snapshots = [list(snapshot) for snapshot in snapshots]
+    if len(snapshots) != len(helpers) or any(len(snapshot) != len(helper.live)
+                                             for snapshot, helper in zip(snapshots, helpers, strict=True)):
+        raise ValueError('Pooled %s snapshots must hold one slot-zero state per GDN helper' % name)
+    return snapshots
+
+
 def validate_replay_options(attention_replay, attention_mask_once, replay_group_rows):
     if type(attention_mask_once) is not bool or (attention_mask_once and not attention_replay):
         raise ValueError('Shared attention masks require explicit replay attention')
@@ -58,11 +87,20 @@ class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
-                 commit_only_gdn=False, before_capture=None, target_attention_t16=False):
+                 commit_only_gdn=False, before_capture=None, target_attention_t16=False, storage=None):
         import ttnn
 
         if before_capture is not None and not callable(before_capture):
             raise ValueError('Callable pre-capture preparation required')
+        # Pooled verifier storage (serving_buffer_pool.VerifierSlot): allocated at attach,
+        # before any request trace, and lent for this request's life. Everything this
+        # engine keeps across steps - initial and carried GDN state, per-width checkpoints,
+        # feature taps, MTP hidden and the fixtures' inputs - comes from it, and close()
+        # frees none of it. Allocated here instead, they would land in the holes an
+        # earlier request's verify trace baked and its replays would overwrite them.
+        if storage is not None and not callable(getattr(storage, 'take', None)):
+            raise ValueError('Pooled verifier storage must lend width buckets')
+        self.storage, self.borrowed = storage, []
 
         if type(commit_only_gdn) is not bool:
             raise ValueError('Explicit commit-only GDN policy required')
@@ -132,8 +170,11 @@ class VerifierEngine:
         # whoever was resident no longer is, even if construction fails part way.
         note_prefill()
         try:
-            for helper in helpers:
-                self.initial.append(helper.allocate())
+            if storage is None:
+                for helper in helpers:
+                    self.initial.append(helper.allocate())
+            else:
+                self.initial = self.borrow(validate_snapshots(storage.initial, helpers, 'initial'))
             # Before any capture, like every buffer a trace may see. Allocated after
             # capture it would sit where a trace's temporaries were and be overwritten
             # by the next replay; it is seeded after the last restore_initial below.
@@ -142,37 +183,57 @@ class VerifierEngine:
                 helper.save(snapshot)
             captures = [(rows, rows, self.position) for rows in self.widths] if self.replay_plan is None else [
                 (capture.key, capture.rows, capture.position) for capture in self.replay_plan.captures]
+            # Every bucket claims its pooled width first, so a request the pool cannot
+            # hold is refused before anything is allocated or captured.
+            slots = {key: None if storage is None else storage.take(rows) for key, rows, position in captures}
             for key, rows, position in captures:
                 bucket = dict(rows=rows, capture_position=position, checkpoints=[], fixture=None, trace=None, output=None, commits={}, first=True)
                 self.buckets[key] = bucket
                 if self.retain_feature_taps:
-                    import torch
                     from prepared_target_features import PreparedTargetFeatures
 
                     bucket['target_features'] = []
-                    for index in self.retain_feature_taps:
-                        feature = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
-                            device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(self.mesh, dim=3))
-                        bucket['target_features'].append(feature)
+                    if slots[key] is None:
+                        import torch
+
+                        for index in self.retain_feature_taps:
+                            feature = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                                device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ShardTensorToMesh(self.mesh, dim=3))
+                            bucket['target_features'].append(feature)
+                    else:
+                        if len(slots[key].target_features) < len(self.retain_feature_taps):
+                            raise ValueError('Pooled %d-row bucket holds %d feature taps; this request retains %d'
+                                             % (rows, len(slots[key].target_features), len(self.retain_feature_taps)))
+                        bucket['target_features'] = self.borrow(list(slots[key].target_features[:len(self.retain_feature_taps)]))
                     bucket['feature_capture'] = PreparedTargetFeatures(model, self.retain_feature_taps,
                         bucket['target_features'], copy=ttnn.copy,
                         storage_ids=lambda value: tuple(enumerate(addresses(ttnn, value))))
             for key, rows, position in captures:
                 bucket = self.buckets[key]
                 if retain_mtp_hidden:
-                    import torch
                     from mtp_hidden_capture import MTPHiddenCapture
 
-                    hidden = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
-                        device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+                    if slots[key] is None:
+                        import torch
+
+                        hidden = ttnn.from_torch(torch.zeros((1, 1, rows, 5120), dtype=torch.bfloat16),
+                            device=self.mesh, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+                    else:
+                        if slots[key].mtp_hidden is None:
+                            raise ValueError('Pooled %d-row bucket holds no MTP hidden; this request retains it' % rows)
+                        (hidden,) = self.borrow([slots[key].mtp_hidden])
                     bucket['mtp_hidden'] = hidden
                     bucket['mtp_capture'] = MTPHiddenCapture(model, hidden, copy=ttnn.copy,
                         storage_ids=lambda value: addresses(ttnn, value))
-                for helper in helpers:
-                    bucket['checkpoints'].append(helper.allocate())
-                bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position)
+                if slots[key] is None:
+                    for helper in helpers:
+                        bucket['checkpoints'].append(helper.allocate())
+                else:
+                    bucket['checkpoints'] = self.borrow(validate_snapshots(slots[key].checkpoints, helpers, 'checkpoint'))
+                bucket['fixture'] = self.fixture(rows, bucket['checkpoints'], retain=rows > 1, position=position,
+                                                 storage=None if slots[key] is None else slots[key].batch)
             if retain_mtp_hidden:
                 from mtp_hidden_rows import MTPHiddenRows
                 self.mtp_row_reader = MTPHiddenRows(ttnn, self.mesh, [bucket['mtp_hidden'] for bucket in self.buckets.values()])
@@ -224,14 +285,25 @@ class VerifierEngine:
             self.close()
             raise
 
-    def fixture(self, rows, checkpoints, *, retain, position=None, pack=None):
+    def borrow(self, value):
+        """Record lent storage so close() frees none of it; a snapshot set is a list of lists."""
+        for item in value:
+            if isinstance(item, list):
+                self.borrowed.extend(item)
+            else:
+                self.borrowed.append(item)
+        return value
+
+    def fixture(self, rows, checkpoints, *, retain, position=None, pack=None, storage=None):
         # Packed, the rows belong to several requests: ModelBatch takes their
         # frontiers, page tables and per-layer GDN state from the pack, and the
         # position and pages below apply only to the unpacked case.
         # Only when packed: the image may run this module over a ModelBatch that
         # predates the pack= parameter (run 35481140763 died on it at admission).
+        # Likewise storage=, the pooled fixture inputs, only when the engine is pooled.
         return ModelBatch(self.model, [1] * rows, self.position if position is None else position, self.pages, self.helpers, checkpoints,
             0 if rows == 1 else rows, **({'pack': pack} if pack is not None else {}),
+            **({'storage': storage} if storage is not None else {}),
             serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=retain, ordered_cache=True,
@@ -278,7 +350,14 @@ class VerifierEngine:
         # One slot-zero snapshot per layer, seeded by save_carry once the layer holds
         # this request's state. Where each sits is recorded: a restore or save that
         # would read or write anywhere else is refused on the host before any copy.
-        self.carry = [helper.allocate() for helper in self.helpers]
+        # Pooled, the carry is the slot's: allocated at attach, before ANY request's
+        # trace, not merely before this one's - an earlier request's replay could
+        # otherwise overwrite it between this engine's steps.
+        storage = getattr(self, 'storage', None)
+        if storage is None:
+            self.carry = [helper.allocate() for helper in self.helpers]
+        else:
+            self.carry = self.borrow(validate_snapshots(storage.carry, self.helpers, 'carry'))
         self.carry_addresses = self.slot_addresses()
 
     def slot_addresses(self):
@@ -450,20 +529,28 @@ class VerifierEngine:
                 self.operations.release_trace(self.mesh, trace)
             if bucket['trace'] is not None:
                 self.operations.release_trace(self.mesh, bucket['trace'])
+        # Lent storage is the pool's: it goes back with the slot, never through deallocate.
+        borrowed = {id(value) for value in getattr(self, 'borrowed', ())}
+
+        def owned(values):
+            return [value for value in values if id(value) not in borrowed]
+
         for bucket in self.buckets.values():
             if bucket.get('feature_capture') is not None:
                 bucket['feature_capture'].close()
-            release_owned(self.operations, bucket.get('target_features', []))
+            release_owned(self.operations, owned(bucket.get('target_features', [])))
             if bucket.get('mtp_hidden') is not None:
-                release_owned(self.operations, [bucket['mtp_hidden']])
+                release_owned(self.operations, owned([bucket['mtp_hidden']]))
             if bucket['output'] is not None:
                 release_owned(self.operations, [value for value in bucket['output'] if value is not None])
             if bucket['fixture'] is not None:
                 bucket['fixture'].close()
-            release_owned(self.operations, [value for snapshot in bucket['checkpoints'] for value in snapshot])
-        release_owned(self.operations, [value for snapshot in self.initial for value in snapshot])
-        release_owned(self.operations, [value for slot in getattr(self, 'carry', ()) for value in slot])
+            release_owned(self.operations, owned(value for snapshot in bucket['checkpoints'] for value in snapshot))
+        release_owned(self.operations, owned(value for snapshot in self.initial for value in snapshot))
+        release_owned(self.operations, owned(value for slot in getattr(self, 'carry', ()) for value in slot))
         self.carry, self.carry_addresses = [], []
+        if getattr(self, 'borrowed', None):
+            self.borrowed.clear()
         if _resident is self:
             _resident = None
         self.buckets.clear()

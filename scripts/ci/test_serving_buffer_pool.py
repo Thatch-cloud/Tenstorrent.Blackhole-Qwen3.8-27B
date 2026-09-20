@@ -13,10 +13,49 @@ import torch
 
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
-from serving_buffer_pool import DRAFT_LAYERS, HISTORY_SHAPE, KV_SHAPE, ServingBufferPool, bank_tensors
+from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, ServingBufferPool,
+                                 bank_tensors, snapshot_tensors, tensor_bytes)
 
 # A slot: the history pair plus, per draft layer, active and spare k and v.
 SLOT_TENSORS = 2 + 4 * DRAFT_LAYERS
+# One GDN slot-zero snapshot as gdn_snapshot.ActiveSnapshot.allocate hands it out: the
+# recurrent state and four convolution taps (gdn_state_copy.page_counts).
+SNAPSHOT_SHAPES = ((1, 24, 128, 128), (1, 1, 5120), (1, 1, 5120), (1, 1, 5120), (1, 1, 5120))
+ROPE_DIM = 64
+# The serving geometry: a T16 cap and a 256-token budget (verifier_engine.capture_bucket_rows).
+BUCKET_ROWS = (1, 2, 4, 8, 8, 16, 16)
+TAPS = 5
+
+
+def fake_helpers(operations):
+    return [SimpleNamespace(live=[FakeTensor(shape, []) for shape in SNAPSHOT_SHAPES],
+                            allocate=Mock(side_effect=lambda: [operations.allocate(shape) for shape in SNAPSHOT_SHAPES]))
+            for index in range(GDN_LAYERS)]
+
+
+def fake_rope(operations):
+    return Mock(side_effect=lambda positions: tuple(operations.allocate((1, len(positions), 1, ROPE_DIM), dtype='bf16', layout='tile')
+                                                    for name in ('cos', 'sin')))
+
+
+def verifier_pool(operations, users=1, **overrides):
+    options = dict(helpers=fake_helpers(operations), page_width=68, bucket_rows=BUCKET_ROWS, feature_taps=TAPS,
+                   rope=fake_rope(operations))
+    options.update(overrides)
+    return ServingBufferPool(operations, 'mesh', users=users, **options)
+
+
+def snapshot_set_bytes():
+    return GDN_LAYERS * sum(tensor_bytes(shape) for shape in SNAPSHOT_SHAPES)
+
+
+def bucket_bytes(rows, page_width=68, taps=TAPS):
+    integers = 4 * (rows + rows + rows * page_width + page_width + rows)
+    return snapshot_set_bytes() + taps * tensor_bytes((1, 1, rows, 5120)) + integers + 2 * tensor_bytes((1, rows, 1, ROPE_DIM))
+
+
+def verifier_slot_bytes(bucket_rows=BUCKET_ROWS):
+    return tensor_bytes(QUERY_SHAPE) + 2 * snapshot_set_bytes() + sum(bucket_bytes(rows) for rows in bucket_rows)
 
 
 class FakeShard:
@@ -28,14 +67,16 @@ class FakeShard:
 
 
 class FakeTensor:
-    def __init__(self, shape, shards):
+    def __init__(self, shape, shards, dtype=None, layout=None, mapper=None):
         self.shape, self.shards = tuple(shape), shards
+        self.dtype, self.layout, self.mapper = dtype, layout, mapper
 
 
 class FakeOperations:
     """Two independent bump allocators, one per chip, so chip addresses never coincide."""
 
     bfloat16, TILE_LAYOUT, ROW_MAJOR_LAYOUT, DRAM_MEMORY_CONFIG = 'bf16', 'tile', 'row_major', 'dram'
+    uint32, int32 = 'uint32', 'int32'
     MathFidelity = SimpleNamespace(HiFi4='HiFi4')
 
     def __init__(self):
@@ -43,17 +84,18 @@ class FakeOperations:
         self.live, self.deallocated, self.copies, self.fills = [], [], [], []
         self.zeros_like_calls = self.synchronized = 0
 
-    def allocate(self, shape):
+    def allocate(self, shape, **options):
         shards = []
         for chip in range(2):
             shards.append(FakeShard(self.next[chip]))
             self.next[chip] += 0x100
-        tensor = FakeTensor(shape, shards)
+        tensor = FakeTensor(shape, shards, **options)
         self.live.append(tensor)
         return tensor
 
     def from_torch(self, value, **options):
-        return self.allocate(value.shape)
+        return self.allocate(value.shape, dtype=options.get('dtype'), layout=options.get('layout'),
+                             mapper=options.get('mesh_mapper'))
 
     def zeros_like(self, tensor):
         self.zeros_like_calls += 1
@@ -214,6 +256,196 @@ class PoolTests(unittest.TestCase):
         self.assertIsNone(slot.owner)
 
 
+class VerifierStorageTests(unittest.TestCase):
+    """The per-request verifier buffers the 2026-09-20 audit found still allocated after
+    an earlier request's traces: the draft cache's query, the initial and carried GDN
+    state, one checkpoint set per capture, the feature taps and the fixture inputs."""
+
+    def test_each_slot_holds_the_query_two_gdn_sets_and_one_bucket_per_capture_width(self):
+        operations = FakeOperations()
+        rope = fake_rope(operations)
+        pool = verifier_pool(operations, users=2, rope=rope)
+        self.assertEqual(len(pool.slots), 2)
+        for slot in pool.slots:
+            self.assertEqual((slot.query.shape, slot.query.dtype, slot.query.layout, slot.query.mapper),
+                             (QUERY_SHAPE, 'bf16', 'tile', ('replicate', 'mesh')))
+            verifier = slot.verifier
+            for snapshots in (verifier.initial, verifier.carry):
+                self.assertEqual([[value.shape for value in snapshot] for snapshot in snapshots],
+                                 [list(SNAPSHOT_SHAPES)] * GDN_LAYERS)
+            self.assertEqual([bucket.rows for bucket in verifier.buckets], list(BUCKET_ROWS))
+            for bucket in verifier.buckets:
+                rows = bucket.rows
+                self.assertEqual([[value.shape for value in snapshot] for snapshot in bucket.checkpoints],
+                                 [list(SNAPSHOT_SHAPES)] * GDN_LAYERS)
+                self.assertEqual(len(bucket.target_features), TAPS)
+                for feature in bucket.target_features:
+                    self.assertEqual((feature.shape, feature.dtype, feature.layout, feature.mapper),
+                                     ((1, 1, rows, 5120), 'bf16', 'tile', ('shard', 'mesh', 3)))
+                self.assertIsNone(bucket.mtp_hidden)
+                batch = bucket.batch
+                self.assertEqual((batch.tokens.shape, batch.tokens.dtype, batch.tokens.layout), ((rows, 1), 'uint32', 'row_major'))
+                self.assertEqual((batch.positions.shape, batch.positions.dtype, batch.positions.layout), ((rows,), 'int32', 'row_major'))
+                self.assertEqual((batch.pages.shape, batch.pages.dtype), ((rows, 68), 'int32'))
+                self.assertEqual((batch.singleton_pages.shape, batch.singleton_pages.dtype), ((1, 68), 'int32'))
+                self.assertEqual([(value.shape, value.dtype, value.layout) for value in batch.singleton_positions],
+                                 [((1,), 'int32', 'row_major')] * rows)
+                for table in (batch.cos, batch.sin):
+                    self.assertEqual((table.shape, table.mapper), ((1, rows, 1, ROPE_DIM), None))
+                self.assertFalse(bucket.taken)
+            # Every tensor is in the slot's address record, once, on independent storage.
+            expected = (2 + 4 * DRAFT_LAYERS + 1 + 2 * 5 * GDN_LAYERS
+                        + sum(5 * GDN_LAYERS + TAPS + 6 + rows for rows in BUCKET_ROWS))
+            self.assertEqual(len(slot.tensors), expected)
+            for chip in range(2):
+                self.assertEqual(len({address[chip] for address in slot.addresses}), expected)
+            self.assertEqual(slot.bytes, 2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(KV_SHAPE)
+                             + verifier_slot_bytes())
+        # The rotary builder was asked once per bucket per slot, for that bucket's rows.
+        self.assertEqual([len(call.args[0]) for call in rope.call_args_list], list(BUCKET_ROWS) * 2)
+        self.assertEqual([helper.allocate.call_count for helper in pool.helpers], [2 * (2 + len(BUCKET_ROWS))] * GDN_LAYERS)
+        self.assertEqual(len(operations.live), 2 * expected)
+        self.assertEqual(operations.synchronized, 1)
+
+    def test_describe_reports_the_verifier_bytes_and_layout_per_slot(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations)
+        report = pool.describe()
+        draft = 2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(KV_SHAPE)
+        self.assertEqual(report['draft_bytes_per_slot'], draft)
+        self.assertEqual(report['query_bytes_per_slot'], tensor_bytes(QUERY_SHAPE))
+        self.assertEqual(report['verifier_bytes_per_slot'], verifier_slot_bytes() - tensor_bytes(QUERY_SHAPE))
+        self.assertEqual(report['bytes_per_slot'], draft + verifier_slot_bytes())
+        self.assertEqual((report['page_width'], report['bucket_rows'], report['gdn_snapshot_sets'],
+                          report['feature_taps'], report['mtp_hidden']), (68, list(BUCKET_ROWS), 9, TAPS, False))
+        slot = pool.slots[0]
+        described = report['slots'][0]
+        self.assertEqual(described['query'], [shard.address for shard in slot.query.shards])
+        verifier = described['verifier']
+        self.assertEqual(verifier['initial'], [shard.address for shard in slot.verifier.initial[0][0].shards])
+        self.assertEqual(verifier['carry'], [shard.address for shard in slot.verifier.carry[0][0].shards])
+        self.assertEqual([bucket['rows'] for bucket in verifier['buckets']], list(BUCKET_ROWS))
+        for bucket, described_bucket in zip(slot.verifier.buckets, verifier['buckets'], strict=True):
+            self.assertEqual(described_bucket['checkpoints'], [shard.address for shard in bucket.checkpoints[0][0].shards])
+            self.assertEqual(described_bucket['target_features'],
+                             [[shard.address for shard in value.shards] for value in bucket.target_features])
+            self.assertIsNone(described_bucket['mtp_hidden'])
+            self.assertEqual(described_bucket['batch']['pages'], [shard.address for shard in bucket.batch.pages.shards])
+            self.assertEqual(len(described_bucket['singleton_positions']), bucket.rows)
+            self.assertFalse(described_bucket['taken'])
+        # A plain pool still reports exactly what it did.
+        plain = ServingBufferPool(FakeOperations(), 'mesh', users=1).describe()
+        self.assertEqual(plain['bytes_per_slot'], draft)
+        self.assertNotIn('verifier', plain['slots'][0])
+        self.assertNotIn('bucket_rows', plain)
+
+    def test_the_slot_lends_each_width_bucket_once_and_refuses_a_width_it_lacks(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, bucket_rows=(1, 8, 8))
+        slot = pool.acquire()
+        verifier = slot.verifier
+        first, second = verifier.take(8), verifier.take(8)
+        self.assertIsNot(first, second)
+        self.assertEqual((first.rows, second.rows), (8, 8))
+        with self.assertRaisesRegex(ValueError, r'no free 8-row bucket: the slot holds widths \[1, 8, 8\]'):
+            verifier.take(8)
+        with self.assertRaisesRegex(ValueError, 'no free 16-row bucket'):
+            verifier.take(16)
+        self.assertEqual(verifier.take(1).rows, 1)
+        # Returned and lent again, every bucket is free.
+        slot.release()
+        self.assertFalse(any(bucket.taken for bucket in verifier.buckets))
+        verifier.take(8)
+        self.assertIs(pool.acquire(), slot)
+        self.assertFalse(any(bucket.taken for bucket in verifier.buckets))
+
+    def test_a_loan_zeroes_the_tiled_buffers_and_leaves_the_staged_integer_inputs(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, bucket_rows=(1, 4))
+        slot = pool.acquire()
+        filled = [value for value, zero in operations.fills]
+        self.assertEqual(filled, list(slot.zeroed))
+        self.assertTrue(all(zero == 0.0 for value, zero in operations.fills))
+        verifier = slot.verifier
+        for value in (slot.history, slot.spare_history, *bank_tensors(slot.kv), slot.query,
+                      *snapshot_tensors(verifier.initial), *snapshot_tensors(verifier.carry)):
+            self.assertTrue(any(value is entry for entry in filled))
+        for bucket in verifier.buckets:
+            for value in (*snapshot_tensors(bucket.checkpoints), *bucket.target_features, bucket.batch.cos, bucket.batch.sin):
+                self.assertTrue(any(value is entry for entry in filled))
+            # Every integer input is fully restaged by the fixture before any read.
+            for value in (bucket.batch.tokens, bucket.batch.positions, bucket.batch.pages, bucket.batch.singleton_pages,
+                          *bucket.batch.singleton_positions):
+                self.assertFalse(any(value is entry for entry in filled))
+                self.assertTrue(any(value is entry for entry in slot.tensors))
+
+    def test_mtp_hidden_is_allocated_per_bucket_only_when_asked(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, bucket_rows=(2, 16), mtp_hidden=True)
+        for bucket in pool.slots[0].verifier.buckets:
+            hidden = bucket.mtp_hidden
+            self.assertEqual((hidden.shape, hidden.dtype, hidden.layout, hidden.mapper),
+                             ((1, 1, bucket.rows, 5120), 'bf16', 'tile', ('replicate', 'mesh')))
+            self.assertTrue(any(hidden is value for value in bucket.zeroed))
+        self.assertEqual(pool.describe()['mtp_hidden'], True)
+        self.assertEqual(pool.slots[0].bytes - verifier_pool(FakeOperations(), bucket_rows=(2, 16)).slots[0].bytes,
+                         tensor_bytes((1, 1, 2, 5120)) + tensor_bytes((1, 1, 16, 5120)))
+
+    def test_verifier_geometry_is_checked_before_anything_is_allocated(self):
+        operations = FakeOperations()
+        helpers = fake_helpers(operations)
+        invalid = [dict(helpers=helpers[:47]), dict(helpers=[object()] * 48), dict(page_width=0), dict(page_width=68.0),
+                   dict(bucket_rows=()), dict(bucket_rows=(1, 3)), dict(bucket_rows=(True,)), dict(feature_taps=-1),
+                   dict(feature_taps=5.0), dict(rope=None), dict(mtp_hidden=1)]
+        for overrides in invalid:
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                verifier_pool(operations, **overrides)
+        # Geometry without the helpers that shape it is a mistake, not a plain pool.
+        for options in (dict(page_width=68), dict(bucket_rows=(1,)), dict(feature_taps=5),
+                        dict(rope=fake_rope(operations)), dict(mtp_hidden=True)):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
+                ServingBufferPool(operations, 'mesh', users=1, **options)
+        self.assertEqual(operations.live, [])
+
+    def test_partial_verifier_allocation_is_freed_when_a_bucket_fails(self):
+        operations = FakeOperations()
+        working, calls = fake_rope(operations), []
+
+        def rope(positions):
+            if calls:
+                raise RuntimeError('out of DRAM')
+            calls.append(positions)
+            return working(positions)
+
+        with self.assertRaisesRegex(RuntimeError, 'out of DRAM'):
+            verifier_pool(operations, bucket_rows=(1, 2), rope=rope)
+        self.assertEqual(operations.deallocated, operations.live)
+        self.assertGreater(len(operations.live), 2 + 4 * DRAFT_LAYERS + 1 + 2 * 5 * GDN_LAYERS)
+
+    def test_close_frees_every_verifier_buffer_once(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=2, bucket_rows=(1, 8))
+        pool.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+        self.assertEqual(len({id(value) for value in operations.deallocated}), len(operations.live))
+
+    def test_a_moved_verifier_buffer_is_refused_at_both_ends_of_the_loan(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, bucket_rows=(1,))
+        slot = pool.slots[0]
+        moved = slot.verifier.buckets[0].batch.pages.shards[1]
+        moved.address += 1
+        with self.assertRaisesRegex(AssertionError, 'slot 0 moved'):
+            pool.acquire()
+        moved.address -= 1
+        self.assertIs(pool.acquire(), slot)
+        slot.verifier.carry[7][0].shards[0].address += 1
+        with self.assertRaisesRegex(AssertionError, 'slot 0 moved'):
+            slot.release()
+        slot.verifier.carry[7][0].shards[0].address -= 1
+        slot.release()
+
+
 class DiagnosticLineTests(unittest.TestCase):
     def test_loguru_carries_the_line_when_present_and_print_when_absent(self):
         logger = Mock()
@@ -371,8 +603,29 @@ class DeviceLoanTests(DeviceFixture):
             self.assertFalse(pool.slots[0].lent)
             plain = self.build(operations, **serving)
             self.assertNotIn('storage', plain.kv_history.options)
+            self.assertNotIn('query', plain.kv_history.options)
             plain.close()
             self.assertTrue(plain.kv_history.closed)
+
+    def test_a_pool_with_verifier_storage_lends_its_query_to_the_draft_cache_too(self):
+        serving = dict(cache_history=True, proposal_capture=True, defer_proposal_capture=True,
+                       native_proposal_attention=True)
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=1)
+        with patch('draft_kv_history.DraftKVHistory', FakeKVHistory):
+            device = self.build(operations, pool, **serving)
+            cache = device.kv_history
+            self.assertIs(cache.options['storage'], pool.slots[0].kv)
+            self.assertIs(cache.options['query'], pool.slots[0].query)
+            device.close()
+            self.assertFalse(pool.slots[0].lent)
+            self.assertFalse(any(value is pool.slots[0].query for value in operations.deallocated))
+            # A plain pool has no query to lend; the cache uploads its own as before.
+            plain_pool = ServingBufferPool(operations, 'mesh', users=1)
+            plain = self.build(operations, plain_pool, **serving)
+            self.assertIs(plain.kv_history.options['storage'], plain_pool.slots[0].kv)
+            self.assertNotIn('query', plain.kv_history.options)
+            plain.close()
 
 
 class SharedWeightTests(DeviceFixture):

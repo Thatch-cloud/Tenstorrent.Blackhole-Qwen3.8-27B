@@ -255,10 +255,14 @@ class DFlashDevice:
 
                 # Pooled, the cache adopts the slot's K/V banks rather than allocating
                 # its own: run 35481466425 found kv_history[0].k of the other request
-                # overwritten by a step while its pooled history survived.
+                # overwritten by a step while its pooled history survived. The slot's
+                # zero query goes with them when the pool carries one: it is read at
+                # every proposal for the request's life and was the last per-request
+                # upload the draft cache made after another request's traces existed.
                 self.kv_history = DraftKVHistory(operations, self.mesh, [layer[0] for layer in self.layers], self.history,
                     position=position, history_rows=self.history_rows, capture_projection=cache_projection_capture,
-                    **(dict(storage=self.pool_slot.kv) if self.pool_slot is not None else {}))
+                    **(dict(storage=self.pool_slot.kv) if self.pool_slot is not None else {}),
+                    **(dict(query=self.pool_slot.query) if getattr(self.pool_slot, 'query', None) is not None else {}))
                 if self.progress is not None:
                     self.kv_history.audit(self.history)
             if proposal_capture and not defer_proposal_capture:

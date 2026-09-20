@@ -1,6 +1,7 @@
 """Static-fixture full-model batching; no installed or class-global patches."""
 
 from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
@@ -55,6 +56,114 @@ def validate_pack(pack, gdn_layers=48):
     return packed
 
 
+BATCH_INPUTS = ('tokens', 'positions', 'pages', 'singleton_pages', 'cos', 'sin')
+
+
+def validate_storage(ttnn, storage, rows, page_width):
+    """Pooled fixture inputs (serving_buffer_pool.BucketSlot.batch) for exactly this
+    width and page-table width, or None to upload the fixture's own.
+
+    The trace bakes every input's address and shape, so a bucket borrows buffers of
+    its exact geometry: rows are matched by the pool's bucket, and the page table must
+    be as wide as the request's - both come from serving_runtime's one page_width. A
+    wider pooled table would report a larger capacity to verifier_inputs.stage_inputs
+    than the request was admitted with, so it is refused rather than sliced.
+    """
+    if storage is None:
+        return None
+    integers = dict(tokens=((rows, 1), ttnn.uint32), positions=((rows,), ttnn.int32),
+                    pages=((rows, page_width), ttnn.int32), singleton_pages=((1, page_width), ttnn.int32))
+    for name, (shape, dtype) in integers.items():
+        value = getattr(storage, name, None)
+        if value is None or tuple(value.shape) != shape or value.dtype != dtype or value.layout != ttnn.ROW_MAJOR_LAYOUT:
+            raise ValueError('Pooled fixture input %r must be a row-major %s of shape %r; the pooled page-table '
+                             'width must equal the request\'s %d' % (name, dtype, shape, page_width))
+    singletons = list(getattr(storage, 'singleton_positions', None) or ())
+    if len(singletons) != rows or any(tuple(value.shape) != (1,) or value.dtype != ttnn.int32
+                                      or value.layout != ttnn.ROW_MAJOR_LAYOUT for value in singletons):
+        raise ValueError('Pooled fixture needs one row-major int32 singleton position per row')
+    for name in ('cos', 'sin'):
+        value = getattr(storage, name, None)
+        if value is None or len(value.shape) != 4 or value.shape[1] != rows or value.dtype != ttnn.bfloat16 or value.layout != ttnn.TILE_LAYOUT:
+            raise ValueError('Pooled fixture input %r must be a tiled BF16 rotary table for %d rows' % (name, rows))
+    return storage
+
+
+def prepare_inputs(ttnn, model, rows, tokens, positions, page_rows, pages, *, storage=None, packed=False):
+    """The fixture's device inputs, uploaded (owned) or staged into pooled buffers (borrowed).
+
+    The unpooled order is the one the fixture always had: tokens, positions, pages,
+    the singleton page table, the packed per-row tables, the singleton positions, then
+    the rotary tables. Pooled, the same host values go through copy_host_to_device_tensor
+    into the lent buffers - the path verifier_inputs.stage_inputs takes before every
+    verify - and the rotary tables are copied from the native construction, so the
+    values are the same and only the addresses differ: pre-trace, pooled ones.
+    """
+    import torch
+    from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
+
+    storage = validate_storage(ttnn, storage, rows, pages.shape[1])
+    if storage is not None and packed:
+        raise ValueError('Pooled fixture inputs describe one request; a packed block cannot borrow them')
+    result = SimpleNamespace(owned=[], borrowed=[], staged=[])
+
+    def upload(value, dtype):
+        uploaded = ttnn.from_torch(value, device=model.mesh_device, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT,
+                                   memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                                   mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
+        result.owned.append(uploaded)
+        return uploaded
+
+    def stage(value, dtype, destination):
+        if tuple(destination.shape) != tuple(value.shape):
+            raise ValueError('Pooled fixture input shape %r does not fit %r' % (tuple(destination.shape), tuple(value.shape)))
+        host = ttnn.from_torch(value, device=None, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT,
+                               mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
+        ttnn.copy_host_to_device_tensor(host, destination)
+        result.staged.append(host)
+        result.borrowed.append(destination)
+        return destination
+
+    def place(value, dtype, name):
+        return upload(value, dtype) if storage is None else stage(value, dtype, getattr(storage, name))
+
+    result.tokens = place(torch.tensor(tokens, dtype=torch.int32).reshape(rows, 1), ttnn.uint32, 'tokens')
+    result.positions = place(positions, ttnn.int32, 'positions')
+    result.pages = place(page_rows, ttnn.int32, 'pages')
+    result.singleton_pages = place(pages, ttnn.int32, 'singleton_pages')
+    # Per row, so a packed row reads its own user's blocks rather than the first
+    # user's table repeated.
+    result.row_tables = ([upload(page_rows[index:index + 1], ttnn.int32) for index in range(rows)]
+                         if packed else [result.singleton_pages] * rows)
+    result.singleton_positions = [upload(position.reshape(1), ttnn.int32) if storage is None
+                                  else stage(position.reshape(1), ttnn.int32, storage.singleton_positions[index])
+                                  for index, position in enumerate(positions)]
+    cos, sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
+                               model.args.max_seq_len, model.args.rope_theta, positions)
+    if storage is None:
+        result.cos, result.sin = cos, sin
+        result.owned.extend([cos, sin])
+        return result
+    try:
+        for value, destination in ((cos, storage.cos), (sin, storage.sin)):
+            if (tuple(destination.shape) != tuple(value.shape) or destination.dtype != value.dtype
+                    or destination.layout != value.layout):
+                raise ValueError('Pooled rotary table %r does not match the native %r' % (tuple(destination.shape), tuple(value.shape)))
+            ttnn.copy(value, destination)
+            result.borrowed.append(destination)
+        # Before the host sources and the native tables go: every copy above reads them.
+        before = [tuple(part.buffer_address() for part in ttnn.get_device_tensors(value)) for value in result.borrowed]
+        ttnn.synchronize_device(model.mesh_device)
+        if [tuple(part.buffer_address() for part in ttnn.get_device_tensors(value)) for value in result.borrowed] != before:
+            raise AssertionError('Staging the fixture inputs replaced a pooled buffer')
+    finally:
+        ttnn.deallocate(cos)
+        ttnn.deallocate(sin)
+        result.staged.clear()
+    result.cos, result.sin = storage.cos, storage.sin
+    return result
+
+
 def validate_checkpoint(rows, prefix):
     if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
         raise ValueError("Expected T=1/2/4/8/16/32")
@@ -83,10 +192,9 @@ class ModelBatch:
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
-                 attention_audit=False, commit_only_gdn=False, pack=None):
+                 attention_audit=False, commit_only_gdn=False, pack=None, storage=None):
         import torch
         import ttnn
-        from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
 
         self.rows = len(tokens)
         self.pack = validate_pack(pack)
@@ -180,18 +288,14 @@ class ModelBatch:
         self.prefix = prefix
         self.profiler = profiler
         self.buffers = []
+        # Pooled inputs (serving_buffer_pool.BucketSlot.batch): read and written here,
+        # never freed here - close() returns nothing the pool lent.
+        self.borrowed = []
         self.bindings = []
         self.writers = []
         self.readers = []
         self.grouped_readers = []
         self.gdn_calls = 0
-
-        def upload(value, dtype):
-            result = ttnn.from_torch(value, device=model.mesh_device, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT,
-                                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                                     mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
-            self.buffers.append(result)
-            return result
 
         # Packed, the rows belong to different users: each brings its own frontier
         # and its own blocks, so neither a single arange nor one repeated page table
@@ -201,20 +305,15 @@ class ModelBatch:
         page_rows = self.pack['pages'] if self.pack is not None else pages.repeat(self.rows, 1)
         if tuple(positions.shape) != (self.rows,) or page_rows.shape[0] != self.rows:
             raise ValueError('One position and one page-table row per query row required')
-        self.tokens = upload(torch.tensor(tokens, dtype=torch.int32).reshape(self.rows, 1), ttnn.uint32)
-        self.positions = upload(positions, ttnn.int32)
-        self.pages = upload(page_rows, ttnn.int32)
-        singleton_pages = upload(pages, ttnn.int32)
-        self.singleton_pages = singleton_pages
-        # Per row, so a packed row reads its own user's blocks rather than the first
-        # user's table repeated.
-        self.row_pages = ([upload(page_rows[index:index + 1], ttnn.int32) for index in range(self.rows)]
-                          if self.pack is not None else [singleton_pages] * self.rows)
-        singleton_positions = [upload(position.reshape(1), ttnn.int32) for position in positions]
-        self.singleton_positions = singleton_positions
-        self.cos, self.sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
-                                            model.args.max_seq_len, model.args.rope_theta, positions)
-        self.buffers.extend([self.cos, self.sin])
+        inputs = prepare_inputs(ttnn, model, self.rows, tokens, positions, page_rows, pages,
+                                storage=storage, packed=self.pack is not None)
+        self.buffers.extend(inputs.owned)
+        self.borrowed.extend(inputs.borrowed)
+        self.tokens, self.positions, self.pages = inputs.tokens, inputs.positions, inputs.pages
+        singleton_pages = self.singleton_pages = inputs.singleton_pages
+        self.row_pages = inputs.row_tables
+        singleton_positions = self.singleton_positions = inputs.singleton_positions
+        self.cos, self.sin = inputs.cos, inputs.sin
         if self.attention_replay:
             from attention_replay import ReplayAttentionReader
 
@@ -427,3 +526,5 @@ class ModelBatch:
         for value in self.buffers:
             self.operations.deallocate(value)
         self.buffers.clear()
+        if getattr(self, 'borrowed', None):
+            self.borrowed.clear()

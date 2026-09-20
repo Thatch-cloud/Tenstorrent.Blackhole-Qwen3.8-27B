@@ -14,7 +14,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from greedy_session import GreedySession
 import verifier_engine
-from verifier_engine import VerifierEngine, carry_log, note_prefill
+from verifier_engine import VerifierEngine, capture_bucket_rows, carry_log, note_prefill
 from verifier_pack import GDN_LAYERS
 
 _addresses = count(1)
@@ -241,6 +241,188 @@ class CarryTests(unittest.TestCase):
         self.assertEqual((alone.carry, alone.carry_addresses), ([], []))
         self.assertIsNone(verifier_engine._resident)
         self.assertEqual(alone.phase, 'closed')
+
+
+def shaped(shape):
+    value = tensor()
+    value.shape = shape
+    return value
+
+
+def snapshot_set():
+    return [[tensor() for index in range(5)] for layer in range(GDN_LAYERS)]
+
+
+def verifier_storage(bucket_rows, taps=5, page_width=68):
+    """A pool slot's verifier storage (serving_buffer_pool.VerifierSlot) over address stand-ins."""
+    from serving_buffer_pool import BucketSlot, VerifierSlot
+
+    buckets = []
+    for rows in bucket_rows:
+        batch = SimpleNamespace(tokens=shaped((rows, 1)), positions=shaped((rows,)), pages=shaped((rows, page_width)),
+                                singleton_pages=shaped((1, page_width)), cos=shaped((1, rows, 1, 64)), sin=shaped((1, rows, 1, 64)),
+                                singleton_positions=[shaped((1,)) for row in range(rows)])
+        buckets.append(BucketSlot(rows, snapshot_set(), [shaped((1, 1, rows, 5120)) for tap in range(taps)], None, batch))
+    return VerifierSlot(snapshot_set(), snapshot_set(), buckets)
+
+
+class PooledStorageTests(unittest.TestCase):
+    """Pooled, the engine keeps nothing it allocated itself: the initial and carried GDN
+    state, every bucket's checkpoints and feature taps, and the fixtures' inputs are the
+    pool slot's, allocated at attach before any request's trace, and close() frees none
+    of them. Unpooled, it allocates exactly as it always has."""
+
+    def setUp(self):
+        note_prefill()
+
+    def construct(self, storage=None, taps=(5, 19), budget=3):
+        """The constructor over fakes: two widths (1 and 2), no replay, features retained."""
+        session = GreedySession('request', [0, 1, 2], 0, vocab_size=100, max_new_tokens=budget)
+        shared = helpers()
+        fixtures = []
+
+        def fixture(engine, rows, checkpoints, *, retain, position=None, pack=None, storage=None):
+            built = SimpleNamespace(rows=rows, checkpoints=checkpoints, storage=storage, close=Mock(), replay_reader=None,
+                                    retained=SimpleNamespace(records=[]) if rows > 1 else None)
+            fixtures.append(built)
+            return built
+
+        def upload(value, **options):
+            return shaped(tuple(value.shape))
+
+        operations = SimpleNamespace(synchronize_device=Mock(), get_device_tensors=lambda value: [value, value],
+            copy=Mock(), from_torch=Mock(side_effect=upload), deallocate=Mock(), release_trace=Mock(),
+            bfloat16='bf16', TILE_LAYOUT='tile', DRAM_MEMORY_CONFIG='dram',
+            ShardTensorToMesh=lambda mesh, dim: ('shard', dim), ReplicateTensorToMesh=lambda mesh: 'replicate')
+        model = SimpleNamespace(mesh_device=object(), layers=[object()] * 64)
+        with patch.dict(sys.modules, ttnn=operations), \
+             patch.object(VerifierEngine, 'fixture', autospec=True, side_effect=fixture), \
+             patch.object(VerifierEngine, 'operation', return_value=(None, None)), \
+             patch.object(VerifierEngine, 'validate_bindings'), \
+             patch('verifier_engine.capture_operation', return_value=('trace', (None, None))), \
+             patch('verifier_engine.prepare', return_value=Mock()):
+            engine = VerifierEngine(model, session, SimpleNamespace(shape=(1, 1024)), shared, retain_feature_taps=taps,
+                                    **(dict(storage=storage) if storage is not None else {}))
+            return SimpleNamespace(engine=engine, session=session, helpers=shared, fixtures=fixtures,
+                                   operations=operations)
+
+    def test_pooled_engine_borrows_every_persistent_buffer_and_allocates_none(self):
+        storage = verifier_storage((1, 2, 4, 8))
+        built = self.construct(storage)
+        engine = built.engine
+        self.assertEqual(engine.phase, 'idle')
+        self.assertEqual(sorted(engine.buckets), [1, 2])
+        for mine, lent in ((engine.initial, storage.initial), (engine.carry, storage.carry)):
+            self.assertEqual(len(mine), GDN_LAYERS)
+            self.assertTrue(all(a is b for own, slot in zip(mine, lent, strict=True) for a, b in zip(own, slot, strict=True)))
+        taken = [bucket for bucket in storage.buckets if bucket.taken]
+        self.assertEqual([bucket.rows for bucket in taken], [1, 2])
+        for slot in taken:
+            bucket = engine.buckets[slot.rows]
+            self.assertTrue(all(a is b for own, lent in zip(bucket['checkpoints'], slot.checkpoints, strict=True)
+                                for a, b in zip(own, lent, strict=True)))
+            # The first two of the slot's five taps, in order.
+            self.assertEqual(bucket['target_features'], list(slot.target_features[:2]))
+            self.assertIs(bucket['fixture'].storage, slot.batch)
+            self.assertIs(bucket['fixture'].checkpoints, bucket['checkpoints'])
+        # No per-request allocation: not one helper snapshot, not one upload.
+        for helper in built.helpers:
+            helper.allocate.assert_not_called()
+        built.operations.from_torch.assert_not_called()
+        # The carry was seeded and its addresses recorded from the pooled slots.
+        self.assertEqual(engine.carry_addresses, engine.slot_addresses())
+        self.assertIs(verifier_engine._resident, engine)
+        # Closing frees nothing the pool lent - nothing at all, since it owns nothing.
+        built.operations.deallocate.reset_mock()
+        engine.close()
+        self.assertEqual(engine.phase, 'closed')
+        built.operations.deallocate.assert_not_called()
+        self.assertEqual((engine.borrowed, engine.carry, engine.initial, engine.buckets), ([], [], [], {}))
+        for fixture in built.fixtures:
+            fixture.close.assert_called_once()
+
+    def test_unpooled_engine_allocates_exactly_as_before_and_frees_it_all(self):
+        built = self.construct()
+        engine = built.engine
+        # initial, carry, and one checkpoint set per bucket
+        self.assertEqual([helper.allocate.call_count for helper in built.helpers], [4] * GDN_LAYERS)
+        # two taps per bucket, uploaded
+        self.assertEqual(built.operations.from_torch.call_count, 4)
+        self.assertTrue(all(bucket['fixture'].storage is None for bucket in engine.buckets.values()))
+        self.assertEqual(engine.borrowed, [])
+        owned = [*(value for snapshot in engine.initial for value in snapshot),
+                 *(value for slot in engine.carry for value in slot),
+                 *(value for bucket in engine.buckets.values() for snapshot in bucket['checkpoints'] for value in snapshot),
+                 *(value for bucket in engine.buckets.values() for value in bucket['target_features'])]
+        built.operations.deallocate.reset_mock()
+        engine.close()
+        freed = [call.args[0] for call in built.operations.deallocate.call_args_list]
+        self.assertEqual(len(freed), len(owned))
+        self.assertTrue(all(any(value is entry for entry in freed) for value in owned))
+
+    def test_a_request_the_pool_cannot_hold_is_refused_before_any_allocation_or_capture(self):
+        storage = verifier_storage((1, 4))
+        with self.assertRaisesRegex(ValueError, r'no free 2-row bucket: the slot holds widths \[1, 4\]'):
+            self.construct(storage)
+        self.assertIsNone(verifier_engine._resident)
+        # Refused at take(), so a width that fits is still lent... and released with the slot.
+        self.assertEqual([bucket.taken for bucket in storage.buckets], [True, False])
+        # Too few taps in the bucket, likewise.
+        storage = verifier_storage((1, 2), taps=1)
+        with self.assertRaisesRegex(ValueError, 'holds 1 feature taps; this request retains 2'):
+            self.construct(storage)
+        # A pooled snapshot set that does not match the helpers.
+        storage = verifier_storage((1, 2))
+        storage.initial = storage.initial[:47]
+        with self.assertRaisesRegex(ValueError, 'initial snapshots'):
+            self.construct(storage)
+        with self.assertRaisesRegex(ValueError, 'lend width buckets'):
+            self.construct(object())
+
+    def test_a_pooled_carry_is_still_checked_against_its_recorded_addresses(self):
+        storage = verifier_storage((1, 2))
+        built = self.construct(storage)
+        engine, session = built.engine, built.session
+        engine.buckets[2].update(trace=7, output=(None, torch.tensor([1, 2])), commits={prefix: 20 + prefix for prefix in range(3)})
+        engine.buckets[2]['fixture'].retained = Mock()
+        engine.buckets[2]['fixture'].retained.replay.side_effect = lambda operation: operation()
+        engine.operations = SimpleNamespace(execute_trace=Mock(return_value=None), synchronize_device=Mock(),
+            get_device_tensors=lambda value: [value, value], to_torch=lambda value: value)
+        engine.model = SimpleNamespace(args=SimpleNamespace(vocab_size=100))
+        engine.validate_bindings = Mock()
+        storage.carry[5][2].buffer_address.return_value = -1
+        # Another engine's prefill displaced this one, so the next verify restores the carry.
+        note_prefill()
+        with patch('verifier_engine.stage_inputs'), self.assertRaisesRegex(ValueError, 'moved'):
+            engine.verify(session.propose('request', max_rows=2))
+        self.assertEqual(engine.phase, 'failed')
+
+    def test_capture_bucket_rows_bounds_every_plan_the_engine_can_build(self):
+        from collections import Counter
+        from attention_request_plan import capture_plan
+
+        self.assertEqual(capture_bucket_rows(16, 256, 16), (1, 2, 4, 8, 8, 16, 16))
+        self.assertEqual(capture_bucket_rows(16, 3, 16), (1, 2))
+        self.assertEqual(capture_bucket_rows(16, 8, 16), (1, 2, 4, 8))
+        self.assertEqual(capture_bucket_rows(16, 24, 16), (1, 2, 4, 8, 8, 16))
+        self.assertEqual(capture_bucket_rows(32, 512, 32), (1, 2, 4) + (8,) * 3 + (16,) * 3 + (32,) * 3)
+        for remaining in (1, 2, 7, 8, 9, 24, 100, 255, 256, 257, 300):
+            bound = Counter(capture_bucket_rows(16, remaining, 16))
+            tight = Counter()
+            # Every offset within a family, plus the seam positions of the next one.
+            for position in [*range(4096, 4096 + 256), 4607, 4608]:
+                plan = capture_plan(position, 65536, 16, remaining, max_verify_rows=16)
+                counts = Counter(capture.rows for capture in plan.captures)
+                for rows, count in counts.items():
+                    self.assertLessEqual(count, bound[rows], (remaining, position, rows))
+                    tight[rows] = max(tight[rows], count)
+                unreplayed = Counter(verifier_engine.capture_widths(position, 65536, 16, remaining, 16))
+                self.assertTrue(all(count <= bound[rows] for rows, count in unreplayed.items()))
+            # Reached somewhere, for every width: the bound is not slack by a whole bucket.
+            self.assertEqual(tight, bound, remaining)
+        for remaining in (0, -1, True, 2.0):
+            with self.assertRaises(ValueError):
+                capture_bucket_rows(16, remaining, 16)
 
 
 if __name__ == '__main__':

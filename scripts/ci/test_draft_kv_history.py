@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from draft_head_preparation import rope_reference, rope_tables
-from draft_kv_history import KV_SHAPE, DraftKVHistory, bank_tensors
+from draft_kv_history import KV_SHAPE, QUERY_SHAPE, DraftKVHistory, bank_tensors
 
 
 def pooled_storage(layers=2):
@@ -43,10 +43,12 @@ class DraftKVHistoryTests(unittest.TestCase):
         return pointer, pointer + 1
 
     @contextmanager
-    def fixture(self, features, position, *, layers=2, storage=None):
+    def fixture(self, features, position, *, layers=2, storage=None, query=None):
         operations = self.operations()
         def project(operations, inputs, query, tables, retain, *, parameters):
             rows = inputs.shape[2]
+            if torch.count_nonzero(query).item():
+                raise AssertionError('The projection reads a zero query')
             value = (inputs[..., :512] * (parameters['layer'] + 1)).reshape(1, rows, 4, 128).transpose(1, 2).contiguous()
             return dict(k=retain(rope_reference(value, *tables)), v=retain(value))
         with patch('draft_kv_history.project_key_value', side_effect=project), \
@@ -54,7 +56,8 @@ class DraftKVHistoryTests(unittest.TestCase):
                 patch('draft_kv_history.release_owned', side_effect=lambda operations, owned: [operations.deallocate(value) for value in owned]):
             cache = DraftKVHistory(operations, object(), [dict(layer=layer) for layer in range(layers)],
                 features, position=position, history_rows=min(position, 2048),
-                **(dict(storage=storage) if storage is not None else {}))
+                **(dict(storage=storage) if storage is not None else {}),
+                **(dict(query=query) if query is not None else {}))
             try:
                 yield cache, operations
             finally:
@@ -197,6 +200,47 @@ class DraftKVHistoryTests(unittest.TestCase):
                 self.assertIs(retain(cache.query), cache.query)
                 scratch = retain(torch.zeros(4))
             self.assertEqual(freed(operations), [scratch])
+
+    def test_a_lent_query_is_borrowed_read_only_used_by_every_projection_and_never_freed(self):
+        features = self.features(170, 5)
+        storage, query = pooled_storage(), torch.zeros(QUERY_SHAPE, dtype=torch.bfloat16)
+        banks = bank_tensors(storage)
+        with self.fixture(features, 170, storage=storage, query=query) as (cache, operations):
+            self.assertIs(cache.query, query)
+            # Nothing uploaded and nothing owned: the slot lends everything persistent.
+            self.assertEqual(cache.owned, [])
+            self.assertEqual(cache.borrowed, [*banks, query])
+            self.assert_history(cache, features)
+            operations.deallocate.reset_mock()
+            with cache.temporaries([]) as retain:
+                self.assertIs(retain(query), query)
+                scratch = retain(torch.zeros(4))
+            self.assertEqual(freed(operations), [scratch])
+            for prefix in (3, 32):
+                candidate = self.features(32, cache.position)
+                cache.commit(cache.prepare(candidate, prefix, position=cache.position))
+                features = torch.cat((features, candidate[..., :prefix, :]), dim=2)[..., -2048:, :]
+                self.assert_history(cache, features)
+            cache.audit(features)
+            self.assertEqual(torch.count_nonzero(query).item(), 0)
+        self.assertEqual(cache.borrowed, [])
+        self.assertFalse(any(released is query for released in freed(operations)))
+        self.assertFalse(any(any(released is value for value in banks) for released in freed(operations)))
+        # Without the query the cache uploads and owns its own, exactly as before.
+        with self.fixture(self.features(170, 5), 170, storage=pooled_storage()) as (cache, operations):
+            self.assertEqual(cache.owned, [cache.query])
+            self.assertEqual(tuple(cache.query.shape), QUERY_SHAPE)
+        self.assertTrue(any(released is cache.query for released in freed(operations)))
+
+    def test_a_query_of_another_geometry_is_refused_before_anything_is_uploaded(self):
+        for query in (torch.zeros((1, 1, 16, 2048), dtype=torch.bfloat16), torch.zeros(QUERY_SHAPE), 'query'):
+            operations = self.operations()
+            operations.from_torch = Mock(side_effect=AssertionError('uploaded before the query was checked'))
+            with self.subTest(query=type(query).__name__), patch('draft_kv_history.addresses', side_effect=self.address), \
+                    self.assertRaises(ValueError):
+                DraftKVHistory(operations, object(), [dict(layer=layer) for layer in range(2)], self.features(170, 3),
+                               position=170, history_rows=170, storage=pooled_storage(), query=query)
+            operations.from_torch.assert_not_called()
 
     def test_storage_geometry_is_checked_before_anything_is_uploaded(self):
         bad_shape, bad_dtype, missing, aliased = (pooled_storage() for _ in range(4))

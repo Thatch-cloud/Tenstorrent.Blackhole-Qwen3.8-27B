@@ -70,8 +70,21 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     self.assertFalse(attached['serving_qualified'])
                     self.assertTrue(callable(install.call_args.kwargs['capture_factory']))
                     self.assertTrue(callable(install.call_args.kwargs['bridge_factory']))
-                    # Sized for the scheduler and allocated before anything else in the attachment.
-                    pooled.assert_called_once_with(operations, model.mesh_device, users=1)
+                    # Sized for the scheduler and allocated before anything else in the attachment,
+                    # with the verifier geometry every request will ask for: the 48 GDN helpers,
+                    # the one page-table width, the capture widths with multiplicity for a
+                    # 256-token budget under a T16 cap, the five feature taps and the rotary
+                    # builder (which imports the native construction only when called).
+                    pooled.assert_called_once()
+                    self.assertEqual(pooled.call_args.args, (operations, model.mesh_device))
+                    options = pooled.call_args.kwargs
+                    self.assertEqual(options['users'], 1)
+                    self.assertEqual(len(options['helpers']), 48)
+                    self.assertEqual(options['page_width'], 68)
+                    self.assertEqual(options['bucket_rows'], (1, 2, 4, 8, 8, 16, 16))
+                    self.assertEqual(options['feature_taps'], 5)
+                    self.assertTrue(callable(options['rope']))
+                    self.assertEqual(set(options), {'users', 'helpers', 'page_width', 'bucket_rows', 'feature_taps', 'rope'})
                     # The device geometry from_prefill asks for, prepared once inside the
                     # admitted runtime and before any request.
                     prepared.assert_called_once_with(operations, model.mesh_device, fixtures[1], fixtures[2], fixtures[3],

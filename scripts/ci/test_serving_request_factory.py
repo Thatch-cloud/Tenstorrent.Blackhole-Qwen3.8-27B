@@ -58,6 +58,25 @@ class RequestFactoryTests(unittest.TestCase):
         engines[0].close.assert_called_once()
         device.close.assert_called_once()
 
+    def test_the_engine_borrows_the_verifier_storage_of_the_slot_the_device_holds(self):
+        # No slot (no pool): the engine allocates as before, no storage keyword at all.
+        components, device, engines, arguments = self.fixture()
+        self.build(components, arguments)
+        self.assertNotIn('storage', components.engine.call_args.kwargs)
+        # A slot without verifier storage (a pool built without the GDN helpers): likewise.
+        components, device, engines, arguments = self.fixture()
+        device.pool_slot = SimpleNamespace(verifier=None)
+        self.build(components, arguments)
+        self.assertNotIn('storage', components.engine.call_args.kwargs)
+        # The slot's verifier storage, allocated at attach before any request's trace.
+        components, device, engines, arguments = self.fixture()
+        storage = object()
+        device.pool_slot = SimpleNamespace(verifier=storage)
+        request = self.build(components, arguments)
+        self.assertIs(components.engine.call_args.kwargs['storage'], storage)
+        self.assertEqual(components.engine.call_args.kwargs['retain_feature_taps'], TARGET_TAPS)
+        request.close('request')
+
     def test_engine_failure_releases_owned_draft_and_features(self):
         components, device, _, arguments = self.fixture()
         components.engine.side_effect = RuntimeError('capture failed')

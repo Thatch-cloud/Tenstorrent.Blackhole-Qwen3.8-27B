@@ -45,13 +45,40 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # device that borrows from it.
     scopes = ExitStack()
     try:
-        pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'])
-        scopes.callback(pool.close)
-        owner = ServingCacheOwner(operations, runner, model)
+        # The helpers allocate nothing; the pool needs them to allocate every request's
+        # GDN snapshot sets (initial, carry, one checkpoint set per capture) in the
+        # exact shape the engine's own allocate() would have, before any trace.
         layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
         if len(layers) != 48:
             raise ValueError('All forty-eight native GDN layers required')
         helpers = [ActiveSnapshot(layer, operations, direct=True) for layer in layers]
+
+        # The page table has to cover the admitted context. It was a fixed 68 pages,
+        # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
+        # 32768 - so the fast path could not decode at ANY context, at one user or two
+        # (runs 35472072127, 35473307362). 68 stays the floor because
+        # ServingCacheOwner requires at least that many physical pages. The pool's
+        # fixture inputs are this wide too: a request's table must match exactly.
+        page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
+
+        def rope(positions):
+            # The native rotary construction ModelBatch uses, so the pooled tables are
+            # the same kind of tensor the fixture would have built.
+            from models.demos.blackhole.qwen36.tt.attention.rope_tp import rot_mats_decode
+            return rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
+                                   model.args.max_seq_len, model.args.rope_theta, positions)
+
+        # Widths with multiplicity for the geometry from_prefill gives every engine:
+        # sixteen verifier rows, the output budget, a T16 cap. A request whose plan
+        # needs more is refused at admission by the engine, never allocated late.
+        from verifier_engine import capture_bucket_rows
+
+        pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
+            helpers=helpers, page_width=page_width,
+            bucket_rows=capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], 16),
+            feature_taps=len(TARGET_TAPS), rope=rope)
+        scopes.callback(pool.close)
+        owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore
         # handles over one mesh is cross-request interference, not concurrency.
         collectives = TT_CCL(model.mesh_device)
@@ -62,12 +89,6 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
         experiment = from_environment(directory, runtime_root)
 
-        # The page table has to cover the admitted context. It was a fixed 68 pages,
-        # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
-        # 32768 - so the fast path could not decode at ANY context, at one user or two
-        # (runs 35472072127, 35473307362). 68 stays the floor because
-        # ServingCacheOwner requires at least that many physical pages.
-        page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,

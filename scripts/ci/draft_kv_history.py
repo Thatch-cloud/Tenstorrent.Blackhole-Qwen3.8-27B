@@ -9,6 +9,22 @@ from gdn_multitoken_conv import addresses, release_owned
 
 
 KV_SHAPE = (1, 4, 2048, 128)
+QUERY_SHAPE = (1, 1, 32, 2048)
+
+
+def validate_query(operations, query):
+    """The pre-trace zero query input lent by the serving pool, or None to upload one here.
+
+    The projection only reads it (draft_kv_projection.project_key_value, through
+    draft_head_layout.split_projected_heads), but it is read at every proposal and every
+    publication for the request's whole life - so, uploaded here after an earlier
+    request's traces exist, it is one more buffer their replays can overwrite.
+    """
+    if query is None:
+        return None
+    if tuple(getattr(query, 'shape', ())) != QUERY_SHAPE or getattr(query, 'dtype', None) != operations.bfloat16:
+        raise ValueError('A replicated zero BF16 (1, 1, 32, 2048) query is required')
+    return query
 
 
 def validate_storage(operations, storage, layers):
@@ -42,7 +58,7 @@ def bank_tensors(banks):
 
 class DraftKVHistory:
     def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False,
-                 storage=None):
+                 storage=None, query=None):
         import torch
 
         parameters = tuple(parameters)
@@ -51,18 +67,25 @@ class DraftKVHistory:
                 or not 1 <= len(parameters) <= 5 or type(capture_projection) is not bool):
             raise ValueError('Bounded absolute draft frontier and explicit learned layers required')
         banks = validate_storage(operations, storage, len(parameters))
+        query = validate_query(operations, query)
         self.operations, self.mesh, self.parameters = operations, mesh, parameters
         self.position, self.history_rows = position, history_rows
         self.owned, self.active, self.spare = [], [], []
-        # Lent banks: read and written here, protected from every temporary like the
-        # owned tensors are, never freed here.
+        # Lent banks and query: read and written here, protected from every temporary
+        # like the owned tensors are, never freed here.
         self.borrowed = [] if banks is None else bank_tensors(banks)
+        if query is not None:
+            self.borrowed.append(query)
         self.checks = []
         self.projection = None
         self.pending, self.closed = None, False
         try:
-            self.query = self.upload(torch.zeros((1, 1, 32, 2048), dtype=torch.bfloat16))
-            self.owned.append(self.query)
+            if query is None:
+                self.query = self.upload(torch.zeros(QUERY_SHAPE, dtype=torch.bfloat16))
+                self.owned.append(self.query)
+            else:
+                # Lent zeroed (serving_buffer_pool.py), exactly as the upload it replaces.
+                self.query = query
             with self.temporaries([features]) as retain:
                 inputs, tables = self.project_inputs(features, history_rows, position - history_rows, retain)
                 for layer, parameter in enumerate(parameters):

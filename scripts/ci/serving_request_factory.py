@@ -125,10 +125,18 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 len(session.emitted))
         except BaseException:
             pass
+        # The verifier's storage comes from the same pool slot the device borrowed:
+        # initial and carried GDN state, per-width checkpoints, feature taps and the
+        # fixtures' inputs were allocated at attach, before any request's trace, so an
+        # earlier request's replays cannot overwrite them (serving_buffer_pool.py).
+        # Only when the slot carries it, so a pool without verifier storage leaves the
+        # engine allocating as before.
+        verifier_storage = getattr(getattr(device, 'pool_slot', None), 'verifier', None)
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
             norm_batch=True, attention_replay=True, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
-            commit_only_gdn=True, target_attention_t16=True, before_capture=prepare_proposal)
+            commit_only_gdn=True, target_attention_t16=True, before_capture=prepare_proposal,
+            **(dict(storage=verifier_storage) if verifier_storage is not None else {}))
         owned.callback(engine.close)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
