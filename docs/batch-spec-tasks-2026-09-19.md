@@ -2024,6 +2024,30 @@ per-request captures to the widths that fallback needs takes each engine from 2.
 towards 0.24 GB (widths 1, 2, 4) and the total to about 21.7 GB, 12.7 GB of headroom;
 that trim is the part-2 lever if 11% proves too tight on the device.
 
+### M3 part 2: the block's own allocations, read from the code it now runs (2026-09-20)
+
+Per chip, device bytes as above, for `PackedVerifierEngine` at (4, 16, 64):
+
+- Retained histories: 4 segments x 48 layers x (16 x 786,432 + 4 x 327,680) B = 2.67 GB,
+  the row as budgeted (the deferred decode's per-segment `states` (16, 24, 128, 128) and
+  four convolution windows, retained per layer by `RetainedGDNBlock`).
+- Per-user entries: `DeviceLoopState(users=4)`, one block-start snapshot per user per
+  layer: 4 x 48 x 2,097,152 B = 0.40 GB, as budgeted.
+- Checkpoint sets: users x 48 = 4 x 100.7 MB = 0.40 GB as budgeted, PLUS the block's
+  `initial` set (slot 0 as attach found it, restored after the commit warming): one more
+  100.7 MB set the table did not count. 0.50 GB.
+- Taps and fixture inputs: 5 x (1, 1, 64, 5120) BF16 sharded = 1.6 MB; tokens, positions,
+  cos/sin, the (64, 1024) pages, 64 row tables, 64 singleton positions, and the two new
+  cache tiles (2 x (32,) + 2 x (32, 1024) int32 = 262 KB): under 1 MB together.
+- The pool's (4, 16) replay tables (the pool row, not the block's): per user per family
+  (3 + 1) x capacity / 64 x 4 B; over the 256 families a 1024-page table holds, 2.1 MB per
+  user, 8.4 MB for four (the (4, 8) default set they replace was 4.2 MB).
+- Commit traces: 64 (`packed_shapes.commit_traces`), in the trace region as budgeted.
+
+Corrected total 30.54 GB of 34.36 GB; headroom 3.8 GB (11%). Nothing the block allocates
+exceeds the budget's rows, so the per-request engines' 8/16-row captures (9.67 GB) are NOT
+trimmed here; they stay the lever if the device shows the headroom is not there.
+
 ## M1b on hardware (2026-09-20 08:55 UTC): bundled per-user replay readers, image v47, run 35500352729
 
 Image v47 = sha256:15ab61f8fc6e (build 35500138157; bc17a7e9 on 97935b94). Two users, prompt bases
@@ -2051,3 +2075,111 @@ v46 rates [15.18, 3.35] (ttft, wall per stream [(28.8, 32.9), (14.3, 33.1)]); v4
 
 Next levers in the packed round, unchanged: L3 one packed draft pass (-38 ms), L4a trace the
 draft (-17), L4b captured publication (-26). M3 (four users, 64-row block) part 2 is in build.
+
+## M3 part 2 (2026-09-20): four T16 users verified in one 64-row block
+
+**What scales from the shape.** `PackedVerifierEngine` takes `PackedShape`, `validate_shape`,
+`m1_shape`, `m3_shape` and `segment_rows` from `packed_shapes.py` (one definition; the names
+stay importable from packed_verifier). Every per-segment structure is built from the
+shape's `users`, `rows_per_user` and `block_rows`, none from a literal 2 or 32: segments
+bound to pool slots 0..users-1 by carry identity (`segment_of`), users x 48 checkpoint sets,
+five (1, 1, block_rows, 5120) taps, one pooled 16-row replay reader per user
+(`PackedReplayAttentionReader`, whose `validate_segments` limit went 32 -> 64), one
+positions word and one bundle-table set per user from the pool's (4, 16)
+`PackedReplayTables`, a block_rows-row staging batch, users x rows_per_user = 64 commit
+traces, block_rows sampled ids (`force_argmax.sample_rows` at 64: two 32-row sampler
+tiles, part 1). The GDN decode is `DeviceLoopState(users=4)` deferred over 64 rows: one
+input projection over 64, four 16-row recurrences each after its own in-trace restore
+(the per-segment `run_batched_projected` is at 16 rows, inside the pinned
+`gdn_multitoken_conv.validate_projected`); `model_batch.recurrence_rows` makes the
+norm-batch decision at the segment's 16 rows, where the recurrence runs, instead of at the
+block's 64 (which `gdn_batched_conv.history_windows` refuses). The MLP is the generic
+unfused path at 64 rows, as the 32-row block runs it (the fused arm is 16-row only, and
+worth under 1 ms).
+
+**How the 64-row attention routes around the pinned attention_batch.py.**
+`SerialCacheWriter` and `SerialAttentionReader` refuse more than 32 rows, and so does
+`ordered_cache.validate_shapes`, the audited ordered K/V kernel the block already writes
+through (a bundle copy the image does not override). None is edited. (1)
+`model_batch.cache_writer` / `attention_reader` build the serial adapters only where they
+serve: the ordered writer and the replay reader replace them, which is what the 32-row
+block used already, so its behaviour is unchanged; a block wider than 32 rows without both
+is refused before any upload. (2) New `packed_cache_writer.SegmentedOrderedCacheWriter`:
+per full-attention layer, the (1, 64, 32, 256) prepared K/V is sliced on its row axis into
+two 32-row tiles (a whole-tile DRAM slice, the serial writer's own mechanism per row) and
+`ordered_cache.update` runs once per tile - the audited kernel exactly as qualified - over
+that tile's own staged positions word (32,) and page-table rows (32, page_width).
+`model_batch.prepare_inputs` uploads them as fixture-owned `cache_tiles` (pre-trace by the
+block's construction order) and `packed_verifier.stage_packed` restages them every round
+with everything else. Tile boundaries are segment boundaries (16-row users), so no user's
+rows are split across launches, and two launches on one command queue keep the order one
+launch had. (3) The reads go through the four 16-row pooled readers (M1b), the query
+dispatched a segment at a time and concatenated in row order.
+
+**What a four-entry round does.** `serving_packed_step.packed_device_step` needed no code
+change (it was written over `shape.users`): the hook drafts once per bridge (four sequential
+draft passes, `serving_worker_hook._drafts`; the packed draft pass is the later lever),
+`block.verify(entries)` stages four users' tokens, positions and pages into their
+segments, four reader words and eight bundle tables, and the two cache tiles' positions and
+pages - 149 host copies behind one fence, against 75 at 32 rows; the 128 singleton positions
+and row tables among them serve only the serial adapters the block does not use, a trim
+lever - runs the one 64-row trace, slices the 64 ids into four 16-row prediction lists in
+ENTRIES order, and each entry commits in the scheduler's order through
+`adopt_packed`/`commit_user` (its own prefix trace into its own carry, prefix 0 runs
+nothing, the last commit fences the retained block's replay). Partial rounds keep the
+existing rule at four: a round with fewer live entries than the shape (one to three
+survivors after partners finish), a narrow ticket or a foreign engine goes to the
+sequential step WHOLE; the block has no idle segments. The consequence to know: once the
+first of four users finishes, the three survivors decode sequentially (three weight passes
+per round) until they finish. Idle segments would need a page nobody reads for the idle
+rows' K/V writes (the ordered writer writes every row of the block; vLLM v1's null block 0
+is the candidate and is unverified for this plugin) and a measured policy for when two or
+three survivors are faster packed than sequential; deferred.
+
+**Shape selection.** `packed_shapes.serving_shape(scheduler_requests, page_width)`: 2 ->
+`m1_shape`, 4 -> `m3_shape`, anything else -> None. Under QWEN_FAST_PACKED_STEP=1
+`serving_runtime` picks it BEFORE the pool, so the pool is built with
+`packed_shapes=((users, rows_per_user),)` - exactly the block's table set - and the block
+is built at that shape; at a count no shape serves it logs a [PINDIAG] line, wires the
+sequential step and adds `packed_block_skipped` to the stage line. With the switch unset
+nothing changes: the pool is built as before and the sequential step serves. The pool's
+default `PACKED_REPLAY_SHAPES` is now ((2, 16), (4, 16)) - M2's (4, 8) is still accepted
+when named - and its shape check takes the legal block widths from packed_shapes (up to 64).
+`model_batch.validate_checkpoint` accepts 64. Left alone, with the reason:
+`serving_buffer_pool.QUERY_SHAPE` (1, 1, 32, 2048) is the draft cache's zero query
+(draft_kv_history.QUERY_SHAPE); the draft proposes in 32-row passes whatever the verify
+block's width, so it is not a verify-block pin.
+
+**Image copy lists.** Both docker/qwen-fast-serving.Dockerfile and
+.github/workflows/qwen-fast-serving-image.yml gain packed_shapes.py, packed_cache_writer.py,
+force_argmax.py and gdn_prefix.py - the last two edited by part 1 (64-row sampling, 64-row
+`validate_rows`) and imported at runtime by packed_verifier/verifier_engine and by
+model_batch, gdn_device_loop_state and gdn_batched_conv, whose bundle copies predate part 1.
+dflash_packed_proposal.py is imported by no runtime module (tests only) and is not added.
+Not added, deliberately: attention_replay.py, attention_batch.py, gdn_multitoken_conv.py,
+dflash_t16_native_attention.py, gdn_commit_dma.py/.cpp, fused_1d_input.cpp.
+
+**Tests (all green, `py -3.10 -B -m unittest`):** test_packed_shapes 4, test_packed_cache_writer
+7 (new, registered in the CPU workflow), test_packed_verifier 17 (four-user construction,
+a scrambled four-entry round with every staged buffer checked, refusals of one to three
+survivors, close releasing 65 traces), test_serving_packed_step 18 (a four-entry round on
+the fake and on the real block, survivors of one to three and five entries going
+sequential, a cancellation between four commits), test_pooled_attention_replay 19 (four
+16-row readers over 64 rows), test_model_batch 31 (cache tiles, writer and reader
+selection, the wide-block refusal, the segment-rows norm-batch decision, 64 as a block
+width), test_serving_runtime 22 (2 -> M1, 4 -> M3, 1/3/8 -> sequential and logged, switch
+unset unchanged), test_serving_buffer_pool 45 (defaults (2, 16)/(4, 16), the (4, 16) set,
+(3, 16) and (8, 16) refused); neighbours unchanged: test_verifier_pack 11,
+test_gdn_packed_segments 14, test_target_packed_pages 9, test_gdn_records 22,
+test_verifier_engine 22, test_force_argmax 12, test_serving_fast_policy 15,
+test_verifier_carry 20, test_attention_replay 14, test_gdn_device_loop_state 14,
+test_retained_ownership 4, test_gdn_prefix 17. 337 in all.
+
+**Never run on hardware, all of it:** the model's decode at (1, 1, 64, 5120) - attention
+prep, RoPE, the unfused MLP and LM head at two tiles - `_project_qkvzab_raw` over 64 rows,
+the two-tile ordered K/V write, two sampler tiles joined, the 64-row feature taps, four
+in-trace restores and a 64-row trace's memory. The gate is the four-user run under
+QWEN_FAST_PACKED_STEP=1 with max_num_seqs 4 and the KV pool capped to the four-user working
+set (the budget's condition 1), each user's text token-exact against the single-user
+references for prompt bases 1000-1003 (M3 gate references above), plus the packed_verify
+timing at 64 rows.

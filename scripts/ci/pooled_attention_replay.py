@@ -188,9 +188,13 @@ class PooledReplayAttentionReader(ReplayAttentionReader):
 PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH = 12, 256
 
 
-def validate_segments(segments, block_rows_limit=32):
+# 64: the M3 block, four T16 users (packed_shapes.m3_shape), four 16-row readers.
+PACKED_BLOCK_ROWS = 64
+
+
+def validate_segments(segments, block_rows_limit=PACKED_BLOCK_ROWS):
     """The packed block's row spans (target_packed_pages.segments): contiguous from row 0,
-    each one a width the pinned reader takes (8, 16 or 32 rows)."""
+    each one a width the pinned reader takes (8, 16 or 32 rows), within the widest block."""
     segments = tuple(tuple(span) for span in segments)
     cursor = 0
     for span in segments:

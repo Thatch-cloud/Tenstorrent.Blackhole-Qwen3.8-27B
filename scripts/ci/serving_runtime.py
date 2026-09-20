@@ -5,7 +5,7 @@ from functools import partial
 import json
 import os
 
-from dflash_device import PreparedDraftWeights
+from dflash_device import PreparedDraftWeights, pindiag
 from serving_buffer_pool import ServingBufferPool
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import validate_fast_config
@@ -75,10 +75,27 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # needs more is refused at admission by the engine, never allocated late.
         from verifier_engine import capture_bucket_rows
 
+        # The packed block's shape, when QWEN_FAST_PACKED_STEP=1 asks for one, follows the
+        # scheduler's request count (packed_shapes.serving_shape): two requests take the
+        # 32-row M1 block, four the 64-row M3 block, and any other count builds no block,
+        # so the sequential step serves the rounds and the stage line says so. Chosen
+        # before the pool, which lends the block its per-user replay page tables for
+        # exactly that shape; with the switch unset the pool is built as it always was.
+        packed_requested = os.environ.get('QWEN_FAST_PACKED_STEP') == '1'
+        packed_shape = None
+        if packed_requested:
+            from packed_shapes import serving_shape
+
+            packed_shape = serving_shape(policy['scheduler_requests'], page_width)
+            if packed_shape is None:
+                pindiag('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
+                        '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
+                        'serves the rounds', policy['scheduler_requests'])
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
             helpers=helpers, page_width=page_width,
             bucket_rows=capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], 16),
-            feature_taps=len(TARGET_TAPS), rope=rope)
+            feature_taps=len(TARGET_TAPS), rope=rope,
+            **({} if packed_shape is None else dict(packed_shapes=((packed_shape.users, packed_shape.rows_per_user),))))
         scopes.callback(pool.close)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore
@@ -109,25 +126,28 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # The device step. By default the sequential one - correct, not yet fast: one
         # weight pass per user per round - and describe() records that cost so a benchmark
         # reading it is not mistaken for the goal. QWEN_FAST_PACKED_STEP=1 builds the
-        # packed verify block instead, one 32-row pass serving every user, and builds it
-        # HERE: after the pool and the shared draft weights, whose buffers it restores
-        # from and checks, and before the lifecycle admits a request, whose traces would
-        # otherwise bake over its buffers (packed_verifier.py, CONSTRUCTION ORDER).
-        # Registered after the weights so it closes before them, with the scope. Off
-        # until the token-exact gate passes (docs/packed-device-step-plan-2026-09-20.md,
-        # section 6); the sequential step stays the serving default until then.
+        # packed verify block instead, one pass serving every user at the shape chosen
+        # above, and builds it HERE: after the pool and the shared draft weights, whose
+        # buffers it restores from and checks, and before the lifecycle admits a request,
+        # whose traces would otherwise bake over its buffers (packed_verifier.py,
+        # CONSTRUCTION ORDER). Registered after the weights so it closes before them,
+        # with the scope. Off by default: the sequential step stays the serving default
+        # until the packed step's gates pass (docs/packed-device-step-plan-2026-09-20.md).
         from serving_sequential_step import describe as describe_sequential_step, sequential_packed_step
 
         packed_step, step_description = sequential_packed_step, describe_sequential_step()
-        if os.environ.get('QWEN_FAST_PACKED_STEP') == '1':
-            from packed_verifier import PackedVerifierEngine, m1_shape
+        if packed_shape is not None:
+            from packed_verifier import PackedVerifierEngine
             from serving_packed_step import describe as describe_packed_step, packed_device_step
 
             block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
-                                         shape=m1_shape(page_width), feature_taps=TARGET_TAPS)
+                                         shape=packed_shape, feature_taps=TARGET_TAPS)
             scopes.callback(block.close)
             packed_step = partial(packed_device_step, block=block)
             step_description = dict(describe_packed_step(), block=block.describe())
+        elif packed_requested:
+            step_description = dict(step_description,
+                packed_block_skipped='no packed block shape for %d scheduler requests' % policy['scheduler_requests'])
         # One line with every pre-trace address - the pooled history pairs, each named
         # shared weight and, when built, the packed block's taps, checkpoints and carries -
         # so a diverged address from the shard check can be placed against what was

@@ -2,18 +2,30 @@
 commit traces, and the staging and readback that serve them.
 
 WHAT IT BUYS. `serving_sequential_step` spends one pass over the 19.92 GB of dense
-weights per user per round. This block runs ONE 32-row verify serving every user:
-the weights are read once, the 48 GDN layers run one input and one output projection
-over the whole block, and only the elementwise recurrence runs once per segment
+weights per user per round. This block runs ONE block_rows-row verify serving every
+user - 32 rows for two T16 users (M1), 64 for four (M3, packed_shapes.m3_shape): the
+weights are read once, the 48 GDN layers run one input and one output projection over
+the whole block, and only the elementwise recurrence runs once per segment
 (gdn_device_loop_state.DeviceLoopState.decode, segments=). The per-user work that
 remains - the draft proposal and the feature publication - stays per user and is
 untouched here.
 
+THE SHAPE. Every per-segment structure scales from the `PackedShape` (packed_shapes.py):
+segments bound to pool slots by carry identity, users x 48 checkpoint sets, five
+(1, 1, block_rows, 5120) taps, one replay reader per user, one positions word and one
+bundle-table set per user, a block_rows-row staging batch, users x rows_per_user commit
+traces, block_rows sampled ids. Nothing here is written for two users. At 64 rows the
+K/V write of every full-attention layer runs as two 32-row tiles of the audited ordered
+kernel (packed_cache_writer.py), because the per-row serial adapters of the pinned
+attention_batch.py stop at 32 rows; the fixture keeps each tile's own positions word and
+page-table rows, restaged here with everything else.
+
 CONSTRUCTION ORDER (docs/packed-device-step-plan-2026-09-20.md section 4;
 serving_buffer_pool.py). Everything this engine keeps across rounds - the fixture's
-32-row inputs including its 32 per-row page tables, the five (1, 1, 32, 5120) feature
-taps, users x 48 GDN checkpoint sets, the retained block's per-layer entry and
-histories, the verify trace and every commit trace - must exist BEFORE any trace that
+block_rows-row inputs including its per-row page tables and cache tiles, the five
+(1, 1, block_rows, 5120) feature taps, users x 48 GDN checkpoint sets, the retained
+block's per-layer entries and histories, the verify trace and every commit trace - must
+exist BEFORE any trace that
 will replay does. A request's verify trace bakes the addresses of the intermediates
 its capture frees; a buffer allocated afterwards lands in those holes and every
 replay of that trace overwrites it, per chip. On the serving path that means the
@@ -68,7 +80,6 @@ sequential step of any user restores first (`verifier_engine.note_packed_step`).
 from contextlib import ExitStack
 import time
 from types import SimpleNamespace
-from typing import NamedTuple
 
 from attention_batch import capture_operation
 from attention_mask_replay import validate_ticket
@@ -76,6 +87,10 @@ from force_argmax import sample_rows
 from gdn_commit_dma import prepare
 from gdn_multitoken_conv import addresses, release_owned
 from model_batch import ModelBatch
+from packed_cache_writer import tile_rows
+# The shape and its validation live in packed_shapes.py (one definition for M1 and M3);
+# the names stay importable from here.
+from packed_shapes import PackedShape, ROWS_PER_USER as LEGAL_WIDTHS, m1_shape, m3_shape, segment_rows, validate_shape
 from prepared_target_features import PreparedTargetFeatures
 from serving_fast_policy import OUTPUT_BUDGET
 from verifier_engine import note_packed_step, note_prefill
@@ -84,42 +99,10 @@ from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 
 FEATURE_WIDTH = 5120
-LEGAL_WIDTHS = (1, 2, 4, 8, 16, 32)
-
-
-class PackedShape(NamedTuple):
-    """The block geometry every shape-dependent choice is keyed on: M1 is
-    (2, 16, 32, page_width, page_width * 64); M2 adds (4, 8, 32, ...) and M3 needs 64 rows."""
-    users: int
-    rows_per_user: int
-    block_rows: int
-    page_width: int
-    capacity: int
-
-
-def validate_shape(shape):
-    if (not isinstance(shape, PackedShape) or any(type(value) is not int for value in shape)
-            or shape.users < 1 or shape.rows_per_user not in LEGAL_WIDTHS
-            or shape.block_rows not in (2, 4, 8, 16, 32) or shape.users * shape.rows_per_user != shape.block_rows
-            or shape.page_width < 68 or shape.capacity != shape.page_width * 64):
-        raise ValueError('A packed shape needs users x rows_per_user == block_rows within the 32-row block, '
-                         'and a page-table width of whole 64-token pages')
-    return shape
-
-
-def m1_shape(page_width):
-    """Two T16 users in one 32-row block over the serving page-table width."""
-    return validate_shape(PackedShape(2, 16, 32, page_width, page_width * 64))
-
-
-def segment_rows(shape, segment):
-    if type(segment) is not int or not 0 <= segment < shape.users:
-        raise ValueError('Segment outside the packed block')
-    return segment * shape.rows_per_user, (segment + 1) * shape.rows_per_user
 
 
 class PackedFeatureTaps(tuple):
-    """The block's five 32-row taps with one user's row offset attached, so that
+    """The block's five block_rows-row taps with one user's row offset attached, so that
     DFlashDevice.project_features (dflash_device.py, row_offset=) slices that user's rows
     while DFlashRequestRuntime.publish passes the taps through unchanged."""
 
@@ -173,11 +156,13 @@ def stage_packed(operations, model, fixture, shape, users):
     one start and never restages pages. Here the tokens, the per-user positions, the rotary
     tables, every singleton position, the (block_rows, page_width) table AND every per-row
     table (attention_batch.SerialAttentionReader reads row_pages[i]) are restaged each
-    round, from each user's own host page table; and, when the fixture's attention is the
+    round, from each user's own host page table; when the fixture's attention is the
     per-user replay reader (M1b), each user's positions word and its reader's per-bundle
     page tables, the way verifier_inputs.stage_inputs stages one request's word and
-    VerifierPageBinding.refresh rewrites its tables. One fence for all of it. Returns the
-    number of buffers written.
+    VerifierPageBinding.refresh rewrites its tables; and, beyond one 32-row tile (M3),
+    each cache tile's own positions word and page-table rows for the tile-by-tile K/V
+    write (packed_cache_writer.py). One fence for all of it. Returns the number of
+    buffers written.
     """
     import torch
 
@@ -188,6 +173,9 @@ def stage_packed(operations, model, fixture, shape, users):
     readers = () if reader is None else tuple(reader.readers)
     if reader is not None and len(readers) != shape.users:
         raise ValueError('One replay reader per packed user required')
+    tiles = tuple(getattr(fixture, 'cache_tiles', None) or ())
+    if tiles and tuple(tile.rows for tile in tiles) != tile_rows(shape.block_rows):
+        raise ValueError('The cache tiles must cover the block in 32-row tiles')
     tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
                                                             model.args.rope_theta, model.args.vocab_size)
     values = [(fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT),
@@ -199,6 +187,10 @@ def stage_packed(operations, model, fixture, shape, users):
                   for index, destination in enumerate(fixture.singleton_positions))
     values.extend((destination, pages[index:index + 1], operations.int32, operations.ROW_MAJOR_LAYOUT)
                   for index, destination in enumerate(fixture.row_pages))
+    for tile in tiles:
+        first, last = tile.rows
+        values.append((tile.positions, positions[first:last].contiguous(), operations.int32, operations.ROW_MAJOR_LAYOUT))
+        values.append((tile.pages, pages[first:last].contiguous(), operations.int32, operations.ROW_MAJOR_LAYOUT))
     for own, (user_tokens, start, table) in zip(readers, users, strict=True):
         # Host only, before any copy: this user's ticket inside its reader's family.
         own.validate(start)

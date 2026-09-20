@@ -79,11 +79,13 @@ after this pool and before any request, so what it allocates itself is pre-trace
 construction; its attention, though, is one replay reader PER USER (M1b,
 pooled_attention_replay.PackedReplayAttentionReader), and those readers' per-bundle page
 tables are the same kind of static-across-steps buffer the request buckets pool. They
-come from here too: per packed shape the serving block can take - M1 two T16 users, M2
-four T8 users, keyed (users, rows_per_user) - one table set per user per family, each
-shaped as a rows_per_user-row reader bundles it (`packed_replay(users, rows)`), lent once
-to the block for the pool's life. The block restages every user's table into them before
-each verify, so they are not zeroed.
+come from here too: per packed shape the serving block can take - M1 two T16 users in
+the 32-row block, M3 four T16 users in the 64-row block, keyed (users, rows_per_user) -
+one table set per user per family, each shaped as a rows_per_user-row reader bundles it
+(`packed_replay(users, rows)`), lent once to the block for the pool's life. The block
+restages every user's table into them before each verify, so they are not zeroed. The
+serving runtime names the one shape its block takes (`packed_shapes=`); by default the
+pool holds every default shape its slot count can fill.
 """
 
 from types import SimpleNamespace
@@ -91,21 +93,25 @@ from types import SimpleNamespace
 from dflash_device import pindiag
 from pooled_attention_replay import bundle_batches, family_capacities
 from gdn_multitoken_conv import addresses, release_owned
+from packed_shapes import BLOCK_ROWS as PACKED_BLOCK_WIDTHS
 from serving_fast_policy import NATIVE_GDN_SLOTS
 
 
 HISTORY_SHAPE = (1, 1, 2048, 5120)
 KV_SHAPE = (1, 4, 2048, 128)
+# The draft cache's zero query input (draft_kv_history.QUERY_SHAPE): the draft proposes
+# in 32-row passes whatever the verify block's width, so this is not a verify-block pin.
 QUERY_SHAPE = (1, 1, 32, 2048)
 FEATURE_WIDTH = 5120
 DRAFT_LAYERS = 5
 GDN_LAYERS = 48
 SIDES, HEADS = ('active', 'spare'), ('k', 'v')
 BATCH_INPUTS = ('tokens', 'positions', 'pages', 'singleton_pages', 'cos', 'sin')
-# The packed shapes the serving block can take, (users, rows_per_user) in a 32-row block:
-# M1 two T16 users, M2 four T8 users (serving_fast_policy.packed_geometry).
-PACKED_REPLAY_SHAPES = ((2, 16), (4, 8))
-PACKED_BLOCK_ROWS = 32
+# The packed shapes the serving block takes by default, (users, rows_per_user): M1 two
+# T16 users in the 32-row block, M3 four T16 users in the 64-row block
+# (packed_shapes.serving_shape). M2's (4, 8) is still accepted when given explicitly.
+PACKED_REPLAY_SHAPES = ((2, 16), (4, 16))
+PACKED_BLOCK_ROWS = max(PACKED_BLOCK_WIDTHS)
 
 
 def default_packed_shapes(users):
@@ -120,9 +126,10 @@ def validate_packed_shapes(shapes):
         raise ValueError('Packed replay shapes must be (users, rows_per_user) pairs') from None
     if (len(set(shapes)) != len(shapes)
             or any(len(shape) != 2 or any(type(value) is not int for value in shape) or shape[0] < 1
-                   or shape[1] not in (8, 16, 32) or shape[0] * shape[1] > PACKED_BLOCK_ROWS for shape in shapes)):
+                   or shape[1] not in (8, 16, 32) or shape[0] * shape[1] not in PACKED_BLOCK_WIDTHS
+                   for shape in shapes)):
         raise ValueError('Packed replay shapes must be distinct (users, rows_per_user) pairs of T8/T16/T32 users '
-                         'within the %d-row block' % PACKED_BLOCK_ROWS)
+                         'filling one legal block width up to %d rows' % PACKED_BLOCK_ROWS)
     return shapes
 
 
@@ -305,8 +312,8 @@ class ServingBufferPool:
         bucket_rows = tuple(bucket_rows)
         if helpers is not None:
             # The packed block's per-user replay tables: by default every packed shape this
-            # many scheduler slots can fill (serving_runtime passes nothing and builds the M1
-            # block over the same pool), or an explicit tuple of (users, rows_per_user).
+            # many scheduler slots can fill, or an explicit tuple of (users, rows_per_user)
+            # (serving_runtime names the one shape of the block it builds over this pool).
             packed_shapes = validate_packed_shapes(default_packed_shapes(users) if packed_shapes is None else packed_shapes)
             helpers = tuple(helpers)
             if (len(helpers) != GDN_LAYERS or any(not callable(getattr(helper, 'allocate', None)) for helper in helpers)

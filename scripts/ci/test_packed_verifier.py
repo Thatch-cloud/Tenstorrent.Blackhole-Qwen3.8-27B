@@ -19,8 +19,10 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from packed_cache_writer import tile as cache_tile, tile_rows
 import packed_verifier
-from packed_verifier import PackedFeatureTaps, PackedShape, PackedVerifierEngine, m1_shape, segment_rows, validate_shape
+from packed_verifier import (PackedFeatureTaps, PackedShape, PackedVerifierEngine, m1_shape, m3_shape, segment_rows,
+                             validate_shape)
 from pooled_attention_replay import bundle_batches
 from serving_buffer_pool import PackedReplayTables
 import verifier_engine
@@ -205,6 +207,10 @@ class FakeModelBatch:
         self.pages, self.singleton_pages = integers((rows, page_width)), integers((1, page_width))
         self.singleton_positions = [integers((1,)) for row in range(rows)]
         self.row_pages = [integers((1, page_width)) for row in range(rows)]
+        # Beyond one 32-row tile, the K/V write's per-tile positions and page-table rows
+        # (model_batch.prepare_inputs, packed_cache_writer.py).
+        self.cache_tiles = [cache_tile((first, last), integers((32,)), integers((32, page_width)))
+                            for first, last in (tile_rows(rows) if rows > 32 else ())]
         self.cos = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
         self.sin = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
         self.retained = FakeRetained(rows) if options.get('retain_records') else None
@@ -234,9 +240,12 @@ class FakeModelBatch:
             reader.close()
 
     def forward(self, *, sharded_logits):
+        from target_packed_pages import segments
+
         ttnn = type(self).ttnn
         if self.retained is not None and not self.retained.records:
             users = len(self.pack)
+            spans, total = segments(self.pack)
             for layer, helper in enumerate(self.helpers):
                 pieces = tuple(dict(states=SimpleNamespace(name='states%d.%d' % (user, layer)),
                                     packed_conv_states=[SimpleNamespace(name='conv%d.%d.%d' % (user, layer, tap)) for tap in range(4)])
@@ -246,7 +255,7 @@ class FakeModelBatch:
                                                               for user in range(users)))
                 # model_batch appends each user's carry for this layer as the record's checkpoint
                 carries = tuple(user['slots'][layer] for user in self.pack)
-                self.retained.records.append((state, dict(segment_results=pieces, segments=((0, 16), (16, 32))), carries))
+                self.retained.records.append((state, dict(segment_results=pieces, segments=spans), carries))
         return ttnn.allocate((1, 1, self.rows, 124160), 'bf16', 'tile')
 
 
@@ -287,15 +296,26 @@ def entry(owner, tokens):
 
 
 class BlockFixture(unittest.TestCase):
+    """The M1 block: two T16 users in 32 rows over a two-slot pool. FourUserFixture below
+    is the same fixture at the M3 shape; everything here scales from USERS."""
+
+    USERS = 2
+
+    def shape(self):
+        return {2: m1_shape, 4: m3_shape}[self.USERS](PAGE_WIDTH)
+
     def setUp(self):
         verifier_engine.note_prefill()
         self.ttnn = FakeTTNN()
         FakeModelBatch.ttnn = self.ttnn
         FakeModelBatch.instances, FakeFeatures.instances = [], []
         self.helpers = helpers(self.ttnn)
-        self.pool, self.weights, self.model = pool(self.ttnn, self.helpers), weights(), model()
+        self.pool = pool(self.ttnn, self.helpers, users=self.USERS,
+                         packed={(self.USERS, 16): packed_tables(self.ttnn, users=self.USERS)})
+        self.weights, self.model = weights(), model()
         self.prepared, self.traces = [], count(1)
-        self.ids = self.ttnn.allocate((32,), 'uint32', 'row_major', torch.arange(1000, 1032, dtype=torch.int32))
+        rows = self.shape().block_rows
+        self.ids = self.ttnn.allocate((rows,), 'uint32', 'row_major', torch.arange(1000, 1000 + rows, dtype=torch.int32))
 
         def prepare(mesh, layers, prefix):
             self.prepared.append((layers, prefix))
@@ -307,7 +327,7 @@ class BlockFixture(unittest.TestCase):
         for target, value in (('ModelBatch', FakeModelBatch), ('PreparedTargetFeatures', FakeFeatures),
                               ('prepare', Mock(side_effect=prepare)),
                               ('capture_operation', Mock(side_effect=capture_operation)),
-                              ('sample_rows', Mock(return_value=self.ids))):
+                              ('sample_rows', Mock(side_effect=lambda *args, **options: self.ids))):
             patcher = patch.object(packed_verifier, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -318,7 +338,7 @@ class BlockFixture(unittest.TestCase):
 
     def build(self, **options):
         return PackedVerifierEngine(self.ttnn, self.model, self.helpers, 'sampler', pool=self.pool,
-            shared_weights=self.weights, shape=m1_shape(PAGE_WIDTH), feature_taps=TAPS, **options)
+            shared_weights=self.weights, shape=self.shape(), feature_taps=TAPS, **options)
 
     def two(self, reversed_order=True, rows=16):
         """Two admitted requests: A in pool slot 0, B in pool slot 1, presented B first
@@ -476,15 +496,26 @@ class ConstructionTests(BlockFixture):
         self.assertFalse(self.pool.packed[(2, 16)].taken, 'nothing refused took the pool set')
 
     def test_shapes_are_keyed_on_the_whole_block(self):
+        import packed_shapes
+
+        # One definition: the engine takes its shape and validation from packed_shapes.
+        self.assertIs(PackedShape, packed_shapes.PackedShape)
+        self.assertIs(validate_shape, packed_shapes.validate_shape)
         self.assertEqual(m1_shape(PAGE_WIDTH), PackedShape(2, 16, 32, PAGE_WIDTH, PAGE_WIDTH * 64))
+        self.assertEqual(m3_shape(PAGE_WIDTH), PackedShape(4, 16, 64, PAGE_WIDTH, PAGE_WIDTH * 64))
         validate_shape(PackedShape(4, 8, 32, 512, 512 * 64))
         for broken in (PackedShape(2, 16, 32, PAGE_WIDTH, PAGE_WIDTH * 64 + 1), PackedShape(3, 16, 32, 68, 68 * 64),
-                       PackedShape(2, 16, 64, 68, 68 * 64), PackedShape(2, 16, 32, 67, 67 * 64), (2, 16, 32, 68, 68 * 64)):
+                       PackedShape(2, 16, 64, 68, 68 * 64), PackedShape(2, 16, 32, 67, 67 * 64), (2, 16, 32, 68, 68 * 64),
+                       PackedShape(8, 16, 128, 68, 68 * 64), PackedShape(4, 16, 64, 68, 68 * 64 + 1)):
             with self.assertRaises(ValueError):
                 validate_shape(broken)
         self.assertEqual([segment_rows(m1_shape(PAGE_WIDTH), user) for user in (0, 1)], [(0, 16), (16, 32)])
+        self.assertEqual([segment_rows(m3_shape(PAGE_WIDTH), user) for user in range(4)],
+                         [(0, 16), (16, 32), (32, 48), (48, 64)])
         with self.assertRaises(ValueError):
             segment_rows(m1_shape(PAGE_WIDTH), 2)
+        with self.assertRaises(ValueError):
+            segment_rows(m3_shape(PAGE_WIDTH), 4)
 
 
 class RoundTests(BlockFixture):
@@ -705,6 +736,200 @@ class RoundTests(BlockFixture):
         self.assertEqual((block.taps, block.checkpoints, block.initial, block.carries, block.trace), ([], [], [], [], None))
         self.assertEqual((block.replay, block.replay_tables, block.replay_addresses), (None, [], []))
         block.close()
+
+
+class FourUserFixture(BlockFixture):
+    """The M3 block: four T16 users in 64 rows over a four-slot pool holding the (4, 16)
+    replay tables. Same fakes, same block class; only the shape differs."""
+
+    USERS = 4
+    # A in slot 0, B in slot 1, C in slot 2, D in slot 3: their pages, positions and tokens.
+    PAGES = (7, 11, 13, 17)
+    POSITIONS = (4100, 4200, 4150, 4300)
+    TOKENS = (10, 50, 30, 70)
+
+    def four(self, order=(2, 0, 3, 1), rows=16):
+        """Four admitted requests, presented in `order` (C, A, D, B by default), every one
+        inside the block's native chunk family [4096, 4352)."""
+        owners = [request(name, self.pool.slots[index], self.POSITIONS[index], self.PAGES[index])
+                  for index, name in enumerate('ABCD')]
+        return [entry(owners[index], range(self.TOKENS[index], self.TOKENS[index] + rows)) for index in order]
+
+
+class FourUserConstructionTests(FourUserFixture):
+    def test_every_per_segment_structure_scales_to_four_users_and_sixty_four_rows(self):
+        block = self.build()
+        self.assertEqual((block.phase, block.users, block.rows_per_user, block.block_rows), ('idle', 4, 16, 64))
+        self.assertEqual(block.shape, m3_shape(PAGE_WIDTH))
+        # the initial snapshot plus one checkpoint set per user, before any capture
+        self.assertEqual([helper.allocate.call_count for helper in self.helpers], [5] * GDN_LAYERS)
+        self.assertEqual([len(checkpoints) for checkpoints in block.checkpoints], [GDN_LAYERS] * 4)
+        self.assertEqual(len(block.carries), 4)
+        # the five taps hold the whole 64-row block
+        self.assertEqual([(tap.shape, tap.dtype, tap.layout, tap.mapper) for tap in block.taps],
+                         [((1, 1, 64, 5120), 'bf16', 'tile', ('shard', 3))] * 5)
+        warm, captured = FakeModelBatch.instances
+        self.assertIs(block.fixture, captured)
+        for fixture in (warm, captured):
+            self.assertEqual((fixture.rows, fixture.start, fixture.prefix), (64, block.capture_position, 64))
+            self.assertEqual([user['rows'] for user in fixture.pack], [16] * 4)
+            self.assertEqual([user['prefix'] for user in fixture.pack], [0] * 4)
+            self.assertIs(fixture.options['packed_replay_pages'], block.replay_tables)
+            self.assertTrue(fixture.options['commit_only_gdn'] and fixture.options['attention_replay']
+                            and fixture.options['ordered_cache'])
+            # segment u restores from and commits into pool slot u's carry
+            for user, participant in enumerate(fixture.pack):
+                self.assertEqual(list(participant['checkpoints']), block.checkpoints[user])
+                lent = self.pool.slots[user].verifier.carry
+                self.assertTrue(all(a is b for mine, theirs in zip(participant['slots'], lent, strict=True)
+                                    for a, b in zip(mine, theirs, strict=True)))
+            # two 32-row K/V cache tiles, each with its own positions word and page-table rows
+            self.assertEqual([tile.rows for tile in fixture.cache_tiles], [(0, 32), (32, 64)])
+            self.assertEqual([(tile.positions.shape, tile.pages.shape) for tile in fixture.cache_tiles],
+                             [((32,), (32, PAGE_WIDTH))] * 2)
+        # the (4, 16) table set, one 16-row reader per user in the block's family
+        tables = self.pool.packed[(4, 16)]
+        self.assertTrue(tables.taken)
+        self.assertIs(block.replay, tables)
+        self.assertEqual(block.replay_capacity, FAMILY)
+        reader = captured.replay_reader
+        self.assertEqual((reader.rows, reader.capacity, reader.starts, len(reader.readers)), (64, FAMILY, (4096,) * 4, 4))
+        self.assertEqual(reader.segments, ((0, 16), (16, 32), (32, 48), (48, 64)))
+        self.assertEqual(len({id(own.positions) for own in reader.readers}), 4)
+        for user, own in enumerate(reader.readers):
+            self.assertEqual(own.rows, 16)
+            self.assertEqual([entry[1] for entry in own.metadata], tables.replay_pages[FAMILY][user])
+            self.assertEqual([tuple(entry[1].shape) for entry in own.metadata], [(3, 68), (1, 68)])
+        self.assertEqual(block.describe()['attention']['bundles_per_user'], [2, 2, 2, 2])
+        # one verify trace, then sixteen commit traces per user: sixty-four, each ending in
+        # that user's own carry (packed_shapes.commit_traces)
+        self.assertEqual(block.trace, 'trace1')
+        self.assertEqual([sorted(commits) for commits in block.commits], [list(range(1, 17))] * 4)
+        self.assertEqual(block.describe()['commit_traces'], 64)
+        self.assertEqual([prefix for layers, prefix in self.prepared], [*range(1, 17)] * 4)
+        for index, (layers, prefix) in enumerate(self.prepared):
+            user = index // 16
+            self.assertEqual(len(layers), GDN_LAYERS)
+            for layer, (record, slot) in enumerate(zip(layers, self.pool.slots[user].verifier.carry, strict=True)):
+                self.assertEqual(len(record), 20)
+                self.assertEqual([value.name for value in record[:5]], ['entry%d.%d' % (user, layer)] * 5)
+                self.assertEqual(record[5].name, 'states%d.%d' % (user, layer))
+                self.assertTrue(all(a is b for a, b in zip(record[15:], slot, strict=True)))
+        # every carry of the four slots zeroed again after the commit warming
+        pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
+        self.assertEqual(len(self.ttnn.zeroed), len(pooled))
+        self.assertIsNone(verifier_engine._resident)
+
+    def test_a_pool_short_of_slots_or_of_the_four_user_tables_refuses_the_block(self):
+        cases = {'a two-slot pool': pool(self.ttnn, self.helpers, users=2, packed={(4, 16): packed_tables(self.ttnn, users=4)}),
+                 'a four-slot pool holding only the M1 tables': pool(self.ttnn, self.helpers, users=4),
+                 'four-user tables lacking the block family': pool(self.ttnn, self.helpers, users=4,
+                     packed={(4, 16): packed_tables(self.ttnn, users=4, families=(4096,))})}
+        for name, refused in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                PackedVerifierEngine(self.ttnn, self.model, self.helpers, 'sampler', pool=refused,
+                                     shared_weights=self.weights, shape=m3_shape(PAGE_WIDTH), feature_taps=TAPS)
+        for helper in self.helpers:
+            helper.allocate.assert_not_called()
+        self.assertEqual((FakeModelBatch.instances, self.prepared), ([], []))
+
+
+class FourUserRoundTests(FourUserFixture):
+    def test_one_trace_serves_four_users_each_from_the_segment_its_carry_binds(self):
+        block = self.build()
+        for helper in self.helpers:
+            helper.restore.reset_mock()
+            helper.save.reset_mock()
+        entries = self.four()
+        executed, copies = len(self.ttnn.executed), len(self.ttnn.host_copies)
+        predictions, metrics = block.verify(entries)
+        # presented C, A, D, B: segments 2, 0, 3, 1, never the entry index
+        self.assertEqual(metrics['segments'], (2, 0, 3, 1))
+        self.assertEqual(metrics['users'], 4)
+        self.assertEqual(predictions, [list(range(1032, 1048)), list(range(1000, 1016)),
+                                       list(range(1048, 1064)), list(range(1016, 1032))])
+        fixture = block.fixture
+        # each user's tokens, positions and pages in its own segment's rows
+        for user in range(4):
+            rows = slice(16 * user, 16 * user + 16)
+            self.assertEqual(fixture.tokens.value[rows, 0].tolist(), list(range(self.TOKENS[user], self.TOKENS[user] + 16)))
+            self.assertEqual(fixture.positions.value[rows].tolist(), list(range(self.POSITIONS[user], self.POSITIONS[user] + 16)))
+            self.assertTrue(bool((fixture.pages.value[rows] == self.PAGES[user]).all()))
+            self.assertEqual([table.value[0, 0].item() for table in fixture.row_pages[rows]], [self.PAGES[user]] * 16)
+            self.assertEqual([position.value.item() for position in fixture.singleton_positions[rows]],
+                             list(range(self.POSITIONS[user], self.POSITIONS[user] + 16)))
+        self.assertEqual((fixture.cos.value.shape, fixture.sin.value.shape), ((1, 64, 1, 64), (1, 64, 1, 64)))
+        # each user's own reader: its word at its start, its bundle tables holding its pages
+        reader = fixture.replay_reader
+        self.assertEqual(reader.starts, self.POSITIONS)
+        self.assertEqual([own.positions.value.tolist()[0] for own in reader.readers], list(self.POSITIONS))
+        for own, page in zip(reader.readers, self.PAGES, strict=True):
+            for bundle, table, mask, config in own.metadata:
+                self.assertEqual(tuple(table.value.shape), (len(bundle), PAGE_WIDTH))
+                self.assertTrue(bool((table.value == page).all()))
+        # and the two cache tiles: rows [0, 32) are A's and B's, rows [32, 64) C's and D's
+        first, second = fixture.cache_tiles
+        self.assertEqual(first.positions.value.tolist(), [*range(4100, 4116), *range(4200, 4216)])
+        self.assertEqual(second.positions.value.tolist(), [*range(4150, 4166), *range(4300, 4316)])
+        self.assertEqual(first.pages.value[:, 0].tolist(), [7] * 16 + [11] * 16)
+        self.assertEqual(second.pages.value[:, 0].tolist(), [13] * 16 + [17] * 16)
+        # tokens, positions, cos, sin, pages, 64 singleton positions, 64 row tables, four
+        # positions words, four users x two bundle tables, two tiles x (positions, pages)
+        self.assertEqual(len(self.ttnn.host_copies) - copies, 149)
+        self.assertEqual(metrics['staged_buffers'], 149)
+        self.assertEqual(self.ttnn.executed[executed:], ['trace1'])
+        for helper in self.helpers:
+            helper.restore.assert_not_called()
+        self.assertEqual((block.phase, block.pending_segments), ('verified', {0, 1, 2, 3}))
+        # taps at each user's row offset
+        self.assertEqual([(block.features(segment).row_offset, block.features(segment).rows) for segment in range(4)],
+                         [(0, 16), (16, 16), (32, 16), (48, 16)])
+        # commits in entries order, each through its own prefix trace, the last one the fence
+        retained = fixture.retained
+        for segment, prefix in zip(metrics['segments'], (9, 16, 0, 4)):
+            block.commit_user(segment, prefix)
+        self.assertEqual(retained.commits, [(2, 9), (0, 16), (3, 0), (1, 4)])
+        self.assertEqual([call.kwargs['synchronize'] for call in retained.commit_user.call_args_list],
+                         [False, False, False, True])
+        self.assertEqual(self.ttnn.executed[executed + 1:], [block.commits[2][9], block.commits[0][16], block.commits[1][4]])
+        self.assertEqual((block.phase, block.pending_segments), ('idle', set()))
+        # the next round, in another order, replays the same trace
+        predictions, metrics = block.verify(self.four(order=(0, 1, 2, 3)))
+        self.assertEqual(metrics['segments'], (0, 1, 2, 3))
+        self.assertEqual(predictions[3], list(range(1048, 1064)))
+        retained.replay.assert_called_once()
+        self.assertEqual(block.rounds, 2)
+
+    def test_fewer_than_four_entries_or_a_foreign_engine_is_refused_before_the_trace(self):
+        block = self.build()
+        executed, copies = len(self.ttnn.executed), len(self.ttnn.host_copies)
+        cases = {'three survivors': self.four()[:3], 'two survivors': self.four()[:2], 'one survivor': self.four()[:1]}
+        stranger = request('E', SimpleNamespace(verifier=SimpleNamespace(carry=snapshot_set(self.ttnn))), 4100, 3)
+        cases['an engine outside the pool'] = [*self.four()[:3], entry(stranger, range(16))]
+        # the first three entries are C, A and D (slots 2, 0 and 3): E through slot 0 again
+        twice = request('E', self.pool.slots[0], 4100, 3)
+        cases['two entries through one slot'] = [*self.four()[:3], entry(twice, range(16))]
+        cases['a narrow ticket'] = [*self.four()[:3], entry(request('B', self.pool.slots[1], 4200, 11), range(8))]
+        for name, entries in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                block.verify(entries)
+            self.assertEqual(block.phase, 'idle', name)
+        self.assertEqual((len(self.ttnn.executed), len(self.ttnn.host_copies)), (executed, copies))
+
+    def test_close_releases_the_verify_trace_and_sixty_four_commit_traces(self):
+        block = self.build()
+        block.verify(self.four())
+        for segment in range(4):
+            block.commit_user(segment, 0)
+        tables = self.pool.packed[(4, 16)]
+        block.close()
+        self.assertEqual(block.phase, 'closed')
+        self.assertEqual(sorted(self.ttnn.released), sorted('trace%d' % index for index in range(1, 66)))
+        self.assertFalse(tables.taken)
+        freed = self.ttnn.deallocated
+        self.assertFalse(any(any(value is entry for entry in freed) for value in tables.tensors))
+        pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
+        self.assertFalse(any(any(value is entry for entry in freed) for value in pooled))
 
 
 class ProjectionOffsetTests(unittest.TestCase):

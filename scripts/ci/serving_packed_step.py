@@ -16,13 +16,19 @@ carry its engine borrowed (`PackedVerifierEngine.segment_of`, returned per entry
 `metrics['segments'][i]`) - never by its index in the entries: probe 35436807668 saw the
 pair presented as ['B', 'A'].
 
+Nothing here is written for two users: the block's shape (packed_shapes.PackedShape) says
+how many entries a round takes - two T16 users in the 32-row M1 block, four in the 64-row
+M3 block - and each entry's draft proposal stays its own pass in the hook (one per bridge,
+serving_worker_hook._drafts), before this one verify.
+
 A round the block cannot serve goes to the sequential step WHOLE: a ticket narrower than
 the block's rows per user (greedy_session narrows the last block of a budget), more or
-fewer entries than the block's users (the survivor after a partner finished), an engine
-the block was not captured against, or a cancellation already raised before any device
-work. The two are never mixed within a round. Either way native GDN slot 0 is trusted by
-nobody afterwards (`verifier_engine.note_packed_step`): the sequential step restores each
-user's carry first, and the packed trace restores every segment's carry inside itself.
+fewer entries than the block's users (the survivors after a partner finished - one of two,
+or one to three of four), an engine the block was not captured against, or a cancellation
+already raised before any device work. The two are never mixed within a round. Either way
+native GDN slot 0 is trusted by nobody afterwards (`verifier_engine.note_packed_step`):
+the sequential step restores each user's carry first, and the packed trace restores every
+segment's carry inside itself.
 
 Every user's commit runs in entries order; the last one is the round's fence. The block
 knows it is last - `PackedVerifierEngine.commit_user` fences exactly the commit that

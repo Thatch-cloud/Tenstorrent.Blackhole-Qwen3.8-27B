@@ -1,14 +1,17 @@
-"""The M3 packed verify geometry: four T16 users in one 64-row block.
+"""The packed verify geometries: two T16 users in one 32-row block (M1), four in one
+64-row block (M3).
 
-`packed_verifier.PackedShape` keys every shape-dependent choice of the packed block on
-(users, rows_per_user, block_rows, page_width, capacity); the engine's `validate_shape`
-and `m1_shape` stop at the 32-row block. This module holds the 64-row shape and its
-bounds apart from the engine, so M3's geometry is defined, tested and budgeted before
-the engine takes it (docs/packed-device-step-plan-2026-09-20.md section 5; part 2 wires
-`m3_shape` into `PackedVerifierEngine`, which should then take `PackedShape` from here).
+`PackedShape` keys every shape-dependent choice of the packed block
+(packed_verifier.PackedVerifierEngine) on (users, rows_per_user, block_rows, page_width,
+capacity): the segments bound to pool slots, the checkpoint sets, the taps, the per-user
+replay readers, the staged words and tables, the commit traces. The engine takes its
+shape and validation from here, so the geometry is defined, tested and budgeted in one
+place (docs/packed-device-step-plan-2026-09-20.md section 5), and `serving_shape` is the
+one rule the serving runtime applies: two scheduler requests take M1, four take M3, any
+other count builds no block.
 
-Only the VERIFY block is 64 rows. The draft proposes in 32-row passes, two T16 users
-each (dflash_packed_proposal.py, BLOCK WIDTH), and each user's commit is that user's
+Only the VERIFY block is 64 rows. The draft proposes per user in 32-row passes (16 live
+rows each, dflash_packed_proposal.py, BLOCK WIDTH), and each user's commit is that user's
 16-row histories (gdn_records.RetainedGDNBlock.commit_user).
 """
 
@@ -20,8 +23,9 @@ MINIMUM_PAGE_WIDTH = 68
 # A user's share of the block is a captured verify width (verifier_engine.VERIFY_WIDTHS
 # below the M3 block itself).
 ROWS_PER_USER = (1, 2, 4, 8, 16, 32)
-# 64 is M3; every narrower width is the 32-row block's (packed_verifier.validate_shape).
+# 64 is M3; every narrower width is the 32-row block's.
 BLOCK_ROWS = (2, 4, 8, 16, 32, 64)
+M1_USERS, M1_ROWS_PER_USER, M1_BLOCK_ROWS = 2, 16, 32
 M3_USERS, M3_ROWS_PER_USER, M3_BLOCK_ROWS = 4, 16, 64
 
 
@@ -45,10 +49,31 @@ def validate_shape(shape):
     return shape
 
 
+def m1_shape(page_width):
+    """Two T16 users in one 32-row block over the serving page-table width."""
+    return validate_shape(PackedShape(M1_USERS, M1_ROWS_PER_USER, M1_BLOCK_ROWS,
+                                      page_width, page_width * PAGE_TOKENS))
+
+
 def m3_shape(page_width):
     """Four T16 users in one 64-row block over the serving page-table width."""
     return validate_shape(PackedShape(M3_USERS, M3_ROWS_PER_USER, M3_BLOCK_ROWS,
                                       page_width, page_width * PAGE_TOKENS))
+
+
+# The block the serving runtime builds for a scheduler request count: the T16 share is
+# fixed by the draft (16 rows per user), so the count picks the block width.
+SERVING_SHAPES = {M1_USERS: m1_shape, M3_USERS: m3_shape}
+
+
+def serving_shape(users, page_width):
+    """The packed block for this many scheduler requests, or None when no captured
+    block serves that count: two requests take M1, four take M3, any other count
+    stays on the sequential step (serving_runtime.py)."""
+    if type(users) is not int or users < 1:
+        raise ValueError('Positive integer scheduler request count required')
+    builder = SERVING_SHAPES.get(users)
+    return None if builder is None else builder(page_width)
 
 
 def segment_rows(shape, segment):

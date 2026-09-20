@@ -67,6 +67,9 @@ jobs:
           for name in pooled_attention_replay.py target_packed_pages.py dflash_batched_mask.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in packed_shapes.py packed_cache_writer.py force_argmax.py gdn_prefix.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"

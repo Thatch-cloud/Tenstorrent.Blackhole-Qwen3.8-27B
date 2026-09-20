@@ -22,7 +22,7 @@ from serving_fast_request import CommittedOutput
 import serving_packed_step
 from serving_packed_step import audit_log, describe, packed_device_step
 from serving_sequential_step import describe as describe_sequential
-from test_packed_verifier import PAGE_WIDTH, BlockFixture
+from test_packed_verifier import PAGE_WIDTH, BlockFixture, FourUserFixture
 import verifier_engine
 
 ROWS = 16
@@ -470,6 +470,78 @@ class PackedStepTests(unittest.TestCase):
             self.assertIs(serving_packed_step.audit_enabled(), True)
 
 
+class FourUserStepTests(unittest.TestCase):
+    """The step over the M3 block: four entries in the scheduler's order, one verify, four
+    commits; and rounds the four-user block cannot serve - one to three survivors after
+    partners finished - handed to the sequential step whole."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block = FakeBlock(users=4)
+        self.stepped = []
+
+    def request(self, request_id, segment, position, accept, rows=ROWS):
+        request = FakeRequest(request_id, position, self.stepped)
+        self.block.bind(request.engine, segment)
+        request.propose(self.block.predictions_for(segment), accept, rows)
+        return request
+
+    def four(self):
+        """A..D in pool slots 0..3, presented C, A, D, B."""
+        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
+                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
+        return [entry(owners[index]) for index in (2, 0, 3, 1)]
+
+    def step(self, entries, cancelled=None):
+        return packed_device_step(entries, cancelled=cancelled or (lambda: False), block=self.block)
+
+    def test_one_verify_serves_four_entries_and_each_commits_its_own_segment_in_order(self):
+        entries = self.four()
+        outputs = self.step(entries)
+        self.assertEqual(self.block.calls, [('verify', ['C', 'A', 'D', 'B']), ('commit', 2, 1), ('commit', 0, 16),
+                                            ('commit', 3, 13), ('commit', 1, 10)])
+        self.assertEqual(self.stepped, [])
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D', 'B'])
+        self.assertEqual(outputs, [CommittedOutput('C', tuple(self.block.predictions_for(2)[:1]), 701, False),
+                                   CommittedOutput('A', tuple(self.block.predictions_for(0)[:16]), 116, False),
+                                   CommittedOutput('D', tuple(self.block.predictions_for(3)[:13]), 5013, False),
+                                   CommittedOutput('B', tuple(self.block.predictions_for(1)[:10]), 3010, False)])
+        for item, segment in zip(entries, (2, 0, 3, 1), strict=True):
+            request = item['request']
+            self.assertEqual(request.engine.adopted, [(item['ticket'], self.block, segment)])
+            self.assertEqual((request.session.phase, request.engine.phase, request.busy), ('idle', 'idle', False))
+            self.assertEqual(request.engine.position, request.session.position)
+        # C accepted nothing: its publication still ran, at prefix 1 (the target's own token)
+        self.assertEqual(entries[0]['request'].runtime.published, [1])
+        self.assertEqual((self.block.phase, self.block.pending_segments, self.block.rounds), ('idle', set(), 1))
+        self.assertIsNone(verifier_engine._resident)
+
+    def test_survivors_of_a_four_user_block_take_the_sequential_step_whole(self):
+        entries = self.four()
+        # two of four finished: the two survivors, in the scheduler's order, one step each
+        for survivors in (entries[:2], entries[1:], entries[:1], entries[:3]):
+            self.stepped.clear()
+            outputs = self.step(survivors)
+            self.assertEqual(self.stepped, [(item['request_id'], False) for item in survivors])
+            self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in survivors])
+            self.assertEqual(self.block.calls, [], 'the four-user block was not touched')
+        # five entries are no block either
+        fifth = self.request('E', 0, 9000, accept=3)
+        self.stepped.clear()
+        self.step([*entries, entry(fifth)])
+        self.assertEqual([item[0] for item in self.stepped], ['C', 'A', 'D', 'B', 'E'])
+        self.assertEqual(self.block.calls, [])
+
+    def test_a_cancellation_between_commits_aborts_the_users_still_pending(self):
+        entries = self.four()
+        outputs = self.step(entries, cancelled=answers(False, False, False, True))
+        self.assertEqual(self.block.calls, [('verify', ['C', 'A', 'D', 'B']), ('commit', 2, 1), ('commit', 0, 16),
+                                            ('commit', 3, 0), ('commit', 1, 0)])
+        self.assertEqual([(output.request_id, output.cancelled) for output in outputs],
+                         [('C', False), ('A', False), ('D', True), ('B', True)])
+        self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
+
+
 class RealBlockTests(BlockFixture):
     """The step over the real PackedVerifierEngine (test_packed_verifier's fakes underneath:
     a fake ttnn, a fake ModelBatch retaining one record per layer, the commit DMA recorded).
@@ -547,6 +619,69 @@ class RealBlockTests(BlockFixture):
         self.assertEqual(stepped, [('B', False), ('A', False)])
         self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
         self.assertEqual((self.ttnn.executed[executed:], block.rounds, block.phase), ([], 0, 'idle'))
+
+
+class FourUserRealBlockTests(FourUserFixture):
+    """The step over the real M3 block: four requests admitted through pool slots 0..3,
+    presented C, A, D, B - each served from its slot's segment, its rows staged into that
+    segment, its reader and cache tile carrying its pages, the last commit the fence."""
+
+    def setUp(self):
+        super().setUp()
+        self.ids.value = torch.arange(0, 64, dtype=torch.int32)
+
+    def requests(self):
+        stepped = []
+        owners = []
+        for index, name in enumerate('ABCD'):
+            owner = FakeRequest(name, self.POSITIONS[index], stepped, carry=self.pool.slots[index].verifier.carry)
+            owner.engine.pages = torch.full((1, PAGE_WIDTH), self.PAGES[index], dtype=torch.int32)
+            owners.append(owner)
+        return owners, stepped
+
+    def test_the_real_block_serves_four_entries_from_their_slots_segments(self):
+        block = self.build()
+        owners, stepped = self.requests()
+        accepts = (15, 9, 0, 12)
+        for index, owner in enumerate(owners):
+            owner.propose(list(range(16 * index, 16 * index + 16)), accept=accepts[index])
+        entries = [entry(owners[index]) for index in (2, 0, 3, 1)]
+        executed = len(self.ttnn.executed)
+        outputs = packed_device_step(entries, cancelled=lambda: False, block=block)
+        self.assertEqual(stepped, [])
+        self.assertEqual(outputs, [CommittedOutput('C', (32,), 4151, False),
+                                   CommittedOutput('A', tuple(range(0, 16)), 4116, False),
+                                   CommittedOutput('D', tuple(range(48, 61)), 4313, False),
+                                   CommittedOutput('B', tuple(range(16, 26)), 4210, False)])
+        fixture = block.fixture
+        for index, owner in enumerate(owners):
+            rows = slice(16 * index, 16 * index + 16)
+            self.assertEqual(fixture.tokens.value[rows, 0].tolist()[0], 5, 'the seed token leads every segment')
+            self.assertTrue(bool((fixture.pages.value[rows] == self.PAGES[index]).all()))
+            self.assertEqual(fixture.positions.value[rows].tolist(), list(range(self.POSITIONS[index], self.POSITIONS[index] + 16)))
+            self.assertEqual([(ticket.request_id, segment) for ticket, unused, segment in owner.engine.adopted],
+                             [(owner.session.request_id, index)])
+        self.assertEqual(fixture.replay_reader.starts, self.POSITIONS)
+        self.assertEqual([bool((entry[1].value == page).all()) for own, page in zip(fixture.replay_reader.readers, self.PAGES)
+                          for entry in own.metadata], [True] * 8)
+        self.assertEqual([tile.pages.value[:, 0].tolist() for tile in fixture.cache_tiles],
+                         [[7] * 16 + [11] * 16, [13] * 16 + [17] * 16])
+        # the one verify trace, then C's prefix-1, A's prefix-16, D's prefix-13 and B's prefix-10 traces
+        self.assertEqual(self.ttnn.executed[executed:], ['trace1', block.commits[2][1], block.commits[0][16],
+                                                         block.commits[3][13], block.commits[1][10]])
+        retained = fixture.retained
+        self.assertEqual(retained.commits, [(2, 1), (0, 16), (3, 13), (1, 10)])
+        self.assertEqual([call.kwargs['synchronize'] for call in retained.commit_user.call_args_list],
+                         [False, False, False, True])
+        self.assertEqual((block.phase, block.pending_segments, block.rounds), ('idle', set(), 1))
+        self.assertIsNone(verifier_engine._resident)
+        # two of four finished: the survivors' round goes to the sequential step, the block untouched
+        for owner in owners[:2]:
+            owner.propose(list(range(16)), accept=3)
+        outputs = packed_device_step([entry(owners[1]), entry(owners[0])], cancelled=lambda: False, block=block)
+        self.assertEqual(stepped, [('B', False), ('A', False)])
+        self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
+        self.assertEqual((len(self.ttnn.executed) - executed, block.rounds), (5, 1))
 
 
 if __name__ == '__main__':

@@ -379,7 +379,8 @@ class PackedReaderTests(unittest.TestCase):
         cases = {'one table set short': dict(storage=self.tables(1)), 'one table set over': dict(storage=self.tables(3)),
                  'one host table short': dict(hosts=self.hosts(1)),
                  'segments not from zero': dict(segments=((16, 32), (32, 48))), 'segments with a gap': dict(segments=((0, 16), (20, 36))),
-                 'a four-row segment': dict(segments=((0, 4), (4, 8))), 'past the block': dict(segments=((0, 32), (32, 64))),
+                 'a four-row segment': dict(segments=((0, 4), (4, 8))),
+                 'past the block': dict(segments=((0, 32), (32, 64), (64, 96))),
                  'no segments': dict(segments=()), 'short context': dict(short_context=True),
                  'tables of another geometry': dict(storage=[pooled_tables([(3, 68), (1, 68)]), pooled_tables([(2, 68)])])}
         for name, overrides in cases.items():
@@ -388,6 +389,52 @@ class PackedReaderTests(unittest.TestCase):
         self.assertEqual(copies, [])
         self.assertEqual(validate_segments(((0, 8), (8, 16), (16, 24), (24, 32))), ((0, 8), (8, 16), (16, 24), (24, 32)))
         self.assertEqual(validate_segments([[0, 32]]), ((0, 32),))
+        # 64 rows is the widest block (M3): four 16-row users, or two 32-row ones
+        self.assertEqual(validate_segments(((0, 16), (16, 32), (32, 48), (48, 64))), ((0, 16), (16, 32), (32, 48), (48, 64)))
+        self.assertEqual(validate_segments(((0, 32), (32, 64))), ((0, 32), (32, 64)))
+        with self.assertRaises(ValueError):
+            validate_segments(((0, 32), (32, 64), (64, 96)))
+        with self.assertRaises(ValueError):
+            validate_segments(((0, 32), (32, 64)), block_rows_limit=32)
+
+    def test_four_sixteen_row_users_fill_the_sixty_four_row_block_a_segment_at_a_time(self):
+        """The M3 block: four pooled 16-row readers, a (1, 64, 12, 256) query dispatched in
+        four slices and reassembled in row order."""
+        segments = ((0, 16), (16, 32), (32, 48), (48, 64))
+        reader, storage, operations, copies, events = self.build(segments=segments)
+        self.assertEqual((reader.rows, reader.segments, len(reader.readers)), (64, segments, 4))
+        self.assertEqual([own.rows for own in reader.readers], [16] * 4)
+        self.assertEqual(reader.starts, (4096,) * 4)
+        for user, own in enumerate(reader.readers):
+            self.assertEqual(own.borrowed, storage[user])
+            for table, batches in zip(storage[user], (3, 1), strict=True):
+                self.assertTrue(torch.equal(table.value, torch.full((batches, 68), 7 + 4 * user, dtype=torch.int32)))
+        self.assertEqual(len({id(own.positions) for own in reader.readers}), 4)
+        served = []
+
+        def attention(mesh, ops, rows, keys, values, metadata, owned, **kwargs):
+            served.append((rows.name, [entry[1] for entry in metadata]))
+            result = SimpleNamespace(name='out%s' % rows.name[4:])
+            owned.append(result)
+            return result
+
+        with patch('attention_replay.addresses', side_effect=lambda operations, value: (id(value), id(value))), \
+                patch('attention_replay.refresh_mask', side_effect=lambda *args: events.append(('mask',))), \
+                patch('attention_replay.execute', side_effect=attention), patch('attention_replay.release_owned'):
+            result = reader(SimpleNamespace(shape=(1, 64, 12, 256)), object(), object(), scale=0.0625, memory_config='L1')
+        self.assertEqual(result.name, 'joined')
+        self.assertEqual(served, [('rows%d' % first, storage[user]) for user, (first, last) in enumerate(segments)])
+        self.assertEqual([event for event in events if event[0] == 'slice'],
+                         [('slice', (0, first, 0, 0), (1, last, 12, 256), 'dram') for first, last in segments])
+        self.assertEqual([event for event in events if event[0] == 'concat'],
+                         [('concat', ['out0', 'out16', 'out32', 'out48'], 1, 'L1')])
+        self.assertEqual(events.count(('mask',)), 8, 'two bundles per reader, four readers')
+        self.assertEqual((reader.calls, [own.calls for own in reader.readers]), (1, [1] * 4))
+        reader.validate((4100, 4200, 4150, 4300))
+        with self.assertRaises(ValueError):
+            reader.validate((4100, 4200, 4150))
+        with self.assertRaisesRegex(ValueError, 'query geometry'):
+            reader(SimpleNamespace(shape=(1, 32, 12, 256)), None, None, scale=0.0625, memory_config='L1')
 
     def test_unpooled_segments_take_the_pinned_reader_and_upload_their_own_tables(self):
         reader, storage, operations, copies, events = self.build(storage=None)

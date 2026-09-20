@@ -132,12 +132,15 @@ class ModelBatchTests(unittest.TestCase):
                 compact_gdn_enabled(16, True, serial_sdpa, profiler)
 
     def test_prefix_bounds(self):
-        for rows in (1, 2, 4, 8, 16):
+        # 64 is the M3 packed block, four T16 users; 48 and 128 are no block.
+        for rows in (1, 2, 4, 8, 16, 32, 64):
             for prefix in range(rows + 1):
                 validate_checkpoint(rows, prefix)
-        for rows, prefix in ((3, 0), (16, -1), (16, 17), (1, True), (True, 0)):
+        for rows, prefix in ((3, 0), (16, -1), (16, 17), (1, True), (True, 0), (48, 0), (128, 0), (64, 65)):
             with self.assertRaises(ValueError):
                 validate_checkpoint(rows, prefix)
+        self.assertTrue(compact_gdn_enabled(64, True, True, None))
+        self.assertTrue(device_loop_enabled(64, True, True, True, compact_prologue=True, packed_checkpoints=True))
 
     def test_existing_instance_attribute_restored_on_failure(self):
         instance = SimpleNamespace(forward="native")
@@ -580,3 +583,104 @@ class PackedFixtureTests(unittest.TestCase):
         for fixture.pack, decisions[0] in ((None, 2), (packed, 1)):
             with self.assertRaisesRegex(AssertionError, 'once per user'):
                 fixture.run()
+
+
+class WideBlockTests(unittest.TestCase):
+    """The 64-row M3 block (four T16 users) in the fixture: beyond one 32-row tile the
+    pinned per-row serial adapters (attention_batch.py) stop, so the K/V write goes tile by
+    tile through the ordered writer over the fixture's own cache tiles, the attention through
+    the per-user replay readers, and the norm-batch decision is made at the segment's rows -
+    or the block is refused before any upload."""
+
+    def pack(self, users=4, rows=16):
+        return [dict(start=4096 + 16 * index, rows=rows, pages=torch.full((1, 68), index + 1, dtype=torch.int32), prefix=0,
+                     checkpoints=['c'] * 48, slots=[['s%d' % index] * 5] * 48) for index in range(users)]
+
+    def test_a_block_beyond_one_tile_uploads_its_own_cache_tiles(self):
+        ttnn = FakeTTNN()
+        model = SimpleNamespace(mesh_device='mesh', args=SimpleNamespace(rope_head_dim=64, max_seq_len=65536, rope_theta=1e6))
+        positions = torch.cat([torch.arange(4096 + 100 * user, 4096 + 100 * user + 16, dtype=torch.int32) for user in range(4)])
+        pages = torch.arange(68, dtype=torch.int32).reshape(1, 68)
+        page_rows = torch.cat([torch.full((16, 68), user + 1, dtype=torch.int32) for user in range(4)])
+        with patch.dict(sys.modules, {'models.demos.blackhole.qwen36.tt.attention.rope_tp':
+                                      SimpleNamespace(rot_mats_decode=fake_rope(ttnn))}):
+            result = prepare_inputs(ttnn, model, 64, list(range(64)), positions, page_rows, pages, packed=True)
+            narrow = prepare_inputs(ttnn, model, 32, list(range(32)), positions[:32], page_rows[:32], pages, packed=True)
+        self.assertEqual([tile.rows for tile in result.cache_tiles], [(0, 32), (32, 64)])
+        for tile, (first, last) in zip(result.cache_tiles, ((0, 32), (32, 64)), strict=True):
+            self.assertEqual((tile.positions.shape, tile.positions.dtype, tile.positions.layout), ((32,), 'int32', 'row_major'))
+            self.assertEqual((tile.pages.shape, tile.pages.dtype, tile.pages.layout), ((32, 68), 'int32', 'row_major'))
+            self.assertTrue(torch.equal(tile.positions.value, positions[first:last]))
+            self.assertTrue(torch.equal(tile.pages.value, page_rows[first:last]))
+            # owned by the fixture, freed with it, never the pool's
+            self.assertTrue(any(tile.positions is value for value in result.owned))
+            self.assertTrue(any(tile.pages is value for value in result.owned))
+        self.assertEqual(result.borrowed, [])
+        self.assertEqual(len(result.row_tables), 64)
+        self.assertEqual(narrow.cache_tiles, [], 'one tile needs no per-tile metadata')
+
+    def test_the_writer_and_reader_follow_the_block_width(self):
+        from model_batch import attention_reader, cache_writer
+        from packed_cache_writer import SegmentedOrderedCacheWriter, tile
+
+        ttnn = FakeTTNN()
+        tiles = [tile((first, last), ttnn.allocate((32,), 'int32', 'row_major'), ttnn.allocate((32, 68), 'int32', 'row_major'))
+                 for first, last in ((0, 32), (32, 64))]
+        serial = Mock(return_value='serial-writer')
+        with patch('model_batch.OrderedCacheWriter', return_value='ordered-writer') as ordered:
+            self.assertEqual(cache_writer(ttnn, 'mesh', 'kernels', ordered_cache=True, cache_tiles=[], serial=serial), 'ordered-writer')
+            ordered.assert_called_once_with('mesh', ttnn, 'kernels')
+            segmented = cache_writer(ttnn, 'mesh', 'kernels', ordered_cache=True, cache_tiles=tiles, serial=serial)
+            self.assertIsInstance(segmented, SegmentedOrderedCacheWriter)
+            self.assertEqual((segmented.rows, segmented.page_width, [t.rows for t in segmented.tiles]), (64, 68, [(0, 32), (32, 64)]))
+            serial.assert_not_called()
+            self.assertEqual(cache_writer(ttnn, 'mesh', 'kernels', ordered_cache=False, cache_tiles=[], serial=serial), 'serial-writer')
+            serial.assert_called_once_with()
+        serial, grouped = Mock(return_value='serial-reader'), Mock(return_value='grouped-reader')
+        self.assertEqual(attention_reader(replay_reader='replay', serial_sdpa=True, grouped_attention=False,
+                                          serial=serial, grouped=grouped), 'replay')
+        self.assertEqual(attention_reader(replay_reader=None, serial_sdpa=True, grouped_attention=True,
+                                          serial=serial, grouped=grouped), 'grouped-reader')
+        serial.assert_not_called()
+        self.assertEqual(attention_reader(replay_reader=None, serial_sdpa=True, grouped_attention=False,
+                                          serial=serial, grouped=grouped), 'serial-reader')
+        self.assertIsNone(attention_reader(replay_reader=None, serial_sdpa=False, grouped_attention=False,
+                                           serial=serial, grouped=grouped))
+        self.assertEqual((serial.call_count, grouped.call_count), (1, 1))
+
+    def test_a_wide_block_without_the_ordered_writer_and_replay_readers_is_refused_before_any_upload(self):
+        options = dict(serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True, skip_row_clones=True,
+                       hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True, batch_conv=True,
+                       packed_checkpoints=True, retain_records=True, norm_batch=True, commit_only_gdn=True)
+        with patch.dict(sys.modules, {'ttnn': SimpleNamespace()}):
+            for name, overrides in (('no ordered cache', dict(ordered_cache=False, attention_replay=False)),
+                                    ('no replay attention', dict(ordered_cache=True, attention_replay=False))):
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'wider than 32 rows'):
+                    ModelBatch(SimpleNamespace(), [1] * 64, 4096, torch.zeros(1, 68, dtype=torch.int32), [None] * 48, [None] * 48, 64,
+                               pack=self.pack(), **dict(options, **overrides))
+            # the 32-row block takes the serial reader as before, refused only later, by its own checks
+            with self.assertRaisesRegex(ValueError, 'commit-only'):
+                ModelBatch(SimpleNamespace(), [1] * 32, 4096, torch.zeros(1, 68, dtype=torch.int32), [None] * 48, [None] * 48, 32,
+                           pack=self.pack(users=2), **dict(options, ordered_cache=False, attention_replay=False, commit_only_gdn=False))
+
+    def test_the_norm_batch_decision_is_made_at_the_segments_rows(self):
+        from model_batch import recurrence_rows
+
+        self.assertEqual(recurrence_rows(32, None, True), 32)
+        self.assertEqual(recurrence_rows(64, validate_pack(self.pack()), True), 16)
+        self.assertEqual(recurrence_rows(32, validate_pack(self.pack(users=2)), True), 16)
+        self.assertEqual(recurrence_rows(32, validate_pack(self.pack(users=4, rows=8)), False), 8)
+        # segments whose widths decide differently (4 rows: no norm batch; 16: yes) are refused
+        mixed = validate_pack([*self.pack(users=1, rows=4), *self.pack(users=1, rows=4)[:0],
+                               dict(start=5000, rows=4, pages=torch.full((1, 68), 9, dtype=torch.int32), prefix=0,
+                                    checkpoints=['c'] * 48, slots=[['t'] * 5] * 48),
+                               dict(start=6000, rows=8, pages=torch.full((1, 68), 8, dtype=torch.int32), prefix=0,
+                                    checkpoints=['c'] * 48, slots=[['u'] * 5] * 48)])
+        with self.assertRaisesRegex(ValueError, 'same norm-batch decision'):
+            recurrence_rows(16, mixed, True)
+        # unpacked, the block IS the recurrence, and 64 unpacked rows fail closed at the decision itself
+        from gdn_batched_conv import norm_batch_enabled
+
+        self.assertEqual(recurrence_rows(64, None, True), 64)
+        with self.assertRaises(ValueError):
+            norm_batch_enabled(recurrence_rows(64, None, True), True)

@@ -555,7 +555,8 @@ class PackedReplayTableTests(unittest.TestCase):
     def test_the_default_shapes_follow_the_slots_and_each_set_is_shaped_per_user_per_bundle(self):
         # One narrow bucket per slot: the pool's overlap check is quadratic in its tensors.
         with patch.dict('os.environ', {}, clear=True):
-            for users, shapes in ((1, ()), (2, ((2, 16),)), (3, ((2, 16),)), (4, ((2, 16), (4, 8)))):
+            # M1 (2, 16) from two slots, M3 (4, 16) from four; M2's (4, 8) only when named.
+            for users, shapes in ((1, ()), (2, ((2, 16),)), (3, ((2, 16),)), (4, ((2, 16), (4, 16)))):
                 operations = FakeOperations()
                 pool = verifier_pool(operations, users=users, bucket_rows=(8,))
                 self.assertEqual(pool.packed_shapes, shapes, users)
@@ -630,15 +631,42 @@ class PackedReplayTableTests(unittest.TestCase):
 
     def test_shapes_are_checked_before_anything_is_allocated(self):
         operations = FakeOperations()
-        for shapes in (((2, 16), (2, 16)), ((3, 12),), ((2, 4),), ((4, 16),), ((0, 16),), ((2.0, 16),), ((2, 16, 32),), (2, 16)):
+        # (3, 16) and (8, 16) fill no legal block width (48 and 128 rows); 64 is the widest.
+        for shapes in (((2, 16), (2, 16)), ((3, 12),), ((2, 4),), ((3, 16),), ((8, 16),), ((0, 16),), ((2.0, 16),),
+                       ((2, 16, 32),), (2, 16)):
             with self.subTest(shapes=shapes), self.assertRaisesRegex(ValueError, 'Packed replay shapes'):
                 verifier_pool(operations, users=4, packed_shapes=shapes)
         with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
             ServingBufferPool(operations, 'mesh', users=2, packed_shapes=((2, 16),))
         self.assertEqual(operations.live, [])
-        # The M3 shape is not a 32-row block; four T16 users need 64 rows.
-        with self.assertRaises(ValueError):
-            verifier_pool(operations, users=4, packed_shapes=((4, 16),))
+
+    def test_the_m3_shape_lends_four_sixteen_row_table_sets_per_family(self):
+        """The 64-row block's readers: four users, each a 16-row reader's bundles, per family
+        (the serving runtime names exactly this shape for four scheduler requests)."""
+        with patch.dict('os.environ', {}, clear=True):
+            operations = FakeOperations()
+            pool = verifier_pool(operations, users=4, bucket_rows=(8,), packed_shapes=((4, 16),))
+            self.assertEqual((pool.packed_shapes, sorted(pool.packed)), (((4, 16),), [(4, 16)]))
+            tables = pool.packed_replay(4, 16)
+            self.assertEqual((tables.users, tables.rows), (4, 16))
+            self.assertEqual(list(tables.replay_pages), list(REPLAY_CAPACITIES))
+            for capacity, per_user in tables.replay_pages.items():
+                self.assertEqual(len(per_user), 4)
+                for user_tables in per_user:
+                    self.assertEqual([value.shape for value in user_tables],
+                                     [(batches, capacity // 64) for batches in bundle_batches(16, capacity)])
+            self.assertEqual(len(tables.tensors), 4 * sum(len(bundle_batches(16, capacity)) for capacity in REPLAY_CAPACITIES))
+            self.assertEqual(len({id(value) for value in tables.tensors}), len(tables.tensors))
+            self.assertEqual(pool.packed_bytes, sum(4 * value.shape[0] * value.shape[1] for value in tables.tensors))
+            self.assertIs(tables.take(), tables)
+            with self.assertRaisesRegex(ValueError, r'\(2, 16\) was asked for'):
+                pool.packed_replay(2, 16)
+            self.assertEqual(pool.describe()['packed_shapes'], [[4, 16]])
+            # a pool of two slots cannot be asked for the four-user tables by default, but
+            # can hold them when named (the block's construction checks the slot count)
+            self.assertEqual(verifier_pool(FakeOperations(), users=2, bucket_rows=(8,)).packed_shapes, ((2, 16),))
+            self.assertEqual(verifier_pool(FakeOperations(), users=2, bucket_rows=(8,), packed_shapes=((4, 16),)).packed_shapes,
+                             ((4, 16),))
 
 
 class DiagnosticLineTests(unittest.TestCase):

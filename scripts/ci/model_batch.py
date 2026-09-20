@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
+from packed_cache_writer import TILE_ROWS, SegmentedOrderedCacheWriter, tile as cache_tile, tile_rows
 
 
 @contextmanager
@@ -180,6 +181,14 @@ def prepare_inputs(ttnn, model, rows, tokens, positions, page_rows, pages, *, st
     result.singleton_positions = [upload(position.reshape(1), ttnn.int32) if storage is None
                                   else stage(position.reshape(1), ttnn.int32, storage.singleton_positions[index])
                                   for index, position in enumerate(positions)]
+    # A block wider than the ordered cache kernel's 32-row tile (the 64-row M3 block)
+    # writes its K/V one tile at a time (packed_cache_writer.SegmentedOrderedCacheWriter),
+    # each tile over its own positions word and page-table rows: uploaded here, owned,
+    # and restaged with the rest of the packed inputs before every verify. Pooled inputs
+    # describe one request within a tile, so a pooled fixture never has any.
+    result.cache_tiles = [cache_tile((first, last), upload(positions[first:last], ttnn.int32),
+                                     upload(page_rows[first:last], ttnn.int32))
+                          for first, last in (tile_rows(rows) if rows > TILE_ROWS else ())]
     cos, sin = rot_mats_decode(model.mesh_device, model.args.rope_head_dim,
                                model.args.max_seq_len, model.args.rope_theta, positions)
     if storage is None:
@@ -206,11 +215,56 @@ def prepare_inputs(ttnn, model, rows, tokens, positions, page_rows, pages, *, st
     return result
 
 
+# 64: the M3 packed block, four T16 users (packed_shapes.m3_shape); the GDN decode runs
+# it as four 16-row segments and the K/V write as two 32-row tiles.
+BLOCK_WIDTHS = (1, 2, 4, 8, 16, 32, 64)
+
+
 def validate_checkpoint(rows, prefix):
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
-        raise ValueError("Expected T=1/2/4/8/16/32")
+    if type(rows) is not int or rows not in BLOCK_WIDTHS:
+        raise ValueError("Expected T=1/2/4/8/16/32/64")
     if type(prefix) is not int or not 0 <= prefix <= rows:
         raise ValueError("Checkpoint must be in [0, T]")
+
+
+def recurrence_rows(rows, pack, norm_batch):
+    """The rows one GDN recurrence runs over, which is where the norm-batch decision is
+    made (gdn_batched_conv.norm_batch_enabled): the whole block unpacked, or packed each
+    user's own segment (gdn_device_loop_state._decode_packed runs the batched recurrence
+    per segment, and DeviceLoopState checks the decision at the segment's rows)."""
+    from gdn_batched_conv import norm_batch_enabled
+
+    if pack is None:
+        return rows
+    widths = sorted({last - first for first, last in pack['segments']})
+    if len({norm_batch_enabled(width, norm_batch) for width in widths}) != 1:
+        raise ValueError('Packed segments must all take the same norm-batch decision')
+    return widths[0]
+
+
+def cache_writer(ttnn, mesh, kernels, *, ordered_cache, cache_tiles, serial):
+    """One full-attention layer's K/V writer. The serial per-row writer
+    (attention_batch.SerialCacheWriter, pinned frozen-recipe evidence, 32 rows at most) is
+    built only where it serves; the ordered writer replaces it, and beyond one 32-row tile
+    the ordered write runs tile by tile over the fixture's cache tiles
+    (packed_cache_writer.SegmentedOrderedCacheWriter)."""
+    if not ordered_cache:
+        return serial()
+    if cache_tiles:
+        return SegmentedOrderedCacheWriter(mesh, ttnn, kernels, cache_tiles)
+    return OrderedCacheWriter(mesh, ttnn, kernels)
+
+
+def attention_reader(*, replay_reader, serial_sdpa, grouped_attention, serial, grouped):
+    """One full-attention layer's reader: the fixture's replay reader when it has one, the
+    grouped reader when selected, else the serial per-row reader
+    (attention_batch.SerialAttentionReader, pinned, 32 rows at most) - built only where it
+    serves - or none."""
+    if replay_reader is not None:
+        return replay_reader
+    if grouped_attention:
+        return grouped()
+    return serial() if serial_sdpa else None
 
 
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
@@ -294,6 +348,13 @@ class ModelBatch:
         if ordered_cache and (not serial_sdpa or profiler is not None):
             raise ValueError('Ordered cache requires the unprofiled exact B1 SDPA path')
         self.ordered_cache = ordered_cache and self.rows > 1
+        # Beyond one 32-row tile (the 64-row M3 block) the per-row serial adapters of the
+        # pinned attention_batch.py stop: the K/V write goes tile by tile through the
+        # ordered writer and the attention through the per-user replay readers, or the
+        # block is refused here, before any upload.
+        if self.rows > TILE_ROWS and not (self.ordered_cache and self.attention_replay):
+            raise ValueError('A block wider than %d rows needs the ordered cache writer and replay attention'
+                             % TILE_ROWS)
         cache_kernels = None
         if self.ordered_cache:
             import os
@@ -329,7 +390,7 @@ class ModelBatch:
         from gdn_batched_conv import norm_batch_enabled
         if norm_batch and not packed_checkpoints:
             raise ValueError('Norm batching requires packed checkpoints')
-        self.norm_batch = norm_batch_enabled(self.rows, norm_batch)
+        self.norm_batch = norm_batch_enabled(recurrence_rows(self.rows, self.pack, norm_batch), norm_batch)
         self.norm_batch_calls = 0
         if retain_records and not self.packed_checkpoints:
             raise ValueError('Retained records require active packed checkpoints')
@@ -367,6 +428,7 @@ class ModelBatch:
         self.tokens, self.positions, self.pages = inputs.tokens, inputs.positions, inputs.pages
         singleton_pages = self.singleton_pages = inputs.singleton_pages
         self.row_pages = inputs.row_tables
+        self.cache_tiles = inputs.cache_tiles
         singleton_positions = self.singleton_positions = inputs.singleton_positions
         self.cos, self.sin = inputs.cos, inputs.sin
         if self.attention_replay:
@@ -420,15 +482,7 @@ class ModelBatch:
         for layer in model.layers:
             attention = layer.attention
             if layer.is_full_attention:
-                writer = SerialCacheWriter(ttnn, singleton_positions, self.row_pages,
-                                           attention._kv_shard_cfg(1))
-                if self.ordered_cache:
-                    writer = OrderedCacheWriter(model.mesh_device, ttnn, cache_kernels)
-                self.writers.append(writer)
-                reader = SerialAttentionReader(ttnn, singleton_positions, self.row_pages) if serial_sdpa else None
-                if self.replay_reader is not None:
-                    reader = self.replay_reader
-                elif self.grouped_attention:
+                def grouped(attention=attention):
                     from attention_grouped import GroupedAttentionReader
 
                     def upload_group(value, dtype=ttnn.bfloat16):
@@ -440,6 +494,16 @@ class ModelBatch:
                         singleton_positions, singleton_pages, upload_group, dma_layout=self.attention_dma, parallel=self.attention_parallel,
                         max_group_rows=8 if self.attention_tree else 4)
                     self.grouped_readers.append(reader)
+                    return reader
+
+                writer = cache_writer(ttnn, model.mesh_device, cache_kernels, ordered_cache=self.ordered_cache,
+                    cache_tiles=self.cache_tiles,
+                    serial=lambda attention=attention: SerialCacheWriter(ttnn, singleton_positions, self.row_pages,
+                                                                         attention._kv_shard_cfg(1)))
+                self.writers.append(writer)
+                reader = attention_reader(replay_reader=self.replay_reader, serial_sdpa=serial_sdpa,
+                    grouped_attention=self.grouped_attention, grouped=grouped,
+                    serial=lambda: SerialAttentionReader(ttnn, singleton_positions, self.row_pages))
                 if reader is not None:
                     self.readers.append(reader)
                 write = profiler.wrap("attention.kv_write", writer) if profiler else writer
