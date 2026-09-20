@@ -1861,3 +1861,15 @@ lost. The fused arm itself is not the cause: a 32-row activation takes its
 fallback (fused_t16_scope.py:49-51), not an exception. Fixed for the rerun: the
 handler logs the closing error and re-raises the original (image v45). The
 lane's committed state returned to the sequential step, which passes the gate.
+
+**Run 35496918269 (image v45, packed step): the attach failure named.**
+`[PINDIAG] attach failed with ModuleNotFoundError: No module named
+'target_packed_pages'; closing the scopes then raised ValueError: Every target
+layer must construct and execute the candidate`. The module is repo-only
+(never in the bundle) and imported lazily inside `model_batch.validate_pack`
+(model_batch.py:41), which only a packed fixture reaches - so every sequential
+run was blind to it. The image's copy lists now carry it and
+dflash_batched_mask.py (the same lazy class on the draft branches' pack= path,
+for the packed proposal later). A static import closure of the packed modules
+lists 70 more repo-only names, all experiment-only lazy imports (dspark_*,
+t32_*, frozen stages) the serving path never executes. Image v46.
