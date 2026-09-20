@@ -300,7 +300,22 @@ class DFlashDevice:
         candidates, unary = merge_chunk_candidates(host_chunks, block_rows=self.block_rows)
         projected_parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
         if len(projected_parts) != 2 or not torch.equal(*projected_parts):
-            raise AssertionError('Replicated learned selector features differ')
+            # Runs 35478872085 and 35479238722 both died here on the third block of
+            # two users, and neither the per-request trace nor per-request
+            # collectives explained it. Report the SIZE and SHAPE of the divergence:
+            # a tiny difference is fidelity, a large one is memory, and all-finite
+            # versus not separates a bad read from a bad write.
+            detail = 'shards=%d' % len(projected_parts)
+            if len(projected_parts) == 2:
+                left, right = (value.float() for value in projected_parts)
+                difference = (left - right).abs()
+                detail = ('call=%d position=%d rows=%d max_abs=%g mean_abs=%g '
+                          'differing=%d of %d finite=%s/%s'
+                          % (self.proposal_calls, self.position, self.history_rows,
+                             float(difference.max()), float(difference.mean()),
+                             int((difference > 0).sum()), difference.numel(),
+                             bool(torch.isfinite(left).all()), bool(torch.isfinite(right).all())))
+            raise AssertionError('Replicated learned selector features differ: %s' % detail)
         selector_hidden = projected_parts[0][..., 1:self.block_rows, :].reshape(1, self.max_drafts, 256)
         tokens, unused = select_active_candidates(selector_hidden, candidates, unary, self.predecessors, self.successors,
             torch.tensor([seed], dtype=torch.int64))
