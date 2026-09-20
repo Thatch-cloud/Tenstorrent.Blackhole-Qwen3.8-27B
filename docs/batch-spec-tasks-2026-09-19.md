@@ -723,3 +723,11 @@ verify/commit path - where the sharpened two-user signature points - needs its
 module added to BOTH lists. `probe_image_drift.py` hashes every repo module
 against the image's copy so an override is known to be byte-identical or a
 deliberate change before it is made.
+
+**Drift measured (probe 35480229521):** of the verify/commit core, 20 modules are
+byte-identical to the bundle and safe to override. `verifier_engine`,
+`model_batch`, `gdn_device_loop_state` and `dflash_t16_native_attention` differ
+only by the packed edits made here. `dflash_combined_request` differs because the
+repo's copy is a strict superset - it also forwards `progressive_evidence` - so the
+bundle is simply older there. No core override would change behaviour beyond the
+packed changes themselves.
