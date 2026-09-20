@@ -1890,3 +1890,31 @@ block: the block-stream Projection wrapper (constructed only inside
 FusedT16Arm.__init__ at scope entry), the fused arm's fallback at 32 rows
 (nothing refuses a nonzero fallback count), the T16 attention gate (only with
 target_attention_t16=True). The serving attach enters no frozen_* scope.
+
+## Run 35497378631 (image v46, QWEN_FAST_PACKED_STEP=1): PACKED STEP CORRECT ON HARDWARE, no speedup yet
+
+Two users on distinct prompts through `packed_device_step`: nine packed rounds
+(`[PHASE] packed_verify` n=9, median 150.6 ms, min 149.2, max 153.3; `packed_commit`
+n=17, median 23 ms, max 621 ms on the first), then one sequential round for the
+survivor after its partner finished (`step` 101 ms), proposals unchanged (median
+41 ms). `[PACKED]` audit lines show each user committing its own accepted prefix
+from the shared verify (segment 1: 11, 10, 5, ...; segment 0: 7, 4, 8, ...), and
+BOTH texts are byte-identical to their single-user references (66a5d0c2, 26c9c952).
+The M1 hardware gate is passed: one weight pass per round for two users, token-
+exact. The shutdown RuntimeError (torch.accelerator.empty_cache with no
+accelerator) is vLLM's teardown, not ours.
+
+Timing, honestly: a packed round is ~150 (verify) + 2 x 23 (commits) + 2 x 41
+(proposals) = ~278 ms for ~7 accepted tokens per user, against the sequential
+scaffold's 2 x 90 + 2 x 41 = ~262 ms. No gain, for three known reasons, in
+order of size: (1) the frozen fused MLP arm accepts only (1,1,16,5120), so the
+32-row packed verify runs every layer's MLP through the unfused fallback
+(fused_t16_scope.py:49-51) - the sequential 16-row verify gets the qualified fast
+MLP; (2) the packed block's attention is the per-row serial reader (plan item
+10, M1b, the bundled replay readers per user); (3) two draft passes per round
+(plan item 11, M1c, the packed proposal). A T32 fused arm exists in the repo
+(`FusedT32Arm`, token_rows 32, with its own t32 experiment lanes and evidence)
+but serving's scope installs one arm at 16 rows; a runtime serving both 16-row
+per-request verifies and the 32-row packed verify would need both arms
+installed, which is new work under the frozen recipe. Next: rank (1)-(3) by
+ms saved per round against cost before building.
