@@ -117,7 +117,8 @@ class VerifierEngine:
     def __init__(self, model, session, pages, helpers, *, sampler=None, norm_batch=False, attention_replay=False,
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
-                 commit_only_gdn=False, before_capture=None, target_attention_t16=False, storage=None):
+                 commit_only_gdn=False, before_capture=None, target_attention_t16=False, storage=None,
+                 capture_rows=None):
         import ttnn
 
         if before_capture is not None and not callable(before_capture):
@@ -177,8 +178,17 @@ class VerifierEngine:
             raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
         if len(pages.shape) != 2 or pages.shape[0] != 1:
             raise ValueError('One request page table required')
+        # The widest capture this engine makes: max_verify_rows, the qualified verifier
+        # width (what the T16 gate and the width-cap rule above read), unless the serving
+        # runtime caps it lower beside a packed block (packed_shapes.sequential_capture_rows,
+        # 4 beside the 64-row block): the captures then serve only the sequential fallback,
+        # at those widths, and a ticket the block serves is never verified here.
+        if capture_rows is not None and (type(capture_rows) is not int or capture_rows not in VERIFY_WIDTHS
+                                         or capture_rows > max_verify_rows):
+            raise ValueError('The capture cap must be a supported verify width within the qualified verifier width')
+        self.capture_rows = max_verify_rows if capture_rows is None else capture_rows
         widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
-                                session.max_new_tokens - len(session.emitted), max_verify_rows)
+                                session.max_new_tokens - len(session.emitted), self.capture_rows)
         self.model, self.session, self.pages, self.helpers = model, session, pages, helpers
         self.operations, self.mesh, self.sampler = ttnn, model.mesh_device, sampler
         self.position = session.position
@@ -191,7 +201,7 @@ class VerifierEngine:
         if attention_replay:
             from attention_request_plan import capture_plan
             self.replay_plan = capture_plan(session.position, pages.shape[1] * 64, session.verifier_rows,
-                session.max_new_tokens - len(session.emitted), max_verify_rows=max_verify_rows, short_context=short_context)
+                session.max_new_tokens - len(session.emitted), max_verify_rows=self.capture_rows, short_context=short_context)
         self.native_addresses = [[addresses(ttnn, value) for value in helper.live] for helper in helpers]
         self.widths = widths
         started = time.perf_counter()
@@ -344,11 +354,30 @@ class VerifierEngine:
             attention_audit=getattr(self, 'attention_audit', False),
             **(dict(commit_only_gdn=True) if getattr(self, 'commit_only_gdn', False) and rows > 1 else {}))
 
-    def proposal_rows(self):
+    def proposal_rows(self, packed_rows=None):
+        """The widest ticket this engine can verify now - or, given `packed_rows` for a
+        round the packed block will serve (serving_packed_step.proposal_rows), the block's
+        rows per user while the budget still holds them: a block-served ticket is never
+        verified here, so the engine's own captures need not hold it (they do not beside
+        the 64-row block). Without the hint, exactly as before."""
         remaining = self.session.max_new_tokens - len(self.session.emitted)
         if getattr(self, 'replay_plan', None) is not None:
-            return self.replay_plan.max_rows(self.position, remaining)
-        return max(rows for rows in self.widths if rows <= remaining)
+            widest = self.replay_plan.max_rows(self.position, remaining)
+        else:
+            widest = max(rows for rows in self.widths if rows <= remaining)
+        if packed_rows is None:
+            return widest
+        if (type(packed_rows) is not int or packed_rows not in VERIFY_WIDTHS
+                or packed_rows > self.session.verifier_rows):
+            raise ValueError('The packed block rows must be a supported verify width within the session verifier rows')
+        return packed_rows if remaining >= packed_rows else widest
+
+    def serves(self, ticket):
+        """Whether this engine's own captures hold the ticket: its verify would take it."""
+        try:
+            return self.bucket_key(ticket) in self.buckets
+        except ValueError:
+            return False
 
     def bucket_key(self, ticket):
         if getattr(self, 'replay_plan', None) is None:

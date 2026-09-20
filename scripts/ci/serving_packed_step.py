@@ -39,6 +39,7 @@ segment, even on cancellation (prefix 0) or after a failure (prefix 0 for what w
 import os
 import time
 
+from attention_mask_replay import validate_ticket
 from serving_fast_request import CommittedOutput
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import phase
@@ -63,6 +64,66 @@ def audit_log(message, **values):
         print(message.format(**values), flush=True)
         return
     logger.info(message, **values)
+
+
+def proposal_rows(block, requests):
+    """The ticket width every live request drafts for the coming round, asked by the worker
+    hook before any proposal: the block's rows per user when the block will serve the round
+    as one pass - every live request present (exactly the block's users, finished ones
+    aside), each with at least that many tokens left, each engine bound to a segment, each
+    frontier inside the block's native chunk family - else None, and each engine proposes
+    at its own captured width.
+
+    Beside the 64-row block the per-request engines capture only the sequential widths
+    (packed_shapes.sequential_capture_rows), so a block-served round MUST be drafted at the
+    block's width and a sequential round (survivors, a last narrow block) at the engines';
+    a ticket drafted for the block that the block then does not serve has no capture
+    anywhere (`unservable`). The draft returns exactly the rows asked of it
+    (dflash_request_runtime.propose), so the decision here is the ticket width.
+    """
+    shape = block.shape
+    live = [request for request in requests if not request.session.finished]
+    if len(live) != shape.users:
+        return None
+    capacity = getattr(block, 'replay_capacity', None)
+    for request in live:
+        session = request.session
+        if session.max_new_tokens - len(session.emitted) < shape.rows_per_user:
+            return None
+        try:
+            block.segment_of(request.engine)
+            if capacity is not None:
+                validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
+        except ValueError:
+            return None
+    return shape.rows_per_user
+
+
+def unservable(entries):
+    """Entries whose ticket no capture of their own engine holds: a round drafted for the
+    block that the block will not serve cannot go to the sequential step either."""
+    refused = []
+    for entry in entries:
+        serves = getattr(entry['request'].engine, 'serves', None)
+        if callable(serves) and not serves(entry['ticket']):
+            refused.append('request=%s rows=%d' % (str(entry['request_id'])[:48], len(entry['ticket'].tokens)))
+    return refused
+
+
+class PackedStep:
+    """The packed device step bound to its block: the step itself, and the per-round
+    ticket-width policy the worker hook asks before drafting (`proposal_rows`)."""
+
+    def __init__(self, block):
+        if block is None:
+            raise ValueError('A packed verify block is required')
+        self.block = block
+
+    def __call__(self, entries, *, cancelled):
+        return packed_device_step(entries, cancelled=cancelled, block=self.block)
+
+    def proposal_rows(self, requests):
+        return proposal_rows(self.block, requests)
 
 
 def ineligible(entries, block):
@@ -96,7 +157,18 @@ def packed_device_step(entries, *, cancelled, block):
         if request.closed or request.busy or request.cancelled or request.session.pending is not ticket:
             raise ValueError('One live owner with its prepared ticket required for every packed entry')
     reason = ineligible(entries, block)
-    if reason is None and cancelled():
+    if reason is not None:
+        # A round drafted for the block (proposal_rows) whose entries changed before the
+        # step: its tickets have no capture anywhere, and the session cannot re-propose
+        # (fail_verification is final), so the round is failed here, before any device
+        # work, with the reason - rather than by the engine's own refusal one step later.
+        refused = unservable(entries)
+        if refused:
+            fail_round(entries, block)
+            raise ValueError('A round the block cannot serve (%s) holds tickets no request engine captured (%s): '
+                             'it was drafted for the block but its entries changed before the step'
+                             % (reason, '; '.join(refused)))
+    elif cancelled():
         # Each request's own step answers a cancellation without touching the device.
         reason = 'cancelled before the verify'
     if reason is not None:

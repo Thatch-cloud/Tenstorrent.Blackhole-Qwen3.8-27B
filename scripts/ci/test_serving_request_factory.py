@@ -44,11 +44,27 @@ class RequestFactoryTests(unittest.TestCase):
         # adopt_slot verifies its slices against a readback and reports the chip count.
         return [Mock(spec=['adopt_slot'], **{'adopt_slot.return_value': 2}) for _ in range(48)]
 
-    def build(self, components, arguments, helpers=None):
+    def build(self, components, arguments, helpers=None, **extra):
         with patch('serving_request_factory.device_components', return_value=components):
             return from_prefill(object(), SimpleNamespace(args=SimpleNamespace(vocab_size=100),
                 mesh_device=object()), object(), torch.tensor([list(range(65)) + [0] * 3], dtype=torch.int32),
-                [object()] * 48 if helpers is None else helpers, **arguments)
+                [object()] * 48 if helpers is None else helpers, **arguments, **extra)
+
+    def test_the_engine_gets_the_runtimes_capture_cap_only_when_one_is_given(self):
+        # the default: the engine is called exactly as before, no capture keyword at all
+        components, device, engines, arguments = self.fixture()
+        request = self.build(components, arguments)
+        self.assertNotIn('capture_rows', components.engine.call_args.kwargs)
+        self.assertEqual(components.engine.call_args.kwargs['max_verify_rows'], 16)
+        request.close('request')
+        # beside the four-user block the runtime caps the captures at 4; the qualified
+        # verifier width the T16 gate reads stays 16
+        components, device, engines, arguments = self.fixture()
+        request = self.build(components, arguments, capture_rows=4)
+        self.assertEqual(components.engine.call_args.kwargs['capture_rows'], 4)
+        self.assertEqual(components.engine.call_args.kwargs['max_verify_rows'], 16)
+        self.assertTrue(components.engine.call_args.kwargs['target_attention_t16'])
+        request.close('request')
 
     def test_prefilled_seed_not_emitted_or_prefilled_twice(self):
         components, device, engines, arguments = self.fixture()

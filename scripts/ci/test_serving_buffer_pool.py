@@ -669,6 +669,60 @@ class PackedReplayTableTests(unittest.TestCase):
                              ((4, 16),))
 
 
+class DramStatisticsTests(unittest.TestCase):
+    """The allocator's DRAM figures per chip for the [PINDIAG] dram lines, read through a
+    pooled buffer: a diagnostic that never raises."""
+
+    def view(self, allocated, free, largest, total=4138123648, banks=8):
+        return SimpleNamespace(num_banks=banks, total_bytes_per_bank=total, total_bytes_allocated_per_bank=allocated,
+                               total_bytes_free_per_bank=free, largest_contiguous_bytes_free_per_bank=largest)
+
+    def operations(self, views):
+        return SimpleNamespace(BufferType=SimpleNamespace(DRAM='dram'),
+            get_device_tensors=lambda tensor: [SimpleNamespace(device=lambda name=name: name) for name in views],
+            get_memory_view=Mock(side_effect=lambda device, kind: views[device] if kind == 'dram' else None))
+
+    def test_the_figures_are_summed_over_the_banks_per_chip_and_formatted_for_the_log(self):
+        from serving_buffer_pool import dram_line, dram_statistics, format_dram
+
+        # run 35509307389's chip 0 as the allocator reported it, per bank
+        views = {'d0': self.view(4111316352, 26807296, 712896), 'd1': self.view(4000000000, 138123648, 1000000)}
+        report = dram_statistics(self.operations(views), 'tensor')
+        self.assertEqual(report, [
+            dict(chip=0, banks=8, allocated=8 * 4111316352, free=8 * 26807296, largest_free=8 * 712896, total=8 * 4138123648),
+            dict(chip=1, banks=8, allocated=8 * 4000000000, free=8 * 138123648, largest_free=8 * 1000000, total=8 * 4138123648)])
+        self.assertEqual(format_dram(report),
+                         'chip0 allocated=32.89GB free=0.21GB largest_free=5.7MB of 33.10GB; '
+                         'chip1 allocated=32.00GB free=1.10GB largest_free=8.0MB of 33.10GB')
+        # a ttnn without the view, or one that refuses it, reports the reason instead of raising
+        self.assertEqual(dram_statistics(SimpleNamespace(get_device_tensors=lambda tensor: [SimpleNamespace(device=lambda: 'd0')]), 'tensor'),
+                         dict(unavailable="AttributeError: 'types.SimpleNamespace' object has no attribute 'get_memory_view'"))
+        refusing = self.operations(views)
+        refusing.get_memory_view = Mock(side_effect=RuntimeError('no allocator on this device'))
+        self.assertEqual(format_dram(dram_statistics(refusing, 'tensor')), 'unavailable (RuntimeError: no allocator on this device)')
+        self.assertEqual(dram_line(SimpleNamespace()), 'unavailable (pool without device statistics)')
+        self.assertEqual(dram_line(SimpleNamespace(dram_statistics=Mock(side_effect=RuntimeError('boom')))), 'unavailable (RuntimeError: boom)')
+        self.assertEqual(dram_line(SimpleNamespace(dram_statistics=Mock(return_value=report[:1]))),
+                         'chip0 allocated=32.89GB free=0.21GB largest_free=5.7MB of 33.10GB')
+
+    def test_the_pool_reads_the_chips_through_its_first_buffer_and_says_so_when_it_cannot(self):
+        from serving_buffer_pool import dram_statistics as statistics
+
+        operations = FakeOperations()
+        pool = ServingBufferPool(operations, 'mesh', users=1)
+        first = pool.owned[0]
+        views = {'d0': self.view(1, 2, 3), 'd1': self.view(4, 5, 6)}
+        shards = operations.get_device_tensors
+        operations.BufferType = SimpleNamespace(DRAM='dram')
+        operations.get_device_tensors = lambda tensor: [SimpleNamespace(device=lambda name=name: name) for name in views] if tensor is first else []
+        operations.get_memory_view = lambda device, kind: views[device]
+        self.assertEqual([chip['allocated'] for chip in pool.dram_statistics()], [8, 32])
+        self.assertEqual(pool.dram_statistics(), statistics(operations, first))
+        operations.get_device_tensors = shards
+        pool.close()
+        self.assertEqual(pool.dram_statistics(), dict(unavailable='no pooled buffer to read the chips through'))
+
+
 class DiagnosticLineTests(unittest.TestCase):
     def test_loguru_carries_the_line_when_present_and_print_when_absent(self):
         logger = Mock()

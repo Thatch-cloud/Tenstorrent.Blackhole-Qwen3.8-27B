@@ -76,6 +76,26 @@ def serving_shape(users, page_width):
     return None if builder is None else builder(page_width)
 
 
+# The widest verify width a per-request engine captures beside a packed block. The
+# engines serve only the sequential fallback (a narrow last ticket, the survivors after a
+# partner finished), and beside the 64-row M3 block their 8- and 16-row captures - about
+# 2.4 GB per engine, four engines - do not fit: run 35509307389 (image v52) had 32.9 of
+# 33.1 GB per chip allocated when the first engine was built (docs, M3 memory budget).
+# Beside the 32-row M1 block they fit, and the two-user gate ran with them (image v47).
+SEQUENTIAL_CAPTURE_ROWS = 16
+M3_SEQUENTIAL_CAPTURE_ROWS = 4
+
+
+def sequential_capture_rows(shape):
+    """The widest verify width a per-request engine captures beside this block: the
+    engine's full T16 set with no block or the M1 block, four rows beside the M3 block
+    (widths 1, 2, 4: the survivors decode sequentially at four rows per round)."""
+    if shape is None:
+        return SEQUENTIAL_CAPTURE_ROWS
+    validate_shape(shape)
+    return M3_SEQUENTIAL_CAPTURE_ROWS if shape.block_rows == M3_BLOCK_ROWS else SEQUENTIAL_CAPTURE_ROWS
+
+
 def segment_rows(shape, segment):
     """Rows [start, stop) of one user's segment: segment u is rows_per_user * u onward."""
     validate_shape(shape)

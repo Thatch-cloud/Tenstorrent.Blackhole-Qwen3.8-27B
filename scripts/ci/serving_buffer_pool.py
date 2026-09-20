@@ -300,7 +300,54 @@ class HistorySlot:
         return report
 
 
+def dram_statistics(operations, tensor):
+    """Each chip's DRAM allocator figures, in bytes over all banks, read from the chips a
+    device tensor spans: allocated, free, the largest free block (the largest buffer that
+    could still be allocated) and the total. A diagnostic, never a gate: a ttnn without
+    the memory view, or one that refuses it, reports the reason instead of raising."""
+    try:
+        report = []
+        for chip, shard in enumerate(operations.get_device_tensors(tensor)):
+            view = operations.get_memory_view(shard.device(), operations.BufferType.DRAM)
+            banks = int(view.num_banks)
+            report.append(dict(chip=chip, banks=banks,
+                allocated=int(view.total_bytes_allocated_per_bank) * banks,
+                free=int(view.total_bytes_free_per_bank) * banks,
+                largest_free=int(view.largest_contiguous_bytes_free_per_bank) * banks,
+                total=int(view.total_bytes_per_bank) * banks))
+        return report
+    except BaseException as failure:
+        return dict(unavailable='%s: %s' % (type(failure).__name__, str(failure)[:120]))
+
+
+def format_dram(statistics):
+    """One line for the log: per chip, allocated / free / largest free block of the total."""
+    if isinstance(statistics, dict):
+        return 'unavailable (%s)' % statistics.get('unavailable', 'no statistics')
+    gigabyte, megabyte = 1e9, 1e6
+    return '; '.join('chip%d allocated=%.2fGB free=%.2fGB largest_free=%.1fMB of %.2fGB'
+                     % (chip['chip'], chip['allocated'] / gigabyte, chip['free'] / gigabyte,
+                        chip['largest_free'] / megabyte, chip['total'] / gigabyte) for chip in statistics)
+
+
+def dram_line(pool):
+    """The pool's DRAM statistics formatted for a [PINDIAG] line; never raises."""
+    try:
+        statistics = getattr(pool, 'dram_statistics', None)
+        if not callable(statistics):
+            return 'unavailable (pool without device statistics)'
+        return format_dram(statistics())
+    except BaseException as failure:
+        return 'unavailable (%s: %s)' % (type(failure).__name__, str(failure)[:120])
+
+
 class ServingBufferPool:
+    def dram_statistics(self):
+        """The DRAM allocator's figures per chip, read through the pool's first buffer."""
+        if self.closed or not self.owned:
+            return dict(unavailable='no pooled buffer to read the chips through')
+        return dram_statistics(self.operations, self.owned[0])
+
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
                  packed_shapes=None):

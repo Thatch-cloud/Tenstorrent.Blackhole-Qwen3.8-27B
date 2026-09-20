@@ -61,7 +61,7 @@ def adopt_prefill_slot(helpers, capture, request_id):
 
 
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
-                 collectives=None, buffer_pool=None, shared_weights=None):
+                 collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None):
     from dflash_request_runtime import TARGET_TAPS
 
     prompt = tuple(state.prompt_token_ids)
@@ -174,11 +174,15 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # Only when the slot carries it, so a pool without verifier storage leaves the
         # engine allocating as before.
         verifier_storage = getattr(getattr(device, 'pool_slot', None), 'verifier', None)
+        # capture_rows: the serving runtime's cap on this engine's captures beside a packed
+        # block (packed_shapes.sequential_capture_rows); only when it caps, so a runtime
+        # without one calls the engine exactly as before.
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
             norm_batch=True, attention_replay=True, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
             commit_only_gdn=True, target_attention_t16=True, before_capture=prepare_proposal,
-            **(dict(storage=verifier_storage) if verifier_storage is not None else {}))
+            **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
+            **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
         owned.callback(engine.close)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')

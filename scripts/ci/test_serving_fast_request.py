@@ -48,6 +48,20 @@ class FastServingTests(unittest.TestCase):
         release = Mock(side_effect=lambda: events.append(('close_drafter',)))
         return FastRequest(session, engine, runtime, release_drafter=release), events
 
+    def test_prepare_threads_the_packed_round_width_to_the_engine_and_nothing_without_it(self):
+        # the width of a round the packed block will serve reaches the engine's proposal
+        request, events = self.fixture()
+        request.engine.proposal_rows = Mock(return_value=16)
+        ticket = request.prepare('request', packed_rows=16)
+        request.engine.proposal_rows.assert_called_once_with(packed_rows=16)
+        self.assertEqual(len(ticket.tokens), 16)
+        # without it the engine is asked exactly as before
+        request, events = self.fixture()
+        request.engine.proposal_rows = Mock(return_value=8)
+        ticket = request.prepare('request')
+        request.engine.proposal_rows.assert_called_once_with()
+        self.assertEqual(len(ticket.tokens), 8)
+
     def test_returns_only_committed_block_after_both_publications(self):
         request, events = self.fixture()
         output = request.step('request', cancelled=lambda: False)

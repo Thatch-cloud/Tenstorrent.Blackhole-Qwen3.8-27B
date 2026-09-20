@@ -25,7 +25,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                      'scope, the sampler links, the pool) - their exits fence the device, and a hung device blocks '
                      'the first fence')
 
-    def exercise(self, fail=False, packed=False, users=1, attach_fail=False):
+    def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None):
         events = []
 
         def diag(template, *values):
@@ -35,6 +35,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 events.append(('diag', template.format(*values)))
         shape = SHAPES.get(users) if packed else None
         built = shape is not None
+        # beside the four-user block the per-request captures are trimmed to (1, 2, 4)
+        trimmed = built and shape.users == 4
         model = SimpleNamespace(args=object(), mesh_device=object(),
             layers=[SimpleNamespace(is_full_attention=False, attention=object()) for _ in range(48)])
         config = FastPolicyTests().fixture()
@@ -126,7 +128,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     self.assertEqual(options['users'], users)
                     self.assertEqual(len(options['helpers']), 48)
                     self.assertEqual(options['page_width'], 68)
-                    self.assertEqual(options['bucket_rows'], (1, 2, 4, 8, 8, 16, 16))
+                    self.assertEqual(options['bucket_rows'], (1, 2, 4) if trimmed else (1, 2, 4, 8, 8, 16, 16))
                     self.assertEqual(options['feature_taps'], 5)
                     self.assertTrue(callable(options['rope']))
                     expected = {'users', 'helpers', 'page_width', 'bucket_rows', 'feature_taps', 'rope'}
@@ -150,21 +152,27 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         self.assertIs(args[3], generator.return_value)
                         self.assertEqual(options, dict(pool=pool, shared_weights=weights, shape=shape,
                                                        feature_taps=(5, 19, 33, 47, 61)))
-                        self.assertIsInstance(packed_step, partial)
-                        self.assertIs(packed_step.func, serving_packed_step.packed_device_step)
-                        self.assertEqual((packed_step.args, packed_step.keywords), ((), dict(block=block)))
-                        diagnostic.assert_not_called()
+                        self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
+                        self.assertIs(packed_step.block, block)
                     else:
-                        # No block: the sequential step is wired, and a switch that asked for a
-                        # block at a count no shape serves says so in the log.
+                        # No block: the sequential step is wired.
                         packed_engine.assert_not_called()
                         self.assertIs(packed_step, serving_sequential_step.sequential_packed_step)
-                        if packed:
-                            diagnostic.assert_called_once()
-                            self.assertIn('no packed block', diagnostic.call_args.args[0])
-                            self.assertEqual(diagnostic.call_args.args[1:], (users,))
-                        else:
-                            diagnostic.assert_not_called()
+                    # The [PINDIAG] lines of the attach, in order: the no-block line when the
+                    # switch asked at a count no shape serves, the trim of the per-request
+                    # captures beside the four-user block, and always the allocator after
+                    # everything the attach allocated (the fake pool has no device to read).
+                    expected = []
+                    if packed and not built:
+                        expected.append(('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
+                                         '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
+                                         'serves the rounds', users))
+                    if trimmed:
+                        expected.append(('[PINDIAG] per-request captures trimmed to widths {} for the four-user block', (1, 2, 4)))
+                    expected.append(('[PINDIAG] dram after attach: {}', 'unavailable (pool without device statistics)'))
+                    self.assertEqual([call.args for call in diagnostic.call_args_list], expected)
+                    if probe is not None:
+                        probe(install, diagnostic)
                     events.append('request')
                     if fail:
                         raise RuntimeError('request failed')
@@ -201,6 +209,30 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
     def test_four_scheduler_requests_take_the_sixty_four_row_block(self):
         self.exercise(packed=True, users=4)
+
+    def test_the_bridge_factory_caps_the_engines_captures_only_beside_the_four_user_block_and_logs_the_allocator(self):
+        for users, packed, expected in ((4, True, dict(capture_rows=4)), (2, True, {}), (1, False, {})):
+            seen = {}
+
+            def probe(install, diagnostic):
+                bridge_factory = install.call_args.kwargs['bridge_factory']
+                state = SimpleNamespace(req_id='request-1', block_ids=([3, 4],))
+                request = SimpleNamespace(engine=object(), close=Mock())
+                serving_runtime.ServingCacheOwner.return_value.physical_pages = 100
+                with patch.object(serving_runtime, 'from_prefill', return_value=request) as factory, \
+                        patch.object(serving_runtime, 'VerifierPageBinding'), \
+                        patch.object(serving_runtime, 'FastRunnerBridge', return_value='bridge'):
+                    self.assertEqual(bridge_factory(state, 'capture'), 'bridge')
+                options = factory.call_args.kwargs
+                seen['capture'] = {name: value for name, value in options.items() if name == 'capture_rows'}
+                seen['engine_lines'] = [call.args for call in diagnostic.call_args_list
+                                        if call.args[0].startswith('[PINDIAG] dram after engine')]
+
+            with self.subTest(users=users):
+                self.exercise(packed=packed, users=users, probe=probe)
+                self.assertEqual(seen['capture'], expected)
+                self.assertEqual(seen['engine_lines'],
+                                 [('[PINDIAG] dram after engine {}: {}', 'request-1', 'unavailable (pool without device statistics)')])
 
     def test_an_attach_failure_is_logged_before_the_scopes_whose_exits_fence_the_device_close(self):
         for packed, users in ((True, 4), (False, 1)):

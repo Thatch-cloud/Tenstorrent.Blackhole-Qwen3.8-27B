@@ -40,6 +40,18 @@ class M3ShapeTests(unittest.TestCase):
         from packed_verifier import PackedShape as BlockShape
         self.assertIs(validate_shape(BlockShape(4, 16, 64, 1024, 65536)).block_rows, 64)
 
+    def test_the_per_request_captures_keep_their_full_width_except_beside_the_four_user_block(self):
+        from packed_shapes import m1_shape, m3_shape, sequential_capture_rows
+
+        # no block, and the M1 block: the engines' full T16 set, as the two-user gate ran
+        self.assertEqual(sequential_capture_rows(None), 16)
+        self.assertEqual(sequential_capture_rows(m1_shape(68)), 16)
+        # beside the 64-row block only the sequential widths (1, 2, 4) fit: run 35509307389
+        self.assertEqual(sequential_capture_rows(m3_shape(68)), 4)
+        self.assertEqual(sequential_capture_rows(m3_shape(1024)), 4)
+        with self.assertRaises(ValueError):
+            sequential_capture_rows(PackedShape(4, 16, 64, 68, 1))
+
     def test_broken_shapes_are_refused(self):
         for broken in (PackedShape(4, 16, 64, 1024, 65536 + 1), PackedShape(3, 16, 64, 1024, 65536),
                        PackedShape(4, 16, 48, 1024, 48 * 64), PackedShape(8, 16, 128, 1024, 65536),

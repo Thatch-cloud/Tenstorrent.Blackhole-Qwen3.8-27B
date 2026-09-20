@@ -6,7 +6,7 @@ import json
 import os
 
 from dflash_device import PreparedDraftWeights, pindiag
-from serving_buffer_pool import ServingBufferPool
+from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import validate_fast_config
 from serving_lifecycle import FastServingLifecycle
@@ -91,9 +91,23 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 pindiag('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
                         '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
                         'serves the rounds', policy['scheduler_requests'])
+        # The per-request engines' capture widths, and the pool's buckets that hold them:
+        # the full T16 set by default and beside the 32-row block, the sequential widths
+        # (1, 2, 4) beside the 64-row block, whose four engines' 8- and 16-row captures do
+        # not fit (packed_shapes.sequential_capture_rows; run 35509307389, image v52, OOM
+        # in the first engine with 32.9 of 33.1 GB per chip allocated). The rounds the
+        # block serves are drafted at its width (serving_packed_step.proposal_rows); the
+        # survivors decode sequentially at four rows per round.
+        from packed_shapes import sequential_capture_rows
+
+        capture_rows = sequential_capture_rows(packed_shape)
+        bucket_rows = capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], capture_rows)
+        trimmed = capture_rows != policy['verifier_rows']
+        if trimmed:
+            pindiag('[PINDIAG] per-request captures trimmed to widths {} for the four-user block',
+                    tuple(sorted(set(bucket_rows))))
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
-            helpers=helpers, page_width=page_width,
-            bucket_rows=capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], 16),
+            helpers=helpers, page_width=page_width, bucket_rows=bucket_rows,
             feature_taps=len(TARGET_TAPS), rope=rope,
             **({} if packed_shape is None else dict(packed_shapes=((packed_shape.users, packed_shape.rows_per_user),))))
         scopes.callback(pool.close)
@@ -138,12 +152,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         packed_step, step_description = sequential_packed_step, describe_sequential_step()
         if packed_shape is not None:
             from packed_verifier import PackedVerifierEngine
-            from serving_packed_step import describe as describe_packed_step, packed_device_step
+            from serving_packed_step import PackedStep, describe as describe_packed_step
 
             block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
                                          shape=packed_shape, feature_taps=TARGET_TAPS)
             scopes.callback(block.close)
-            packed_step = partial(packed_device_step, block=block)
+            # The step bound to its block, carrying the per-round ticket-width policy the
+            # worker hook asks before drafting.
+            packed_step = PackedStep(block)
             step_description = dict(describe_packed_step(), block=block.describe())
         elif packed_requested:
             step_description = dict(step_description,
@@ -154,6 +170,10 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # allocated before any request; and which device step serves the rounds.
         print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe(), draft_weights=weights.describe(),
                               device_step=step_description)), flush=True)
+        # The device allocator after everything the attach allocates - weights, KV pool,
+        # buffer pool, draft weights, the block and its traces - so the log shows the
+        # headroom the per-request engines have (run 35509307389 found 214 MB of it).
+        pindiag('[PINDIAG] dram after attach: {}', dram_line(pool))
 
         def capture_factory(position):
             owner.validate()
@@ -172,9 +192,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             def create_request():
                 return from_prefill(operations, model, sampler, pages, helpers,
                     state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
-                    collectives=collectives, buffer_pool=pool, shared_weights=weights)
+                    collectives=collectives, buffer_pool=pool, shared_weights=weights,
+                    **(dict(capture_rows=capture_rows) if trimmed else {}))
 
             request = create_request() if experiment is None else experiment.create(create_request)
+            # The allocator after this request's engine and its captures: one line per
+            # admitted request, so the log shows what each costs and what is left.
+            pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)

@@ -16,13 +16,19 @@ class FastRunnerBridge:
         self.validate_storage = validate_storage
         self.failed = False
 
-    def drafts(self):
+    def drafts(self, packed_rows=None):
+        """This request's draft token ids, preparing its ticket when none is pending.
+        `packed_rows` is the width of a round the packed block will serve (the worker hook
+        asks the packed step); without it the request prepares exactly as before."""
         if self.failed or self.request.closed or self.request.cancelled:
             raise ValueError('Live fast request required')
         if self.request.session.finished:
             return None
         if self.request.session.pending is None:
-            self.request.prepare(self.request.session.request_id)
+            if packed_rows is None:
+                self.request.prepare(self.request.session.request_id)
+            else:
+                self.request.prepare(self.request.session.request_id, packed_rows=packed_rows)
         return draft_token_ids(self.request)
 
     def execute_decode(self, scheduled, *, cancelled):

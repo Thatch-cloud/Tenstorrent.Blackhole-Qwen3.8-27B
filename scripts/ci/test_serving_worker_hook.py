@@ -93,6 +93,46 @@ class WorkerHookTests(unittest.TestCase):
         self.assertFalse(hasattr(worker, 'take_draft_token_ids'))
         self.assertTrue(bridge.request.closed)
 
+    def test_drafting_asks_the_packed_step_for_the_rounds_width_and_hands_it_to_every_bridge(self):
+        """Beside the 64-row block the engines capture only the sequential widths, so the
+        width of a round is decided here, over every live request, before any proposal."""
+        worker, bridge, events, scheduled = self.fixture()
+        policy = Mock(return_value=16)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=policy))
+        original = hook.bridges
+        bridges = {name: SimpleNamespace(request=SimpleNamespace(session=SimpleNamespace(request_id=name)),
+                                         drafts=Mock(return_value=SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
+                   for name in 'ab'}
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b'], [[1], [1]]))
+            policy.assert_called_once_with([bridges['a'].request, bridges['b'].request])
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+            # None from the policy: each bridge drafts exactly as before
+            policy.return_value = None
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with()
+            # a step without the policy (the sequential step): likewise
+            hook.packed_step = lambda entries, *, cancelled: []
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with()
+        finally:
+            hook.bridges = original
+            hook.close()
+
     def test_queued_sampler_or_second_owner_rejected(self):
         worker, bridge, _, _ = self.fixture()
         bridge.runner._pending_samples.append(object())

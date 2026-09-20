@@ -20,7 +20,7 @@ import torch
 
 from serving_fast_request import CommittedOutput
 import serving_packed_step
-from serving_packed_step import audit_log, describe, packed_device_step
+from serving_packed_step import PackedStep, audit_log, describe, packed_device_step, proposal_rows
 from serving_sequential_step import describe as describe_sequential
 from test_packed_verifier import PAGE_WIDTH, BlockFixture, FourUserFixture
 import verifier_engine
@@ -90,6 +90,7 @@ class FakeSession:
         self.request_id, self.position, self.seed = request_id, position, 5
         self.phase, self.pending, self.finished = 'idle', None, False
         self.emitted, self.aborted, self.epoch = [], 0, 0
+        self.max_new_tokens = 256
 
     def propose(self, tokens):
         if self.phase != 'idle' or self.pending is not None:
@@ -145,13 +146,19 @@ class FakeSession:
 class FakeEngine:
     """VerifierEngine.adopt_packed and the packed branch of its publish."""
 
-    def __init__(self, session, carry=None):
+    def __init__(self, session, carry=None, widths=(1, 2, 4, 8, 16)):
         self.session, self.position = session, session.position
         self.phase, self.pending, self.packed = 'idle', None, None
         self.adopted = []
+        # the engine's own captures (VerifierEngine.widths / serves): the full T16 set, or
+        # the sequential widths beside the four-user block
+        self.widths = tuple(widths)
         if carry is not None:
             # borrowed from a pool slot, the way VerifierEngine.allocate_carry borrows it
             self.carry = [list(snapshot) for snapshot in carry]
+
+    def serves(self, ticket):
+        return len(ticket.tokens) in self.widths
 
     def adopt_packed(self, ticket, block, segment):
         self.session.check_ticket(self.session.request_id, ticket)
@@ -245,6 +252,61 @@ def answers(*flags):
     return cancelled
 
 
+class ProposalRowsTests(unittest.TestCase):
+    """The ticket width of the coming round, decided before drafting over every live request:
+    the block's rows when the block will serve the round as one pass, else None."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block = FakeBlock(users=4)
+        self.stepped = []
+
+    def requests(self, names='ABCD', bind=True):
+        made = []
+        for segment, name in enumerate(names):
+            request = FakeRequest(name, 4100 + segment * 50, self.stepped)
+            if bind:
+                self.block.bind(request.engine, segment)
+            made.append(request)
+        return made
+
+    def test_the_blocks_rows_when_exactly_its_users_are_live_each_with_a_block_left_and_each_bound(self):
+        requests = self.requests()
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        self.assertEqual(proposal_rows(self.block, list(reversed(requests))), 16, 'in any order')
+        # exactly 16 tokens left still holds a block; 15 do not
+        requests[2].session.emitted = [1] * 240
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        requests[2].session.emitted = [1] * 241
+        self.assertIsNone(proposal_rows(self.block, requests))
+
+    def test_survivors_finished_users_foreign_engines_and_a_frontier_outside_the_family_make_the_round_sequential(self):
+        requests = self.requests()
+        for live in (requests[:3], requests[:1], requests[1:]):
+            with self.subTest(live=[request.session.request_id for request in live]):
+                self.assertIsNone(proposal_rows(self.block, live))
+        # a finished request is not live: three left of four is sequential, four of five packed
+        requests[3].session.finished = True
+        self.assertIsNone(proposal_rows(self.block, requests))
+        fifth = FakeRequest('E', 4300, self.stepped)
+        self.block.bind(fifth.engine, 3)
+        self.assertEqual(proposal_rows(self.block, [*requests, fifth]), 16)
+        requests[3].session.finished = False
+        self.assertIsNone(proposal_rows(self.block, [*requests, fifth]), 'five live is no block')
+        # an engine the block was not captured against
+        foreign = self.requests(bind=False)
+        self.assertIsNone(proposal_rows(self.block, foreign))
+        # the block's native chunk family bounds every frontier: a block that would leave it
+        self.block.replay_capacity = 4352
+        requests = self.requests()
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        requests[0].session.position = 4340
+        self.assertIsNone(proposal_rows(self.block, requests))
+        requests[0].session.position = 4336
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        self.assertEqual(self.stepped, [])
+
+
 class PackedStepTests(unittest.TestCase):
     def setUp(self):
         verifier_engine.note_prefill()
@@ -315,6 +377,52 @@ class PackedStepTests(unittest.TestCase):
                 self.assertEqual(self.stepped, [(item['request_id'], False) for item in entries])
                 self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in entries])
                 self.assertEqual(self.block.calls, [], 'the block was not touched')
+
+    def test_a_round_drafted_for_the_block_that_the_block_cannot_serve_fails_loudly_before_any_device_work(self):
+        """Beside the 64-row block the engines capture only (1, 2, 4): a 16-row ticket the
+        block does not serve (its entries changed after drafting) has no capture anywhere and
+        cannot be re-proposed, so the round fails here, naming the reason and the tickets."""
+        request = FakeRequest('A', 100, self.stepped)
+        request.engine.widths = (1, 2, 4)
+        self.block.bind(request.engine, 0)
+        request.propose(self.block.predictions_for(0), accept=15)
+        with self.assertRaisesRegex(ValueError, r'cannot serve \(entries=1 block_users=2\) holds tickets no request '
+                                                r'engine captured \(request=A rows=16\)'):
+            self.step([entry(request)])
+        self.assertEqual((self.stepped, self.block.calls), ([], []))
+        self.assertEqual(request.session.phase, 'failed', 'the round is failed, as a refused verify would fail it')
+        self.assertEqual(request.engine.adopted, [])
+        # a narrow ticket the trimmed engine captured goes to the sequential step as before
+        survivor = FakeRequest('B', 3000, self.stepped)
+        survivor.engine.widths = (1, 2, 4)
+        self.block.bind(survivor.engine, 1)
+        survivor.propose(self.block.predictions_for(1), accept=3, rows=4)
+        outputs = self.step([entry(survivor)])
+        self.assertEqual((self.stepped, [output.request_id for output in outputs]), ([('B', False)], ['B']))
+        # an engine without the serves contract (an untrimmed one) is never refused here
+        plain = FakeRequest('C', 100, self.stepped)
+        del plain.engine.widths
+        plain.engine.serves = None
+        self.block.bind(plain.engine, 0)
+        plain.propose(self.block.predictions_for(0), accept=15)
+        self.stepped.clear()
+        self.step([entry(plain)])
+        self.assertEqual(self.stepped, [('C', False)])
+
+    def test_the_packed_step_object_binds_the_block_and_carries_the_proposal_policy(self):
+        step = PackedStep(self.block)
+        self.assertIs(step.block, self.block)
+        entries = self.two()
+        outputs = step(entries, cancelled=lambda: False)
+        self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
+        self.assertEqual(len(self.block.calls), 3, 'one verify and two commits through the block')
+        requests = [FakeRequest(name, 100, self.stepped) for name in 'AB']
+        for segment, request in enumerate(requests):
+            self.block.bind(request.engine, segment)
+        self.assertEqual(step.proposal_rows(requests), 16)
+        self.assertIsNone(step.proposal_rows(requests[:1]))
+        with self.assertRaises(ValueError):
+            PackedStep(None)
 
     def test_a_cancellation_before_the_verify_is_answered_by_each_requests_own_step(self):
         entries = self.two()

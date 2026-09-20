@@ -52,9 +52,52 @@ def engine(request_id, shared, rows=4):
         output=(None, torch.tensor([1, 2, 0, 1])), commits={prefix: 20 + prefix for prefix in range(5)},
         checkpoints=[[tensor()] for index in range(GDN_LAYERS)])
     engine.buckets = {width: bucket for width in (1, 2, 4) if width <= rows}
+    engine.widths = tuple(engine.buckets)
     engine.allocate_carry()
     engine.save_carry()
     return engine, session
+
+
+class ProposalRowsTests(unittest.TestCase):
+    """The engine's ticket width: its widest capture, or the packed block's rows for a round
+    the block will serve (the hint the worker hook threads down), and whether a ticket is one
+    its own captures hold."""
+
+    def setUp(self):
+        note_prefill()
+
+    def test_the_hint_names_the_blocks_rows_while_the_budget_holds_them_and_nothing_otherwise(self):
+        shared = helpers()
+        engine_, session = engine('A', shared)
+        # without the hint: the widest capture, exactly as before
+        self.assertEqual(engine_.proposal_rows(), 4)
+        # for a block-served round: the block's rows, which this engine never verifies itself
+        self.assertEqual(engine_.proposal_rows(packed_rows=16), 16)
+        self.assertEqual(engine_.proposal_rows(packed_rows=4), 4)
+        # once the budget no longer holds a block, the widest capture again (the seed
+        # counts as emitted, so 63 remain at the start)
+        session.emitted.extend([1] * 54)
+        self.assertEqual(session.max_new_tokens - len(session.emitted), 9)
+        self.assertEqual(engine_.proposal_rows(packed_rows=16), 4)
+        self.assertEqual(engine_.proposal_rows(), 4)
+        session.emitted.extend([1] * 6)
+        self.assertEqual(engine_.proposal_rows(packed_rows=16), 2)
+        for rows in (3, 32, True, 4.0, 0):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, 'packed block rows'):
+                engine_.proposal_rows(packed_rows=rows)
+
+    def test_serves_says_whether_the_engines_own_captures_hold_the_ticket(self):
+        shared = helpers()
+        engine_, session = engine('A', shared)
+        ticket = session.propose(session.request_id, max_rows=4)
+        self.assertTrue(engine_.serves(ticket))
+        self.assertFalse(engine_.serves(SimpleNamespace(tokens=(0,) * 16, position=session.position)))
+        # with a replay plan the plan decides, and a width it lacks is not served
+        engine_.replay_plan = SimpleNamespace(select=Mock(side_effect=ValueError('no bucket')))
+        self.assertFalse(engine_.serves(ticket))
+        engine_.replay_plan = SimpleNamespace(select=Mock(return_value=SimpleNamespace(key=4)))
+        self.assertTrue(engine_.serves(ticket))
+        session.fail_verification(session.request_id, ticket)
 
 
 def cycle(engine, session, rows=4, abort=False):

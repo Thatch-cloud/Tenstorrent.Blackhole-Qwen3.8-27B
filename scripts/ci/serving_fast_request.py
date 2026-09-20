@@ -29,14 +29,18 @@ class FastRequest:
         self.timings = []
         self.prepared_timing = self.last_commit_time = None
 
-    def prepare(self, request_id):
+    def prepare(self, request_id, packed_rows=None):
+        """Prepare this request's ticket. `packed_rows` is the width of a round the packed
+        block will serve (the worker hook asks the packed step before drafting); without it
+        the engine proposes at its own captured width, exactly as before."""
         if (self.closed or self.busy or self.cancelled or request_id != self.session.request_id
                 or self.session.phase != 'idle' or self.session.finished or self.engine.phase != 'idle'):
             raise ValueError('One unfinished idle owner required for draft preparation')
         self.busy = True
         try:
             started = time.perf_counter() if self.collect_timings else None
-            rows = self.engine.proposal_rows()
+            rows = (self.engine.proposal_rows() if packed_rows is None
+                    else self.engine.proposal_rows(packed_rows=packed_rows))
             if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
                 raise ValueError('Qualified T16 verifier bucket required')
             ticket = self.session.propose(request_id, max_rows=rows, selected=self.runtime.drafter_name)

@@ -31,6 +31,30 @@ class RunnerBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.state.output_token_ids, list(range(10, 27)))
         self.assertEqual(bridge.state.num_computed_tokens, 18)
 
+    def test_drafts_threads_the_packed_round_width_to_prepare_and_nothing_without_it(self):
+        bridge = FastRunnerBridge.__new__(FastRunnerBridge)
+        session = SimpleNamespace(request_id='r', finished=False, pending=None)
+        prepared = []
+
+        def prepare(request_id, **options):
+            prepared.append((request_id, options))
+            session.pending = 'ticket'
+
+        bridge.request = SimpleNamespace(closed=False, cancelled=False, session=session, prepare=Mock(side_effect=prepare))
+        bridge.failed = False
+        with patch('serving_runner_bridge.draft_token_ids', return_value='ids') as ids:
+            self.assertEqual(bridge.drafts(packed_rows=16), 'ids')
+            self.assertEqual(prepared, [('r', dict(packed_rows=16))])
+            # a pending ticket is not prepared again, hint or not
+            self.assertEqual(bridge.drafts(packed_rows=16), 'ids')
+            self.assertEqual(len(prepared), 1)
+            session.pending = None
+            self.assertEqual(bridge.drafts(), 'ids')
+            self.assertEqual(prepared[-1], ('r', {}), 'without the hint prepare is called exactly as before')
+            ids.assert_called_with(bridge.request)
+            session.finished = True
+            self.assertIsNone(bridge.drafts(packed_rows=16))
+
     def test_capacity_rejected_before_page_refresh_and_verification(self):
         bridge, _, scheduled = self.fixture()
         bridge.runner.model_config.max_model_len = 4

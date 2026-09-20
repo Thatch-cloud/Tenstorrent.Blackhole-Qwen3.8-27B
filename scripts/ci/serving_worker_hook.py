@@ -1,5 +1,6 @@
 """Request-scoped worker routing for an already prepared fast verifier bridge."""
 
+from functools import partial
 import os
 from types import MethodType
 
@@ -130,13 +131,23 @@ class FastWorkerHook:
         # 'Live prepared request ticket required' (run 35475786321).
         from vllm.v1.outputs import DraftTokenIds
 
+        # The ticket width of the coming round, decided here, where every live request is
+        # known: the packed step's rows per user when the block will serve the round as one
+        # pass, else None and each engine proposes at its own captured width. Beside the
+        # 64-row block the engines capture only the sequential widths (1, 2, 4), so a
+        # block-served round must be drafted at the block's width and a sequential one
+        # (survivors, a user with fewer than sixteen tokens left) at the engines'. A step
+        # without the policy (the sequential step) leaves every proposal as before.
+        policy = getattr(self.packed_step, 'proposal_rows', None)
+        packed_rows = policy([bridge.request for bridge in self.bridges.values()]) if callable(policy) else None
         request_ids, tokens = [], []
         for bridge in self.bridges.values():
             # Phase lines around each proposal: run 35482551725 stalled with both
             # requests still running and neither device past its FIRST proposal, so
             # the next run has to say whether it is a proposal or a step that never
             # returns, and whose.
-            drafts = phase('propose', bridge.request.session.request_id, bridge.drafts)
+            drafts = phase('propose', bridge.request.session.request_id,
+                           bridge.drafts if packed_rows is None else partial(bridge.drafts, packed_rows=packed_rows))
             if drafts is None:
                 continue
             request_ids.extend(drafts.req_ids)
