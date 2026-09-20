@@ -1553,3 +1553,20 @@ reads packed conv states and the attention's per-slot tables). A single-user run
 of the same prompt is in flight to say which text is right; the GDN audit is
 ranking what the prefill overwrites. This is the first correctness signal beyond
 completion for the two-user path and it predates the packed step entirely.
+
+**Single-user reference (run 35492921706, users=1, same prompt, image v41):** 64
+tokens in 10 chunks, text BYTE-IDENTICAL to user 0 of run 35492676194 (sha
+66a5d0c2), common prefix with user 1 only 48 chars. So the 'token soup' is the
+correct greedy continuation of the nonsense prompt and user 0 was right; USER 1 -
+the second-admitted request, which the plugin prefilled 'into slots [1]' - is the
+corrupted one: right for its first chunk, wrong after, and accepting fewer draft
+tokens from the start (23 chunks vs 10). The fast path saves and restores GDN
+state at native index 0 only (`gdn_snapshot.py:43-45`:
+`_write_recurrent_state_prefix(..., 1)`, `_write_index(target, saved, 0, 1)`;
+the eight-slot native state at :10), so user 1's initial snapshot and carry were
+taken from slot 0 - whatever it held - not from the slot its prefill wrote.
+Identical prompts make the two post-prefill states coincide, which is why user
+1 was right for one chunk; the run with distinct prompts (one id offset) tells
+whether user 1 is wrong from its first token. Single user on the fast path:
+46.7 tok/s over its decode window (64 tokens; 90 ms verify + 41 ms proposal per
+chunk of ~6.4 accepted tokens).
