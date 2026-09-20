@@ -2657,3 +2657,19 @@ fits, but four concurrent decoders never form under serial admission, so the 4-w
 be exercised. This is the admission/prefill serialisation that Lever N (resumable prefill) and M2
 (batched admission / scheduler alternation) remove. M3's device work is complete and proven; its
 throughput benefit is gated on that interleave, as the programme's remaining path already stated.
+
+## Run 35540885281 (image v54): four-user packed round runs, token-exact, 2043 ms
+
+The 3->4-live stale-ticket fix (47a1f183) held: all four users completed 256 tokens with no crash,
+no refuse_round, no TT_FATAL (one benign worker.__del__ shutdown Traceback). 25 packed 64-row rounds
+executed; each user is token-exact against its single-user reference over the full 64-token
+comparable length. Checkpoint B (four concurrent fast-path users with speculation) is reached.
+
+packed_verify 2043 ms/round (min 2042, max 2063), against 109 ms for the 2-user 32-row round and the
+cost model's 152 ms estimate. The tight variance shows a fixed cost, not contention. The 64-row path
+runs through the correctness-first prefill-mode fallbacks (prep as two batch-32 calls, head concat in
+two halves, the unfused MLP prefill arm at M=64, the GDN and wo projections on prefill 2D configs
+with DRAM output, DRAM<->L1 moves). Those are throughput-tuned, not latency-tuned. Making the round
+fast needs real two-tile decode program configs (per_core_M 2) in place of the prefill fallbacks and
+a bundled prep, tracked separately. Per-user rate this run (0.7-2.2 tok/s) is dominated by the ~312 s
+serial prefill ramp, not the packed tail.
