@@ -1848,3 +1848,16 @@ and the replay page tables in the trace holes (pooled). Image v44 =
 sha256:873a9103, built from 3db6e225 (with 89f13a27's fixture fix on the
 branch). The packed device step's gate is now meaningful; its run follows on the
 same image with QWEN_FAST_PACKED_STEP=1.
+
+## Run 35496483954 (image v44, QWEN_FAST_PACKED_STEP=1): attach failed, error masked
+
+The server never became ready: the packed block's construction at attach raised
+inside `attach_combined_runtime`, whose handler (serving_runtime.py:168-170)
+called `scopes.close()` while handling it; the block-stream scope's exit check
+(mlp_block_stream_runtime.py:189-190, 'Every target layer must construct and
+execute the candidate' - trivially unmet at attach, before any layer has run
+the fused candidate) raised, and vLLM logged only that. The original error is
+lost. The fused arm itself is not the cause: a 32-row activation takes its
+fallback (fused_t16_scope.py:49-51), not an exception. Fixed for the rerun: the
+handler logs the closing error and re-raises the original (image v45). The
+lane's committed state returned to the sequential step, which passes the gate.
