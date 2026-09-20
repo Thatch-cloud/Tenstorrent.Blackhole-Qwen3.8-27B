@@ -1489,3 +1489,28 @@ and native slot 0, so the carries must be re-seeded after warming. Tests: 91
 green across eight modules (16 new); test_gdn_records,
 test_gdn_device_loop_state and test_retained_ownership were never in CI and
 are now registered.
+
+**Items 4-5 landed (38895d69):** `packed_verifier.py` - `PackedShape`,
+`m1_shape(page_width)`, `segment_rows`, `PackedFeatureTaps` (a tuple subclass
+carrying the user's row offset), module-level `stage_packed` (so the bundle's
+verifier_inputs.py stays untouched), and `PackedVerifierEngine(operations,
+model, helpers, sampler, *, pool, shared_weights, shape, feature_taps)` with
+`segment_of(engine)`, `segments(entries)`, `stage_packed_inputs(entries)`,
+`verify(entries) -> (predictions, metrics)` (predictions in entries order,
+`metrics['segments'][i]` = entry i's segment), `features(segment)`,
+`commit_user(segment, prefix)`, `describe()`, `close()`.
+`VerifierEngine.adopt_packed(ticket, block, segment)` (:514) installs a
+synthetic bucket keyed ('packed', segment) whose feature capture is a
+`PackedFeatureView`; `publish` (:534) then routes to `block.commit_user`, clears
+`_resident`, advances the position and goes idle without `save_carry`;
+`note_packed_step()` (:28) is for the step to call. `project_features` takes
+`row_offset` (dflash_device.py:532). SEGMENT BINDING: the trace bakes each
+segment's restore source and commit destination - the pool slot carries - so
+segment u is bound to pool slot u at attach and an entry is mapped to its
+segment by carry identity; the plan's 'segment u = entries[u]' cannot hold once
+the scheduler presents B before A, and the step must pass
+`metrics['segments'][i]` for entry i. Construction order (after the pool and
+PreparedDraftWeights, before the lifecycle) is enforced: construction refuses
+a lent slot, a closed pool or weights, a differing page width, or a resident
+carry. Tests: 128 green across seven modules (12 new in test_packed_verifier,
+5 in test_verifier_carry). Combined with items 1-3 at HEAD: 223 green.
