@@ -1816,3 +1816,19 @@ family's tables, else the pinned call unchanged. Helpers moved to the new
 module; serving_buffer_pool imports them from there. 218 tests green over the
 twelve modules; test_pooled_attention_replay registered. Image v43 (tag at
 563f633c) is the gate build.
+
+## Run 35495982721 (image v43): the adoption self-check catches the slice convention
+
+The frozen pin is satisfied (first user admitted, one chunk emitted). The second
+user's admission reached adoption and the self-check refused before any write:
+
+    ValueError: Recurrent-state slice at row 1 differs from the row: layer 0 rec_state
+    chip 0 shape (0, 24, 128, 128) torch.bfloat16, row (1, 24, 128, 128) torch.bfloat16
+
+The model's `_slice_along(tensor, dim, a, b)` takes (start, stop), not (start,
+count): row 1 requested as (1, 1) is empty. Every older call is (0, 1), which
+reads identically under either convention, so nothing in the codebase or its
+tests had ever disambiguated it; the test fixture modelled the count reading.
+Fixed: `adopt_slot` slices (index, index + 1) and the fixture narrows to stop -
+start. Without the self-check this would have written an empty tensor into row
+0 and decoded from garbage silently. Image v44 = the gate build.
