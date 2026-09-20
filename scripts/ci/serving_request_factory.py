@@ -21,7 +21,8 @@ def device_components():
         runtime=DFlashRequestRuntime, session=GreedySession, engine=VerifierEngine, collectives=TT_CCL)
 
 
-def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids):
+def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
+                 collectives=None):
     from dflash_request_runtime import TARGET_TAPS
 
     prompt = tuple(state.prompt_token_ids)
@@ -67,7 +68,15 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 getattr(state, 'block_ids', None))
         except BaseException:
             pass
-        device = components.device(operations, model, components.collectives(model.mesh_device),
+        # ONE collectives object for every request. Each used to build its own
+        # TT_CCL, and two of them cycle semaphore handles over the same mesh: run
+        # 35477522469 had the draft head refuse non-finite candidates and run
+        # 35478872085, with the trace disabled, had the two chips' replicated
+        # selector features disagree. Both are what interleaved collectives look
+        # like. The sequential step runs users one at a time, so a shared object is
+        # used exactly as serially as it is with a single request.
+        device = components.device(operations, model,
+            collectives if collectives is not None else components.collectives(model.mesh_device),
             layers, projection, selector, _qwen_outputs, position=len(prompt),
             block_rows=16, proposal_capture=True, max_new_tokens=256,
             fused_convolution=True, feature_start=len(prompt) - 2048,

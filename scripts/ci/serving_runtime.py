@@ -34,6 +34,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     if len(layers) != 48:
         raise ValueError('All forty-eight native GDN layers required')
     helpers = [ActiveSnapshot(layer, operations, direct=True) for layer in layers]
+    # Built once and shared by every request: two TT_CCL objects cycling semaphore
+    # handles over one mesh is cross-request interference, not concurrency.
+    collectives = TT_CCL(model.mesh_device)
     sampler = SamplingGenerator(args=model.args, mesh_device=model.mesh_device,
         tt_ccl=TT_CCL(model.mesh_device))
     sampler.set_trace_bucket(1)
@@ -64,7 +67,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
         def create_request():
             return from_prefill(operations, model, sampler, pages, helpers,
-                state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids)
+                state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
+                collectives=collectives)
 
         request = create_request() if experiment is None else experiment.create(create_request)
         try:
