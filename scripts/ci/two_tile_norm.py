@@ -26,13 +26,19 @@ model_config.py, and its dict is read at exactly two places on the decode path:
 WHAT. `two_tile_norm_config` rebuilds those two values for the block's rows: the same
 core grid, orientation and buffer type with a (rows, width) shard, and the same grid,
 subblock_w and block_w with block_h = rows / 32. Every other key passes through
-untouched (`output_mem_config`, which model.py:522 sets to DRAM for the final norm, and
-whatever else the framework carries), except that any unknown value carrying a one-tile
-shard is refused, because leaving it on the path would fail the way the gather did.
-`bind_two_tile_norms` wraps the getter for one block: decode configs come back two
-tiles high, prefill and every other call reach the native getter unchanged, and the
-wrapper counts its calls so ModelBatch.run can check that every decode norm of the
-forward (two per layer plus the final norm) took the rebuilt config.
+untouched (whatever else the framework carries), except that any unknown value carrying
+a one-tile shard is refused, because leaving it on the path would fail the way the
+gather did, and that a None `output_mem_config` becomes L1-interleaved: rmsnorm.py:176-177
+then hands the norm output on interleaved, which is the layout the consumers of a
+wide block take (two_tile_decode.py: the GDN in-projection's 2D branch and the MLP's
+unfused prefill arm read the activation as given, and the 1D attention arm's own
+interleave becomes a no-op). The framework dict carries None there for the layer norms
+(tt_transformers model_config.py:2196); model.py:522 sets DRAM for the final norm after
+the getter returns, and that assignment wins as before. `bind_two_tile_norms` wraps the
+getter for one block: decode configs come back two tiles high, prefill and every other
+call reach the native getter unchanged, and the wrapper counts its calls so
+ModelBatch.run can check that every decode norm of the forward (two per layer plus the
+final norm) took the rebuilt config.
 
 WHERE IT RUNS. ModelBatch adds the binding only for a block wider than one tile
 (rows > 32) and applies it, like every adapter, only around that block's forward through
@@ -116,11 +122,13 @@ def two_tile_program_config(config, rows, operations):
         block_w=config.block_w, inplace=config.inplace)
 
 
-def two_tile_norm_config(config, rows, operations):
+def two_tile_norm_config(config, rows, operations, output_mem_config=None):
     """The framework's decode norm config dict with its two sharded values rebuilt for
-    `rows`; every other key passes through. Refuses a dict without the sharded keys (the
-    consumers above would then run the norm interleaved, which is not the 32-row path
-    this mirrors) and any other value that still carries a one-tile shard."""
+    `rows`; every other key passes through, except that a None `output_mem_config` takes
+    `output_mem_config` when one is given (the wide block's interleaved hand-off). Refuses a
+    dict without the sharded keys (the consumers above would then run the norm interleaved,
+    which is not the 32-row path this mirrors) and any other value that still carries a
+    one-tile shard."""
     validate_two_tile_rows(rows)
     if not isinstance(config, dict) or any(key not in config for key in SHARDED_KEYS):
         raise ValueError('The decode norm config no longer carries %s; the two-tile override cannot rebuild it'
@@ -132,13 +140,18 @@ def two_tile_norm_config(config, rows, operations):
     if stale:
         raise ValueError('Decode norm config key(s) %s carry a one-tile shard the override does not rebuild'
                          % ', '.join(stale))
+    if output_mem_config is not None and rebuilt.get('output_mem_config') is None:
+        rebuilt['output_mem_config'] = output_mem_config
     return rebuilt
 
 
 class TwoTileNormBinding:
     """The one instance binding for a wide block: `args.get_norm_config` answering decode
-    calls two tiles high. `binding` is the (instance, name, value) triple ModelBatch
-    applies through instance_overrides; `calls` counts the decode configs rebuilt."""
+    calls two tiles high, their output interleaved in L1. `binding` is the (instance, name,
+    value) triple ModelBatch applies through instance_overrides (`bindings` lists it, the
+    shape every two-tile binder shares); `calls` counts the decode configs rebuilt."""
+
+    label = 'decode norm'
 
     def __init__(self, args, rows, operations, expected_calls):
         self.rows = rows
@@ -148,16 +161,20 @@ class TwoTileNormBinding:
         native = getattr(args, 'get_norm_config', None)
         if not callable(native):
             raise ValueError('The model args expose no get_norm_config to rebuild; the model changed')
+        if getattr(operations, 'L1_MEMORY_CONFIG', None) is None:
+            raise ValueError('An interleaved L1 memory config is required for the wide block norm output')
         self.native = native
+        self.output_mem_config = operations.L1_MEMORY_CONFIG
         self.calls = 0
         self.binding = (args, 'get_norm_config', self)
+        self.bindings = [self.binding]
 
     def __call__(self, name, mode, *rest, **options):
         config = self.native(name, mode, *rest, **options)
         if not is_decode(mode):
             return config
         self.calls += 1
-        return two_tile_norm_config(config, self.rows, self.operations)
+        return two_tile_norm_config(config, self.rows, self.operations, output_mem_config=self.output_mem_config)
 
 
 def bind_two_tile_norms(model, rows, operations):

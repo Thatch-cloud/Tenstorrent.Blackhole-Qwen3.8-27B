@@ -70,7 +70,7 @@ jobs:
           for name in packed_shapes.py packed_cache_writer.py force_argmax.py gdn_prefix.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in two_tile_norm.py; do
+          for name in two_tile_norm.py two_tile_decode.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
       - name: Build and CPU-test canary without devices or weights
