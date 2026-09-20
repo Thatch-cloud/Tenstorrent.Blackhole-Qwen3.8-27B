@@ -1656,3 +1656,16 @@ records `empty_slots`; `ActiveSnapshot.adopt_slot(k)` copies row k into row 0
 through the slice path at admission, before the engine's first save; decode,
 restore and commit stay at slot 0. A follow-up probe prints `write_slot` so the
 adoption covers everything the prefill wrote.
+
+The GDN audit reached the same finding independently (from the image's
+`lever_n_model_patch.py:174-206`: bind the single-occupancy GDN prefill scratch,
+run the chunked prefill with vLLM's own block-table row, read the scratch
+rec/conv back to host, unbind, `_write_gdn_slot(int(empty_slots[u]), ...)` -
+slot 1 for the second user; slot 0 is not written) and adds what the fix needs:
+slot 0's recurrent state plus the four conv taps IS the whole per-slot GDN
+state (gates, dt bias, neg-exp A and norm are weights, gdn_device_loop_state.py:77),
+so copying those rows is complete; `note_prefill()`'s assumption that a prefill
+overwrote slot 0 is the reverse of reality and costs one extra restore, nothing
+more; and serving's prefill is the untraced chunked fallback (:361-366), an
+eager path that allocates only free memory and cannot scribble the first
+user's live buffers - which the first user's byte-exact text confirms.
