@@ -478,8 +478,11 @@ class PackedVerifierEngine:
         self.check_segment(segment)
         if type(prefix) is not int or not 0 <= prefix <= self.rows_per_user:
             raise ValueError('Selected prefix outside the user segment')
+        # Each commit trace already blocks the host; the one fence that matters is the
+        # last user's, which arms the retained block's replay for the next round.
+        last = self.pending_segments == {segment}
         try:
-            self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=True,
+            self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last,
                 publication=lambda selected: self.execute_commit(segment, selected))
             self.pending_segments.discard(segment)
             if not self.pending_segments:

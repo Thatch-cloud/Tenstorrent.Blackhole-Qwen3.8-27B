@@ -473,7 +473,8 @@ class RoundTests(BlockFixture):
         self.assertEqual(self.ttnn.executed[executed:], [block.commits[1][9]])
         self.assertEqual(retained.commits, [(1, 9)])
         call = retained.commit_user.call_args
-        self.assertEqual((call.args, call.kwargs['dma'], call.kwargs['synchronize']), ((1, 9), True, True))
+        # not the last user: the trace blocked the host already, no fence yet
+        self.assertEqual((call.args, call.kwargs['dma'], call.kwargs['synchronize']), ((1, 9), True, False))
         self.assertTrue(callable(call.kwargs['publication']))
         self.assertEqual((block.phase, block.pending_segments), ('verified', {0}))
         with self.assertRaises(ValueError):
@@ -483,6 +484,8 @@ class RoundTests(BlockFixture):
         block.commit_user(0, 0)
         self.assertEqual(self.ttnn.executed[executed:], [block.commits[1][9]], 'prefix 0 executes no trace')
         self.assertEqual(retained.commits, [(1, 9), (0, 0)])
+        # the last user's commit carries the one fence that arms the next round's replay
+        self.assertTrue(retained.commit_user.call_args.kwargs['synchronize'])
         self.assertEqual((block.phase, block.pending_segments), ('idle', set()))
         self.assertIsNone(verifier_engine._resident)
         with self.assertRaises(ValueError):
