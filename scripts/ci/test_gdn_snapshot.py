@@ -90,12 +90,12 @@ class SnapshotTests(unittest.TestCase):
         live = {"rec": shards("rec", (8, 24, 4, 4), 0), "conv0": shards("conv0", (1, 8, 16), 1),
                 "conv1": shards("conv1", (1, 8, 16), 1)}
 
-        def slice_along(tensor, dimension, start, count):
+        def slice_along(tensor, dimension, start, stop):
             order.append("slice")
             parts = []
             for chip, shard in enumerate(tensor.chips):
                 row = 0 if wrong == (tensor.name, chip) else start
-                parts.append(shard.narrow(dimension, row, count).clone())
+                parts.append(shard.narrow(dimension, row, stop - start).clone())
             sliced = SimpleNamespace(name="slice:" + tensor.name, chips=parts)
             slices.append(sliced)
             return sliced
@@ -126,7 +126,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(snapshots.adopt_slot(1, layer=3), 2, "verified on both chips")
             dma.assert_not_called()
             self.assertEqual([call.args for call in layer._slice_along.call_args_list],
-                             [(layer.rec_state, 0, 1, 1), (layer.conv_states[0], 1, 1, 1), (layer.conv_states[1], 1, 1, 1)])
+                             [(layer.rec_state, 0, 1, 2), (layer.conv_states[0], 1, 1, 2), (layer.conv_states[1], 1, 1, 2)])
             self.assertEqual(len(slices), 3)
             layer._write_recurrent_state_prefix.assert_called_once_with(("clone", slices[0]), 1)
             self.assertEqual([call.args for call in layer._write_index.call_args_list],
@@ -168,13 +168,13 @@ class SnapshotTests(unittest.TestCase):
 
     def test_a_slice_with_the_wrong_shape_or_missing_shards_is_refused(self):
         layer, operations, order, slices, snapshots = self.adoption_fixture(True)
-        layer._slice_along.side_effect = lambda tensor, dimension, start, count: SimpleNamespace(
+        layer._slice_along.side_effect = lambda tensor, dimension, start, stop: SimpleNamespace(
             name="slice", chips=[shard.narrow(dimension, start, 2) for shard in tensor.chips])
         with self.assertRaisesRegex(ValueError, "differs from the row: layer [?] rec_state chip 0 shape"):
             snapshots.adopt_slot(1)
         layer._write_recurrent_state_prefix.assert_not_called()
         layer, operations, order, slices, snapshots = self.adoption_fixture(True)
-        layer._slice_along.side_effect = lambda tensor, dimension, start, count: SimpleNamespace(
+        layer._slice_along.side_effect = lambda tensor, dimension, start, stop: SimpleNamespace(
             name="slice", chips=[tensor.chips[0].narrow(dimension, start, 1)])
         with self.assertRaisesRegex(ValueError, "has 1 shards against 2 live shards"):
             snapshots.adopt_slot(1)
