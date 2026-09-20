@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from serving_worker_hook import FastWorkerHook
@@ -111,3 +112,24 @@ class WorkerHookTests(unittest.TestCase):
             hook.close()
         self.assertFalse(hook.closed)
         self.assertIs(worker.model_runner._qwen_fast_hook, hook)
+
+
+class PhaseLogTests(unittest.TestCase):
+    def test_phase_runs_the_call_and_returns_its_result_when_logging_is_off(self):
+        import serving_worker_hook
+
+        with patch.object(serving_worker_hook, 'PHASE_LOG', False):
+            self.assertEqual(serving_worker_hook.phase('propose', 'r', lambda: 'drafts'), 'drafts')
+
+    def test_phase_logs_begin_and_end_around_the_call(self):
+        import sys
+        from types import ModuleType
+        import serving_worker_hook
+
+        lines = []
+        stub = ModuleType('loguru')
+        stub.logger = SimpleNamespace(info=lambda template, *values: lines.append(template.format(*values)))
+        with patch.dict(sys.modules, {'loguru': stub}), patch.object(serving_worker_hook, 'PHASE_LOG', True):
+            self.assertEqual(serving_worker_hook.phase('propose', 'r', lambda: 'drafts'), 'drafts')
+        self.assertEqual(lines[0], '[PHASE] propose r begin')
+        self.assertTrue(lines[1].startswith('[PHASE] propose r end '))

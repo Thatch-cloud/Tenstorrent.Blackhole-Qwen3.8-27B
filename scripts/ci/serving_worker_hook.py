@@ -1,6 +1,24 @@
 """Request-scoped worker routing for an already prepared fast verifier bridge."""
 
+import os
 from types import MethodType
+
+
+PHASE_LOG = os.environ.get('QWEN_FAST_PHASE_LOG') == '1'
+
+
+def phase(name, request_id, call):
+    """Run `call` between a begin and an end line so a hang names its phase."""
+    if not PHASE_LOG:
+        return call()
+    import time
+    from loguru import logger
+
+    logger.info('[PHASE] {} {} begin', name, request_id)
+    started = time.perf_counter()
+    result = call()
+    logger.info('[PHASE] {} {} end {:.1f} ms', name, request_id, (time.perf_counter() - started) * 1000)
+    return result
 
 
 class FastWorkerHook:
@@ -101,7 +119,11 @@ class FastWorkerHook:
 
         request_ids, tokens = [], []
         for bridge in self.bridges.values():
-            drafts = bridge.drafts()
+            # Phase lines around each proposal: run 35482551725 stalled with both
+            # requests still running and neither device past its FIRST proposal, so
+            # the next run has to say whether it is a proposal or a step that never
+            # returns, and whose.
+            drafts = phase('propose', bridge.request.session.request_id, bridge.drafts)
             if drafts is None:
                 continue
             request_ids.extend(drafts.req_ids)
