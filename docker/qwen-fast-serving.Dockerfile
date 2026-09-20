@@ -32,6 +32,7 @@ COPY scripts/ci/pooled_attention_replay.py /experiment-scripts/ci/
 COPY scripts/ci/target_packed_pages.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_batched_mask.py /experiment-scripts/ci/
 COPY scripts/ci/packed_shapes.py scripts/ci/packed_cache_writer.py scripts/ci/force_argmax.py scripts/ci/gdn_prefix.py /experiment-scripts/ci/
+COPY scripts/ci/two_tile_norm.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

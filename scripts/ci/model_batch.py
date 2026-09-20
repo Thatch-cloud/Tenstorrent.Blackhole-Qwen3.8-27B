@@ -267,6 +267,21 @@ def attention_reader(*, replay_reader, serial_sdpa, grouped_attention, serial, g
     return serial() if serial_sdpa else None
 
 
+def norm_bindings(rows, model, operations):
+    """The wide block's two-tile norm binding (two_tile_norm.py), or None within one tile.
+
+    Beyond one 32-row tile the model's own decode norm configs are one tile high (run
+    35502452429 refused the 64-row block at layer 0's attention norm gather), so the block
+    supplies `args.get_norm_config`'s decode dicts rebuilt for its rows. Within one tile
+    there is no binding: the 32-row block's calls stay exactly as the M1 gate ran them."""
+    validate_checkpoint(rows, rows)
+    if rows <= TILE_ROWS:
+        return None
+    from two_tile_norm import bind_two_tile_norms
+
+    return bind_two_tile_norms(model, rows, operations)
+
+
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
     validate_checkpoint(rows, rows)
     if requested and (not serial_sdpa or profiler is not None):
@@ -527,6 +542,12 @@ class ModelBatch:
                         self.bindings.append((attention, name, profiler.wrap(category, getattr(attention, name))))
                 self.bindings.append((attention, "forward_decode", forward))
                 gdn_index += 1
+        # Beyond one tile, the model's decode norms (two per layer and the final norm) take
+        # their configs from args.get_norm_config one tile high; the block hands them its
+        # own rows through the one binding two_tile_norm builds. None within one tile.
+        self.norm_binding = norm_bindings(self.rows, model, ttnn)
+        if self.norm_binding is not None:
+            self.bindings.append(self.norm_binding.binding)
         if profiler:
             from stage_profile import decoder_bindings
             for index, layer in enumerate(model.layers):
@@ -645,12 +666,17 @@ class ModelBatch:
         before_writes = [writer.calls for writer in self.writers]
         before_reads = [reader.calls for reader in self.readers]
         before_mask_refresh = self.replay_reader.refresh_calls if self.attention_mask_once else 0
+        norm_binding = getattr(self, 'norm_binding', None)
+        before_norms = norm_binding.calls if norm_binding is not None else 0
         mask_scope = self.replay_reader.shared_masks(16) if self.attention_mask_once else nullcontext()
         with instance_overrides(self.bindings), mask_scope:
             result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages,
                 **({'sharded_lm_head': True} if sharded_logits else {}))
         if self.attention_mask_once and self.replay_reader.refresh_calls - before_mask_refresh != len(self.replay_reader.metadata):
             raise AssertionError('Shared masks must refresh exactly once per model forward')
+        if norm_binding is not None and norm_binding.calls - before_norms != norm_binding.expected_calls:
+            raise AssertionError('Every decode norm of the wide block must take a two-tile config: %d rebuilt, %d expected'
+                                 % (norm_binding.calls - before_norms, norm_binding.expected_calls))
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):
