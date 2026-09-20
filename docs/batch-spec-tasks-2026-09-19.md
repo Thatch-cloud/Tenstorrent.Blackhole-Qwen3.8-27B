@@ -1873,3 +1873,20 @@ dflash_batched_mask.py (the same lazy class on the draft branches' pack= path,
 for the packed proposal later). A static import closure of the packed modules
 lists 70 more repo-only names, all experiment-only lazy imports (dspark_*,
 t32_*, frozen stages) the serving path never executes. Image v46.
+
+Watch-list for the v46 packed run (block author's read-only walk of the
+constructor against the real attach objects; none of the block's own checks
+fires): (1) gdn_device_loop_state.py:169 - a half-tile ttnn.slice of the L1
+TILE projection starting at row 16 on the tile-row dimension, and :188 a
+concat of two (1,16,3072) tiled pieces - the first hardware exercise of an
+unaligned tile START in this recipe (every existing tiled slice has only an
+unaligned end); a TT_FATAL RuntimeError, or its Python shadow
+gdn_direct_window_scope.py:53-54 'Simulator-qualified L1 projection required'.
+(2) DRAM at attach: 2 segments x 48 layers x 16-row retained histories = 1.27
+GB per chip plus 0.2 GB of snapshots and entries, before each request's own
+~2 GB. (3) gdn_records retain_checkpoint_histories scratch aliasing (low).
+(4) trace region at end_trace_capture (low, 1 GiB). Not reachable from the
+block: the block-stream Projection wrapper (constructed only inside
+FusedT16Arm.__init__ at scope entry), the fused arm's fallback at 32 rows
+(nothing refuses a nonzero fallback count), the T16 attention gate (only with
+target_attention_t16=True). The serving attach enters no frozen_* scope.
