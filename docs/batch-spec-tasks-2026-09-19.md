@@ -1431,3 +1431,38 @@ ContextVar, the per-instance validated-mask set) plus the device program cache.
 22 new tests (`test_dflash_device_audit`, registered), 167 green across the
 touched modules with the switch off. Not yet run on hardware; the readback
 follows `check_shards`, which has.
+
+### Why per-request collectives diverge: the trace-hole mechanism on L1 (audit, 2026-09-20)
+
+Read at the image's tt-metal pin (v0.77.0-rc1). A `TT_CCL` instance owns 36
+global semaphores (`models/tt_transformers/tt/ccl.py:51-74`: 3 axis pools x 2
+double-buffered x [1 barrier + 2 all-gather + 3 reduce-scatter]), each a real
+HEIGHT_SHARDED L1 buffer with one 4-byte page on every Tensix core of both chips,
+allocated through the ordinary allocator at whatever L1 was free at construction
+(`tt_metal/impl/buffers/global_semaphore.cpp:89-102`). With
+`QWEN_FAST_SHARED_CCL=0` each request built its own at admission
+(`serving_request_factory.py:87`) - i.e. B's 36 pages per core were allocated
+AFTER A's verify trace was captured, into L1 holes that trace baked for the
+intermediates it freed. Every replay of A's verify then wrote A's L1
+intermediates over B's semaphore pages, per chip, with data-dependent values.
+
+The all-gather protocol turns a scribbled semaphore into exactly what was seen:
+the reader waits with `noc_semaphore_wait_min(out_ready_sem, target)`
+(`minimal_default_reader.cpp:300-302, 376-378`, reset to 0 at :400), which
+releases on ANY value >= target, so a nonzero leftover lets that chip consume the
+freshly allocated output buffer before the remote chunks land - it reads a freed
+intermediate. Most elements wrong on one chip, magnitude set by stale data, no
+hang (0.496 vs 0.133 max_abs, 7391 vs 6712 of 8192 across runs). Everything
+else fits: B fails and A does not (A's semaphores predate B's traces); the
+failing proposal is the one right after A's step, i.e. after A's verify replay;
+the shard check does not cover semaphores. The two instances share nothing
+across the CCL objects themselves - no persistent gather buffer
+(`feature_collective.py:51`), semaphore addresses rewritten per call on a
+program-cache hit (`all_gather_async_default_program_factory.cpp:112-141,
+854-868`); what the second instance shares is the L1 allocator with a trace
+captured before it existed. With `QWEN_FAST_SHARED_CCL=1` the single `TT_CCL`
+is built at attach (`serving_runtime.py:84`), before any request trace, like the
+pool and the shared weights: protected by construction ORDER. Same class as
+runs 35477522469 and 35481466425, on L1 instead of DRAM. The rule stands and now
+covers semaphores: nothing a request keeps across steps may be allocated after
+any trace that will replay exists.
