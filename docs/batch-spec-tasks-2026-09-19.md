@@ -1210,3 +1210,31 @@ three REPORT_SHA256 constants to the regenerated reports, re-cut the bundle
 wait-zone gates, frozen_recipe_context.py:225,304, cumulative_t16_experiment.py:28)
 follow for lane hygiene. `tensix_stream_activation.cpp` has the same exit defect
 but is not on the serving path.
+
+### Frozen-recipe revision for the drained reader: the chain as run (2026-09-20)
+
+Kernel: `scripts/ci/fused_1d_input.cpp` gains `noc_async_write_barrier()` and
+`noc_async_atomic_barrier()` after the block loop (commit 4d890d6a, reader sha256
+3e907b91). Overlay: `frozen_recipe_context.py`'s unconditional orchestrator loop
+now carries the reader, `fused_t16_admission.py` and the target-mode simulator
+report with its exit status into every lane's read-combined tree (REVISION
+unchanged at 8c102b20; dry-run against a checkout of that ref verified).
+Allowlist: one PATCH added five entries (experiments@frozen-mlp-exit-v1,
+mlp-register-epilogue-sim-v5, mlp-block-stream-replay-v7,
+cumulative-t16-full-v20-direct-dma-kv-slide-block-stream-dflash-native,
+serving-bundle-v2); the group's five repositories survived and were verified.
+
+P1: `qwen-experiments.yml` dispatched on tag frozen-mlp-exit-v1 (learned-attention,
+simulator_only, simulator_fusion_t16, simulator_target_math). First attempt
+35487389218 died inside actions/checkout deleting the persistent workspace
+root, which other lanes had filled with container-written trees; the lane's
+ownership step now owns the whole workspace (24bf8bab). Second attempt
+35487539038 succeeded: six kernels, every `reader_sha256['fused_1d_input.cpp']`
+= 3e907b91, exit status 0; committed as `fused-t16-target-simulator.json` with
+`fused_t16_admission.REPORT_SHA256` = f9b9ce2d (2f8204e2); `qualify_simulator()`
+passes on the tree. The regenerated report also records the current
+`packed_weight_check.py` hash where the 09-17 report had an older one.
+
+P2 (sim-v5, run 35488011817) and P3 (replay-v7, run 35488011111) tagged at
+2f8204e2; then the hardware lane (cumulative full v20), the bundle (v2), image
+v40, and the two-user run.
