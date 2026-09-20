@@ -2183,3 +2183,151 @@ QWEN_FAST_PACKED_STEP=1 with max_num_seqs 4 and the KV pool capped to the four-u
 set (the budget's condition 1), each user's text token-exact against the single-user
 references for prompt bases 1000-1003 (M3 gate references above), plus the packed_verify
 timing at 64 rows.
+
+## M3 64-row decode path (2026-09-20): every model-owned decode op at two tiles
+
+Run 35502452429 (image v48, commit 58a8066b) died at attach in the block's warm forward
+(`packed_verifier.operation` -> `fixture.run(sharded_logits=True)` ->
+`model._forward_decode(..., sharded_lm_head=True)`), inside the model, before any block
+adapter ran:
+
+    model.py:938 _forward_decode: x = layer.forward(x, mode="decode")
+    layer.py:188 forward: attn_input = self.attention_norm(x, mode=_norm_mode, norm_config=_attn_norm_config)
+    distributed_norm.py:85 forward: x = ttnn.experimental.all_gather_async(...)
+    TT_FATAL tensor_spec.cpp:161: Shard height 32 must match physical height 64 for width sharded
+
+The 32-row block ran the same path token-exact (v47); 64 rows is the first two-tile decode
+forward ever attempted. The sources live only in the image; `probe_model_decode_sources.py`
+(5cd4cce0) dumped them with line numbers (distributed_norm.py and layer.py in full;
+model.py `_forward_decode`, `_final_norm_decode`, `_lm_head`; the sharding lines of
+model_config.py, mlp.py and rmsnorm.py). Line numbers below are the image's. Two things the
+dump did NOT reach: `get_norm_config` is not in the qwen36 model_config.py (the probe printed
+"(no match)"; it is the framework ModelArgs the qwen36 args subclass at model_config.py:40),
+and the attention and GDN modules are packages (`attention/tp.py`, `gdn/tp.py`, layer.py:85
+and :92), not the `attention.py`/`gdn.py` files the probe grepped ("missing").
+
+**Enumeration.** Every model-owned decode-mode op on the block's path, in forward order,
+with its one-tile assumption and its class: (a) shape-agnostic; (b) per-tile-safe
+(elementwise or norm; two 32-row halves would be legal, at a cost); (c) weight-bound (must
+run as ONE 64-row op: two 32-row passes read the weights twice and forfeit the one weight
+pass per round that M3 exists for).
+
+| # | Op (image file:line) | One-tile assumption | Class | At 64 rows |
+| --- | --- | --- | --- | --- |
+| 1 | `self.embd(token_ids_buf)` model.py:930 | none seen (its config was not dumped) | (a) | ran on device before the failure (the traceback is at layer 0's norm) |
+| 2 | `ttnn.reshape(x, (1, 1, B, dim_frac))` model.py:933 | none | (a) | ran on device |
+| 3 | `args.get_norm_config("attn", Mode.DECODE)` layer.py:171 (attention norm) and :177 (ff norm takes the attn layout on purpose: 32 cores, `act_shard_hidden`, comment :175) | the getter's dict carries `sharded_output_config`, a WIDTH-sharded spec with a (32, dim / cores) shard, and `sharded_program_config`, a LayerNormShardedMultiCoreProgramConfig with block_h 1 (one tile row per core); consumed at distributed_norm.py:57, :81, :94 and rmsnorm.py:138-139, :145-146 | (b) | REBUILT from our side (two_tile_norm.py): shard (64, width) on the same grid, block_h 2; 128 calls per forward |
+| 4 | pre-norm `all_gather_async(x, dim=3, memory_config=input_mem_cfg)` distributed_norm.py:85-104, `input_mem_cfg = sharded_output_config` (:81) | the gather's OUTPUT layout is the one-tile spec: THE FAILURE (tensor_spec.cpp:161) | (b) | one gather of (1, 1, 64, 2560) per chip into the rebuilt spec; the gather itself is shape-agnostic |
+| 5 | sharded `ttnn.rms_norm` via `self.norm(x, mode, in_sharded=True, out_sharded=True, norm_config)` distributed_norm.py:108-110 -> rmsnorm.py:145-146 (program_config = sharded_program_config, memory_config = sharded_output_config), :168 | block_h 1 and the 32-row shard; rmsnorm.py:9 carries the framework note `SHARD_HEIGHT = TILE  # Current ttnn.rms_norm implementation requires shard height to be a single tile` | (b) | rebuilt block_h 2 over the (64, width) shard: FIRST RUN on device |
+| 6 | post-norm gather distributed_norm.py:113-126 | n/a in decode: `is_distributed_norm(DECODE)` is false (the pre-norm gather at :85 is what ran) | - | not on the path |
+| 7 | attention `forward_decode(attn_input, position_tensor, cos, sin, page_table)` layer.py:210-212 -> attention/tp.py, UNSEEN. Runs with the block's `_decode_from_prep` binding (model_batch.py:511, attention_batch.serial_tail replaces only `paged_update_cache` and the SDPA). Model-owned inside it: `_qkv_raw_decode` (`attn_qkv_decode_1d_progcfg`, model_config.py:210, a 1D decode progcfg built at the config's M), `ttnn.transformer.attn_decode_prep(..., attention._kv_shard_cfg(batch), batch=rows)` (call shape from mtp_cache_only.py:18-21; `_kv_shard_cfg` builds the one-user-per-core height shard of model_config.py:243-252; the ordered writer converts what arrives to DRAM, packed_cache_writer.py:90-91), RoPE inside that prep, `_wo_proj` (`attn_wo_decode_1d_progcfg`, model_config.py:222-223) | every 1D decode progcfg has per_core_M 1 (output_projection_grid.py:11 and mlp_down_grid.py:7 pin it), which a 1D mcast matmul cannot run over two tile rows - unless the module gates on rows as mlp.py does; the prep's batch | (c) for the two projections | UNSEEN: neither classifiable nor configurable from here |
+| 8 | GDN `forward_decode(attn_input)` layer.py:228 -> replaced whole by `model_batch.device_forward`. Model-owned inside it: `_project_qkvzab_raw(packed, rows, L1)` (gdn/tp.py UNSEEN; `gdn_qkvz_decode_1d_progcfg` model_config.py:215-216, 44 cores) at gdn_device_loop_state.py:136 and :160; `_row_proj(output, tw["out"])` (gdn/tp.py UNSEEN; `gdn_out_decode_1d_progcfg` model_config.py:227-228, 33 cores, per_core_M 1 per output_projection_grid.py:11) at gdn_multitoken_conv.py:104 | per_core_M 1 unless gated on `rows` (the in-projection takes `rows` explicitly) | (c) | UNSEEN |
+| 9 | `ttnn.add(x, attn_output)` layer.py:247 | none | (a) | shape-agnostic |
+| 10 | ff norm layer.py:250 with the "attn" decode config (:176-177) | as 3-5 | (b) | rebuilt; its output is the two-tile width shard the MLP then receives |
+| 11 | MLP `feed_forward.forward(ff_input)` layer.py:252 -> mlp.py. The decode arms are gated `x.shape[-2] <= ttnn.TILE_SIZE` (:233 DRAM-sharded w1/w3, :254 1D decode w1/w3, :321 1D decode w2), so 64 rows fall to the PREFILL program configs: `create_prefill_mlp_matmul_program_config` at :282-294 with `_gw = decode_grid_w` (:279) and L1 outputs (:291, :294), w2 at :327-337; and to the prefill compute kernel config (:196, :222, `T <= 1`) | the decode 1D progcfgs (`mlp_w1/w3/w2_decode_1d_progcfg`, model_config.py:190-204, per_core_M 1) are one tile but are NOT taken at 64 | (c): one pass over w1, w3 and w2 at M = 64 by the model's own routing | unseen inside it: whether the prefill arm interleaves a width-sharded input (the 1D arm does, :256 "ff-norm hands us a width-shard -> interleave first"; the prefill arm's input handling is in the unprinted lines 276-300), the gated-activation memory config (:303-309, "L1 in decode, DRAM in prefill", keyed how), the all-reduce (:217 `tt_all_reduce`, ccl.py unseen) |
+| 12 | `ttnn.add(h, ff_output)` layer.py:255 | none | (a) | shape-agnostic |
+| 13 | final norm `_final_norm_decode` model.py:939 -> :520-523: `get_norm_config("lm_head", Mode.DECODE)`, `output_mem_config = DRAM`, `self.norm(x, mode=DECODE, norm_config=nc)`; `self.norm`'s construction is unseen (model.py `__init__`), the docstring (:515-518) says the sharded multi-core norm over `lm_head_core_grid` runs | the lm_head dict is one tile like the attn one | (b) | rebuilt: the wrapper serves every decode call, 129 per forward (2 x 64 + 1) |
+| 14 | LM head `ttnn.linear(x, self.lm_head_weight)` model.py:942 (auto program config, DRAM-interleaved input per :517-518) | none: ttnn derives the program from M | (c): one pass at M = 64 | FIRST RUN of ttnn's own choice at M = 64 |
+| 15 | block-owned after the model: `force_argmax.sample_rows` as two 32-row sampler tiles, the five (1, 1, 64, 5120) taps | ours | - | as built in part 2 |
+
+Counts. Seen and classified: (a) 4 ops (embedding, reshape, two residual adds); (b) 3 norm
+sites, 129 instances per forward, each a gather plus a sharded norm; (c) 4 seen (w1, w3,
+w2, LM head), all one weight pass at 64 rows by the model's own routing, nothing to
+supply. UNSEEN: 4 weight-bound projections (attention QKV and wo, GDN in and out), whose
+decode progcfgs are one tile (per_core_M 1) unless the module gates on rows, and 4
+shape-keyed non-weight ops (`attn_decode_prep` at batch 64 with `_kv_shard_cfg(64)`, the
+MLP prefill arm's input handling, `tt_all_reduce` at two sites, `model.norm`'s wrapper).
+
+**Route: (i), two-tile configs supplied from our side, for the (b) class; the (c) class
+routes itself where seen and is pending source where not.**
+
+- (i) chosen. Every decode norm takes its config from one getter, `args.get_norm_config`,
+  and the seen consumers read exactly two keys of its dict (rows 3-5). One instance binding
+  on `model.args` (model_batch.instance_overrides, applied only around the wide block's
+  forward) returns decode dicts with those two values rebuilt for the block's rows and
+  passes prefill calls and every other key through. The model's code runs unchanged; only
+  two config objects differ. Nothing is added to the weight path.
+- (ii) rejected: `layer.forward(mode="prefill")` calls `forward_prefill_paged` /
+  `forward_prefill` (layer.py:194-208, :216-226), not `forward_decode`, so neither the
+  attention `_decode_from_prep` binding nor the GDN `forward_decode` binding engages; the
+  GDN prefill is the 128-token chunk kernel with `capture_state`, not four per-user
+  recurrences; the prefill norms are the distributed rmsnorm with the gather fused into
+  the in-projection AGMM (`enable_all_gather=not _fuse_norm_agmm`, layer.py:45-47, :61,
+  :76), which hands the modules a K-sharded input the decode adapters cannot take and
+  changes the numerics the 32-row gate was passed on; and `_forward_decode` is the only
+  path that returns per-row vocab-sharded logits (model.py:940-942).
+- (iii) rejected as primary: two 32-row halves per norm double the gathers (129 more
+  collective launches, each a fixed ~15 us: about +2 ms per verify) and add a slice and a
+  concat per norm, for an op whose two-tile form is one launch on the same cores. It stays
+  the fallback if the sharded rms_norm refuses block_h 2 on device (row 5).
+
+**Cost of the norm gather at 64 rows (chosen route).** The pre-norm gather moves
+(rows, dim / tp) BF16 per chip: 320 KB at 64 rows against 160 KB at 32, about 2 us more per
+gather on the 84 GB/s link; 129 gathers per forward, so roughly +0.3 ms per verify, on a
+per-collective fixed cost that does not change (the frozen 16-row profile's 3.4 ms of
+collectives over ~200 launches is ~17 us each, almost all fixed). The sharded norm at
+block_h 2 does twice the one-tile work on the same 32 cores, a few microseconds per norm.
+Estimated, unprofiled; neither term adds a weight pass.
+
+**Implemented.** `scripts/ci/two_tile_norm.py`: `two_tile_memory_config` (same grid,
+orientation and buffer type, shard (rows, width); refuses anything but a one-tile WIDTH
+shard), `two_tile_program_config` (block_h = rows / 32, grid, subblock_w, block_w and
+inplace kept; refuses block_h != 1 or a config that hides a field),
+`two_tile_norm_config` (the two keys rebuilt, the rest passed through; refuses a dict
+without the sharded keys and any OTHER value that still carries a one-tile shard),
+`TwoTileNormBinding` / `bind_two_tile_norms` (the `(model.args, "get_norm_config", wrapper)`
+triple; decode calls rebuilt and counted, prefill calls native). `model_batch.norm_bindings`
+builds it only for rows > 32 and `ModelBatch.run` demands exactly 2 x layers + 1 rebuilt
+decode configs per forward. Within one tile there is no binding and the module is not
+imported: the 32-row block's calls are byte for byte the M1 gate's. Image copy lists
+(Dockerfile and image workflow) and the CPU workflow's unittest line carry the new module
+and its tests (15).
+
+**What the enumeration could not settle: regions to re-probe (exact).** Without these the
+(c)-class attention and GDN projections at 64 rows cannot be classified or configured from
+our side, and nothing further is built here.
+
+1. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/attention/tp.py`: `__init__` (the decode
+   config attributes it keeps), `forward_decode`, `_qkv_raw_decode`, `_decode_from_prep`,
+   `_wo_proj`, `_kv_shard_cfg`, in full; plus a grep for
+   `shard|core_grid|per_core_M|batch|TILE_SIZE|shape\[-2\]|progcfg|rows`.
+2. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/gdn/tp.py`: `_project_qkvzab_raw`,
+   `_project_qkvzab`, `_row_proj`, `forward_decode`, in full; plus a grep for
+   `TILE_SIZE|shape\[-2\]|rows|progcfg|shard|per_core_M`.
+3. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/tp_common.py`:
+   `create_matmul_1d_decode_progcfg`, `matmul_1d_decode`, `create_activation_shard_config`,
+   `create_prefill_mlp_matmul_program_config`, `create_dram_sharded_matmul_program_config`,
+   `mlp_gateup_agmm_enabled`, in full.
+4. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/mlp.py`: `forward` in full (lines 176-351),
+   and `__init__` from line 160.
+5. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/model_config.py`: lines 98-260 in full (the
+   TP block: `M`, every `*_decode_1d_progcfg`, `act_shard_*`, `kv_update_shard_cfg`) and a
+   grep for `SHARDED|model_config\[|norm|tile_padded|lm_head_core_grid|attn_input_grid`.
+6. `/opt/tt-metal/models/demos/blackhole/qwen36/tt/model.py`: the `__init__` lines
+   constructing `self.norm`, `self.embd` and `self.lm_head_weight` (grep
+   `self\.norm\b|self\.embd\b|lm_head_weight|Embedding|RMSNorm|DistributedNorm`).
+7. `/opt/tt-metal/models/tt_transformers/tt/model_config.py`: `get_norm_config`,
+   `create_sharded_norm_config` (or whatever builds `SHARDED_NORM_*_PRGM_CFG`),
+   `tile_padded_batch_rows`, and the `SHARDED_ATTN_INPUT_MEMCFG` / `SHARDED_MLP_INPUT_MEMCFG`
+   / `SHARDED_LM_HEAD_INPUT_MEMCFG` (names may differ) assignments; grep
+   `tile_padded_batch_rows|SHARDED_NORM|SHARDED_.*INPUT_MEMCFG|lm_head_core_grid|attn_input_grid|def get_norm_config|def create_sharded_norm_config`.
+8. `/opt/tt-metal/models/common/rmsnorm.py`: `forward` and `_distributed_rmsnorm` in full
+   (lines 122-227), for the keys the norm reads besides the two rebuilt here.
+9. `/opt/tt-metal/models/tt_transformers/tt/ccl.py`: `tt_all_reduce` and `tt_all_gather` in
+   full (shape-keyed branches at 64 rows, two sites per layer).
+10. `/opt/tt-metal/models/tt_transformers/tt/common.py`: the `Mode` enum (whether
+    `Mode.DECODE == "decode"`, distributed_norm.py:91, :97, :100 - it only selects the
+    gather's link count and chunking, the same at 32 and 64 rows).
+
+**Hardware unknowns at 64 rows after this commit (first device run, in order met).** The
+64-row `all_gather_async` into a two-tile width-sharded L1 output (row 4); the sharded
+`ttnn.rms_norm` at block_h 2 over a (64, 160)-per-core width shard on 32 cores (row 5,
+against the rmsnorm.py:9 note); the attention input projection, `attn_decode_prep` at
+batch 64 with `_kv_shard_cfg(64)`, RoPE in that prep and the output projection (row 7, the
+first ops the re-probe decides); `_project_qkvzab_raw` over 64 rows and `_row_proj` over
+the 64 concatenated recurrence rows (row 8); the MLP prefill arm fed the two-tile width
+shard, its L1 outputs at M = 64, its gated activation and its all-reduce (row 11); the
+final norm's gather and sharded norm on `lm_head_core_grid` at 64 rows and ttnn's auto
+program for the LM head at M = 64 (rows 13-14); then the block's own firsts from part 2:
+the two-tile ordered K/V write, four in-trace restores, two sampler tiles joined, the
+64-row taps and the 64-row trace's memory.
