@@ -1588,3 +1588,21 @@ user 1's true state, written to slot 1, was never read. The single-user run on
 base 1001 (queued) is the formal check that user 1 is wrong from its first
 token. Fix shape: the admission snapshot must read the slot the prefill wrote;
 decode, restore and commit stay at slot 0.
+
+**Single-user reference for prompt base 1001 (run 35493236124):** 64 tokens in 11
+chunks, sha 26c9c952, 39.7 tok/s. Its text is nearly the base-1000 text without
+the leading ' would' - the two nonsense prompts have near-identical correct
+continuations, so the distinct-prompt run did NOT discriminate as intended.
+User 1 of run 35493208438 matches its own reference for 30 characters (about
+five tokens, i.e. most of its first verify) and diverges after ('would be to
+the end' where the reference has 'val somefterys'). Two readings survive: an
+initial snapshot taken from slot 0 (user 0's state, similar enough for a few
+tokens), or a corruption between user 1's first and second verifies. Probe
+cpu-probe-v20 (run 35493486419, `probe_prefill_slot.py`) prints the image
+model's prefill signatures and slot selection; the GDN audit ranks the
+per-slot state. Note for the fix: serving builds `ActiveSnapshot(direct=True)`
+(serving_runtime.py:56), whose save/restore go through the
+`gdn_state_copy.cpp` DMA kernel at slot 0; the admission snapshot can use the
+ttnn slice path at the prefill's index instead, leaving the per-step carry
+swaps at slot 0 untouched. `gdn_snapshot.py` is identical to the bundle's
+copy and not yet in the image lists.
