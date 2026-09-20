@@ -26,22 +26,31 @@ QWEN = TT / 'models/demos/blackhole/qwen36/tt'
 FULL = [
     TT / 'models/tt_transformers/tt/distributed_norm.py',
     QWEN / 'layer.py',
+    # Second pass (the four weight-bound projections and their config builders):
+    QWEN / 'attention/tp.py',
+    QWEN / 'gdn/tp.py',
+    QWEN / 'tp_common.py',
+    QWEN / 'mlp.py',
+    QWEN / 'model_config.py',
+    TT / 'models/common/rmsnorm.py',
 ]
 # (path, regex naming the function or region to print in full)
 REGIONS = [
     (QWEN / 'model.py', r'def _forward_decode\b'),
     (QWEN / 'model.py', r'def _final_norm_decode\b'),
     (QWEN / 'model.py', r'def _lm_head\b'),
-    (QWEN / 'model_config.py', r'def get_norm_config\b'),
-    (QWEN / 'model_config.py', r'def get_model_config\b'),
+    (TT / 'models/tt_transformers/tt/model_config.py', r'def get_norm_config\b'),
+    (TT / 'models/tt_transformers/tt/model_config.py', r'def create_sharded_norm_config\b'),
+    (TT / 'models/tt_transformers/tt/ccl.py', r'def tt_all_reduce\b'),
+    (TT / 'models/tt_transformers/tt/ccl.py', r'def tt_all_gather\b'),
+    (TT / 'models/tt_transformers/tt/common.py', r'class Mode\b'),
 ]
 GREPS = [
-    (QWEN / 'model_config.py', r'shard|Shard|core_grid|per_core_M|tile_padded_batch|max_batch_size|DECODE|decode'),
-    (QWEN / 'mlp.py', r'shard|Shard|core_grid|per_core_M|mode|decode|program_config'),
-    (QWEN / 'attention.py', r'shard|Shard|core_grid|per_core_M|mode ==|decode|program_config'),
-    (QWEN / 'gdn.py', r'shard|Shard|core_grid|per_core_M|mode ==|decode|program_config'),
-    (TT / 'models/common/rmsnorm.py', r'shard|Shard|core_grid|mode|program_config|def forward'),
+    (QWEN / 'model.py', r'self\.norm\b|self\.embd\b|lm_head_weight =|Embedding\(|RMSNorm\(|DistributedNorm\('),
+    (TT / 'models/tt_transformers/tt/model_config.py',
+     r'tile_padded_batch_rows|SHARDED_NORM|SHARDED_.*INPUT_MEMCFG|lm_head_core_grid|attn_input_grid|def get_norm_config|def create_sharded_norm_config|def get_model_config|DECODE_RESIDUAL|RESIDUAL_MEMCFG'),
 ]
+LISTINGS = [QWEN / 'attention', QWEN / 'gdn', TT / 'models/tt_transformers/tt']
 
 
 def show(label, value):
@@ -77,6 +86,9 @@ def region(text, pattern):
 def main():
     listing = sorted(p.name for p in QWEN.glob('*.py')) if QWEN.is_dir() else []
     show('qwen36/tt modules', ' '.join(listing) or 'MISSING')
+    for directory in LISTINGS:
+        names = sorted(p.name for p in directory.glob('*.py')) if directory.is_dir() else []
+        show(str(directory), ' '.join(names) or 'MISSING')
     for path in FULL:
         if not path.is_file():
             show('missing', path)
