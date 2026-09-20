@@ -19,6 +19,7 @@ COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_packed.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_contract.py /experiment-scripts/ci/
+COPY scripts/ci/model_batch.py /experiment-scripts/ci/
 COPY scripts/ci/serving_packed_bridge.py /experiment-scripts/ci/
 COPY scripts/ci/serving_sequential_step.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_state.py /experiment-scripts/ci/

@@ -1087,3 +1087,25 @@ both contracts now name every condition they judged with its value
 (`Received request`, aborts, the access log, the engine stats) among the
 diagnostics so both arrivals stay readable. `serving_vllm_contract.py` joins the
 image's copy lists (byte-identical to the bundle before this change). Image v38.
+
+### Verifier per-request buffers pooled (a52be7a7, 2026-09-20)
+
+Items 1-6 of the post-capture list now come from `ServingBufferPool` slots
+allocated at attach, before any trace: `DraftKVHistory.query`; the verifier's
+initial GDN snapshots, its carry, and one bucket per capture width holding
+checkpoints, target features, optional MTP hidden and the ModelBatch inputs
+(tokens, positions, pages at the exact page width, singleton pages/positions,
+cos/sin). `capture_bucket_rows(16, 256, 16)` gives widths (1,2,4,8,8,16,16), the
+second 8 and 16 being the other mask family. Injected by `storage=` on
+`VerifierEngine`, `ModelBatch.prepare_inputs` and `query=` on `DraftKVHistory`;
+borrowed buffers are never freed; a width the pool lacks raises at admission;
+the unpooled path is unchanged. 125 tests in the touched modules and 192 in the
+modules importing them pass on CPU. Cost: one GDN set tile-pads to 100.7 MB on
+device, nine sets per slot = 906 MB per user per chip (the engine allocated seven,
+705 MB, per request before), so two users hold 1.8 GB of pooled sets per chip.
+`model_batch.py` joins the image copy lists (its bundle drift was the packed
+edits only). Not pooled: proposal buckets (trace mode only), and two allocations
+outside the change's file list that are the next hole candidates -
+`ReplayAttentionReader` positions/pages/masks (`attention_replay.py`; pages and
+masks are NOT restaged before every verify) and `DeviceLoopState` entry/state per
+GDN layer. Image v39 carries this on top of v38's evidence-carrying refusals.
