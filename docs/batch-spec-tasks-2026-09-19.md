@@ -804,3 +804,25 @@ before any trace capture (`feature_prefix.allocate_prefix_pool`).
 The shared-GDN-carry bug (no per-request restore in the sequential path) is real
 and separately being fixed, but it is chip-symmetric and cannot produce this
 signature.
+
+### Synthesis of the three audits (2026-09-20)
+
+| Audit | Verdict on the chip disagreement |
+| --- | --- |
+| shared-model hooks | no Python hook or attribute outlives its scope; the only cross-request coupling is device memory baked into verify traces |
+| device memory / caches | verify traces bake addresses of intermediates freed after capture; the later request's persistent buffers land there; the earlier request's replay overwrites them per chip. Precedent `docs/experiment-execution.md:499-510`. No address-keyed cache, no cross-request free found |
+| collectives | every draft collective is barrier-protected and the mesh is idle between requests; a mis-paired gather is not constructible and both hardware runs agree. Refinement: on the cached path the proposal reads the per-request DRAFT WEIGHTS, not `history` |
+
+One mechanism, three independent routes to it. The refinement matters for the fix:
+the draft weights are uploaded first at device construction, so first-fit places
+them in the lowest freed holes of the earlier request's verify trace. A pool that
+covers only `history` cannot help; the weights must be prepared once, before any
+request exists, and shared - which also removes the per-request duplication of the
+five draft layers. `history`/`spare_history`, the draft K/V, the feature taps and
+the proposal buckets are the remaining per-request allocations and are the next
+hole candidates in that order.
+
+Prediction to test on the rig: the victim is the later-admitted request, and the
+scribble happens across the earlier request's verify replay. The diagnostic
+compares the two shards of the other device's replicated weights, history and K/V
+after every step and names the tensor, its shape and its address on divergence.
