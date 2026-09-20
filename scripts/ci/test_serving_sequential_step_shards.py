@@ -6,6 +6,7 @@ per chip by construction, are compared per chip against their owner's last step.
 
 import importlib
 import os
+import re
 import sys
 from types import SimpleNamespace
 import unittest
@@ -14,6 +15,7 @@ from unittest.mock import patch
 import torch
 
 import serving_sequential_step as module
+import serving_worker_hook as hook
 
 # The log capture truncates around 250 characters; every diagnostic line stays under this.
 LINE_BUDGET = 180
@@ -449,6 +451,66 @@ class SwitchTests(ShardCheckBase):
         with patch.dict(os.environ, {'QWEN_FAST_SHARD_CHECK': 'yes'}):
             with self.assertRaises(ValueError):
                 importlib.reload(module)
+
+
+class PhaseLogTests(ShardCheckBase):
+    """QWEN_FAST_PHASE_LOG brackets each device step with the same begin/end lines
+    the worker hook writes around each proposal, so a hang names its phase and whose."""
+
+    mode = '0'
+
+    def phase_log(self, enabled):
+        patcher = patch.object(hook, 'PHASE_LOG', enabled)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_off_means_no_lines(self):
+        self.phase_log(False)
+        stepped, operations = [], FakeOperations()
+        module.sequential_packed_step([entry('A', device(operations), stepped), entry('B', device(operations), stepped)],
+                                      cancelled=lambda: False)
+        self.assertEqual((stepped, self.logger.lines), (['A', 'B'], []))
+
+    def test_on_means_begin_before_and_end_after_each_step(self):
+        self.phase_log(True)
+        stepped, operations, seen = [], FakeOperations(), []
+        entries = [entry(request_id, device(operations), stepped, on_step=lambda _: seen.append(list(self.logger.lines)))
+                   for request_id in ('B', 'A')]
+        module.sequential_packed_step(entries, cancelled=lambda: False)
+        self.assertEqual(stepped, ['B', 'A'])
+        self.assertEqual(seen, [['[PHASE] step B begin'],
+                                ['[PHASE] step B begin', self.logger.lines[1], '[PHASE] step A begin']],
+                         'the begin line is written before the step runs, the end line after')
+        self.assertEqual([line for line in self.logger.lines if 'begin' in line],
+                         ['[PHASE] step B begin', '[PHASE] step A begin'])
+        for line, request_id in zip([line for line in self.logger.lines if ' end ' in line], ('B', 'A')):
+            self.assertRegex(line, r'^\[PHASE\] step %s end \d+\.\d ms$' % request_id)
+        self.assertEqual(len(self.logger.lines), 4)
+
+    def test_it_is_the_hooks_implementation_so_propose_and_step_lines_match(self):
+        self.assertIs(module.phase, hook.phase)
+        self.phase_log(True)
+        stepped = []
+        seen = hook.phase('propose', 'A', lambda: self.logger.lines[-1])
+        module.sequential_packed_step([entry('A', device(FakeOperations()), stepped)], cancelled=lambda: False)
+        self.assertEqual(seen, '[PHASE] propose A begin')
+        self.assertEqual(self.logger.lines[2], '[PHASE] step A begin')
+        self.assertEqual([re.sub(r'\d+\.\d ms$', 'N ms', line) for line in self.logger.lines],
+                         ['[PHASE] propose A begin', '[PHASE] propose A end N ms',
+                          '[PHASE] step A begin', '[PHASE] step A end N ms'])
+
+    def test_the_shard_check_runs_after_the_end_line(self):
+        """So a stall inside the readback is not booked to the device step."""
+        self.phase_log(True)
+        with patch.object(module, 'SHARD_CHECK', 'warn'):
+            stepped, operations = [], FakeOperations()
+            module.sequential_packed_step([entry('A', device(operations), stepped), entry('B', device(operations), stepped)],
+                                          cancelled=lambda: False)
+        kinds = [line.split()[0] + ' ' + line.split()[1] for line in self.logger.lines]
+        self.assertEqual([kind for kind in kinds if kind != '[PINDIAG] address'],
+                         ['[PHASE] step', '[PHASE] step', '[PINDIAG] shards',
+                          '[PHASE] step', '[PHASE] step', '[PINDIAG] shards'])
+        self.assertEqual(self.logger.lines[1][:19], '[PHASE] step A end ')
 
 
 if __name__ == '__main__':

@@ -20,6 +20,8 @@ was produced for. Stepping in entry order is what keeps that true.
 
 import os
 
+from serving_worker_hook import phase
+
 # Diagnostic for the two-user selector divergence (runs 35478872085 and
 # 35479238722): after each user's step, every OTHER user's replicated draft
 # buffers must still agree across the two chips, and its K/V banks must still
@@ -60,7 +62,9 @@ def sequential_packed_step(entries, *, cancelled):
         request, ticket = entry['request'], entry['ticket']
         if ticket.request_id != entry['request_id']:
             raise ValueError('Each packed entry must carry its own prepared ticket')
-        output = request.step(ticket.request_id, cancelled=cancelled)
+        # Under QWEN_FAST_PHASE_LOG the same begin/end lines the hook writes around
+        # each proposal, so a hang says which phase stalled and whose.
+        output = phase('step', ticket.request_id, lambda: request.step(ticket.request_id, cancelled=cancelled))
         if output is None or output.request_id != entry['request_id']:
             raise ValueError('A packed request must commit its own output')
         outputs.append(output)
