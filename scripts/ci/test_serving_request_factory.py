@@ -132,7 +132,7 @@ class RequestFactoryTests(unittest.TestCase):
         expected = [[call(1, layer=layer)] for layer in range(48)]
         self.assertEqual(seen, [('device', expected), ('engine', expected)])
         self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [1] * 48, 'adopted exactly once')
-        log.assert_called_once_with('[PINDIAG] adopted GDN slot {} into slot 0: {} layers verified on {} for request {}',
+        log.assert_called_once_with('[PINDIAG] adopted GDN slot {} into slot 0: {} layers, slices verified on {} for request {}',
                                     1, 48, 'both chips', 'request')
         self.assertIs(request.runtime.engine, engines[0])
         request.close('request')

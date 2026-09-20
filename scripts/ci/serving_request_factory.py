@@ -56,7 +56,7 @@ def adopt_prefill_slot(helpers, capture, request_id):
     if len(chips) != 1 or not isinstance(next(iter(chips)), int) or next(iter(chips)) < 1:
         raise ValueError('Every GDN layer must verify its adopted slot on the same chips; got %r' % (sorted(chips, key=repr),))
     (verified,) = chips
-    _log('[PINDIAG] adopted GDN slot {} into slot 0: {} layers verified on {} for request {}',
+    _log('[PINDIAG] adopted GDN slot {} into slot 0: {} layers, slices verified on {} for request {}',
          slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
 
