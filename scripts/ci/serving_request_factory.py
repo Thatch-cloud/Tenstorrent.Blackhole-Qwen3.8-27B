@@ -49,9 +49,15 @@ def adopt_prefill_slot(helpers, capture, request_id):
     if slot is None or slot == 0:
         _log('[PINDIAG] prefill slot {}, nothing to adopt for request {}', slot, request_id)
         return
-    for helper in helpers:
-        helper.adopt_slot(slot)
-    _log('[PINDIAG] adopted GDN slot {} into slot 0 for request {}', slot, request_id)
+    # Each helper verifies its slices against a host readback before writing and
+    # reports the chips it verified on; one count for every layer, or the copy is
+    # not the proof the gate run needs.
+    chips = {helper.adopt_slot(slot, layer=layer) for layer, helper in enumerate(helpers)}
+    if len(chips) != 1 or not isinstance(next(iter(chips)), int) or next(iter(chips)) < 1:
+        raise ValueError('Every GDN layer must verify its adopted slot on the same chips; got %r' % (sorted(chips, key=repr),))
+    (verified,) = chips
+    _log('[PINDIAG] adopted GDN slot {} into slot 0: {} layers verified on {} for request {}',
+         slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
 
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,

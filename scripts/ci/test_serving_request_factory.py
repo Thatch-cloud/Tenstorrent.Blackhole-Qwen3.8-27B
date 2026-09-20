@@ -41,7 +41,8 @@ class RequestFactoryTests(unittest.TestCase):
         return components, device, engines, arguments
 
     def helpers(self):
-        return [Mock(spec=['adopt_slot']) for _ in range(48)]
+        # adopt_slot verifies its slices against a readback and reports the chip count.
+        return [Mock(spec=['adopt_slot'], **{'adopt_slot.return_value': 2}) for _ in range(48)]
 
     def build(self, components, arguments, helpers=None):
         with patch('serving_request_factory.device_components', return_value=components):
@@ -126,11 +127,28 @@ class RequestFactoryTests(unittest.TestCase):
 
         components.device.side_effect = device_factory
         components.engine.side_effect = engine_after_adoption
-        request = self.build(components, arguments, helpers)
-        self.assertEqual(seen, [('device', [[call(1)]] * 48), ('engine', [[call(1)]] * 48)])
+        with patch('serving_request_factory._log') as log:
+            request = self.build(components, arguments, helpers)
+        expected = [[call(1, layer=layer)] for layer in range(48)]
+        self.assertEqual(seen, [('device', expected), ('engine', expected)])
         self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [1] * 48, 'adopted exactly once')
+        log.assert_called_once_with('[PINDIAG] adopted GDN slot {} into slot 0: {} layers verified on {} for request {}',
+                                    1, 48, 'both chips', 'request')
         self.assertIs(request.runtime.engine, engines[0])
         request.close('request')
+
+    def test_layers_verified_on_differing_chips_are_refused_before_device_allocation(self):
+        # Every helper must report the same chip count, and at least one chip: an
+        # unverified layer is not the proof the gate run needs.
+        for counts in ((2,) * 47 + (1,), (0,) * 48, (None,) * 48):
+            components, _, _, arguments = self.fixture()
+            arguments['capture'].prefill_slot = 1
+            helpers = self.helpers()
+            for helper, count in zip(helpers, counts):
+                helper.adopt_slot.return_value = count
+            with self.subTest(last=counts[-1]), self.assertRaisesRegex(ValueError, 'same chips'):
+                self.build(components, arguments, helpers)
+            components.device.assert_not_called()
 
     def test_slot_zero_and_a_single_sequence_prefill_adopt_nothing(self):
         # The first user prefills into slot 0, and a single-sequence prefill records no
