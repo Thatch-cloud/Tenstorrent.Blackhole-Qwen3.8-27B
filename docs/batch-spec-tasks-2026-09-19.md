@@ -1253,3 +1253,25 @@ only stage that hashes the orchestrator this way. Regenerating that evidence:
 tag dflash-t16-attention-sim-v5 (CPU simulator lane) at 5819047a, then the
 cumulative lane again as full v21 with the new run id at cumulative-t16.yml:88.
 Second allowlist PATCH for those two entries; repositories verified after it.
+
+The dflash-native evidence was regenerated (sim-v5, run 35488650495; both
+contexts pass, sources equal this tree) and `dflash_t16_native_scope.REPORTS`
+pins its two reports (b1e61622). Hardware lane full v21, second attempt (run
+35488924182): the restore and staging steps PASSED - every gate accepted the
+regenerated P1, P2, P3 and native evidence against the drained reader - and the
+audit step then failed at the first command of `run-dspark-hardware.sh`,
+`no valid artifacts found to download`. That script restores eight
+`qwen-hardware-inventory-*` artifacts of experiment runs from 2026-09-12/13
+(34677941763, 34693525557, 34694674606, 34695921492, 34699176210, 34701425373,
+34703126782, 34728453080), uploaded with 7-day retention; all eight expired
+between 2026-09-19 06:22 and 2026-09-20 00:37 UTC, before the first v20 attempt.
+The lane is not runnable by anyone until that week-old evidence chain is
+regenerated, which is unrelated to this change and out of today's scope.
+
+Decision: cut the serving bundle (serving-bundle-v2) from the runner's tree as
+the lane left it after its passed staging steps - the same provenance as
+bundle v1, which run 35328870330 packaged after v18's hardware step had failed
+- and state the gap plainly: the fused T16 arm's ABBA device audit did NOT run
+for the drained reader. Its device qualification is the two-user serving run on
+image v40, which is the workload the fix exists for. No evidence hash was
+hand-edited anywhere in this chain.
