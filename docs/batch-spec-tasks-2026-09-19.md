@@ -2023,3 +2023,31 @@ step uses only as the sequential fallback for narrow tickets and survivors. Keep
 per-request captures to the widths that fallback needs takes each engine from 2.42 GB
 towards 0.24 GB (widths 1, 2, 4) and the total to about 21.7 GB, 12.7 GB of headroom;
 that trim is the part-2 lever if 11% proves too tight on the device.
+
+## M1b on hardware (2026-09-20 08:55 UTC): bundled per-user replay readers, image v47, run 35500352729
+
+Image v47 = sha256:15ab61f8fc6e (build 35500138157; bc17a7e9 on 97935b94). Two users, prompt bases
+1000 and 1001, stagger 0, QWEN_FAST_PACKED_STEP=1. Gate PASSED: both texts byte-identical to the
+single-user references (sha 66a5d0c2 and 26c9c952, 240 and 241 chars, 64 tokens each), so the
+per-user bundled readers over the users' own page tables and positions words reproduce the serial
+per-row reader exactly.
+
+| [PHASE] (18 rounds) | v46 serial readers (35497378631) | v47 bundled readers (35500352729) |
+| --- | ---: | ---: |
+| packed_verify mean / median | 150.8 / 150.6 ms | 109.3 / 108.9 ms |
+| packed_verify min / max | 149.2 / 153.3 | 108.2 / 111.7 |
+| packed_commit median (per user) | 22.8 ms | 21.8 ms |
+| propose median (per user, two per round) | 42.1 ms | 42.3 ms |
+
+Verify fell by 41.5 ms per round against the 46 ms the cost model expected for L2 (the serial
+reader was ~65 ms, the bundled ~20 ms; the residual is the per-segment slice/concat and the two
+mask refreshes per layer). Round now ~ 2 x 42 (propose) + 109 (verify) + 2 x 22 (commit) = 237 ms
+versus 278 ms on v46. Per-user rates from the bench stay confounded by the second user's 14 s
+prefill blocking the first user's decode (stream 0: ttft 14.4 s, wall 31.1 s; stream 1: ttft
+28.5 s, wall 31.3 s), which is Lever N's interleave, not the block: the clean number is the
+overlapped decode, stream 1 at 22.7 tok/s (v46 same measure: see rates below).
+
+v46 rates None; v47 rates None (decode_tokens_per_user_per_s, stream order).
+
+Next levers in the packed round, unchanged: L3 one packed draft pass (-38 ms), L4a trace the
+draft (-17), L4b captured publication (-26). M3 (four users, 64-row block) part 2 is in build.
