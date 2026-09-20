@@ -702,3 +702,24 @@ into the image: `dflash_device`, `draft_attention_branch`, `draft_mlp_branch` an
 the convolution modules were never copied, so none of the packed work had ever
 reached hardware. The build context is a temp directory the workflow fills file by
 file, so a Dockerfile COPY alone fails the build - both lists need the name.
+
+## What actually runs in the image (inventory, 2026-09-20)
+
+The workflow's build-context list and the Dockerfile's COPY list are now in exact
+1:1 correspondence: 26 named files plus `test_serving_*.py`. Every one of those
+overrides the bundle. Everything else in the serving path runs as the bundle's
+frozen copy, including the ENTIRE verify/commit core: `verifier_engine`,
+`model_batch`, `full_dflash_request`, `dflash_request_runtime`,
+`gdn_device_loop_state`, `serving_runner_bridge`, `serving_cache_owner`,
+`serving_page_binding`, `dflash_combined_request`, `dflash_prefill_window`,
+`dflash_proposal_trace`, `gdn_snapshot`, `gdn_multitoken_conv`, `gdn_prefix`,
+`feature_collective`, `draft_shared_head`, `draft_selector`,
+`prepared_target_features`, `attention_replay`, `attention_batch` and more.
+`greedy_session` and `hybrid_draft` exist only in the image's harness.
+
+So `ModelBatch(pack=...)`, `DeviceLoopState.decode(segments=...)` and
+`VerifierEngine.fixture(pack=...)` have never reached hardware, and a fix in the
+verify/commit path - where the sharpened two-user signature points - needs its
+module added to BOTH lists. `probe_image_drift.py` hashes every repo module
+against the image's copy so an override is known to be byte-identical or a
+deliberate change before it is made.
