@@ -21,7 +21,7 @@ class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
                  cache_history=False, cache_projection_capture=False, live_query_qk=False, native_proposal_attention=False,
-                 defer_proposal_capture=False):
+                 defer_proposal_capture=False, buffer_pool=None):
         import torch
 
         window = prefill_window(position)
@@ -36,7 +36,8 @@ class DFlashDevice:
                 or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
                 or type(live_query_qk) is not bool or (live_query_qk and (not proposal_capture or block_rows != 8))
                 or type(native_proposal_attention) is not bool or (native_proposal_attention and
-                    (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))):
+                    (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))
+                or (buffer_pool is not None and not callable(getattr(buffer_pool, 'acquire', None)))):
             raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
@@ -44,6 +45,7 @@ class DFlashDevice:
         self.owned, self.layers = [], []
         self.history = self.pending = None
         self.spare_history = None
+        self.pool_slot = None
         self.proposal_capture = None
         self.kv_history = None
         self.cache_history = cache_history
@@ -58,6 +60,9 @@ class DFlashDevice:
         self.kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
             math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
         try:
+            if buffer_pool is not None:
+                # First, so an exhausted pool refuses the request before any upload.
+                self.pool_slot = buffer_pool.acquire()
             for attention, convolution, mlp in layers:
                 self.layers.append((prepare_attention_branch(operations, self.mesh, attention, convolution, self.retain,
                     native_head_layout=True, block_rows=block_rows, live_query_qk=live_query_qk,
@@ -75,7 +80,18 @@ class DFlashDevice:
             if addresses(operations, padded) != addresses(operations, self.history):
                 operations.deallocate(self.history)
             self.history = padded
-            self.spare_history = operations.zeros_like(self.history)
+            if self.pool_slot is None:
+                self.spare_history = operations.zeros_like(self.history)
+            else:
+                # Borrowed, not allocated. Storage allocated here - after another
+                # request's verify trace was captured - can sit at an address that
+                # trace baked for an intermediate it freed, and every replay then
+                # writes over it, per chip, so the replicas diverge (runs 35477522469,
+                # 35479238722; serving_buffer_pool.py). The pool's pair predates
+                # every request trace.
+                operations.copy(self.history, self.pool_slot.history)
+                operations.deallocate(self.history)
+                self.history, self.spare_history = self.pool_slot.history, self.pool_slot.spare_history
             operations.synchronize_device(self.mesh)
             if cache_history:
                 from draft_kv_history import DraftKVHistory
@@ -393,6 +409,13 @@ class DFlashDevice:
             self.discard_publication(self.pending)
         if self.kv_history is not None:
             self.kv_history.close()
+        if self.pool_slot is not None:
+            # Commits swap the pair; whichever way round, both belong to the pool.
+            for name in ('history', 'spare_history'):
+                if any(getattr(self, name) is value for value in self.pool_slot.tensors):
+                    setattr(self, name, None)
+            self.pool_slot.release()
+            self.pool_slot = None
         if self.history is not None:
             self.operations.deallocate(self.history)
             self.history = None

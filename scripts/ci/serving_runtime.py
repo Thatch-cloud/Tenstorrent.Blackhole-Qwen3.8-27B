@@ -1,7 +1,9 @@
 """Explicit attachment of the admitted combined runtime to a loaded TT worker."""
 
 from contextlib import ExitStack, contextmanager
+import json
 
+from serving_buffer_pool import ServingBufferPool
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import validate_fast_config
 from serving_lifecycle import FastServingLifecycle
@@ -23,7 +25,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     from models.tt_transformers.tt.ccl import TT_CCL
     from sampling_link_policy import sampler_links
 
-    validate_fast_config(worker.vllm_config)
+    policy = validate_fast_config(worker.vllm_config)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or block_stream is None or 'pipeline_evidence' in block_stream):
         raise ValueError('Native T16, direct KV publication and serial weight-stream recipe required')
@@ -44,16 +46,28 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
     experiment = from_environment(directory, runtime_root)
 
-    def capture_factory(position):
-        owner.validate()
-        return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
-
     # The page table has to cover the admitted context. It was a fixed 68 pages,
     # which is 68 x 64 = 4352 tokens, while this image's T16 gate demands position
     # 32768 - so the fast path could not decode at ANY context, at one user or two
     # (runs 35472072127, 35473307362). 68 stays the floor because
     # ServingCacheOwner requires at least that many physical pages.
     page_width = max(68, -(-int(worker.vllm_config.model_config.max_model_len) // 64))
+    # One draft history pair per scheduler slot, allocated NOW: no request exists
+    # yet, so no request trace does either. A request's verify trace bakes the
+    # addresses of the intermediates its capture frees; the next request's
+    # persistent history, allocated afterwards, lands in those holes and every
+    # replay of the first trace overwrites it - per chip, since each chip's
+    # allocator reuses independently (runs 35477522469, 35479238722; precedent
+    # docs/experiment-execution.md, feature_prefix.py). Registered first so it
+    # closes last, after the lifecycle has closed every device that borrows from it.
+    pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'])
+    scopes = ExitStack()
+    scopes.callback(pool.close)
+    print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe())), flush=True)
+
+    def capture_factory(position):
+        owner.validate()
+        return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
 
     def bridge_factory(state, capture):
         owner.validate()
@@ -68,7 +82,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         def create_request():
             return from_prefill(operations, model, sampler, pages, helpers,
                 state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
-                collectives=collectives)
+                collectives=collectives, buffer_pool=pool)
 
         request = create_request() if experiment is None else experiment.create(create_request)
         try:
@@ -78,7 +92,6 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             request.close(state.req_id)
             raise
 
-    scopes = ExitStack()
     try:
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
