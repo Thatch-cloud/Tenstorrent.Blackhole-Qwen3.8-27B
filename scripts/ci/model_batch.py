@@ -98,8 +98,8 @@ def replay_storage(storage, capacity):
     fixture inputs but not these would leave the one persistent per-request allocation
     that runs 35492676194 and 35493208438 found overwritten. The family is the capture
     position's, `(start // 256 + 1) * 256`, so the pool holds one set per family it can
-    serve (serving_buffer_pool.py, attention_replay.family_capacities) and the fixture
-    picks its own; a family the pool lacks is refused here, before any upload.
+    serve (serving_buffer_pool.py, pooled_attention_replay.family_capacities) and the
+    fixture picks its own; a family the pool lacks is refused here, before any upload.
     """
     if storage is None:
         return None
@@ -349,13 +349,22 @@ class ModelBatch:
                     layout=ttnn.ROW_MAJOR_LAYOUT if dtype == ttnn.int32 else ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(model.mesh_device))
 
-            # Pooled, the per-bundle page tables are the slot's for this capture's family;
-            # the reader stages the request's table into them and frees none of them.
+            # Pooled, the per-bundle page tables are the slot's for this capture's family
+            # and the reader is the pooled one (pooled_attention_replay.py), which stages
+            # the request's table into them and frees none of them. attention_replay.py
+            # is frozen-recipe evidence, pinned byte for byte, so the unpooled call is the
+            # pinned reader exactly as before.
             tables = replay_storage(storage, self.replay_capacity)
-            self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
-                upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context,
-                **({'storage': tables} if tables is not None else {}))
-            self.borrowed.extend(self.replay_reader.borrowed)
+            if tables is None:
+                self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
+                    upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)
+            else:
+                from pooled_attention_replay import PooledReplayAttentionReader
+
+                self.replay_reader = PooledReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity,
+                    pages, upload_replay, storage=tables, max_group_rows=self.replay_group_rows,
+                    short_context=self.short_context)
+                self.borrowed.extend(self.replay_reader.borrowed)
             self.grouped_readers.append(self.replay_reader)
             if attention_audit:
                 from attention_replay_audit import AttentionReplayAudit

@@ -11,9 +11,9 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from attention_replay import bundle_batches, family_capacities
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
+from pooled_attention_replay import bundle_batches, family_capacities
 from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, ServingBufferPool,
                                  bank_tensors, snapshot_tensors, tensor_bytes)
 

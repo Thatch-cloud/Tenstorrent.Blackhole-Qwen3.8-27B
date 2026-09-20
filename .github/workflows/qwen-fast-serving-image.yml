@@ -64,7 +64,7 @@ jobs:
           for name in gdn_snapshot.py dflash_prefill_window.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in attention_replay.py; do
+          for name in pooled_attention_replay.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
       - name: Build and CPU-test canary without devices or weights

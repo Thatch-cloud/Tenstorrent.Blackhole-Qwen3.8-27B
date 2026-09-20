@@ -68,15 +68,17 @@ the wrong KV pages from its next verify on. They are not the request's page tabl
 each is (batches, capacity // 64) for the capture's 256-position native chunk family,
 which the request's position fixes at admission and the pool cannot know at attach.
 So every replay-width bucket carries one page-table set per family the reader can be
-captured in (attention_replay.family_capacities, cut to the pool's page-table width),
-`batch.replay_pages[capacity]`, and the fixture picks its family's. The row tables need
-nothing: unpacked, every row's table is the pooled singleton page table.
+captured in (pooled_attention_replay.family_capacities, cut to the pool's page-table
+width), `batch.replay_pages[capacity]`, and the fixture picks its family's and builds
+the pooled reader over them (attention_replay.py itself is frozen-recipe evidence and
+stays byte-exact). The row tables need nothing: unpacked, every row's table is the
+pooled singleton page table.
 """
 
 from types import SimpleNamespace
 
-from attention_replay import bundle_batches, family_capacities
 from dflash_device import pindiag
+from pooled_attention_replay import bundle_batches, family_capacities
 from gdn_multitoken_conv import addresses, release_owned
 from serving_fast_policy import NATIVE_GDN_SLOTS
 

@@ -375,6 +375,24 @@ class ReplayStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'families None'):
             replay_storage(SimpleNamespace(replay_pages=['b']), 4352)
 
+    def test_the_unpooled_call_is_the_pinned_reader_and_the_pooled_one_the_new_module(self):
+        """attention_replay.py is frozen-recipe evidence (its bytes at 8c102b20), so the
+        pooled reader lives in pooled_attention_replay.py and the unpooled construction
+        stays the pinned call exactly as it was."""
+        import inspect
+
+        import model_batch
+
+        source = inspect.getsource(model_batch.ModelBatch.__init__)
+        self.assertIn('self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,\n'
+                      '                    upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)',
+                      source)
+        self.assertIn('from pooled_attention_replay import PooledReplayAttentionReader', source)
+        self.assertIn('storage=tables', source)
+        self.assertEqual(source.count('ReplayAttentionReader('), 2)
+        self.assertNotIn('storage', source[source.index('= ReplayAttentionReader('):source.index('else:', source.index('= ReplayAttentionReader('))],
+                         'the pinned reader takes no storage keyword')
+
     def test_the_unpacked_row_tables_are_the_pooled_singleton(self):
         """Every row's table is the singleton page table, so pooling it pools them."""
         import ast
