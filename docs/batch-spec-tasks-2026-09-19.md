@@ -2047,7 +2047,7 @@ prefill blocking the first user's decode (stream 0: ttft 14.4 s, wall 31.1 s; st
 28.5 s, wall 31.3 s), which is Lever N's interleave, not the block: the clean number is the
 overlapped decode, stream 1 at 22.7 tok/s (v46 same measure: see rates below).
 
-v46 rates None; v47 rates None (decode_tokens_per_user_per_s, stream order).
+v46 rates [15.18, 3.35] (ttft, wall per stream [(28.8, 32.9), (14.3, 33.1)]); v47 rates [3.78, 22.69] (ttft, wall [(14.4, 31.1), (28.5, 31.3)]); decode_tokens_per_user_per_s in stream order.
 
 Next levers in the packed round, unchanged: L3 one packed draft pass (-38 ms), L4a trace the
 draft (-17), L4b captured publication (-26). M3 (four users, 64-row block) part 2 is in build.
