@@ -826,3 +826,9 @@ Prediction to test on the rig: the victim is the later-admitted request, and the
 scribble happens across the earlier request's verify replay. The diagnostic
 compares the two shards of the other device's replicated weights, history and K/V
 after every step and names the tensor, its shape and its address on divergence.
+
+**Run 35481140763 (image v32, diagnostic + carry, no pool):** died at admission
+with `ModelBatch.__init__() got an unexpected keyword argument 'pack'`. Overriding
+`verifier_engine` brought a call that the bundle's `model_batch` predates. Rule:
+an overridden module must not depend on a module it does not bring along; the
+drift probe is the check. Fixed by passing `pack=` only when packed (5205854a).
