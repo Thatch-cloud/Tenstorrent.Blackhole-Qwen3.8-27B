@@ -1238,3 +1238,18 @@ passes on the tree. The regenerated report also records the current
 P2 (sim-v5, run 35488011817) and P3 (replay-v7, run 35488011111) tagged at
 2f8204e2; then the hardware lane (cumulative full v20), the bundle (v2), image
 v40, and the two-user run.
+
+P2 and P3 succeeded (constants 0fa23737 and 02e16191, commit 5819047a; both gates
+pass on CPU against a staged candidate). The hardware lane (full v20, run
+35488441244) then refused in its restore step, before any device work:
+`drafter_comparison_stage.py:43` -> `dflash_t16_native_attention_gate.qualify`
+'Clean source-bound proposal-only simulation with unchanged native runtime
+required'. That stage hashes the ORCHESTRATOR's SOURCES (line 21:
+`directory = Path(__file__).parent`), not the pinned tree, against the
+dflash-native evidence of run 35293698929; this branch has since changed exactly
+one of them, `dflash_t16_native_attention.py` (+21/-3, the packed-mask `users=`
+edits, since a92f10f8 of the last good cumulative run). Not the kernel. It is the
+only stage that hashes the orchestrator this way. Regenerating that evidence:
+tag dflash-t16-attention-sim-v5 (CPU simulator lane) at 5819047a, then the
+cumulative lane again as full v21 with the new run id at cumulative-t16.yml:88.
+Second allowlist PATCH for those two entries; repositories verified after it.
