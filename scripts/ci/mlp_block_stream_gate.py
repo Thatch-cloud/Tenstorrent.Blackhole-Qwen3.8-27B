@@ -10,7 +10,7 @@ from mlp_block_stream_projection import adapt_projection
 from mlp_register_epilogue_gate import COMPUTE, SIM_PACKER, TYPECAST
 
 
-REPORT_SHA256 = '548805b4bc3b64c1441f59c6a7f887ec35df40308f9c10cdbaa57cd4aa62a138'
+REPORT_SHA256 = '02e161915ccf29453970d3d812a5469b4d7a35518ff7092f25f1215df4887e6e'
 CANDIDATE_SHA256 = '00f29b83acb3eb93929b623e426c9312c158c8b8a9b9db028e7011e4f51db6d7'
 
 

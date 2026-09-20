@@ -10,7 +10,7 @@ from mlp_rounding_policy import runtime
 from mlp_weight_pipeline_gate import validate_report
 
 
-REPORT_SHA256 = 'cda39d8936cbe2056510c0cbcadb41df8e5c478ad277b3641f13fb121986e543'
+REPORT_SHA256 = '0fa237377c79e0d98d848f9b811ce1d16c81ae63778d33611431a1f5a4e7635f'
 CONTROL = '4c215d945e723ef3d8c2be1757e7c170bf21eebb01e204359243d766c6c7cf93'
 CANDIDATE = 'd26d67ab4c893de327c8a2c6aa9ec949d904332a9b2a91353c5889f30272b6d4'
 COMPUTE = 'd212a495967dd0db31ee447ed7761b7ce6af3306b35fa42611e1296c4a1b1a82'

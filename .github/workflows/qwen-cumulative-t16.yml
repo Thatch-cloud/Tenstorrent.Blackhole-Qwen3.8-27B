@@ -66,7 +66,7 @@ jobs:
           fi
           native_args=()
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v* ]]; then
-            gh run download 35238822290 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-register-epilogue-sim-35238822290 --dir "$evidence/register-epilogue"
+            gh run download 35488011817 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-register-epilogue-sim-35488011817 --dir "$evidence/register-epilogue"
             down_args+=(--register-evidence "$evidence/register-epilogue")
             native_args+=(--register-epilogue)
           fi
@@ -92,7 +92,7 @@ jobs:
               --manifest read-combined/experiment-results/drafter-comparison-sources.json "${drafter_args[@]}"
           fi
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-block-stream-dflash-native ]]; then
-            gh run download 35297164881 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35297164881 --dir "$evidence/block-stream"
+            gh run download 35488011111 --repo "$GITHUB_REPOSITORY" --name qwen-mlp-block-stream-replay-35488011111 --dir "$evidence/block-stream"
             python3 -B read-orchestrator/scripts/ci/mlp_block_stream_hardware_stage.py --checkout read-combined \
               --evidence "$evidence/block-stream" --native-root "$evidence/model-native/prefill-cache/sources" \
               --manifest read-combined/experiment-results/block-stream-hardware-sources.json
