@@ -238,7 +238,7 @@ class PackedVerifierEngine:
             self.carries.append([list(snapshot) for snapshot in carry])
         self.native_addresses = [[addresses(operations, value) for value in helper.live] for helper in helpers]
         self.carry_addresses = self.slot_addresses()
-        self.checkpoints, self.taps, self.owned = [], [], []
+        self.initial, self.checkpoints, self.taps, self.owned = [], [], [], []
         self.feature_capture = self.fixture = None
         self.trace = self.output = None
         self.commits = [{} for user in range(shape.users)]
@@ -246,7 +246,13 @@ class PackedVerifierEngine:
         self.pending_segments = set()
         started = time.perf_counter()
         try:
-            # Allocated before ANY capture, like everything a trace may see.
+            # Allocated before ANY capture, like everything a trace may see. The initial
+            # snapshot is slot 0 as attach found it, put back once the captures are done.
+            self.initial = [helper.allocate() for helper in helpers]
+            for helper, snapshot in zip(helpers, self.initial, strict=True):
+                helper.save(snapshot)
+            # The pack's per-user checkpoints: demanded by verifier_pack and validate_pack,
+            # never written by the deferred decode (its decisions go to the carries).
             for user in range(shape.users):
                 self.checkpoints.append([helper.allocate() for helper in helpers])
             for index in self.feature_taps:
@@ -287,6 +293,11 @@ class PackedVerifierEngine:
                 operations.synchronize_device(self.mesh)
                 for prefix, publication in publications.items():
                     self.commits[user][prefix], unused = capture_operation(operations, self.mesh, publication)
+            # Warming the commit traces wrote every carry and slot 0 (as verifier_engine's
+            # own warming does): slot 0 goes back to what attach found, and the carries go
+            # back to the zeros the pool lends - a request's engine seeds its own on
+            # admission (VerifierEngine.save_carry), after the pool zeroes the slot again.
+            self.reseed()
             operations.synchronize_device(self.mesh)
             self.validate_bindings()
             # The captures rewrote slot 0: nobody is resident.
@@ -327,6 +338,18 @@ class PackedVerifierEngine:
             if logits is not None:
                 self.operations.deallocate(logits)
             raise
+
+    def reseed(self):
+        """Undo what warming the commit traces wrote: slot 0 from the initial snapshot,
+        every carry to zero."""
+        if self.slot_addresses() != self.carry_addresses:
+            raise ValueError('A carried GDN state moved under the packed block')
+        for helper, snapshot in zip(self.helpers, self.initial, strict=True):
+            helper.restore(snapshot)
+        for carry in self.carries:
+            for snapshot in carry:
+                for value in snapshot:
+                    self.operations.full_like(value, 0.0, optional_tensor=value)
 
     def slot_addresses(self):
         return [[[addresses(self.operations, value) for value in snapshot] for snapshot in carry] for carry in self.carries]
@@ -503,7 +526,8 @@ class PackedVerifierEngine:
             self.fixture = None
         release_owned(operations, self.taps)
         release_owned(operations, [value for checkpoints in self.checkpoints for snapshot in checkpoints for value in snapshot])
-        self.taps, self.checkpoints = [], []
+        release_owned(operations, [value for snapshot in self.initial for value in snapshot])
+        self.taps, self.checkpoints, self.initial = [], [], []
         # The carries are the pool's: lent to the requests, never freed here.
         self.carries, self.carry_addresses = [], []
         self.pending_segments.clear()

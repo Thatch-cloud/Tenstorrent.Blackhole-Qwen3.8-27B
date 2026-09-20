@@ -43,8 +43,13 @@ class FakeTTNN:
 
     def __init__(self):
         self.hosts, self.host_copies, self.executed, self.released, self.deallocated = [], [], [], [], []
-        self.device_uploads = []
+        self.device_uploads, self.zeroed = [], []
         self.synchronized = 0
+
+    def full_like(self, tensor, fill, optional_tensor=None):
+        if optional_tensor is not tensor:
+            raise AssertionError('In-place fill expected')
+        self.zeroed.append(tensor)
 
     def allocate(self, shape, dtype='bf16', layout='tile', value=None, mapper=None):
         tensor = SimpleNamespace(shape=tuple(shape), dtype=dtype, layout=layout, value=value, mapper=mapper)
@@ -276,9 +281,19 @@ class ConstructionTests(BlockFixture):
         block = self.build()
         self.assertEqual(block.phase, 'idle')
         self.assertEqual(block.capture_position, PAGE_WIDTH * 64 - 256)
-        # two users x 48 checkpoint sets and the five 32-row taps, allocated before any capture
-        self.assertEqual([helper.allocate.call_count for helper in self.helpers], [2] * GDN_LAYERS)
+        # the initial snapshot, two users x 48 checkpoint sets and the five 32-row taps,
+        # allocated before any capture
+        self.assertEqual([helper.allocate.call_count for helper in self.helpers], [3] * GDN_LAYERS)
         self.assertEqual([len(checkpoints) for checkpoints in block.checkpoints], [GDN_LAYERS, GDN_LAYERS])
+        # slot 0 as attach found it was saved first and put back after the commit warming,
+        # and every pooled carry the warming wrote was zeroed again
+        for helper, snapshot in zip(self.helpers, block.initial, strict=True):
+            helper.save.assert_called_once_with(snapshot)
+            helper.restore.assert_called_once_with(snapshot)
+        pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
+        self.assertEqual(len(self.ttnn.zeroed), len(pooled))
+        self.assertTrue(all(any(value is entry for entry in self.ttnn.zeroed) for value in pooled))
+        self.assertIs(self.ttnn.zeroed[0], pooled[0])
         self.assertEqual([(tap.shape, tap.dtype, tap.layout, tap.mapper) for tap in block.taps],
                          [((1, 1, 32, 5120), 'bf16', 'tile', ('shard', 3))] * 5)
         (features,) = FakeFeatures.instances
@@ -385,6 +400,9 @@ class ConstructionTests(BlockFixture):
 class RoundTests(BlockFixture):
     def test_one_trace_serves_both_users_and_every_result_follows_the_entries(self):
         block = self.build()
+        for helper in self.helpers:
+            helper.restore.reset_mock()
+            helper.save.reset_mock()
         entries = self.two()
         executed, synchronized = len(self.ttnn.executed), self.ttnn.synchronized
         copies = len(self.ttnn.host_copies)
@@ -541,7 +559,7 @@ class RoundTests(BlockFixture):
         block.commit_user(0, 3)
         block.commit_user(1, 0)
         owned = [*block.taps, *(value for checkpoints in block.checkpoints for snapshot in checkpoints for value in snapshot),
-                 *block.output]
+                 *(value for snapshot in block.initial for value in snapshot), *block.output]
         fixture = block.fixture
         block.close()
         self.assertEqual(block.phase, 'closed')
@@ -553,7 +571,7 @@ class RoundTests(BlockFixture):
         self.assertTrue(all(any(value is entry for entry in freed) for value in owned))
         pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
         self.assertFalse(any(any(value is entry for entry in freed) for value in pooled))
-        self.assertEqual((block.taps, block.checkpoints, block.carries, block.trace), ([], [], [], None))
+        self.assertEqual((block.taps, block.checkpoints, block.initial, block.carries, block.trace), ([], [], [], [], None))
         block.close()
 
 
