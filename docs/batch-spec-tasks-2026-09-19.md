@@ -862,3 +862,13 @@ hoist the draft weights so no per-request persistent allocation follows a trace.
 Log lines are truncated at ~250 characters by the capture, which lost the
 differing count, max_abs and the address map; the diagnostic will emit short
 lines next run.
+
+**Run 35481903377 (v34: history pool, draft weights uploaded once and shared,
+pool first in attach, per-engine carry, shard check OFF):** neither diverged nor
+failed - it HUNG on the decode step, no stream progress for over eleven minutes,
+cancelled, no log recovered because the bench dumps the server log only at the
+end and its socket timeout was 900 s. A different failure class from every run
+before it. The bench now errors a stream after 180 s of inactivity and keeps the
+tokens it saw, so a hang still yields the diagnostic lines up to the stall. The
+collectives audit had said the one semaphore-pool hazard it could construct was a
+hang rather than divergence; that analysis is being redone against v34's changes.
