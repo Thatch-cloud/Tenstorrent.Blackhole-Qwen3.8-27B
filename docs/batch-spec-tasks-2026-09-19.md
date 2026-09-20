@@ -934,3 +934,14 @@ matter:
 The principle that closes the class: nothing a request keeps across steps may be
 allocated after any trace that will replay exists. The packed design needs the
 same rule for its single shared engine.
+
+**Run 35483320919 (v36, watcher on):** "Watcher stopped the device due to
+tripped assert" at 02:16:27, during the FIRST request's admission capture - one
+pool slot acquired, no second request yet, so this is the single-user path. With
+the watcher off, kernel asserts are compiled out and a violated one is silently
+run past; with it on, the device stops and the watcher log names the kernel and
+the assert. The bench's 200-line tail held only idle cores and the kernel table
+(fabric routers and dispatch), so the assert text was not captured; the bench now
+extracts it from the whole log. This precedes and may underlie both the
+second-proposal divergence and the hang. The per-request-collectives A/B did not
+run and is still pending.
