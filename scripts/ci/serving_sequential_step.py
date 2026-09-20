@@ -23,14 +23,20 @@ import os
 # Diagnostic for the two-user selector divergence (runs 35478872085 and
 # 35479238722): after each user's step, every OTHER user's replicated draft
 # buffers must still agree across the two chips. Read once at import and off by
-# default, so it can stay in.
-SHARD_CHECK = os.environ.get('QWEN_FAST_SHARD_CHECK') == '1'
+# default, so it can stay in. '1' raises at the first divergence; 'warn' logs it
+# and lets decoding continue, so a run shows whether it still proceeds.
+SHARD_CHECK = os.environ.get('QWEN_FAST_SHARD_CHECK', '0')
+if SHARD_CHECK not in ('0', '1', 'warn'):
+    raise ValueError('QWEN_FAST_SHARD_CHECK must be unset, 0, 1 or warn')
 # Buffer addresses of every checked tensor, by request id, taken the first time
 # the step sees that request and logged once. This module cannot see
 # DFlashDevice construction, but these are persistent allocations, so the
 # address at first sight is the address at construction - what a trace's freed
 # regions are matched against later. Pruned to the live requests each step.
 RECORDED = {}
+# (victim request id, buffer name) pairs already reported, so under 'warn' a
+# buffer that stays diverged is reported once rather than every step.
+REPORTED = set()
 
 
 def sequential_packed_step(entries, *, cancelled):
@@ -46,7 +52,7 @@ def sequential_packed_step(entries, *, cancelled):
         if output is None or output.request_id != entry['request_id']:
             raise ValueError('A packed request must commit its own output')
         outputs.append(output)
-        if SHARD_CHECK and len(entries) > 1:
+        if SHARD_CHECK != '0' and len(entries) > 1:
             check_shards(entries, index)
     return outputs
 
@@ -90,8 +96,9 @@ def check_shards(entries, stepped):
     live = [entry['request_id'] for entry in entries]
     for stale in [request_id for request_id in RECORDED if request_id not in live]:
         del RECORDED[stale]
+    REPORTED.difference_update([key for key in REPORTED if key[0] not in live])
     actor = entries[stepped]
-    checked = 0
+    equal = diverged = 0
     for index, entry in enumerate(entries):
         if index == stepped:
             continue
@@ -99,34 +106,48 @@ def check_shards(entries, stepped):
         device = entry['request'].runtime.drafter
         operations = device.operations
         buffers = replicated_buffers(device)
-        recorded = RECORDED.get(entry['request_id'])
+        victim = entry['request_id']
+        recorded = RECORDED.get(victim)
         if recorded is None:
-            recorded = RECORDED[entry['request_id']] = {name: addresses(operations, value)
-                                                        for category, name, value in buffers}
-            logger.info('[PINDIAG] draft buffer addresses for {}: {}', entry['request_id'], recorded)
+            recorded = RECORDED[victim] = {name: addresses(operations, value) for category, name, value in buffers}
+            for name, (first, second) in recorded.items():
+                logger.info('[PINDIAG] address {} {} {} {}', victim, name, first, second)
         for category, name, value in buffers:
             shards = [operations.to_torch(shard).contiguous() for shard in operations.get_device_tensors(value)]
             if len(shards) != 2:
                 raise AssertionError('Both chips required')
             left, right = shards
             if torch.equal(left.view(torch.int16), right.view(torch.int16)):
-                checked += 1
+                equal += 1
                 continue
+            diverged += 1
+            if SHARD_CHECK == 'warn' and (victim, name) in REPORTED:
+                continue
+            REPORTED.add((victim, name))
             difference = (left.float() - right.float()).abs()
             # The histories and K/V swap roles on commit (dflash_device.py:193-195,
             # draft_kv_history.py:118), so say which name this address was first
             # seen under; None means it was allocated after first sight.
             current = addresses(operations, value)
             origin = next((seen for seen, address in recorded.items() if address == current), None)
-            raise AssertionError(
-                '[PINDIAG] replicated draft %s differs between chips after step of %s (entry %d): '
-                'victim=%s (entry %d) buffer=%s shape=%s address=%s first_seen_as=%s '
-                'differing=%d of %d max_abs=%g; scheduler order=%s proposal_calls=%s'
-                % (category, actor['request_id'], stepped, entry['request_id'], index, name,
-                   tuple(value.shape), current, origin,
-                   int((difference > 0).sum()), difference.numel(), float(difference.max()),
-                   live, [other['request'].runtime.drafter.proposal_calls for other in entries]))
-    logger.info('[PINDIAG] shards equal after step of {}: {} buffers', actor['request_id'], checked)
+            # Several short lines: the log capture truncates around 250 characters,
+            # and run 35481466425 lost everything after the shape.
+            logger.info('[PINDIAG] shard mismatch after step of {} (entry {}): victim={} (entry {}) category={}',
+                        actor['request_id'], stepped, victim, index, category)
+            logger.info('[PINDIAG] mismatch buffer={} shape={} address={} first_seen_as={}',
+                        name, tuple(value.shape), current, origin)
+            logger.info('[PINDIAG] mismatch differing={} of {} max_abs={:g}',
+                        int((difference > 0).sum()), difference.numel(), float(difference.max()))
+            logger.info('[PINDIAG] mismatch scheduler order={} proposal_calls={}',
+                        live, [other['request'].runtime.drafter.proposal_calls for other in entries])
+            if SHARD_CHECK == '1':
+                raise AssertionError('Replicated draft %s differs between chips: victim=%s buffer=%s; '
+                                     'see the [PINDIAG] mismatch log lines' % (category, victim, name))
+    if diverged:
+        logger.info('[PINDIAG] shards differ after step of {}: {} equal, {} diverged',
+                    actor['request_id'], equal, diverged)
+    else:
+        logger.info('[PINDIAG] shards equal after step of {}: {} buffers', actor['request_id'], equal)
 
 
 def describe():
