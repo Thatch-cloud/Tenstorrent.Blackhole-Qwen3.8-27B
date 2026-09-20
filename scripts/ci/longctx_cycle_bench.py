@@ -274,6 +274,14 @@ def main():
             for line in lines[-400:]:
                 print(line[:300])
         print(LOG_END)
+        # TT-Metal's watcher, when enabled, records each RISC's last waypoint: a
+        # stalled core names the class of hang. It lives inside the container.
+        watcher = Path('/opt/tt-metal/generated/watcher/watcher.log')
+        print('<<<CYCLE_BENCH_WATCHER_BEGIN>>>')
+        if watcher.is_file():
+            for line in watcher.read_text(errors='replace').splitlines()[-200:]:
+                print(line[:300])
+        print('<<<CYCLE_BENCH_WATCHER_END>>>')
         sys.stdout.flush()
     return 0 if report.get('ready') else 1
 

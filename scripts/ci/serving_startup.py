@@ -77,6 +77,13 @@ def stop(worker):
 
 
 def warmup(worker):
+    if os.environ.get('QWEN_FAST_FAULTHANDLER') == '1':
+        # A device hang leaves the worker blocked inside a ttnn call; dumping the
+        # Python stack every minute names that call in the server log (run
+        # 35482551725 stalled with nothing to say).
+        import faulthandler
+        import sys
+        faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
     from vllm.v1.worker.worker_base import CompilationTimes
 
     started = time.perf_counter()

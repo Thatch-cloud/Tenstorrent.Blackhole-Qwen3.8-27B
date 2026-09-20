@@ -81,6 +81,15 @@ class FastWorkerHook:
         # request's work and must reach the runner rather than the decode contract.
         # Without this, admit_scheduler_output refuses it for carrying a new request
         # and a second arrival cannot prefill while the first decodes.
+        if PHASE_LOG:
+            # One line per scheduled step: a stream of zero-token steps is a
+            # scheduler livelock, silence after a line is the device.
+            from loguru import logger
+            cached = getattr(getattr(scheduled, 'scheduled_cached_reqs', None), 'req_ids', ()) or ()
+            logger.info('[PHASE] execute total={} new={} cached={} spec={}',
+                        getattr(scheduled, 'total_num_scheduled_tokens', None),
+                        len(getattr(scheduled, 'scheduled_new_reqs', None) or ()), len(list(cached)),
+                        len(getattr(scheduled, 'scheduled_spec_decode_tokens', None) or {}))
         if getattr(scheduled, 'scheduled_new_reqs', None):
             return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request
