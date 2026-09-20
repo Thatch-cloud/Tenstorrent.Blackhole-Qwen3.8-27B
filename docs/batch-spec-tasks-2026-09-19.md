@@ -1376,3 +1376,34 @@ pass for all users per round) in place of the sequential scaffold, 64-row blocks
 for four T16 users, and the prefill/decode interleave; none of those is measured
 yet. The concurrency pin (one hook, one bridge, one trace bucket) is lifted for
 two users by construction.
+
+## Run 35490648209 (image v41, timing): the sequential scaffold's honest numbers
+
+Watcher off, shard readbacks off, shared collectives, real token counts from the
+server's usage report. Both users completed 64 tokens, no error.
+
+    stream 0: completion_tokens=64 chunks=10 ttft=14.9 s wall=31.6 s decode window=16.7 s -> 3.8 tok/s
+    stream 1: completion_tokens=64 chunks=23 ttft=28.8 s wall=33.4 s decode window=4.6 s -> 13.7 tok/s
+    chunk gap median 259 ms, p90 304 ms; steps n=30 per run median 90 ms (83-367);
+    eager proposals median 41 ms (max 185); aggregate 17.5 tok/s; 4.4% of 200 tok/s per user
+
+Reading it: a 32768-token prefill takes ~14 s without the watcher, and the
+one-in-flight rule holds user 0 idle for the whole of user 1's prefill, which is
+why user 0's window-averaged rate is a third of user 1's. In the phase where
+both are resident, one packed round is step B (90 ms) + step A (90 ms) + two
+eager proposals (2 x 41 ms) = ~262 ms for two chunks of ~6.4 accepted tokens
+each, i.e. ~24 tok/s per user, ~49 tok/s aggregate, through the sequential
+scaffold that reads the 19.92 GB of dense weights once PER USER per round. The
+16-row verify replay itself is 90 ms.
+
+Against the goal (200 tok/s per user = 5 ms per token): two users are correct
+end to end at ~24 tok/s each while co-resident. The next lever is the packed
+device step - one verify (one weight pass) for all users per round, and one
+packed proposal - which at today's per-op costs would bring a two-user round
+to roughly 90 + 45 ms, ~45 tok/s per user; four users at T8 (K=7, ~6 commits)
+share the same pass. The prefill/decode interleave (Lever N) is what stops the
+first user idling during the second's 14 s prefill. 200 tok/s per user is not
+reachable by packing alone at a 90 ms verify: it needs the verify itself well
+under 60 ms per round on top of packing, which is the kernel work the earlier
+profiling documents describe. That is the honest position at the end of this
+session.
