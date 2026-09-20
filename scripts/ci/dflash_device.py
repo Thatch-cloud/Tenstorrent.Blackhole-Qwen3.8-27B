@@ -1,5 +1,7 @@
 """Opt-in complete five-layer DFlash2 proposer with committed projected feature history."""
 
+import hashlib
+import os
 from types import SimpleNamespace
 from contextlib import nullcontext
 
@@ -26,6 +28,229 @@ def pindiag(template, *values):
         print(template.format(*values), flush=True)
         return
     logger.info(template, *values)
+
+
+AUDIT_SWITCH = 'QWEN_FAST_PROPOSAL_AUDIT'
+# The log capture truncates around 250 characters and loguru's own prefix takes
+# some of them, so each audit message stays under this (the budget
+# test_serving_sequential_step_shards holds the shard check to); a longer message
+# is continued on further lines rather than lost.
+AUDIT_LINE_BUDGET = 180
+# Stages the eager proposal computes per chip by construction - each chip holds its
+# own 16 query and four K/V heads (draft_attention_branch.py projection(), sharded
+# dim 0), its own MLP columns (draft_mlp_branch.py device_projections), half the
+# embedding width before the all-gather and half the vocabulary - so they have no
+# cross-chip equality to check. Named once per proposal so their absence from the
+# stage lines is not read as an omission.
+AUDIT_SHARDED = ('embedding.local', 'attn q/k/v heads+output', 'o-proj partial', 'mlp gate/up/act',
+                 'down-proj partial', 'vocab head top16')
+
+
+def proposal_audit_enabled(environment=None):
+    """QWEN_FAST_PROPOSAL_AUDIT=1. Read at each proposal rather than at import, so
+    the switch a test flips is the one the proposal sees."""
+    return (os.environ if environment is None else environment).get(AUDIT_SWITCH, '0') == '1'
+
+
+def compare_shards(left, right):
+    """One tensor's two chip copies, on the host: the bit-for-bit differing count
+    (as serving_sequential_step.check_shards compares), the size of the difference,
+    and which copy carries the larger norm."""
+    import torch
+
+    if tuple(left.shape) != tuple(right.shape) or left.dtype != right.dtype:
+        raise AssertionError('Chip shards differ in geometry: %s %s vs %s %s'
+                             % (tuple(left.shape), left.dtype, tuple(right.shape), right.dtype))
+    left, right = left.contiguous(), right.contiguous()
+    bits = {torch.bfloat16: torch.int16, torch.float16: torch.int16, torch.float32: torch.int32, torch.float64: torch.int64}
+    if left.dtype in bits:
+        differing = left.view(bits[left.dtype]) != right.view(bits[left.dtype])
+    else:
+        differing = left != right
+    wide_left, wide_right = left.to(torch.float64), right.to(torch.float64)
+    difference = (wide_left - wide_right).abs()
+    norms = (float(wide_left.norm()), float(wide_right.norm()))
+    count = int(differing.sum())
+    larger = None
+    if count:
+        larger = 'chip0' if norms[0] > norms[1] else 'chip1' if norms[1] > norms[0] else 'equal'
+    return dict(differing=count, total=int(differing.numel()),
+                max_abs=float(difference.max()) if count else 0.0,
+                mean_abs=float(difference.mean()) if count else 0.0,
+                finite=(bool(torch.isfinite(wide_left).all()), bool(torch.isfinite(wide_right).all())),
+                norms=norms, larger_norm=larger)
+
+
+def identity(value):
+    return 'none' if value is None else '%s@%x' % (type(value).__name__, id(value))
+
+
+def collective_state(collectives):
+    """The host-side integer state of a collectives object, by attribute name: TT_CCL
+    cycles its semaphore handles by index, so a shared object's position is on record."""
+    try:
+        attributes = vars(collectives)
+    except TypeError:
+        return 'opaque'
+    state = {}
+    for name, value in attributes.items():
+        if type(value) is int or (isinstance(value, (list, tuple)) and value and all(type(item) is int for item in value)):
+            state[name] = value
+    return state or 'no-integer-attributes'
+
+
+class ProposalAudit:
+    """First-divergent-stage audit of one EAGER proposal, under QWEN_FAST_PROPOSAL_AUDIT=1.
+
+    Runs 35486440095 and 35489404340: with every persistent buffer verified equal on
+    both chips right before it, the second user's third eager proposal still made
+    replicated selector features that differ between the chips - a transient of the
+    proposal itself, after the other user's proposal had run. This names WHERE.
+    Every replicated tensor the proposal reads or produces is read back from both
+    chips at the stage that made it, compared bit for bit, and reported on one short
+    '[AUDIT]' line: stage, shape, differing count, max_abs, mean_abs. The first stage
+    that differs also says which chip's copy carries the larger norm. Per-chip
+    intermediates (AUDIT_SHARDED) have no cross-chip equality and are named as such.
+
+    At proposal start, the state this device reads but does not own is listed with
+    id() and device addresses - the lent weights, the pool's histories, the
+    collectives and its counters, the target model's tensors, the module-level state
+    on the path - so a collision between two DFlashDevice instances shows as the same
+    address in two devices' listings.
+
+    Readbacks are synchronous and the audit is a diagnostic. Off, none of this runs:
+    `observe` is never passed, and the proposal's operations and their order are
+    exactly as before.
+    """
+
+    def __init__(self, device, *, log=None, line_budget=AUDIT_LINE_BUDGET):
+        self.device, self.operations = device, device.operations
+        self.log = pindiag if log is None else log
+        self.line_budget = line_budget
+        self.tag = 'dev=%x call=%d' % (id(device), device.proposal_calls)
+        self.stages, self.first_divergent, self.summarized = [], None, False
+
+    def line(self, template, *values):
+        message = '[AUDIT] %s %s' % (self.tag, template.format(*values))
+        budget = max(self.line_budget, 40)
+        self.log('{}', message[:budget])
+        rest = message[budget:]
+        prefix = '[AUDIT] %s ...' % self.tag
+        width = max(budget - len(prefix), 20)
+        while rest:
+            self.log('{}', prefix + rest[:width])
+            rest = rest[width:]
+
+    def address_of(self, value):
+        try:
+            return '%x/%x' % addresses(self.operations, value)
+        except Exception:
+            return 'n/a'
+
+    def program_cache(self):
+        count = getattr(getattr(self.device, 'mesh', None), 'num_program_cache_entries', None)
+        if not callable(count):
+            return 'n/a'
+        try:
+            return int(count())
+        except Exception:
+            return 'n/a'
+
+    def begin(self):
+        device = self.device
+        self.line('begin position={} history_rows={} block_rows={} path=eager,uncached-history native_attention={} fused_convolution={}',
+                  device.position, device.history_rows, device.block_rows,
+                  getattr(device, 'native_proposal_attention', False), getattr(device, 'fused_convolution', False))
+        self.line('sharded per chip, not compared: {}', ', '.join(AUDIT_SHARDED))
+        self.not_owned()
+
+    def not_owned(self):
+        device = self.device
+        weights = getattr(device, 'shared_weights', None)
+        slot = getattr(device, 'pool_slot', None)
+        collectives = getattr(device, 'collectives', None)
+        model = getattr(device, 'model', None)
+        kv = getattr(device, 'kv_history', None)
+        self.line('not-owned weights={} borrowers={} model={} collectives={}', identity(weights),
+                  len(getattr(weights, 'borrowers', ())), identity(model), identity(collectives))
+        self.line('pool slot={} index={} owner={}', identity(slot), getattr(slot, 'index', None), getattr(slot, 'owner', None))
+        self.line('collectives state={}', 'none' if collectives is None else collective_state(collectives))
+        self.line('histories {}: history={} spare_history={}; kv banks {} (not read by the eager proposal)',
+                  'lent by the pool' if slot is not None else 'owned', self.address_of(device.history),
+                  self.address_of(device.spare_history), 'none' if kv is None else '%d layers' % len(getattr(kv, 'active', ())))
+        embedding = getattr(model, 'embd', None)
+        self.line('model tensors: lm_head_weight={} embd={} embd.weights={}',
+                  self.address_of(getattr(model, 'lm_head_weight', None)), identity(embedding),
+                  self.address_of(getattr(embedding, 'weights', None)))
+        self.module_state()
+        self.shared_weights(weights)
+
+    def module_state(self):
+        try:
+            links = projection_links()
+        except Exception as error:
+            links = 'error:%s' % type(error).__name__
+        try:
+            from dflash_t16_native_scope import _ACTIVE
+
+            admission = identity(_ACTIVE.get())
+        except Exception:
+            admission = 'unavailable'
+        masks = getattr(self.device, 'validated_native_proposal_masks', ())
+        self.line('module state: projection_links={} (lru_cache projection_link_policy._resolve) validated_masks={} '
+                  'program_cache_entries={}', links, len(masks), self.program_cache())
+        self.line('t16 admission={} (ContextVar dflash_t16_native_scope._ACTIVE)', admission)
+
+    def shared_weights(self, weights):
+        tensors = list(getattr(weights, 'tensors', None) or ())
+        if not tensors:
+            self.line('shared weights: none; the weights are this device\'s own uploads')
+            return
+        try:
+            names = list(weights.names())
+        except Exception:
+            names = []
+        if len(names) != len(tensors):
+            names = ['tensor[%d]' % index for index in range(len(tensors))]
+        entries = [(name, id(tensor), self.address_of(tensor)) for name, tensor in zip(names, tensors)]
+        digest = hashlib.sha256(repr(entries).encode()).hexdigest()[:12]
+        if digest == getattr(self.device, 'audit_digest', None):
+            self.line('shared weights: {} tensors, ids and addresses unchanged since listed (digest {})', len(entries), digest)
+            return
+        self.device.audit_digest = digest
+        self.line('shared weights: {} tensors, digest {}, listed as name id=<id()> addr=<chip0>/<chip1>', len(entries), digest)
+        for name, tensor_id, address in entries:
+            self.line('shared-tensor {} id={:x} addr={}', name, tensor_id, address)
+
+    def observe(self, name, value):
+        operations = self.operations
+        shards = operations.get_device_tensors(value)
+        if len(shards) != 2:
+            raise AssertionError('Both chips required to audit %s' % name)
+        left, right = (operations.to_torch(shard) for shard in shards)
+        result = compare_shards(left, right)
+        self.stages.append((name, result))
+        marker = ''
+        if not all(result['finite']):
+            marker += ' finite=%d/%d' % tuple(int(flag) for flag in result['finite'])
+        if result['differing'] and self.first_divergent is None:
+            self.first_divergent = name
+            marker += ' FIRST larger_norm=%s' % result['larger_norm']
+        self.line('stage={} shape={} differing={} of {} max_abs={:g} mean_abs={:g}{}',
+                  name, 'x'.join(str(extent) for extent in left.shape), result['differing'], result['total'],
+                  result['max_abs'], result['mean_abs'], marker)
+        return value
+
+    def summary(self):
+        if self.summarized:
+            return
+        self.summarized = True
+        diverged = [name for name, result in self.stages if result['differing']]
+        first = next((result for name, result in self.stages if name == self.first_divergent), None)
+        self.line('summary stages={} diverged={} first_divergent={}{} program_cache_entries={}',
+                  len(self.stages), len(diverged), self.first_divergent or 'none',
+                  '' if first is None else ' larger_norm=%s norms=%g/%g' % (first['larger_norm'], *first['norms']),
+                  self.program_cache())
 
 
 class PreparedDraftWeights:
@@ -206,6 +431,9 @@ class DFlashDevice:
         self.fused_convolution, self.convolution_checks = fused_convolution, []
         self.closed = False
         self.proposal_calls = self.published_rows = 0
+        # Digest of the shared weights' ids and addresses as the proposal audit last
+        # listed them, so an unchanged set is one line rather than the listing again.
+        self.audit_digest = None
         if progress is not None and not callable(progress):
             raise ValueError('An optional callable audit progress reporter is required')
         self.progress = progress
@@ -393,7 +621,7 @@ class DFlashDevice:
         self.pending = None
 
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
-                         audit_convolution=False, cached_history=None, pack=None):
+                         audit_convolution=False, cached_history=None, pack=None, observe=None):
         operations = self.operations
         live_query_qk = getattr(self, 'live_query_qk', False)
         native_proposal_attention = getattr(self, 'native_proposal_attention', False)
@@ -413,6 +641,20 @@ class DFlashDevice:
         rows = 32 if pack is not None else self.block_rows
         seams = None if pack is None else tuple(
             (index * self.block_rows, (index + 1) * self.block_rows) for index in range(len(pack)))
+        # QWEN_FAST_PROPOSAL_AUDIT (ProposalAudit): `observe(name, tensor)` reads a
+        # replicated intermediate back from both chips at the stage that made it. None,
+        # the default and the only value with the audit off, adds no operation and
+        # changes no order; each branch gets a copy scoped to its layer.
+        def watch(name, value):
+            if observe is not None:
+                observe(name, value)
+            return value
+
+        def scoped(prefix):
+            if observe is None:
+                return {}
+            return dict(observe=lambda name, value: observe('%s.%s' % (prefix, name), value))
+
         stage('borrowed-embedding')
         local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
         local = retain(operations.reshape(local, (1, 1, rows, 2560)))
@@ -422,8 +664,9 @@ class DFlashDevice:
             barrier_semaphore=self.collectives.get_and_cycle_barrier_semaphore_handle(), num_links=projection_links(),
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
+        watch('embedding.gathered', hidden)
         if rows != 32:
-            hidden = retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0))
+            hidden = watch('embedding.padded', retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0)))
         for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
             convolution_options = {}
             if getattr(self, 'fused_convolution', False):
@@ -438,24 +681,25 @@ class DFlashDevice:
             with operation_audit:
                 hidden = execute_attention_branch(operations, self.mesh, self.collectives, hidden, history, mask, rope,
                     retain, parameters=attention, context=context, pack=pack, **convolution_options,
+                    **scoped('layer%d.attn' % layer),
                     **(dict(live_query_mask_validated=True) if live_query_qk else {}),
                     **(dict(native_proposal_mask_validated=True) if native_proposal_attention else {}),
                     **(dict(cached_history=[cache[layer] for cache in cached_history] if pack is not None
                     else cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
-                retain, parameters=mlp, trace_safe=True, **convolution_options,
+                retain, parameters=mlp, trace_safe=True, **convolution_options, **scoped('layer%d.mlp' % layer),
                 **(dict(boundaries=seams) if pack is not None else {}))['output']
         stage('final-norm-and-selector-projection')
-        normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
-            compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+        normalized = watch('selector.normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
+            compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 1),
             in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
             fuse_batch=True, fused_activation=None, mcast_in0=True)
-        projected = retain(operations.matmul(normalized, self.selector_projection, dtype=operations.float32,
-            program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
-        projected = retain(operations.typecast(projected, operations.bfloat16))
-        block = retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120)))
+        projected = watch('selector.projected-fp32', retain(operations.matmul(normalized, self.selector_projection, dtype=operations.float32,
+            program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
+        projected = watch('selector.features', retain(operations.typecast(projected, operations.bfloat16)))
+        block = watch('head.input', retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120))))
         stage('shared-full-vocabulary-head')
         chunks = shared_head_candidates(operations, self.model, block, owned)
         return SimpleNamespace(projected=projected, chunks=chunks)
@@ -509,10 +753,14 @@ class DFlashDevice:
         if self.closed or self.pending is not None or type(seed) is not int or not 0 <= seed < 248320 or type(count) is not int or not 1 <= count <= self.max_drafts:
             raise ValueError('Committed DFlash2 history and bounded anchor/proposal IDs required')
         if self.proposal_capture is not None:
+            if proposal_audit_enabled():
+                pindiag('[AUDIT] dev={:x} call={} proposal is a trace replay: the stage audit reads intermediates '
+                        'only from the eager proposal (QWEN_FAST_EAGER_PROPOSAL=1)', id(self), self.proposal_calls)
             tokens = self.proposal_capture.propose(seed, count)
             self.proposal_calls += 1
             return tokens
         operations = self.operations
+        audit = ProposalAudit(self) if proposal_audit_enabled() else None
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])
         previous_stage = 'target-publication'
         def stage(name, **values):
@@ -527,8 +775,12 @@ class DFlashDevice:
                 layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
                 memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(self.mesh)))
         try:
+            if audit is not None:
+                audit.begin()
             stage('upload-anchor-and-mask')
             identifiers = upload(torch.tensor([[seed, *([248070] * self.max_drafts)]], dtype=torch.int64), dtype=operations.uint32, row_major=True)
+            if audit is not None:
+                audit.observe('input.identifiers', identifiers)
             stage('prepare-history-mask-and-rope')
             host_mask = draft_attention_mask(self.history_rows, block_rows=self.block_rows)
             key_rows = host_mask.shape[-1]
@@ -552,8 +804,19 @@ class DFlashDevice:
                 self.validated_native_proposal_masks.add(addresses(operations, mask))
             rope = {name: tuple(upload(value) for value in rope_tables(start, rows))
                 for name, start, rows in (('q', self.position, 32), ('k', self.position - self.history_rows, key_rows))}
+            if audit is not None:
+                # The inputs as the proposal consumes them: the committed buffer, the
+                # window sliced and padded from it, the mask and the position tables.
+                audit.observe('input.history-buffer', self.history)
+                audit.observe('input.history-window', history)
+                audit.observe('input.mask', mask)
+                for name in ('q', 'k'):
+                    for part, table in zip(('cos', 'sin'), rope[name]):
+                        audit.observe('input.rope.%s.%s' % (name, part), table)
             outputs = self.execute_proposal(identifiers, history, mask, rope, context=self.history_rows,
-                owned=owned, retain=retain, stage=stage)
+                owned=owned, retain=retain, stage=stage, **(dict(observe=audit.observe) if audit is not None else {}))
+            if audit is not None:
+                audit.summary()
             stage('synchronize-head-and-selector')
             operations.synchronize_device(self.mesh)
             stage('read-candidates-and-select')
@@ -561,6 +824,10 @@ class DFlashDevice:
             self.proposal_calls += 1
             return tokens
         finally:
+            if audit is not None:
+                # Already written on the normal path; after a failure inside
+                # execute_proposal this is where the stages seen so far are summed up.
+                audit.summary()
             stage('synchronize-and-release-draft-temporaries')
             operations.synchronize_device(self.mesh)
             release_owned(operations, owned)

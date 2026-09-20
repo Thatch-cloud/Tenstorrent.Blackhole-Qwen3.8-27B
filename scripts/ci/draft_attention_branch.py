@@ -56,8 +56,17 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
                              parameters, context, pack=None, wide_dot_placement=False, convolution_operation=None,
-                             cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False):
+                             cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False,
+                             observe=None):
     convolve = convolution_operation or grouped_causal_convolution
+    # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): `observe(name, tensor)` reads
+    # a replicated intermediate back from both chips at the stage that made it. None,
+    # the default and the only value with the audit off, adds nothing.
+    def watch(name, value):
+        if observe is not None:
+            observe(name, value)
+        return value
+
     # The convolution is causal over rows, so a packed block must restart the shift
     # at each user. Threaded into every call rather than defaulted, because the
     # default is the one that silently mixes users.
@@ -134,14 +143,14 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         return retain(operations.matmul(value, weight, dtype=operations.float32,
             compute_kernel_config=kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
 
-    normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['norm'],
-        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+    normalized = watch('normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['norm'],
+        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
     projected = project(normalized, parameters['convolution'], (8, 5), 32, 1)
-    rounded = retain(operations.typecast(projected, operations.bfloat16))
+    rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
-    prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
-        fp32_intermediates=True, retain_temporaries=retain, **seams))
+    prepared = watch('conv-in', retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
+        fp32_intermediates=True, retain_temporaries=retain, **seams)))
     def normalize_head(name, head):
         norm = retain(operations.rms_norm(head, epsilon=1e-6, weight=parameters['head_norms'][name],
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
@@ -189,7 +198,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         if key_rows > context + block_rows:
             zeros = retain(operations.zeros_like(history))
             parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - block_rows, 5120))))
-        keys = retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+        keys = watch('keys', retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG)))
         heads, flat = {}, {}
         for name, count in (('q', 16), ('k', 4), ('v', 4)):
             rows = 32 if name == 'q' else key_rows
@@ -241,10 +250,11 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         transposed = retain(operations.transpose(rounded, 1, 2))
         merged = retain(operations.reshape(transposed, (1, 1, 32, 2048)))
     partial = project(merged, parameters['output_projection'], (8, 10), 32, 2)
-    reduced = retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain))
+    reduced = watch('reduced', retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain,
+        **(dict(observe=observe) if observe is not None else {}))))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
-    finished = retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
-        fp32_intermediates=True, retain_temporaries=retain, **seams))
+    finished = watch('conv-out', retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
+        fp32_intermediates=True, retain_temporaries=retain, **seams)))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (finished, hidden)]
     summed = retain(operations.add(*wide, dtype=operations.float32))
-    return retain(operations.typecast(summed, operations.bfloat16))
+    return watch('output', retain(operations.typecast(summed, operations.bfloat16)))

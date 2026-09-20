@@ -31,8 +31,16 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
 
 
 def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None,
-                       trace_safe=False, convolution_operation=None, boundaries=None):
+                       trace_safe=False, convolution_operation=None, boundaries=None, observe=None):
     convolve = convolution_operation or grouped_causal_convolution
+    # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): `observe(name, tensor)` reads
+    # a replicated intermediate back from both chips at the stage that made it. None,
+    # the default and the only value with the audit off, adds nothing.
+    def watch(name, value):
+        if observe is not None:
+            observe(name, value)
+        return value
+
     seams = {} if boundaries is None else dict(boundaries=boundaries)
     if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
         raise ValueError('A padded32-row BF16 hidden block is required')
@@ -51,25 +59,26 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         return retain(operations.matmul(value, weight, dtype=operations.float32, program_config=program,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
 
-    normalized = retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['device_norm'],
-        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+    normalized = watch('normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['device_norm'],
+        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
     projected = project(normalized, parameters['device_conv'], (8, 5), 1)
-    rounded = retain(operations.typecast(projected, operations.bfloat16))
+    rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
         for offset in range(4)]
     bases = parameters['bases']
-    prepared = retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership, **seams))
+    prepared = watch('conv-in', retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership, **seams)))
     projections = [project(prepared, parameters['device_projections'][index], (8, 10), 4)
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
     partial = project(activation, parameters['device_projections'][2], (8, 10), 2)
-    reduced = retain(gather_add_projection(operations, mesh, collectives, partial, **ownership))
+    reduced = watch('reduced', retain(gather_add_projection(operations, mesh, collectives, partial, **ownership,
+        **(dict(observe=observe) if observe is not None else {}))))
     rounded_output = retain(operations.typecast(reduced, operations.bfloat16))
-    finished = retain(convolve(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership, **seams))
+    finished = watch('conv-out', retain(convolve(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership, **seams)))
     wide_finished = retain(operations.typecast(finished, operations.float32))
     wide_hidden = retain(operations.typecast(hidden, operations.float32))
     summed = retain(operations.add(wide_finished, wide_hidden, dtype=operations.float32))
-    output = retain(operations.typecast(summed, operations.bfloat16))
+    output = watch('output', retain(operations.typecast(summed, operations.bfloat16)))
     return dict(hidden=hidden, normalized=normalized, conv_projection=projected, dynamic=dynamic, prepared=prepared,
         projections=projections, activation=activation, partial=partial, reduced=reduced, finished=finished,
         output=output, shards=parameters['shards'], norm_weight=parameters['norm_weight'],

@@ -32,7 +32,7 @@ def reduce_projection(operations, mesh, collectives, value):
             operations.deallocate(reduced)
 
 
-def gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None):
+def gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None, observe=None):
     links = projection_links()
     shape = tuple(value.shape)
     if (list(mesh.shape) != [1, 2] or len(shape) != 4 or shape[:2] != (1, 1)
@@ -54,6 +54,10 @@ def gather_add_projection(operations, mesh, collectives, value, *, retain_tempor
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
         retain(gathered)
+        if observe is not None:
+            # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): both partials as
+            # this chip received them, before the add - replicated when the gather is.
+            observe('gathered', gathered)
         for chip in range(2):
             retain(operations.slice(gathered, (chip, 0, 0, 0), (chip + 1, 1, rows, 5120)))
         output = operations.add(temporaries[1], temporaries[2], dtype=operations.float32,
