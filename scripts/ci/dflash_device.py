@@ -529,12 +529,16 @@ class DFlashDevice:
         identity = addresses(self.operations, output) if output is not None else None
         release_owned(self.operations, [value for value in owned if addresses(self.operations, value) != identity])
 
-    def project_features(self, features, count):
+    def project_features(self, features, count, row_offset=None):
+        # A packed block's taps hold every user's rows (packed_verifier.PackedFeatureTaps
+        # names this user's first row); unpacked taps start at row 0.
+        offset = getattr(features, 'row_offset', 0) if row_offset is None else row_offset
         features = tuple(features)
         operations = self.operations
-        if (len(features) != 5 or type(count) is not int or count < 1
+        if (len(features) != 5 or type(count) is not int or count < 1 or type(offset) is not int or offset < 0
                 or any(len(value.shape) != 4 or tuple(value.shape)[:2] != (1, 1)
-                    or value.shape[2] < count or value.shape[3] != 2560 or value.dtype != operations.bfloat16 for value in features)):
+                    or value.shape[2] < offset + count or value.shape[3] != 2560 or value.dtype != operations.bfloat16
+                    for value in features)):
             raise ValueError('Five complete ordered BF16 local feature taps required')
         owned, retain = self.temporaries(features)
         output = None
@@ -547,7 +551,7 @@ class DFlashDevice:
                 rows = min(32, count - start)
                 parts = []
                 for value in features:
-                    sliced = retain(operations.slice(value, (0, 0, start, 0), (1, 1, start + rows, 2560)))
+                    sliced = retain(operations.slice(value, (0, 0, offset + start, 0), (1, 1, offset + start + rows, 2560)))
                     if rows < 32:
                         sliced = retain(operations.pad(sliced, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0))
                     parts.append(sliced)

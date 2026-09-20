@@ -33,7 +33,7 @@ jobs:
           python -B -m unittest test_dram_harvest_probe
           python -B -m unittest test_firmware_staging_manifest
           python -B -m unittest test_firmware_flash_workflow
-          python -B -m unittest test_serving_sequential_step test_serving_sequential_step_shards test_verifier_carry test_verifier_pack test_serving_vllm_packed test_serving_packed_bridge test_serving_one_in_flight test_dflash_batched_mask test_dflash_packed_proposal test_draft_attention_branch_packed test_draft_convolution_packed test_draft_convolution_fused_seams test_dflash_device_audit test_gdn_packed_segments test_target_packed_pages test_model_batch test_gdn_records test_gdn_device_loop_state test_retained_ownership
+          python -B -m unittest test_serving_sequential_step test_serving_sequential_step_shards test_verifier_carry test_verifier_pack test_packed_verifier test_serving_vllm_packed test_serving_packed_bridge test_serving_one_in_flight test_dflash_batched_mask test_dflash_packed_proposal test_draft_attention_branch_packed test_draft_convolution_packed test_draft_convolution_fused_seams test_dflash_device_audit test_gdn_packed_segments test_target_packed_pages test_model_batch test_gdn_records test_gdn_device_loop_state test_retained_ownership
           python -B -m unittest test_gdn_gate_exp_fusion test_gdn_gate_exp_report test_gdn_gate_exp_scope
           python -B -m unittest test_draft_kv_slide
           python -B -m unittest test_draft_kv_slide_direct

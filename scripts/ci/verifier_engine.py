@@ -25,6 +25,28 @@ def note_prefill():
     _resident = None
 
 
+def note_packed_step():
+    """A packed block rewrote slot 0 - its segment restores inside the verify trace and
+    its per-user commit DMAs - so no engine is resident: a later sequential step of any
+    user restores its carry first (packed_verifier.py; the packed step calls this too)."""
+    global _resident
+    _resident = None
+
+
+class PackedFeatureView:
+    """The synthetic bucket's feature capture for an adopted packed segment: the block's
+    32-row taps at this user's row offset (packed_verifier.PackedVerifierEngine.features)."""
+
+    def __init__(self, block, segment):
+        self.block, self.segment = block, segment
+
+    def outputs(self):
+        return self.block.features(self.segment)
+
+    def close(self):
+        pass
+
+
 def carry_log(message, **values):
     """One line per carry copy, so a stalled run shows whether the copies finished."""
     try:
@@ -489,7 +511,28 @@ class VerifierEngine:
             raise ValueError('Feature publication requires the current committing verifier ticket')
         return self.buckets[self.pending_key]['feature_capture'].outputs()
 
+    def adopt_packed(self, ticket, block, segment):
+        """This ticket was verified by a packed block (packed_verifier.PackedVerifierEngine),
+        in that block's `segment`: become 'verified' on it, so DFlashRequestRuntime.publish
+        runs unchanged. The synthetic bucket's features are the block's taps at this
+        segment and its publication is the block's per-user commit; the carry is not
+        saved afterwards, because that commit wrote the accepted state into it."""
+        self.session.check_ticket(self.session.request_id, ticket)
+        if self.phase != 'idle' or self.pending is not None or ticket.position != self.position:
+            raise ValueError('Only an idle engine at the ticket frontier can adopt a packed verification')
+        if (type(segment) is not int or segment < 0 or not callable(getattr(block, 'features', None))
+                or not callable(getattr(block, 'commit_user', None))
+                or getattr(block, 'rows_per_user', None) != len(ticket.tokens)):
+            raise ValueError('A packed block segment holding exactly this ticket\'s rows is required')
+        key = ('packed', segment)
+        self.buckets[key] = dict(rows=len(ticket.tokens), capture_position=ticket.position, checkpoints=[],
+            fixture=None, trace=None, output=None, commits={}, first=False, target_features=[],
+            feature_capture=PackedFeatureView(block, segment), packed=(block, segment))
+        self.pending_key = key
+        self.phase, self.pending = 'verified', ticket
+
     def publish(self, prefix):
+        global _resident
         ticket = self.pending
         if self.phase != 'verified' or ticket is None or self.session.pending is not ticket or self.session.phase != 'committing':
             raise ValueError('Publication requires the live verified ticket during its owner decision')
@@ -497,17 +540,27 @@ class VerifierEngine:
             raise ValueError('Selected prefix outside verified block')
         self.phase = 'committing'
         bucket = self.buckets[self.pending_key]
+        packed = bucket.get('packed')
         try:
-            if bucket['fixture'].retained is not None:
-                bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
-                    publication=lambda selected: self.operations.execute_trace(self.mesh, bucket['commits'][selected], cq_id=0, blocking=True))
+            if packed is not None:
+                block, segment = packed
+                block.commit_user(segment, prefix)
+                # The block's commit wrote this user's accepted state into its carry, so
+                # there is nothing to save; and slot 0 holds the last committed segment (or,
+                # at prefix 0, whatever the block left), which no engine may trust.
+                _resident = None
+                del self.buckets[self.pending_key]
             else:
-                self.validate_bindings()
-                if prefix == 0:
-                    for helper, snapshot in zip(self.helpers, bucket['checkpoints'], strict=True):
-                        helper.restore(snapshot)
-                self.operations.synchronize_device(self.mesh)
-            self.save_carry()
+                if bucket['fixture'].retained is not None:
+                    bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
+                        publication=lambda selected: self.operations.execute_trace(self.mesh, bucket['commits'][selected], cq_id=0, blocking=True))
+                else:
+                    self.validate_bindings()
+                    if prefix == 0:
+                        for helper, snapshot in zip(self.helpers, bucket['checkpoints'], strict=True):
+                            helper.restore(snapshot)
+                    self.operations.synchronize_device(self.mesh)
+                self.save_carry()
             self.position += prefix
             self.phase, self.pending = 'idle', None
             self.pending_key = None

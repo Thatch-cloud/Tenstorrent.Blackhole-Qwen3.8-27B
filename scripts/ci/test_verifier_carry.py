@@ -14,7 +14,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speculative-decoding' / 'harness'))
 from greedy_session import GreedySession
 import verifier_engine
-from verifier_engine import VerifierEngine, capture_bucket_rows, carry_log, note_prefill
+from verifier_engine import VerifierEngine, capture_bucket_rows, carry_log, note_packed_step, note_prefill
 from verifier_pack import GDN_LAYERS
 
 _addresses = count(1)
@@ -241,6 +241,124 @@ class CarryTests(unittest.TestCase):
         self.assertEqual((alone.carry, alone.carry_addresses), ([], []))
         self.assertIsNone(verifier_engine._resident)
         self.assertEqual(alone.phase, 'closed')
+
+
+def block(rows=4):
+    """A packed block (packed_verifier.PackedVerifierEngine) as adopt_packed sees it."""
+    taps = ('tap0', 'tap1', 'tap2', 'tap3', 'tap4')
+    return SimpleNamespace(rows_per_user=rows, taps=taps, features=Mock(return_value=taps), commit_user=Mock())
+
+
+class PackedAdoptionTests(unittest.TestCase):
+    """A ticket verified by the packed block publishes through the block's per-user commit,
+    which writes the accepted state straight into this engine's carry: no save follows,
+    no engine is resident afterwards, and the next sequential step restores first."""
+
+    def setUp(self):
+        note_prefill()
+
+    def adopt(self, engine, session, packed, segment=1):
+        ticket = session.propose(session.request_id, max_rows=4)
+        engine.adopt_packed(ticket, packed, segment)
+        return ticket
+
+    def test_an_adopted_ticket_publishes_through_the_block_and_saves_no_carry(self):
+        shared = helpers()
+        alone, session = engine('A', shared)
+        alone.retain_feature_taps = (5, 19, 33, 47, 61)
+        cycle(alone, session)
+        self.assertIs(verifier_engine._resident, alone)
+        reset(shared)
+        packed = block()
+        traces = alone.operations.execute_trace.call_count
+        ticket = self.adopt(alone, session, packed)
+        self.assertEqual((alone.phase, alone.pending, alone.pending_key), ('verified', ticket, ('packed', 1)))
+        seen = []
+
+        def publish(prefix):
+            # DFlashRequestRuntime.publish: the features first, then the target publication
+            seen.append(alone.verified_features_for_publication(ticket))
+            return alone.publish(prefix)
+
+        position = alone.position
+        decision = session.commit('A', ticket, [1, 2, 0, 1], publish)
+        packed.features.assert_called_once_with(1)
+        self.assertEqual(seen, [packed.taps])
+        packed.commit_user.assert_called_once_with(1, decision.state_rows)
+        self.assertEqual(alone.position, position + decision.state_rows)
+        self.assertEqual(alone.position, session.position)
+        self.assertEqual((alone.phase, alone.pending, alone.pending_key), ('idle', None, None))
+        self.assertNotIn(('packed', 1), alone.buckets)
+        for helper in shared:
+            helper.save.assert_not_called()
+            helper.restore.assert_not_called()
+        # no per-request commit trace either: the block's commit was the publication
+        self.assertEqual(alone.operations.execute_trace.call_count, traces)
+        self.assertIsNone(verifier_engine._resident)
+        # slot 0 is not trusted: the next sequential step restores this engine's carry
+        self.assertTrue(cycle(alone, session)['carry_restored'])
+        for helper, slot in zip(shared, alone.carry, strict=True):
+            helper.restore.assert_called_once_with(slot)
+
+    def test_an_abort_after_adoption_publishes_prefix_zero_through_the_block(self):
+        shared = helpers()
+        alone, session = engine('A', shared)
+        reset(shared)
+        packed = block()
+        ticket = self.adopt(alone, session, packed, segment=0)
+        position = alone.position
+        session.abort('A', ticket, alone.publish)
+        packed.commit_user.assert_called_once_with(0, 0)
+        self.assertEqual((alone.position, alone.phase, alone.pending), (position, 'idle', None))
+        for helper in shared:
+            helper.save.assert_not_called()
+        self.assertIsNone(verifier_engine._resident)
+
+    def test_adoption_needs_an_idle_engine_at_the_frontier_and_a_block_holding_its_rows(self):
+        shared = helpers()
+        alone, session = engine('A', shared)
+        ticket = session.propose('A', max_rows=4)
+        for name, packed, segment, phase, offset in (('a busy engine', block(), 1, 'verifying', 0),
+                                                     ('a moved frontier', block(), 1, 'idle', 1),
+                                                     ('a block of other rows', block(rows=16), 1, 'idle', 0),
+                                                     ('a block without commits', SimpleNamespace(rows_per_user=4, features=Mock()), 1, 'idle', 0),
+                                                     ('a segment index that is not one', block(), '1', 'idle', 0)):
+            with self.subTest(name=name):
+                alone.phase, alone.position = phase, session.position + offset
+                with self.assertRaises(ValueError):
+                    alone.adopt_packed(ticket, packed, segment)
+                self.assertEqual((alone.pending, getattr(alone, 'pending_key', None)), (None, None))
+                self.assertFalse(any(isinstance(key, tuple) for key in alone.buckets))
+        alone.phase, alone.position = 'idle', session.position
+        with self.assertRaises(ValueError):
+            alone.adopt_packed(SimpleNamespace(position=session.position, tokens=ticket.tokens), block(), 1)
+
+    def test_a_failed_packed_commit_fails_the_engine_and_close_still_releases_it(self):
+        shared = helpers()
+        alone, session = engine('A', shared)
+        packed = block()
+        packed.commit_user.side_effect = RuntimeError('commit trace failure')
+        ticket = self.adopt(alone, session, packed)
+        with self.assertRaises(RuntimeError):
+            session.commit('A', ticket, [1, 2, 0, 1], alone.publish)
+        self.assertEqual((alone.phase, session.phase), ('failed', 'failed'))
+        self.assertIn(('packed', 1), alone.buckets)
+        with patch('verifier_engine.release_owned'):
+            alone.close()
+        self.assertEqual((alone.phase, alone.buckets), ('closed', {}))
+
+    def test_note_packed_step_displaces_the_resident_engine(self):
+        shared = helpers()
+        alone, session = engine('A', shared)
+        cycle(alone, session)
+        self.assertIs(verifier_engine._resident, alone)
+        note_packed_step()
+        self.assertIsNone(verifier_engine._resident)
+        reset(shared)
+        self.assertTrue(cycle(alone, session)['carry_restored'])
+        self.assertFalse(cycle(alone, session)['carry_restored'])
+        for helper, slot in zip(shared, alone.carry, strict=True):
+            helper.restore.assert_called_once_with(slot)
 
 
 def shaped(shape):
