@@ -165,9 +165,21 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
             cancelled=cancelled, packed_step=packed_step)
-    except BaseException:
-        scopes.close()
-        raise
+    except BaseException as failure:
+        # Closing the scopes can itself raise (the block-stream scope checks at exit
+        # that every layer ran the fused candidate, which nothing has at attach), and
+        # run 35496483954 logged only that, losing the attach failure it was
+        # handling. Keep the original: log the closing error and re-raise the first.
+        try:
+            scopes.close()
+        except BaseException as closing:
+            try:
+                from loguru import logger
+                logger.info('[PINDIAG] attach failed with {}: {}; closing the scopes then raised {}: {}',
+                            type(failure).__name__, str(failure)[:300], type(closing).__name__, str(closing)[:200])
+            except BaseException:
+                pass
+        raise failure
     try:
         yield dict(lifecycle=lifecycle, runtime=audit, cache_owner=owner,
             serving_qualified=False, performance_qualified=False)
