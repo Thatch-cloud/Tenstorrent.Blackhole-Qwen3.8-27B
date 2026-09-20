@@ -1918,3 +1918,11 @@ but serving's scope installs one arm at 16 rows; a runtime serving both 16-row
 per-request verifies and the 32-row packed verify would need both arms
 installed, which is new work under the frozen recipe. Next: rank (1)-(3) by
 ms saved per round against cost before building.
+
+Post-gate trim (23b7f945): `adopt_slot` no longer reads the full rec_state back
+per chip (~600 MB per admission); rec_state is checked from device-tensor
+metadata only (shard count, slice shape, dtype) now that its page-aligned slice
+is proven on device, while the conv-state bit-equality against row k stays
+(~31 MB, the unaligned-slice proof). Summary line: '48 layers, conv slices
+verified on both chips'. 46 tests green in the three modules. Goes into the next
+image.
