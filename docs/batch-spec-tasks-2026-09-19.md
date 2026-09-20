@@ -1466,3 +1466,26 @@ pool and the shared weights: protected by construction ORDER. Same class as
 runs 35477522469 and 35481466425, on L1 instead of DRAM. The rule stands and now
 covers semaphores: nothing a request keeps across steps may be allocated after
 any trace that will replay exists.
+
+## Packed device step build (from docs/packed-device-step-plan-2026-09-20.md)
+
+**Items 1-3 landed (a9c03b45):** `DeviceLoopState(..., commit_only=True, users=N)`
+allocates N per-user entries before any trace; `decode(..., segments=, slots=,
+deferred=True)` restores each user's own carry slot, runs its recurrence, does
+NO eager prefix restore, and leaves `segment_results` in segment order
+(gdn_device_loop_state.py:102, :195). `RetainedGDNBlock.commit_user(segment,
+prefix, dma=, publication=, synchronize=)` commits one user's segment with its
+own prefix through `segment_layers(segment)` (48 lists of 20 for the commit
+DMA, the carry as destination; prefix 0 is a no-op that still counts as a
+decision; replay needs every user decided and a synchronising last commit; a
+raising publication poisons the block) (gdn_records.py:143, :132, :67).
+ModelBatch: pack + retain_records requires `commit_only_gdn=True` (:212 - the
+plan said False; serving already uses True), the retained block's checkpoints
+are the tuple of per-user carries (:440), and `run()` requires
+`checkpoint_calls == len(pack['segments'])` per layer (:528). Two consequences
+for the block engine: the pack's per-user checkpoints are dead in deferred
+mode but still validated, and warming the commit traces writes the carries
+and native slot 0, so the carries must be re-seeded after warming. Tests: 91
+green across eight modules (16 new); test_gdn_records,
+test_gdn_device_loop_state and test_retained_ownership were never in CI and
+are now registered.
