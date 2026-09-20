@@ -310,6 +310,14 @@ class MLPBindingTests(unittest.TestCase):
             bind_two_tile_mlp(model, 32)
 
 
+DECODE = SimpleNamespace(name='DECODE')
+
+
+def decode_mode_module():
+    """The model's Mode enum module, as two_tile_norm imports it at bind."""
+    return patch.dict(sys.modules, {'models.tt_transformers.tt.common': SimpleNamespace(Mode=SimpleNamespace(DECODE=DECODE))})
+
+
 class ModelBatchWiringTests(unittest.TestCase):
     """model_batch builds the three binders only beyond one tile and checks every count per forward."""
 
@@ -329,7 +337,8 @@ class ModelBatchWiringTests(unittest.TestCase):
 
         ttnn = FakeTTNN()
         model = fake_model(ttnn)
-        norm, attention, mlp = two_tile_bindings(64, model, ttnn)
+        with decode_mode_module():
+            norm, attention, mlp = two_tile_bindings(64, model, ttnn)
         self.assertIsInstance(norm, TwoTileNormBinding)
         self.assertIsInstance(attention, TwoTileAttentionBinding)
         self.assertIsInstance(mlp, TwoTileMLPBinding)
@@ -354,11 +363,12 @@ class ModelBatchWiringTests(unittest.TestCase):
 
         ttnn = FakeTTNN()
         model = fake_model(ttnn, layers=3, full=(1,))
-        two_tile = two_tile_bindings(64, model, ttnn)
+        with decode_mode_module():
+            two_tile = two_tile_bindings(64, model, ttnn)
         norm, attention, mlp = two_tile
         self.assertEqual([binder.expected_calls for binder in two_tile], [7, 1, 3])
         fixture = self.fixture(two_tile)
-        decode = SimpleNamespace(name='DECODE')
+        decode = DECODE
         seen = dict(block_h=[], fusion=[])
 
         def forward(*args, **kwargs):

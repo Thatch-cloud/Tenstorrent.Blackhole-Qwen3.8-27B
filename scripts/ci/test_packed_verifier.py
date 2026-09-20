@@ -350,6 +350,96 @@ class BlockFixture(unittest.TestCase):
         return entries if reversed_order else entries[::-1]
 
 
+class ConstructionFailureTests(BlockFixture):
+    """A construction that fails after device work was enqueued (run 35505708710, image v50:
+    the 64-row warm forward raised on the host with the device hung on one of its ops) logs
+    the cause and its traceback BEFORE closing, and closes without the device fence: no
+    synchronize, no trace release, everything else released as usual."""
+
+    def failing_build(self, failure, **patches):
+        lines, seen = [], {}
+        original = PackedVerifierEngine.close
+
+        def spy(block, *, wait=True):
+            seen.update(wait=wait, phase=block.phase, stage=block.stage, taps=list(block.taps), trace=block.trace,
+                        commits=sum(len(commits) for commits in block.commits), fences=self.ttnn.synchronized)
+            original(block, wait=wait)
+            # the fences close itself added (the readers' staging fences during construction are not its)
+            seen.update(closed=block.phase, fences=self.ttnn.synchronized - seen['fences'])
+
+        with patch.object(packed_verifier, 'diagnostic', Mock(side_effect=lines.append)), \
+                patch.object(PackedVerifierEngine, 'close', spy):
+            with self.assertRaisesRegex(type(failure), str(failure)):
+                self.build()
+        return lines, seen
+
+    def test_a_failed_warm_forward_is_logged_with_its_traceback_before_a_close_that_never_fences(self):
+        failure = RuntimeError('device refused the 64-row op')
+        with patch.object(FakeModelBatch, 'forward', Mock(side_effect=failure)):
+            lines, seen = self.failing_build(failure)
+        self.assertEqual(lines[0], '[PINDIAG] packed block warm failed with RuntimeError: device refused the 64-row op; '
+                                   'stage warm forward; closing without the device fence')
+        self.assertTrue(lines[1].startswith('[PINDIAG] packed block failure traceback\nTraceback (most recent call last):'))
+        self.assertIn('RuntimeError: device refused the 64-row op', lines[1])
+        self.assertIn('in operation', lines[1], 'the traceback names the frame that raised')
+        self.assertEqual(lines[2], '[PINDIAG] packed block closed without the device fence at stage warm forward; '
+                                   '0 captured trace(s) abandoned')
+        self.assertEqual(len(lines), 3)
+        self.assertEqual((seen['wait'], seen['phase'], seen['closed'], seen['trace'], seen['commits']),
+                         (False, 'failed', 'closed', None, 0))
+        # no fence, no trace release; the frees and the pool hand-back happen as they always did
+        self.assertEqual((seen['fences'], self.ttnn.released), (0, []))
+        freed = self.ttnn.deallocated
+        self.assertEqual(len(seen['taps']), 5)
+        self.assertTrue(all(any(tap is entry for entry in freed) for tap in seen['taps']))
+        self.assertFalse(self.pool.packed[(2, 16)].taken)
+        (warm,) = FakeModelBatch.instances
+        warm.close.assert_called_once()
+        self.assertTrue(FakeFeatures.instances[0].closed)
+        pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
+        self.assertFalse(any(any(value is entry for entry in freed) for value in pooled))
+
+    def test_a_failure_after_the_verify_trace_abandons_it_and_names_its_stage(self):
+        failure = RuntimeError('commit capture refused')
+        with patch.object(packed_verifier, 'prepare', Mock(side_effect=failure)):
+            lines, seen = self.failing_build(failure)
+        self.assertEqual(lines[0], '[PINDIAG] packed block warm failed with RuntimeError: commit capture refused; '
+                                   'stage commit trace capture; closing without the device fence')
+        self.assertEqual(lines[2], '[PINDIAG] packed block closed without the device fence at stage commit trace capture; '
+                                   '1 captured trace(s) abandoned')
+        self.assertEqual((seen['wait'], seen['trace'], seen['closed']), (False, 'trace1', 'closed'))
+        # close added no fence, and the captured verify trace is abandoned, not released
+        self.assertEqual((seen['fences'], self.ttnn.released), (0, []))
+        warm, captured = FakeModelBatch.instances
+        warm.close.assert_called_once()
+        captured.close.assert_called_once()
+        self.assertFalse(self.pool.packed[(2, 16)].taken)
+
+    def test_a_healthy_close_still_fences_and_releases_the_traces(self):
+        block = self.build()
+        synchronized = self.ttnn.synchronized
+        block.close()
+        self.assertEqual(self.ttnn.synchronized - synchronized, 1)
+        self.assertEqual(sorted(self.ttnn.released), sorted('trace%d' % index for index in range(1, 34)))
+
+    def test_the_diagnostic_line_goes_to_loguru_when_present_and_to_stderr_otherwise(self):
+        import io
+        import sys
+        from contextlib import redirect_stderr
+
+        logger = SimpleNamespace(info=Mock())
+        with patch.dict(sys.modules, {'loguru': SimpleNamespace(logger=logger)}):
+            packed_verifier.diagnostic('[PINDIAG] via loguru')
+        logger.info.assert_called_once_with('{}', '[PINDIAG] via loguru')
+        captured = io.StringIO()
+        with patch.dict(sys.modules, {'loguru': None}), redirect_stderr(captured):
+            packed_verifier.diagnostic('[PINDIAG] via stderr')
+        self.assertEqual(captured.getvalue(), '[PINDIAG] via stderr\n')
+        # a failing sink never masks the failure being reported
+        with patch.dict(sys.modules, {'loguru': SimpleNamespace(logger=SimpleNamespace(info=Mock(side_effect=OSError('sink'))))}):
+            packed_verifier.diagnostic('[PINDIAG] lost')
+
+
 class ConstructionTests(BlockFixture):
     def test_the_block_is_the_retained_per_user_replay_pack_over_the_pool_carries(self):
         block = self.build()

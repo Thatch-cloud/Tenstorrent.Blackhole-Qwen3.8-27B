@@ -78,7 +78,9 @@ sequential step of any user restores first (`verifier_engine.note_packed_step`).
 """
 
 from contextlib import ExitStack
+import sys
 import time
+import traceback
 from types import SimpleNamespace
 
 from attention_batch import capture_operation
@@ -99,6 +101,21 @@ from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 
 FEATURE_WIDTH = 5120
+
+
+def diagnostic(text):
+    """One [PINDIAG] line into the server log: loguru where it exists, stderr otherwise
+    (the lane attaches both). Never raises: a failed report must not mask the failure
+    it reports."""
+    try:
+        try:
+            from loguru import logger
+        except ImportError:
+            print(text, file=sys.stderr, flush=True)
+        else:
+            logger.info('{}', text)
+    except BaseException:
+        pass
 
 
 class PackedFeatureTaps(tuple):
@@ -295,6 +312,7 @@ class PackedVerifierEngine:
         self.commits = [{} for user in range(shape.users)]
         self.phase, self.first, self.rounds = 'preparing', True, 0
         self.pending_segments = set()
+        self.stage = 'allocating'
         started = time.perf_counter()
         try:
             # Allocated before ANY capture, like everything a trace may see. The initial
@@ -319,20 +337,24 @@ class PackedVerifierEngine:
             placeholders = [SimpleNamespace(position=capture_position,
                                             pages=torch.zeros((1, shape.page_width), dtype=torch.int32))
                             for user in range(shape.users)]
+            self.stage = 'warm forward'
             warm = self.build_fixture(placeholders)
             result = None
             try:
                 result = self.operation(warm)
+                self.stage = 'warm forward fence'
                 operations.synchronize_device(self.mesh)
             finally:
                 if result is not None:
                     release_owned(operations, [value for value in result if value is not None])
                 warm.close()
+            self.stage = 'verify trace capture'
             self.fixture = self.build_fixture(placeholders)
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
             retained = self.fixture.retained
             if len(retained.records) != GDN_LAYERS:
                 raise ValueError('The captured packed block must retain every GDN layer')
+            self.stage = 'commit trace capture'
             for user in range(shape.users):
                 layers = validate_commit_layers(retained.segment_layers(user), self.carries[user])
                 # Prefix 0 is a no-op on the carry (the deferred decode never advanced it, and
@@ -348,17 +370,36 @@ class PackedVerifierEngine:
             # own warming does): slot 0 goes back to what attach found, and the carries go
             # back to the zeros the pool lends - a request's engine seeds its own on
             # admission (VerifierEngine.save_carry), after the pool zeroes the slot again.
+            self.stage = 'reseeding'
             self.reseed()
             operations.synchronize_device(self.mesh)
+            self.stage = 'validating bindings'
             self.validate_bindings()
             # The captures rewrote slot 0: nobody is resident.
             note_prefill()
             self.setup_ms = (time.perf_counter() - started) * 1000
             self.phase = 'idle'
-        except BaseException:
+        except BaseException as failure:
             self.phase = 'failed'
-            self.close()
+            # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
+            # 64-row warm forward after the device had hung on an enqueued op; close then
+            # blocked in the device fence for the rest of the timeout and the cause was
+            # never logged (serving_runtime's own [PINDIAG] line comes after this close).
+            self.report_failure(failure)
+            self.close(wait=False)
             raise
+
+    def report_failure(self, failure):
+        """The construction failure and its traceback into the log, so the next run's log
+        shows the cause even when the device never completes the work already enqueued."""
+        try:
+            summary = '%s: %s' % (type(failure).__name__, str(failure)[:300])
+            diagnostic('[PINDIAG] packed block warm failed with %s; stage %s; closing without the device fence'
+                       % (summary, self.stage))
+            diagnostic('[PINDIAG] packed block failure traceback\n'
+                       + ''.join(traceback.format_exception(type(failure), failure, failure.__traceback__)))
+        except BaseException:
+            pass
 
     def build_fixture(self, placeholders):
         """The packed ModelBatch: retained records for the per-user commits; commit-only GDN,
@@ -569,20 +610,38 @@ class PackedVerifierEngine:
                            tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds)
 
-    def close(self):
+    def close(self, *, wait=True):
+        """Release the block. `wait=False` is the failed construction: the device may still be
+        running, or hung on, the work the failed forward enqueued, so nothing that can block
+        is done - no device fence, and the traces (if any were captured) are abandoned rather
+        than released, since a trace release may fence. Everything else is released as
+        usual: the frees are host-side allocator bookkeeping (run 35505708710 freed the warm
+        fixture's buffers with the device hung and returned), the pool's tables are handed
+        back, and a process whose attach failed does not allocate again, so a freed address
+        cannot be re-issued under a kernel that is still running. Every other close keeps
+        the fence: an idle block has nothing in flight and returns at once; a block failed
+        in verify or commit was fenced by its blocking trace or its staging before it
+        failed."""
         if self.phase == 'closed':
             return
         if self.phase not in ('idle', 'preparing', 'failed'):
             raise ValueError('Commit every segment of the pending packed block before closing')
         operations = self.operations
-        operations.synchronize_device(self.mesh)
+        if wait:
+            operations.synchronize_device(self.mesh)
+        abandoned = sum(len(commits) for commits in self.commits) + (self.trace is not None)
         for commits in self.commits:
-            for trace in commits.values():
-                operations.release_trace(self.mesh, trace)
+            if wait:
+                for trace in commits.values():
+                    operations.release_trace(self.mesh, trace)
             commits.clear()
         if self.trace is not None:
-            operations.release_trace(self.mesh, self.trace)
+            if wait:
+                operations.release_trace(self.mesh, self.trace)
             self.trace = None
+        if not wait:
+            diagnostic('[PINDIAG] packed block closed without the device fence at stage %s; %d captured trace(s) abandoned'
+                       % (self.stage, abandoned))
         if self.feature_capture is not None:
             self.feature_capture.close()
         if self.output is not None:

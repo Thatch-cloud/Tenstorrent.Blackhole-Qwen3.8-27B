@@ -176,21 +176,26 @@ class NormConfigTests(unittest.TestCase):
 
 
 class BindingTests(unittest.TestCase):
-    def model(self, ttnn, layers=64):
+    def model(self, ttnn, layers=64, configs=None):
         args = SimpleNamespace()
-        args.get_norm_config = Mock(side_effect=lambda name, mode: native_config(ttnn, name=name, mode=mode, output_mem_config=None))
+        configs = configs or {}
+        args.get_norm_config = Mock(side_effect=lambda name, mode: configs[name] if name in configs
+                                    else native_config(ttnn, name=name, mode=mode, output_mem_config=None))
         return SimpleNamespace(args=args, layers=[object()] * layers)
 
     def test_decode_calls_come_back_two_tiles_high_and_interleaved_and_prefill_ones_untouched(self):
         ttnn = FakeTTNN()
         model = self.model(ttnn)
-        binding = bind_two_tile_norms(model, 64, ttnn)
+        binding = bind_two_tile_norms(model, 64, ttnn, mode=Mode.DECODE)
         self.assertIsInstance(binding, TwoTileNormBinding)
         self.assertEqual(binding.label, 'decode norm')
         self.assertEqual(binding.binding[:2], (model.args, 'get_norm_config'))
         self.assertIs(binding.binding[2], binding)
         self.assertEqual(binding.bindings, [binding.binding])
         self.assertEqual((binding.rows, binding.tiles, binding.expected_calls, binding.calls), (64, 2, 129, 0))
+        # the trial rebuild at bind asked the native getter for both decode configs and counted nothing
+        self.assertEqual([call.args for call in model.args.get_norm_config.call_args_list],
+                         [('attn', Mode.DECODE), ('lm_head', Mode.DECODE)])
         decode = binding('attn', Mode.DECODE)
         self.assertEqual((decode['name'], decode['mode']), ('attn', Mode.DECODE))
         self.assertEqual(decode['sharded_output_config'].shard_spec.shape, [64, 160])
@@ -204,8 +209,39 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(binding.calls, 1)
         binding('lm_head', Mode.DECODE)
         self.assertEqual(binding.calls, 2)
-        self.assertEqual(model.args.get_norm_config.call_count, 3)
+        self.assertEqual(model.args.get_norm_config.call_count, 5)
         model.args.get_norm_config.assert_any_call('lm_head', Mode.DECODE)
+
+    def test_a_decode_config_the_rebuild_refuses_fails_the_bind_by_name_before_any_forward(self):
+        """The final norm's config is the LAST call of a forward (model.py:521): refusing it
+        there would raise on the host after every op of the forward was enqueued. It is
+        refused at bind instead, naming the config."""
+        ttnn = FakeTTNN()
+        height = ttnn.MemoryConfig('height', 'l1', ttnn.ShardSpec('lm-head-grid', [32, 160], 'rm'))
+        bad = dict(sharded_output_config=height, sharded_program_config=one_tile_program(ttnn), output_mem_config=None)
+        with self.assertRaisesRegex(ValueError, "The 'lm_head' decode norm config cannot be rebuilt for 64 rows: "
+                                                "The decode norm output config must be a width-sharded"):
+            bind_two_tile_norms(self.model(ttnn, configs={'lm_head': bad}), 64, ttnn, mode=Mode.DECODE)
+        with self.assertRaisesRegex(ValueError, "The 'attn' decode norm config cannot be rebuilt for 64 rows: "
+                                                "The decode norm program config is expected one tile row per core"):
+            two_tile = dict(native_config(ttnn), sharded_program_config=ttnn.LayerNormShardedMultiCoreProgramConfig(
+                compute_with_storage_grid_size=(8, 4), subblock_w=1, block_h=2, block_w=5, inplace=False))
+            bind_two_tile_norms(self.model(ttnn, configs={'attn': two_tile}), 64, ttnn, mode=Mode.DECODE)
+        # the framework's own final-norm DRAM override is applied after the getter returns
+        # (model.py:522), so a None output config passes the trial as it passes the forward
+        bind_two_tile_norms(self.model(ttnn), 64, ttnn, mode=Mode.DECODE)
+
+    def test_without_an_explicit_mode_the_models_decode_mode_is_imported(self):
+        import sys
+        from unittest.mock import patch
+
+        ttnn = FakeTTNN()
+        model = self.model(ttnn)
+        with patch.dict(sys.modules, {'models.tt_transformers.tt.common': SimpleNamespace(Mode=Mode)}):
+            binding = bind_two_tile_norms(model, 64, ttnn)
+        self.assertEqual([call.args for call in model.args.get_norm_config.call_args_list],
+                         [('attn', Mode.DECODE), ('lm_head', Mode.DECODE)])
+        self.assertEqual(binding.calls, 0)
 
     def test_the_binding_reaches_the_native_getter_through_instance_overrides(self):
         from model_batch import instance_overrides
@@ -213,7 +249,7 @@ class BindingTests(unittest.TestCase):
         ttnn = FakeTTNN()
         model = self.model(ttnn, layers=2)
         native = model.args.get_norm_config
-        binding = bind_two_tile_norms(model, 64, ttnn)
+        binding = bind_two_tile_norms(model, 64, ttnn, mode=Mode.DECODE)
         self.assertEqual(binding.expected_calls, 5)
         with instance_overrides(binding.bindings):
             self.assertIs(model.args.get_norm_config, binding)
@@ -226,13 +262,13 @@ class BindingTests(unittest.TestCase):
         ttnn = FakeTTNN()
         for rows in (16, 32):
             with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, 'beyond one tile'):
-                bind_two_tile_norms(self.model(ttnn), rows, ttnn)
+                bind_two_tile_norms(self.model(ttnn), rows, ttnn, mode=Mode.DECODE)
         with self.assertRaisesRegex(ValueError, 'no get_norm_config'):
-            bind_two_tile_norms(SimpleNamespace(args=SimpleNamespace(), layers=[object()] * 64), 64, ttnn)
+            bind_two_tile_norms(SimpleNamespace(args=SimpleNamespace(), layers=[object()] * 64), 64, ttnn, mode=Mode.DECODE)
         with self.assertRaisesRegex(ValueError, 'layers and args'):
-            bind_two_tile_norms(SimpleNamespace(args=SimpleNamespace()), 64, ttnn)
+            bind_two_tile_norms(SimpleNamespace(args=SimpleNamespace()), 64, ttnn, mode=Mode.DECODE)
         with self.assertRaisesRegex(ValueError, 'interleaved L1'):
-            bind_two_tile_norms(self.model(ttnn), 64, SimpleNamespace(L1_MEMORY_CONFIG=None))
+            bind_two_tile_norms(self.model(ttnn), 64, SimpleNamespace(L1_MEMORY_CONFIG=None), mode=Mode.DECODE)
 
 
 if __name__ == '__main__':

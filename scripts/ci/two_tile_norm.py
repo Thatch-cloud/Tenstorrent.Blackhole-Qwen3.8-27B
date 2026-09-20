@@ -177,10 +177,35 @@ class TwoTileNormBinding:
         return two_tile_norm_config(config, self.rows, self.operations, output_mem_config=self.output_mem_config)
 
 
-def bind_two_tile_norms(model, rows, operations):
+DECODE_NORMS = ('attn', 'lm_head')  # layer.py:171 and :177 (both "attn"), model.py:521
+
+
+def decode_mode():
+    """The model's Mode.DECODE (tt_transformers common.py), the value layer.py:168 and
+    model.py:521 pass the getter."""
+    from models.tt_transformers.tt.common import Mode
+
+    return Mode.DECODE
+
+
+def bind_two_tile_norms(model, rows, operations, mode=None):
     """The wide block's norm binding over the model's args: two decode norms per layer and
-    the final norm (model.py:521) are the calls one forward makes."""
+    the final norm (model.py:521) are the calls one forward makes.
+
+    Both decode configs the forward will ask for are rebuilt here, at attach, before any
+    device op: a config the rebuild refuses (a shard that is not WIDTH, a program that is
+    not one tile) fails the attach by name instead of raising on the host at the end of a
+    forward whose ops are already enqueued (the final norm's config is the LAST call of the
+    forward, model.py:521). The getter is pure, so the trial rebuild changes nothing and
+    counts nothing."""
     layers = getattr(model, 'layers', None)
     if layers is None or getattr(model, 'args', None) is None:
         raise ValueError('A model with layers and args is required')
-    return TwoTileNormBinding(model.args, rows, operations, expected_calls=2 * len(layers) + 1)
+    binding = TwoTileNormBinding(model.args, rows, operations, expected_calls=2 * len(layers) + 1)
+    mode = decode_mode() if mode is None else mode
+    for name in DECODE_NORMS:
+        try:
+            two_tile_norm_config(binding.native(name, mode), rows, operations, output_mem_config=binding.output_mem_config)
+        except ValueError as failure:
+            raise ValueError('The %r decode norm config cannot be rebuilt for %d rows: %s' % (name, rows, failure)) from failure
+    return binding
