@@ -117,12 +117,23 @@ class RefusalEvidenceTests(unittest.TestCase):
     """Run 35484349353 died on the five-way clause and its message named none of
     the five. A refusal must carry what it judged."""
 
-    def test_a_finished_id_is_named(self):
+    def test_a_finished_id_that_is_still_live_is_named(self):
         scheduled = PackedAdmissionTests().scheduled(('A', 'B'))
-        scheduled.finished_req_ids = {'Z'}
+        scheduled.finished_req_ids = {'A'}
         with self.assertRaises(ValueError) as caught:
             ordered_tickets(PackedAdmissionTests().pair(), scheduled)
-        self.assertIn("finished=['Z']", str(caught.exception))
+        self.assertIn("finished=['A']", str(caught.exception))
+
+    def test_a_partner_that_completed_and_was_detached_does_not_refuse_the_survivor(self):
+        """Run 35489772960: two users decoded nine rounds, one completed its budget,
+        the lifecycle detached it, and the survivor's next step carried that id in
+        finished_req_ids. vLLM reports every id finished since the last schedule;
+        only a live one is this step's business."""
+        survivor = [request('A', 100, list(range(1, 17)))]
+        scheduled = step(('A',), [100], {'A': 16}, {'A': list(range(2, 17))})
+        scheduled.finished_req_ids = {'B'}
+        entries = admit_packed_scheduler_output(survivor, scheduled)
+        self.assertEqual([entry['request_id'] for entry in entries], ['A'])
 
     def test_a_preempted_id_and_a_new_request_are_both_named(self):
         scheduled = PackedAdmissionTests().scheduled(('A', 'B'))

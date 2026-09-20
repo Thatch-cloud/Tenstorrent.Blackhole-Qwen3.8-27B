@@ -23,7 +23,15 @@ def ordered_tickets(requests, scheduled):
     """One live ticket per scheduled request, in the scheduler's own order."""
     cached = scheduled.scheduled_cached_reqs
     order = list(cached.req_ids)
-    found = step_refusals(scheduled)
+    by_id = {}
+    for request in requests:
+        ticket = prepared_ticket(request)
+        if ticket.request_id in by_id:
+            raise ValueError('Two live requests claim one request id')
+        by_id[ticket.request_id] = (request, ticket)
+    # The live set decides which finished ids concern this step: a partner that
+    # completed was detached by the lifecycle before this step and is not here.
+    found = step_refusals(scheduled, live=set(by_id))
     if not order:
         found.append('no cached request')
     elif len(set(order)) != len(order):
@@ -31,12 +39,6 @@ def ordered_tickets(requests, scheduled):
     if found:
         raise ValueError('Resident decode requests at the exact scheduled frontier required: '
                          + '; '.join(found))
-    by_id = {}
-    for request in requests:
-        ticket = prepared_ticket(request)
-        if ticket.request_id in by_id:
-            raise ValueError('Two live requests claim one request id')
-        by_id[ticket.request_id] = (request, ticket)
     if set(by_id) != set(order):
         raise ValueError('The scheduled requests and the prepared requests must be the same set')
     resumed = set(getattr(cached, 'resumed_req_ids', ()) or ())
