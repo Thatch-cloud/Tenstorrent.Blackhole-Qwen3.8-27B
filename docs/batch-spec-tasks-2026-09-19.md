@@ -1407,3 +1407,27 @@ reachable by packing alone at a 90 ms verify: it needs the verify itself well
 under 60 ms per round on top of packing, which is the kernel work the earlier
 profiling documents describe. That is the honest position at the end of this
 session.
+
+### Proposal audit instrument (7b3977b8): QWEN_FAST_PROPOSAL_AUDIT=1
+
+Built while the collectives A/B ran, and kept for the packed step. With
+`QWEN_FAST_PROPOSAL_AUDIT=1` and eager proposals, `DFlashDevice.propose` reads
+every replicated input and intermediate back from both chips at the stage that
+made it (`ProposalAudit`, dflash_device.py:97-259; `compare_shards` :44-71) and
+logs one `[AUDIT] dev=<id> call=<n> stage=<name> ...` line per stage - 89 stages
+per proposal from the identifiers, pooled history buffer, sliced window, mask and
+RoPE tables, through the embedding gather, each layer's attention and MLP branch
+(normalized, kernels, convolutions, the gathered partials inside the collective,
+the reduced sum, outputs; sharded heads and partials named once, not compared),
+to the selector projection and features. The first differing stage is marked
+`FIRST larger_norm=chipK` and repeated in a summary line. Off, no observer is
+passed and no op or order changes. At proposal start it also logs every tensor
+the proposal reads that the instance does not own: the lent PreparedDraftWeights
+(104 tensors, ids and both chip addresses), the shared TT_CCL object with its
+counters, the target's embedding and head, the pool slot. The audit found NO
+module-level cache keyed by position or shape on the proposal path; the only
+module-level state is host-side (projection-links lru_cache, the T16 admission
+ContextVar, the per-instance validated-mask set) plus the device program cache.
+22 new tests (`test_dflash_device_audit`, registered), 167 green across the
+touched modules with the switch off. Not yet run on hardware; the readback
+follows `check_shards`, which has.
