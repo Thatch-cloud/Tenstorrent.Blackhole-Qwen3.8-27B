@@ -2673,3 +2673,13 @@ with DRAM output, DRAM<->L1 moves). Those are throughput-tuned, not latency-tune
 fast needs real two-tile decode program configs (per_core_M 2) in place of the prefill fallbacks and
 a bundled prep, tracked separately. Per-user rate this run (0.7-2.2 tok/s) is dominated by the ~312 s
 serial prefill ramp, not the packed tail.
+
+## Run 35544598063 (image v55): decode-tile splits cut the round 2043 -> 1453 ms, token-exact
+
+The four prefill-mode fallbacks converted to two-call-at-32-rows decode splits (MLP, GDN in/out,
+attention wo). Token-exact (same output shas as v54), no crash, 34 packed rounds. packed_verify
+2043 -> 1453 ms; [PACKED-PHASE] shows trace_ms=1442 (all on-device). Still ~10x the 152 ms model and
+~13x the 2-user 32-row 109 ms round. The two-tile workaround doubles per-layer op count and adds 64
+MLP all-reduces/round; a native 64-row decode kernel would avoid both but is a model graft. No host
+decomposition possible (single captured trace); needs the device profiler. Per-user rate 0.8-2.8
+tok/s, still dominated by the serial prefill ramp.
