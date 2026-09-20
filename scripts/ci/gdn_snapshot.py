@@ -72,7 +72,10 @@ class ActiveSnapshot:
         sources, chips = [], None
         try:
             for tensor, dimension in zip(self.live, self.dimensions, strict=True):
-                sources.append(self.gdn._slice_along(tensor, dimension, index, 1))
+                # The model's slice helper takes (start, stop), not (start, count): every
+                # older call is (0, 1), which reads the same either way, and run
+                # 35495982721's row-1 slice came back empty under the count reading.
+                sources.append(self.gdn._slice_along(tensor, dimension, index, index + 1))
             for name, tensor, dimension, source in zip(names, self.live, self.dimensions, sources, strict=True):
                 verified = self._verify_row(name, tensor, dimension, source, index, layer)
                 if chips is not None and verified != chips:
