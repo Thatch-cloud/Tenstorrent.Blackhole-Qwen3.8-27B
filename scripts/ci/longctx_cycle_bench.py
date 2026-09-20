@@ -50,7 +50,10 @@ def stream_once(port, prompt, max_tokens, results, index):
     first_token_at = None
     entry = {}
     try:
-        with urlopen(request, timeout=900) as response:
+        # The socket timeout is the inactivity limit between chunks. At 900 s a hung
+        # decode sat for fifteen minutes (run 35481903377) and produced no log; 180 s
+        # is nine times the 32k-token TTFT and hundreds of times the inter-token gap.
+        with urlopen(request, timeout=180) as response:
             previous = None
             for raw in response:
                 line = raw.decode('utf-8', 'replace').strip()
@@ -87,7 +90,12 @@ def stream_once(port, prompt, max_tokens, results, index):
                      wall_s=time.perf_counter() - started)
         results[index] = entry
     except BaseException as error:
-        results[index] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]))
+        # Keep what arrived before the failure: a hang after N tokens and a refusal
+        # at admission are different findings.
+        results[index] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]),
+                              tokens=tokens, gaps_ms=[1000.0 * g for g in gaps],
+                              ttft_s=(first_token_at - started) if first_token_at else None,
+                              wall_s=time.perf_counter() - started)
 
 
 def main():
