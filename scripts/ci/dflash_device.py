@@ -338,6 +338,21 @@ class DFlashDevice:
             valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
             history = retain(operations.pad(valid_history, [(0, 0), (0, 0), (0, key_rows - self.history_rows), (0, 0)], 0.0))
             mask = upload(host_mask)
+            if self.native_proposal_attention:
+                # The TRACE path validates and registers its mask; the eager path
+                # never did, so it was refused by its own device with 'Native
+                # proposal mask was not validated before upload/capture'
+                # (run 35478076344). Same check, same registration.
+                if self.block_rows == 16:
+                    from dflash_t16_native_scope import require_active
+                    from dflash_t16_native_attention import validate_mask
+
+                    require_active()
+                else:
+                    from proposal_native_attention import validate_mask
+
+                validate_mask(host_mask)
+                self.validated_native_proposal_masks.add(addresses(operations, mask))
             rope = {name: tuple(upload(value) for value in rope_tables(start, rows))
                 for name, start, rows in (('q', self.position, 32), ('k', self.position - self.history_rows, key_rows))}
             outputs = self.execute_proposal(identifiers, history, mask, rope, context=self.history_rows,
