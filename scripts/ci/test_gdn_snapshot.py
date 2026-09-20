@@ -76,16 +76,20 @@ class SnapshotTests(unittest.TestCase):
         rec_state is (8, 24, 4, 4) per chip on dim 0 and each conv state (1, 8, 16) on
         dim 1, every row distinct, so a slice that returns any other row is caught.
         `wrong` = (tensor name, chip) makes that one device slice hand back row 0 -
-        what a broken tile-internal slice would do - on that chip only.
+        what a broken tile-internal slice would do - on that chip only. `hosts`
+        records every shard read back to the host, by tensor name and chip.
         """
-        order, slices = [], []
+        order, slices, hosts, owner = [], [], [], {}
 
         def shards(name, shape, dimension):
             rows = [torch.full([size if axis != dimension else 1 for axis, size in enumerate(shape)],
                                float(100 * chip + 10 * row + 1), dtype=torch.bfloat16)
                     for chip in range(chips) for row in range(8)]
-            return SimpleNamespace(name=name, chips=[torch.cat(rows[chip * 8:(chip + 1) * 8], dim=dimension)
-                                                     for chip in range(chips)])
+            value = SimpleNamespace(name=name, chips=[torch.cat(rows[chip * 8:(chip + 1) * 8], dim=dimension)
+                                                      for chip in range(chips)])
+            for chip, shard in enumerate(value.chips):
+                owner[id(shard)] = (name, chip)
+            return value
 
         live = {"rec": shards("rec", (8, 24, 4, 4), 0), "conv0": shards("conv0", (1, 8, 16), 1),
                 "conv1": shards("conv1", (1, 8, 16), 1)}
@@ -96,9 +100,14 @@ class SnapshotTests(unittest.TestCase):
             for chip, shard in enumerate(tensor.chips):
                 row = 0 if wrong == (tensor.name, chip) else start
                 parts.append(shard.narrow(dimension, row, stop - start).clone())
+                owner[id(parts[-1])] = ("slice:" + tensor.name, chip)
             sliced = SimpleNamespace(name="slice:" + tensor.name, chips=parts)
             slices.append(sliced)
             return sliced
+
+        def to_torch(shard):
+            hosts.append(owner.get(id(shard), ("?", None)))
+            return shard
 
         def device_tensors(value):
             order.append("read")
@@ -110,21 +119,25 @@ class SnapshotTests(unittest.TestCase):
                                 _write_index=Mock(side_effect=lambda *args: order.append("write")))
         operations = SimpleNamespace(clone=Mock(side_effect=lambda source, **kwargs: ("clone", source)),
                                      copy=Mock(), deallocate=Mock(side_effect=lambda value: order.append("free")),
-                                     get_device_tensors=device_tensors, to_torch=lambda shard: shard,
-                                     DRAM_MEMORY_CONFIG="DRAM")
+                                     get_device_tensors=device_tensors, to_torch=to_torch,
+                                     DRAM_MEMORY_CONFIG="DRAM", hosts=hosts)
         return layer, operations, order, slices, ActiveSnapshot(layer, operations, direct=direct)
+
+    CONV_READBACKS = [("conv0", 0), ("slice:conv0", 0), ("conv0", 1), ("slice:conv0", 1),
+                      ("conv1", 0), ("slice:conv1", 0), ("conv1", 1), ("slice:conv1", 1)]
 
     def test_adopt_slot_copies_the_prefill_row_into_slot_zero_over_the_slice_path(self):
         # The batched prefill wrote the user's state into its decode slot; serving builds
         # the helpers direct=True, and the DMA kernel copies slot 0 only, so adoption
         # takes the ttnn slice path whatever the mode: slice row k of every live tensor,
-        # read every slice and its live tensor back, then the writes restore() makes,
-        # then release the slices.
+        # read every conv slice and its live tensor back (rec_state by metadata only),
+        # then the writes restore() makes, then release the slices.
         for direct in (False, True):
             layer, operations, order, slices, snapshots = self.adoption_fixture(direct)
             with self.subTest(direct=direct), patch("gdn_state_copy.copy_active") as dma:
                 self.assertEqual(snapshots.adopt_slot(1, layer=3), 2, "verified on both chips")
             dma.assert_not_called()
+            self.assertEqual(operations.hosts, self.CONV_READBACKS, "the conv states and their slices, nothing else")
             self.assertEqual([call.args for call in layer._slice_along.call_args_list],
                              [(layer.rec_state, 0, 1, 2), (layer.conv_states[0], 1, 1, 2), (layer.conv_states[1], 1, 1, 2)])
             self.assertEqual(len(slices), 3)
@@ -146,12 +159,21 @@ class SnapshotTests(unittest.TestCase):
                     for chip in range(2):
                         self.assertTrue(torch.equal(sliced.chips[chip], live.chips[chip].narrow(dimension, index, 1)))
 
-    def test_a_slice_that_returns_the_wrong_row_is_refused_before_any_write(self):
+    def test_rec_state_is_checked_by_metadata_and_never_read_back(self):
+        # rec_state's page-aligned slice was proven on device (run 35496290854) and the
+        # eight-slot tensor is 6.3 MB per chip per layer, so it is no longer read back:
+        # a wrong row there is not what this check is for, and it passes without a
+        # single rec_state shard reaching the host. The conv proof is unchanged.
+        layer, operations, order, slices, snapshots = self.adoption_fixture(True, wrong=("rec", 1))
+        self.assertEqual(snapshots.adopt_slot(2, layer=7), 2)
+        self.assertEqual(operations.hosts, self.CONV_READBACKS)
+        self.assertEqual(order, ["slice"] * 3 + ["read"] * 6 + ["write"] * 3 + ["free"] * 3)
+
+    def test_a_conv_slice_that_returns_the_wrong_row_is_refused_before_any_write(self):
         # A tile-internal conv-state slice at row k != 0 is what no other path exercises.
         # A fake whose slice hands back row 0 instead must fail the readback check, name
         # the layer, chip and difference, and reach no write; the slices are released.
-        for name, chip, kind in (("conv1", 1, "Unaligned conv-state"), ("conv0", 0, "Unaligned conv-state"),
-                                 ("rec", 1, "Recurrent-state")):
+        for name, chip, kind in (("conv1", 1, "Unaligned conv-state"), ("conv0", 0, "Unaligned conv-state")):
             layer, operations, order, slices, snapshots = self.adoption_fixture(True, wrong=(name, chip))
             with self.subTest(name=name, chip=chip), self.assertRaises(ValueError) as refused:
                 snapshots.adopt_slot(2, layer=7)
@@ -166,17 +188,36 @@ class SnapshotTests(unittest.TestCase):
             layer._write_index.assert_not_called()
             self.assertEqual([call.args for call in operations.deallocate.call_args_list], [(sliced,) for sliced in slices])
 
-    def test_a_slice_with_the_wrong_shape_or_missing_shards_is_refused(self):
-        layer, operations, order, slices, snapshots = self.adoption_fixture(True)
-        layer._slice_along.side_effect = lambda tensor, dimension, start, stop: SimpleNamespace(
-            name="slice", chips=[shard.narrow(dimension, start, 2) for shard in tensor.chips])
-        with self.assertRaisesRegex(ValueError, "differs from the row: layer [?] rec_state chip 0 shape"):
-            snapshots.adopt_slot(1)
-        layer._write_recurrent_state_prefix.assert_not_called()
+    def test_a_slice_with_the_wrong_shape_dtype_or_missing_shards_is_refused(self):
+        # rec_state is the first tensor checked, by metadata: two rows instead of one,
+        # a float32 slice of a bf16 tensor, or one shard against two are each refused
+        # before any write, and without reading rec_state back.
+        cases = (("shape", lambda shard, dimension, start: shard.narrow(dimension, start, 2),
+                  "Recurrent-state slice at row 1 differs from the row: layer [?] rec_state chip 0 shape"),
+                 ("dtype", lambda shard, dimension, start: shard.narrow(dimension, start, 1).float(),
+                  "rec_state chip 0 shape [(]1, 24, 4, 4[)] torch.float32, row [(]1, 24, 4, 4[)] torch.bfloat16"))
+        for label, cut, message in cases:
+            layer, operations, order, slices, snapshots = self.adoption_fixture(True)
+            layer._slice_along.side_effect = lambda tensor, dimension, start, stop, cut=cut: SimpleNamespace(
+                name="slice", chips=[cut(shard, dimension, start) for shard in tensor.chips])
+            with self.subTest(label), self.assertRaisesRegex(ValueError, message):
+                snapshots.adopt_slot(1)
+            layer._write_recurrent_state_prefix.assert_not_called()
+            self.assertEqual(operations.hosts, [])
         layer, operations, order, slices, snapshots = self.adoption_fixture(True)
         layer._slice_along.side_effect = lambda tensor, dimension, start, stop: SimpleNamespace(
             name="slice", chips=[tensor.chips[0].narrow(dimension, start, 1)])
-        with self.assertRaisesRegex(ValueError, "has 1 shards against 2 live shards"):
+        with self.assertRaisesRegex(ValueError, "Recurrent-state slice at row 1 has 1 shards against 2 live shards"):
+            snapshots.adopt_slot(1)
+        layer._write_recurrent_state_prefix.assert_not_called()
+        self.assertEqual(operations.hosts, [])
+        # The same geometry checks guard the conv states, through their readback.
+        layer, operations, order, slices, snapshots = self.adoption_fixture(True)
+        cut = layer._slice_along.side_effect
+        layer._slice_along.side_effect = lambda tensor, dimension, start, stop: cut(
+            tensor, dimension, start, stop) if dimension == 0 else SimpleNamespace(
+            name="slice", chips=[shard.narrow(dimension, start, 2) for shard in tensor.chips])
+        with self.assertRaisesRegex(ValueError, "Unaligned conv-state slice at row 1 differs from the row: layer [?] conv_states\\[0\\] chip 0 shape"):
             snapshots.adopt_slot(1)
         layer._write_recurrent_state_prefix.assert_not_called()
 

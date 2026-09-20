@@ -55,13 +55,16 @@ class ActiveSnapshot:
         Always the ttnn slice path, whatever `direct` is: the DMA kernel copies
         slot 0 only. Row 0 has nothing to adopt.
 
-        Every slice is verified against a host readback of its live tensor before
-        anything is written. The conv states keep all eight slots inside one 32-row
-        tile, so a row-k slice with k != 0 is a tile-internal unaligned slice that no
-        other path takes (every existing slice starts at row 0); rec_state's dim-0
-        slice is page-aligned and checked the same way as insurance. Unconditional:
-        once per admission, and it is the proof the token-exact gate run needs.
-        Returns the number of chips every tensor was verified on.
+        Every slice is checked before anything is written. The conv states keep all
+        eight slots inside one 32-row tile, so a row-k slice with k != 0 is a
+        tile-internal unaligned slice that no other path takes (every existing slice
+        starts at row 0): each is read back per chip with its live tensor and must
+        equal row k bit for bit. rec_state's dim-0 slice is page-aligned and was
+        proven on device (run 35496290854, both users byte-exact), and the eight-slot
+        tensor is 6.3 MB per chip per layer - some 600 MB per admission read back
+        whole - so it keeps only the shard-count, shape and dtype checks, from the
+        device tensors' metadata, with no readback. Unconditional, once per
+        admission. Returns the number of chips every tensor was verified on.
         """
         if type(index) is not int or not 0 <= index < self.gdn.B:
             raise ValueError("Native GDN slot index within the eight-slot batch required")
@@ -90,12 +93,17 @@ class ActiveSnapshot:
         return chips
 
     def _verify_row(self, name, tensor, dimension, source, index, layer):
-        """Per chip, the device slice must equal row `index` of the live tensor read
-        back whole (the check_shards readback in serving_sequential_step)."""
+        """Per chip, the device slice must have the live tensor's shard count and row
+        `index`'s shape and dtype; a conv-state slice must also equal that row bit for
+        bit when both are read back whole (the check_shards readback in
+        serving_sequential_step). rec_state is never read back: its slot axis is
+        dimension 0, so the metadata answers the geometry, and the ~600 MB per
+        admission its readback cost is what the trim after run 35496290854 removed."""
         import torch
 
         operations = self.operations
-        kind = "Recurrent-state" if dimension == 0 else "Unaligned conv-state"
+        aligned = dimension == 0
+        kind = "Recurrent-state" if aligned else "Unaligned conv-state"
         where = "layer %s %s" % ("?" if layer is None else layer, name)
         fulls = list(operations.get_device_tensors(tensor))
         parts = list(operations.get_device_tensors(source))
@@ -103,12 +111,20 @@ class ActiveSnapshot:
             raise ValueError("%s slice at row %d has %d shards against %d live shards: %s"
                              % (kind, index, len(parts), len(fulls), where))
         for chip, (full, part) in enumerate(zip(fulls, parts, strict=True)):
-            expected = operations.to_torch(full).narrow(dimension, index, 1).contiguous()
-            actual = operations.to_torch(part).contiguous()
-            if tuple(actual.shape) != tuple(expected.shape) or actual.dtype != expected.dtype:
+            if aligned:
+                expected_shape = tuple(1 if axis == dimension else size for axis, size in enumerate(tuple(full.shape)))
+                expected_dtype, actual_shape, actual_dtype = full.dtype, tuple(part.shape), part.dtype
+            else:
+                expected = operations.to_torch(full).narrow(dimension, index, 1).contiguous()
+                actual = operations.to_torch(part).contiguous()
+                expected_shape, expected_dtype = tuple(expected.shape), expected.dtype
+                actual_shape, actual_dtype = tuple(actual.shape), actual.dtype
+            if actual_shape != expected_shape or actual_dtype != expected_dtype:
                 raise ValueError("%s slice at row %d differs from the row: %s chip %d shape %r %s, row %r %s"
-                                 % (kind, index, where, chip, tuple(actual.shape), actual.dtype,
-                                    tuple(expected.shape), expected.dtype))
+                                 % (kind, index, where, chip, actual_shape, actual_dtype,
+                                    expected_shape, expected_dtype))
+            if aligned:
+                continue
             if not _same_bits(torch, actual, expected):
                 difference = (actual.float() - expected.float()).abs()
                 raise ValueError("%s slice at row %d differs from the row: %s chip %d differing=%d of %d max_abs=%g"
