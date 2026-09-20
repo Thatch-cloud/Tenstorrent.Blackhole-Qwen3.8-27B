@@ -596,3 +596,62 @@ this serving path. What changes is the claim about hardware: the only thing the 
 has demonstrated is run 35441818361, where **both users prefilled and the scheduler
 presented the packed two-user decode step**. No decode of any kind has run through
 the fast path in this image, at one user or two.
+
+## The fast path decodes (2026-09-20)
+
+**Run 35475120459 is the first time the fast path has produced a token in this
+workflow**, at one user: `prompt_tokens=32768` exactly, 10 tokens, no error,
+`blocks=516`, ITL median 122.5 ms, 8.2 tok/s.
+
+Three things had to be true at once, and each was found by reading the IMAGE
+rather than this repo:
+
+1. **The gate's required position is not a constant.** The image's
+   `frozen_combined_runtime.validate_target_option` compares
+   `position != selected_geometry()['context']`, where this repo's copy hardcodes
+   32768. `selected_geometry()` reads `QWEN_DSPARK_REQUEST_CONTEXT`, default
+   `'8192'`. Every value the diagnostic printed matched because none of them was
+   the one being compared.
+2. **The prompt must be exact.** The bench built text - a phrase repeated
+   `prompt_tokens // 8` times - so asking for 32768 gave `position=20488`. Every
+   gate here compares position for equality. It now sends a token-id array.
+3. **The page table must cover the context.** `serving_runtime` built a fixed
+   `(1, 68)` table, 4352 tokens. It now derives from `max_model_len`.
+
+### Two users
+
+| Run | Result |
+| --- | --- |
+| 35475354962 | both prefill; refused at the packed device step, by name |
+| 35476203187 | 1 token each; refused at ticket preparation |
+| 35476929953 | the image was running the bundle's `serving_vllm_state`, not this repo's |
+| 35477522469 | **2 tokens each**, then the draft head refuses its own candidates |
+
+The last one is the real wall. `merge_chunk_candidates` rejects the vocabulary
+head's output - 'Finite complete-block top16 values and in-range integer indices
+required' - after two committed blocks. The sequential step runs two complete
+single-user cycles through ONE model, and the draft machinery is not re-entrant
+per request: each `DFlashDevice` holds its own history, but they share the model,
+the mesh and the vocabulary head, and nothing swaps between them.
+
+That is precisely what the packed design handles - one pass with each user's state
+restored at its own segment boundary - and precisely what the sequential shortcut
+cannot, because it never restores anything. So the shortcut gets two users further
+than before and then stops for a reason the batched verifier does not have.
+
+### Where that leaves the work
+
+- One user decodes. That is new, and everything above it was blocking at one user
+  as much as at two.
+- Two users prefill, admit, and commit two blocks each.
+- The remaining piece is unchanged and is now the ONLY piece: a packed device step
+  that restores per-user state, which is what `verifier_pack`, the GDN segment
+  swap and `ModelBatch(pack=...)` were built for. `serving_packed_bridge` takes it
+  as a parameter, so it drops in where `sequential_packed_step` sits today.
+
+**Lesson worth keeping:** three separate times the image's copy of a module
+differed from this repo's - `verifier_engine` is the bundle's, this repo's
+`dspark_context_selection` defaults to 4096 where the image's defaults to 8192,
+and the frozen validator compares a computed geometry where this repo's compares a
+constant. The CPU probe lane mounts the repo at `/probe` FIRST on `PYTHONPATH`, so
+importing a module there measures the repo. Read image files by path.
