@@ -832,3 +832,33 @@ with `ModelBatch.__init__() got an unexpected keyword argument 'pack'`. Overridi
 `verifier_engine` brought a call that the bundle's `model_batch` predates. Rule:
 an overridden module must not depend on a module it does not bring along; the
 drift probe is the check. Fixed by passing `pack=` only when packed (5205854a).
+
+## Confirmed on the rig: the trace-hole mechanism (run 35481466425, 2026-09-20)
+
+Image v33: history pool + per-engine GDN carry + shard check, two users arriving
+together, eager proposal. The check compares, in order, the replicated draft
+weights, then `history`/`spare_history` (both pooled, allocated before any
+trace), then the draft K/V (not pooled), and raises at the first mismatch. It
+fired on the very first step:
+
+```
+replicated draft kv differs between chips after step of <entry 0>:
+victim=<entry 1> buffer=kv_history[0].k shape=(1, 4, 2048, 128)
+```
+
+So at that moment the checked weights and the POOLED history of the victim were
+still bit-identical across chips, and the one UNPOOLED persistent buffer was not.
+The pooled buffers survived the other request's verify replay; the unpooled one
+was overwritten. That is the mechanism three audits predicted, on hardware, with
+the fix's own effect visible in the same measurement.
+
+Corrections to the prediction: the victim was the draft K/V, not the weights - the
+checked weight subset was intact - and the scribble is visible after the FIRST
+verify replay, before the victim ever verifies. Whether the eager proposal reads
+the K/V is a separate question; the check raised before a proposal ran.
+
+Next: pool the draft K/V per request (storage injection into DraftKVHistory), then
+hoist the draft weights so no per-request persistent allocation follows a trace.
+Log lines are truncated at ~250 characters by the capture, which lost the
+differing count, max_abs and the address map; the diagnostic will emit short
+lines next run.
