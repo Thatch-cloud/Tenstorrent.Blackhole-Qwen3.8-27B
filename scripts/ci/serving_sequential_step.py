@@ -22,7 +22,8 @@ import os
 
 # Diagnostic for the two-user selector divergence (runs 35478872085 and
 # 35479238722): after each user's step, every OTHER user's replicated draft
-# buffers must still agree across the two chips. Read once at import and off by
+# buffers must still agree across the two chips, and its K/V banks must still
+# hold what they held after its own last step. Read once at import and off by
 # default, so it can stay in. '1' raises at the first divergence; 'warn' logs it
 # and lets decoding continue, so a run shows whether it still proceeds.
 SHARD_CHECK = os.environ.get('QWEN_FAST_SHARD_CHECK', '0')
@@ -34,15 +35,26 @@ if SHARD_CHECK not in ('0', '1', 'warn'):
 # address at first sight is the address at construction - what a trace's freed
 # regions are matched against later. Pruned to the live requests each step.
 RECORDED = {}
-# (victim request id, buffer name) pairs already reported, so under 'warn' a
-# buffer that stays diverged is reported once rather than every step.
+# (victim request id, buffer name, chip or None) already reported, so under
+# 'warn' a buffer that stays diverged is reported once rather than every step.
 REPORTED = set()
+# Per-chip host copies of each request's committed K/V rows, taken before its
+# first step and again right after each of its own steps. The banks differ
+# between the chips by construction (see replicated_buffers), so what they are
+# checked for is a write between their owner's steps, chip by chip.
+SNAPSHOTS = {}
 
 
 def sequential_packed_step(entries, *, cancelled):
     """Step every packed request in the scheduler's order, one at a time."""
     if not entries:
         raise ValueError('A packed step needs at least one admitted request')
+    checking = SHARD_CHECK != '0' and len(entries) > 1
+    if checking:
+        forget_departed(entries)
+        for entry in entries:
+            if entry['request_id'] not in SNAPSHOTS:
+                snapshot_kv(entry)
     outputs = []
     for index, entry in enumerate(entries):
         request, ticket = entry['request'], entry['ticket']
@@ -52,7 +64,7 @@ def sequential_packed_step(entries, *, cancelled):
         if output is None or output.request_id != entry['request_id']:
             raise ValueError('A packed request must commit its own output')
         outputs.append(output)
-        if SHARD_CHECK != '0' and len(entries) > 1:
+        if checking:
             check_shards(entries, index)
     return outputs
 
@@ -66,8 +78,17 @@ def replicated_buffers(device):
     The q/k/v/o and the three MLP projections are sharded across the chips
     (draft_attention_branch.py:39-41, draft_mlp_branch.py:30), so they have no
     cross-chip equality to check; the convolution kernel projection is the
-    largest replicated weight in a layer. About 79 MB of readback per device:
-    selector 2.6 MB, convolution 13 MB, the two histories 21 MB each, K/V 21 MB.
+    largest replicated weight in a layer. About 58 MB of readback per device:
+    selector 2.6 MB, convolution 13 MB, the two histories 21 MB each.
+
+    The K/V banks are NOT here. `project_key_value` (draft_kv_projection.py:21)
+    runs those same sharded k/v projections, so each chip holds its own four of
+    the eight K/V heads (draft_attention.py:23-26): the banks differ per chip by
+    construction. Run 35482551725 read exactly that - all ten banks differing on
+    every step, ~1,047,800 of 1,048,576 elements, both directions, from the
+    first step - while these buffers stayed bit-identical; the run 35481466425
+    'kv_history[0].k victim' was this structure, not a scribble. The banks get a
+    per-chip stability check in `check_shards` instead.
     """
     if device.closed:
         return []
@@ -79,75 +100,129 @@ def replicated_buffers(device):
                         ('weight.layers[0].mlp.device_norm', mlp['device_norm'])])
     buffers = [('weight', name, value) for name, value in weights]
     buffers.extend([('history', 'history', device.history), ('history', 'spare_history', device.spare_history)])
-    if device.kv_history is not None:
-        buffers.extend(('kv', 'kv_history[%d].%s' % (layer, name), cache[name])
-                       for layer, cache in enumerate(device.kv_history.active) for name in ('k', 'v'))
     return [(category, name, value) for category, name, value in buffers if value is not None]
+
+
+def kv_banks(device, spare=False):
+    """The committed (or, with `spare`, the standby) draft K/V banks, by name."""
+    if device.closed or device.kv_history is None:
+        return []
+    banks = device.kv_history.spare if spare else device.kv_history.active
+    return [('%s[%d].%s' % ('kv_spare' if spare else 'kv_history', layer, name), cache[name])
+            for layer, cache in enumerate(banks) for name in ('k', 'v')]
+
+
+def snapshot_kv(entry):
+    """Own host copies of each chip's committed K/V rows: [0, history_rows), because
+    the rows beyond are rewritten by the owner's own publication."""
+    device = entry['request'].runtime.drafter
+    operations, banks = device.operations, kv_banks(device)
+    rows = device.kv_history.history_rows if banks else 0
+    SNAPSHOTS[entry['request_id']] = {
+        name: (rows, [operations.to_torch(shard)[..., :rows, :].contiguous().clone()
+                      for shard in operations.get_device_tensors(value)])
+        for name, value in banks}
+
+
+def forget_departed(entries):
+    live = {entry['request_id'] for entry in entries}
+    for table in (RECORDED, SNAPSHOTS):
+        for stale in [request_id for request_id in table if request_id not in live]:
+            del table[stale]
+    REPORTED.difference_update([key for key in REPORTED if key[0] not in live])
 
 
 def check_shards(entries, stepped):
     """After `entries[stepped]` ran, every OTHER entry's replicated draft buffers
-    must still be bit-identical on both chips. One that is not was written by
-    something other than its own user."""
+    must still be bit-identical on both chips, and each chip's K/V banks must
+    still hold what they held after that entry's own last step. One that does
+    not was written by something other than its own user."""
     import torch
     from gdn_multitoken_conv import addresses
     from loguru import logger
 
     live = [entry['request_id'] for entry in entries]
-    for stale in [request_id for request_id in RECORDED if request_id not in live]:
-        del RECORDED[stale]
-    REPORTED.difference_update([key for key in REPORTED if key[0] not in live])
+    calls = [entry['request'].runtime.drafter.proposal_calls for entry in entries]
     actor = entries[stepped]
+    snapshot_kv(actor)
     equal = diverged = 0
+
+    def same(left, right):
+        return torch.equal(left.view(torch.int16), right.view(torch.int16))
+
+    def report(kind, index, name, value, what, left, right, failure):
+        # Several short lines: the log capture truncates around 250 characters,
+        # and run 35481466425 lost everything after the shape.
+        victim = entries[index]['request_id']
+        operations = entries[index]['request'].runtime.drafter.operations
+        difference = (left.float() - right.float()).abs()
+        # The histories swap roles on commit (DFlashDevice.commit_publication) and
+        # so do the K/V banks (DraftKVHistory.commit), so say which name this
+        # address was first seen under; None means allocated after first sight.
+        current = addresses(operations, value)
+        origin = next((seen for seen, address in RECORDED[victim].items() if address == current), None)
+        logger.info('[PINDIAG] {} after step of {} (entry {}): victim={} (entry {}) {}',
+                    'shard mismatch' if kind == 'mismatch' else 'kv drift', actor['request_id'], stepped,
+                    victim, index, what)
+        logger.info('[PINDIAG] {} buffer={} shape={} address={} first_seen_as={}',
+                    kind, name, tuple(value.shape), current, origin)
+        logger.info('[PINDIAG] {} differing={} of {} max_abs={:g}',
+                    kind, int((difference > 0).sum()), difference.numel(), float(difference.max()))
+        logger.info('[PINDIAG] {} scheduler order={} proposal_calls={}', kind, live, calls)
+        if SHARD_CHECK == '1':
+            raise AssertionError('%s: victim=%s buffer=%s; see the [PINDIAG] %s log lines'
+                                 % (failure, victim, name, kind))
+
     for index, entry in enumerate(entries):
         if index == stepped:
             continue
         # FastRequest.runtime is the DFlashRequestRuntime; its drafter is the DFlashDevice.
         device = entry['request'].runtime.drafter
-        operations = device.operations
-        buffers = replicated_buffers(device)
-        victim = entry['request_id']
-        recorded = RECORDED.get(victim)
-        if recorded is None:
-            recorded = RECORDED[victim] = {name: addresses(operations, value) for category, name, value in buffers}
-            for name, (first, second) in recorded.items():
+        operations, victim = device.operations, entry['request_id']
+        replicated, banks = replicated_buffers(device), kv_banks(device)
+        if victim not in RECORDED:
+            RECORDED[victim] = {name: addresses(operations, value) for name, value in
+                                [*((name, value) for category, name, value in replicated),
+                                 *banks, *kv_banks(device, spare=True)]}
+            for name, (first, second) in RECORDED[victim].items():
                 logger.info('[PINDIAG] address {} {} {} {}', victim, name, first, second)
-        for category, name, value in buffers:
+        for category, name, value in replicated:
             shards = [operations.to_torch(shard).contiguous() for shard in operations.get_device_tensors(value)]
             if len(shards) != 2:
                 raise AssertionError('Both chips required')
-            left, right = shards
-            if torch.equal(left.view(torch.int16), right.view(torch.int16)):
+            if same(*shards):
                 equal += 1
                 continue
             diverged += 1
-            if SHARD_CHECK == 'warn' and (victim, name) in REPORTED:
+            if SHARD_CHECK == 'warn' and (victim, name, None) in REPORTED:
                 continue
-            REPORTED.add((victim, name))
-            difference = (left.float() - right.float()).abs()
-            # The histories and K/V swap roles on commit (dflash_device.py:193-195,
-            # draft_kv_history.py:118), so say which name this address was first
-            # seen under; None means it was allocated after first sight.
-            current = addresses(operations, value)
-            origin = next((seen for seen, address in recorded.items() if address == current), None)
-            # Several short lines: the log capture truncates around 250 characters,
-            # and run 35481466425 lost everything after the shape.
-            logger.info('[PINDIAG] shard mismatch after step of {} (entry {}): victim={} (entry {}) category={}',
-                        actor['request_id'], stepped, victim, index, category)
-            logger.info('[PINDIAG] mismatch buffer={} shape={} address={} first_seen_as={}',
-                        name, tuple(value.shape), current, origin)
-            logger.info('[PINDIAG] mismatch differing={} of {} max_abs={:g}',
-                        int((difference > 0).sum()), difference.numel(), float(difference.max()))
-            logger.info('[PINDIAG] mismatch scheduler order={} proposal_calls={}',
-                        live, [other['request'].runtime.drafter.proposal_calls for other in entries])
-            if SHARD_CHECK == '1':
-                raise AssertionError('Replicated draft %s differs between chips: victim=%s buffer=%s; '
-                                     'see the [PINDIAG] mismatch log lines' % (category, victim, name))
+            REPORTED.add((victim, name, None))
+            report('mismatch', index, name, value, 'category=%s' % category, *shards,
+                   'Replicated draft %s differs between chips' % category)
+        saved = SNAPSHOTS.get(victim, {})
+        for name, value in banks:
+            if name not in saved:
+                continue
+            rows, kept = saved[name]
+            drifted = False
+            for chip, (shard, before) in enumerate(zip(operations.get_device_tensors(value), kept, strict=True)):
+                current = operations.to_torch(shard)[..., :rows, :].contiguous()
+                if same(current, before):
+                    continue
+                drifted = True
+                if SHARD_CHECK == 'warn' and (victim, name, chip) in REPORTED:
+                    continue
+                REPORTED.add((victim, name, chip))
+                report('drift', index, name, value, 'chip=%d rows=%d' % (chip, rows), current, before,
+                       "Draft K/V drifted on chip %d between its owner's steps" % chip)
+            equal += not drifted
+            diverged += drifted
     if diverged:
-        logger.info('[PINDIAG] shards differ after step of {}: {} equal, {} diverged',
-                    actor['request_id'], equal, diverged)
+        logger.info('[PINDIAG] shards differ after step of {}: {} equal, {} diverged proposal_calls={}',
+                    actor['request_id'], equal, diverged, calls)
     else:
-        logger.info('[PINDIAG] shards equal after step of {}: {} buffers', actor['request_id'], equal)
+        logger.info('[PINDIAG] shards equal after step of {}: {} buffers proposal_calls={}',
+                    actor['request_id'], equal, calls)
 
 
 def describe():
