@@ -1926,3 +1926,48 @@ is proven on device, while the conv-state bit-equality against row k stays
 (~31 MB, the unaligned-slice proof). Summary line: '48 layers, conv slices
 verified on both chips'. 46 tests green in the three modules. Goes into the next
 image.
+
+## Packed-round cost model and the ceiling (2026-09-20, from the measured profiles)
+
+CORRECTION to the ranking above: the unfused MLP is NOT the largest term. The
+frozen-recipe 32K T16 device profile (run 35076649250, combined-trace-attribution.md:189-203)
+puts the 16-row verify at 73.7 ms: fused MLP 11.4, down/output 10.8, bundled
+SDPA 9.9 (32 calls), GDN 20.1 total, collectives 3.4, argmax 0.7. Native MLP at
+39 cores is 11.8 (T8/T16 verifier profiles), flat from 8 to 16 rows at one tile,
+so the fused arm saves ~0.4 ms per verify and a 32-row fused arm is worth <1 ms.
+The 150.6 ms packed verify decomposes (estimates, nothing at 32 rows profiled):
+
+    attention  16 layers x 32 serial per-row SDPA calls at 32K:  ~65 ms  (+56 vs 9.9 bundled)
+    GDN        48 layers, two segments: per-segment ops twice:   ~42 ms  (+22)
+    MLP        native at 32 rows:                                ~12 ms  (+0.4)
+    sampling/readback/staging:                                    ~3 ms  (+2)
+    residue (collectives, other matmuls):                         ~8 ms  (0)
+    sum ~147-154 against 150.6 measured
+
+Levers, ms saved per two-user round (today 150.6 verify + 46 commits + 82
+proposals = 278.6 ms for ~7 accepted per user, 25 tok/s per user):
+  L2 M1b per-user bundled replay readers in the packed block: ~46 ms, 6-8 h, unpinned subclass;
+  L3 M1c packed draft pass (propose_packed exists, eager): ~38 ms, 6 h;
+  L4a trace the packed proposal: +17 ms; L4b captured publication per user: ~26 ms
+  (serving's publication is eager: project, slice, concat, pad, history copy, sync);
+  L4c the 621 ms first commit is one-off (first-use compile; warm at attach);
+  L1 fused T32 arm: 0.4-0.7 ms - skip; L4d GDN per-segment ops once: ~2-3 ms, a
+  segmented recurrence kernel (~10 ms) edits the hash-pinned GDN compute.
+Projection: +L2 -> 232 ms, 30 tok/s per user; +L3 -> 194 ms, 36; +L4a+L4b ->
+152 ms, ~46 tok/s per user, ~92 aggregate: two packed users each get what one
+user gets alone today (47-49). Four T8 users at 32 rows: ~23 per user (90
+aggregate) eager, ~31 (122 aggregate) with the traces.
+
+THE CEILING, honestly: 200 tok/s per user is 5 ms per token; at ~7 accepted per
+user the whole two-user round must be 35 ms, while the weight pass alone is
+31.6 ms at the measured 315 GB/s (verifier-overhead-2026-09-19.md:254,260) and the
+single-user 4K bound with every non-weight op removed is 187 tok/s
+(200tps-verdict-2026-09-19.md:46-49); 32K context is worse than 4K. No lever in
+this list reaches 200 at 32 rows. Beyond them it would take, all together: a
+64-row or four-user block sharing the weight pass 4x (M3); the GDN machinery
+from ~20 ms per 16-row segment to near zero (a segmented recurrence kernel
+outside the frozen recipe); per-user attention at 32K under ~2 ms instead of
+~10; a draft that is not 15 sequential ~1.6 ms steps; publication under 1 ms per
+user; and acceptance holding near 7 at 32K, which the packed run already shows
+slipping (prefixes 11,10,5 vs 7,4,8). That is a kernel programme, not a serving
+change. Recommended order: L2, then L3 with L4a folded in, then L4b.
