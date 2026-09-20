@@ -113,5 +113,33 @@ class PackedAdmissionTests(unittest.TestCase):
         self.assertEqual([entry['request_id'] for entry in entries], ['A'])
 
 
+class RefusalEvidenceTests(unittest.TestCase):
+    """Run 35484349353 died on the five-way clause and its message named none of
+    the five. A refusal must carry what it judged."""
+
+    def test_a_finished_id_is_named(self):
+        scheduled = PackedAdmissionTests().scheduled(('A', 'B'))
+        scheduled.finished_req_ids = {'Z'}
+        with self.assertRaises(ValueError) as caught:
+            ordered_tickets(PackedAdmissionTests().pair(), scheduled)
+        self.assertIn("finished=['Z']", str(caught.exception))
+
+    def test_a_preempted_id_and_a_new_request_are_both_named(self):
+        scheduled = PackedAdmissionTests().scheduled(('A', 'B'))
+        scheduled.preempted_req_ids = {'B'}
+        scheduled.scheduled_new_reqs = [SimpleNamespace(req_id='C')]
+        with self.assertRaises(ValueError) as caught:
+            ordered_tickets(PackedAdmissionTests().pair(), scheduled)
+        self.assertIn("new=['C']", str(caught.exception))
+        self.assertIn("preempted=['B']", str(caught.exception))
+
+    def test_a_frontier_mismatch_names_both_numbers(self):
+        scheduled = PackedAdmissionTests().scheduled(('A', 'B'))
+        scheduled.scheduled_cached_reqs.num_computed_tokens = [101, 5000]
+        with self.assertRaises(ValueError) as caught:
+            ordered_tickets(PackedAdmissionTests().pair(), scheduled)
+        self.assertIn('frontier=101 ticket_position=100', str(caught.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

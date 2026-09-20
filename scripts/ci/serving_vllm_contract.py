@@ -17,18 +17,45 @@ def draft_token_ids(request):
     return DraftTokenIds(req_ids=[ticket.request_id], draft_token_ids=[list(ticket.tokens[1:])])
 
 
+def step_refusals(scheduled):
+    """The step-level conditions no decode contract admits, each with its value.
+
+    Run 35484349353 was refused on one of these five and the message named none
+    of them, so the run's whole evidence was a line number. A refusal must say
+    what it judged, as the prefill refusal in serving_lifecycle already does.
+    """
+    found = []
+    new = [getattr(value, 'req_id', value) for value in (scheduled.scheduled_new_reqs or ())]
+    if new:
+        found.append('new=%r' % (new,))
+    finished = scheduled.finished_req_ids
+    if finished:
+        found.append('finished=%r' % (sorted(finished, key=str),))
+    preempted = getattr(scheduled, 'preempted_req_ids', None)
+    if preempted:
+        found.append('preempted=%r' % (sorted(preempted, key=str),))
+    if getattr(scheduled, 'has_structured_output_requests', False):
+        found.append('structured_output=True')
+    encoder = getattr(scheduled, 'scheduled_encoder_inputs', {})
+    if encoder:
+        found.append('encoder_inputs=%r' % (encoder,))
+    return found
+
+
 def admit_scheduler_output(request, scheduled):
     ticket = prepared_ticket(request)
     request_id = ticket.request_id
     cached = scheduled.scheduled_cached_reqs
-    if (scheduled.scheduled_new_reqs or scheduled.finished_req_ids
-            or getattr(scheduled, 'preempted_req_ids', None)
-            or getattr(scheduled, 'has_structured_output_requests', False)
-            or getattr(scheduled, 'scheduled_encoder_inputs', {})
-            or list(cached.req_ids) != [request_id]
-            or request_id in cached.resumed_req_ids
-            or list(cached.num_computed_tokens) != [ticket.position]):
-        raise ValueError('Single resident decode request at the exact scheduled frontier required')
+    found = step_refusals(scheduled)
+    if list(cached.req_ids) != [request_id]:
+        found.append('cached=%r expected=%r' % (list(cached.req_ids), [request_id]))
+    if request_id in (getattr(cached, 'resumed_req_ids', None) or ()):
+        found.append('resumed=%r' % (request_id,))
+    if list(cached.num_computed_tokens) != [ticket.position]:
+        found.append('frontier=%r ticket_position=%r' % (list(cached.num_computed_tokens), ticket.position))
+    if found:
+        raise ValueError('Single resident decode request at the exact scheduled frontier required: '
+                         + '; '.join(found))
     counts = scheduled.num_scheduled_tokens
     if (set(counts) != {request_id} or type(counts[request_id]) is not int
             or counts[request_id] != len(ticket.tokens)

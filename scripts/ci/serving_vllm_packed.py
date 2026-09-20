@@ -16,19 +16,21 @@ the packed block are matched to the scheduler's rows. Assembling in registry ord
 would silently give each user the other's proposals.
 """
 
-from serving_vllm_contract import prepared_ticket
+from serving_vllm_contract import prepared_ticket, step_refusals
 
 
 def ordered_tickets(requests, scheduled):
     """One live ticket per scheduled request, in the scheduler's own order."""
     cached = scheduled.scheduled_cached_reqs
     order = list(cached.req_ids)
-    if (scheduled.scheduled_new_reqs or scheduled.finished_req_ids
-            or getattr(scheduled, 'preempted_req_ids', None)
-            or getattr(scheduled, 'has_structured_output_requests', False)
-            or getattr(scheduled, 'scheduled_encoder_inputs', {})
-            or not order or len(set(order)) != len(order)):
-        raise ValueError('Resident decode requests at the exact scheduled frontier required')
+    found = step_refusals(scheduled)
+    if not order:
+        found.append('no cached request')
+    elif len(set(order)) != len(order):
+        found.append('duplicate order=%r' % (order,))
+    if found:
+        raise ValueError('Resident decode requests at the exact scheduled frontier required: '
+                         + '; '.join(found))
     by_id = {}
     for request in requests:
         ticket = prepared_ticket(request)
@@ -45,7 +47,9 @@ def ordered_tickets(requests, scheduled):
     for request_id, position in zip(order, positions):
         request, ticket = by_id[request_id]
         if request_id in resumed or position != ticket.position:
-            raise ValueError('Resident decode requests at the exact scheduled frontier required')
+            raise ValueError('Resident decode requests at the exact scheduled frontier required: '
+                             'request=%r resumed=%r frontier=%r ticket_position=%r order=%r'
+                             % (request_id, request_id in resumed, position, ticket.position, order))
         entries.append(dict(request_id=request_id, request=request, ticket=ticket))
     return entries
 

@@ -268,9 +268,15 @@ def main():
             # whether they were never written or scrolled off is the finding.
             # Bounded from both ends: the first lines hold the attach-time
             # addresses, the last ones hold the step the run died in.
+            # The request lifecycle lines too: whether the second prompt reached
+            # the engine, and when, was unreadable in run 35484349353 because
+            # both arrivals had scrolled out of the tail.
             diagnostic = [line[:600] for line in lines
                           if '[PINDIAG]' in line or '"stage"' in line
-                          or '[PHASE]' in line or '[CARRY]' in line]
+                          or '[PHASE]' in line or '[CARRY]' in line
+                          or 'Received request' in line or 'Added request' in line
+                          or 'bort' in line or '/v1/completions' in line
+                          or 'Running: ' in line]
             if len(diagnostic) > 800:
                 omitted = len(diagnostic) - 800
                 diagnostic = (diagnostic[:400] + ['... %d diagnostic lines omitted' % omitted]

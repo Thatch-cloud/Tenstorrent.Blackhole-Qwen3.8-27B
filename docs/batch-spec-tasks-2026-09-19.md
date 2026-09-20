@@ -1069,3 +1069,21 @@ both contracts will also carry their values in the refusal.
 
 Diagnostic-mode costs seen, not serving numbers: verifier build 48 s and the
 eager proposal 12.3 s under the watcher's NoC sanitiser.
+
+**Probe cpu-probe-v20 (run 35485312330, `probe_frontier_refusal.py`):** on the real
+scheduler classes at the fp2u geometry, the solo step is ADMITTED by the packed
+contract - stock vllm, TTScheduler and the one-in-flight subclass alike, in both
+arrival orders - and every field the clause reads is false on every decode step
+(`finished=[] preempted=set() structured=False encoder={}`; all three attributes
+exist in this vLLM). The plugin's `schedule()` source: prefill-only whenever a
+prefill is pending, falling back to decode-only when that pass schedules nothing
+and a decode is running. So the scheduler's own bookkeeping never produces the
+refused step; the truthy field in v38 came from engine state between the two
+steps - a request finishing or aborting is the only source of `finished_req_ids`
+on a step that still schedules the survivor. Which one, the live engine must say:
+both contracts now name every condition they judged with its value
+(`serving_vllm_contract.step_refusals`), the hook's execute line prints
+`finished=` and `preempted=`, and the bench keeps the request-lifecycle lines
+(`Received request`, aborts, the access log, the engine stats) among the
+diagnostics so both arrivals stay readable. `serving_vllm_contract.py` joins the
+image's copy lists (byte-identical to the bundle before this change). Image v38.

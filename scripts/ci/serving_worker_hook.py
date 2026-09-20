@@ -86,10 +86,14 @@ class FastWorkerHook:
             # scheduler livelock, silence after a line is the device.
             from loguru import logger
             cached = getattr(getattr(scheduled, 'scheduled_cached_reqs', None), 'req_ids', ()) or ()
-            logger.info('[PHASE] execute total={} new={} cached={} spec={}',
+            # finished and preempted too: run 35484349353 was refused on one of the
+            # step-level conditions and this line, printed just before, named neither.
+            logger.info('[PHASE] execute total={} new={} cached={} spec={} finished={} preempted={}',
                         getattr(scheduled, 'total_num_scheduled_tokens', None),
                         len(getattr(scheduled, 'scheduled_new_reqs', None) or ()), len(list(cached)),
-                        len(getattr(scheduled, 'scheduled_spec_decode_tokens', None) or {}))
+                        len(getattr(scheduled, 'scheduled_spec_decode_tokens', None) or {}),
+                        sorted(getattr(scheduled, 'finished_req_ids', None) or (), key=str),
+                        sorted(getattr(scheduled, 'preempted_req_ids', None) or (), key=str))
         if getattr(scheduled, 'scheduled_new_reqs', None):
             return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request

@@ -43,6 +43,16 @@ class SchedulerContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             admit_scheduler_output(request, scheduled)
 
+    def test_a_refusal_names_what_it_judged(self):
+        request, _, scheduled = self.fixture()
+        scheduled.finished_req_ids = {'other'}
+        scheduled.scheduled_cached_reqs.num_computed_tokens = [1]
+        with self.assertRaises(ValueError) as caught:
+            admit_scheduler_output(request, scheduled)
+        self.assertIn("finished=['other']", str(caught.exception))
+        self.assertIn('frontier=[1] ticket_position=', str(caught.exception))
+        request.engine.verify.assert_not_called()
+
     def test_vllm_output_keeps_variable_committed_length(self):
         request, _, scheduled = self.fixture()
         outputs = ModuleType('vllm.v1.outputs')
