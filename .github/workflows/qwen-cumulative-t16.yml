@@ -85,7 +85,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash || "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
             drafter_args=()
             if [[ "$GITHUB_REF" == refs/tags/experiment/cumulative-t16-full-v*-dflash-native ]]; then
-              gh run download 35293698929 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t16-attention-35293698929-1 --dir "$evidence/dflash-native"
+              gh run download 35488650495 --repo "$GITHUB_REPOSITORY" --name qwen-dflash-t16-attention-35488650495-1 --dir "$evidence/dflash-native"
               drafter_args=(--native-evidence "$evidence/dflash-native")
             fi
             python3 -B read-orchestrator/scripts/ci/drafter_comparison_stage.py --checkout read-combined \
