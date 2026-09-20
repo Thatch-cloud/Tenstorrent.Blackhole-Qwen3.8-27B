@@ -900,3 +900,12 @@ Two corrections from the diagnostic:
 Next run: QWEN_FAST_PHASE_LOG=1 wraps each proposal and each step in begin/end
 lines so the stall names its phase; the collectives audit is re-examining the
 semaphore state a trace replay leaves for the next eager gather.
+
+**Device hang, not livelock (v35 log):** vLLM's 10-second engine stats came at
+01:56:22/32/42/52 and then never again, while the server lived on to 02:00:02. A
+scheduler livelock would have kept the engine loop, and its stats, alive; a step
+that never returned stops both. Combined with proposal_calls stuck at [1, 1], the
+block is inside a device's second proposal or the step after round two. v36 adds
+per-execute scheduling counts, a periodic Python stack dump and TT-Metal's
+watcher (its log printed by the bench) so the stalled kernel names itself, and
+runs with per-request collectives as the A/B for semaphore residue.
