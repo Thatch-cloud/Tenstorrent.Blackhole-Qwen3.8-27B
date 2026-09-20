@@ -2350,3 +2350,78 @@ down output (11b); the final norm's gather and sharded norm on `lm_head_core_gri
 ttnn's auto program for the LM head at M = 64 (rows 13-14); then the block's own firsts
 from part 2: four in-trace restores, two sampler tiles joined, the 64-row taps and the
 64-row trace's memory.
+
+### Run 35504864400 (image v49): through the norms and the GDN in-projection, stopped by our own scope
+
+Rows 4, 5, 11d and 8b above passed on the device: the embedding, the 64-row norm gather,
+`rms_norm` at block_h 2, the interleaved hand-off and the GDN in-projection through the
+prefill branch all ran. The block then died in OUR admission scope, not the model:
+
+    model_batch.py:596 device_forward -> gdn_device_loop_state.py:135 decode -> :171 _decode_packed
+    -> :85 _recurrence -> gdn_direct_window_scope.py:54 run
+    ValueError: Simulator-qualified L1 projection required
+
+`gdn_direct_window_scope.run` admits the qualified (1, 16, 8240) piece only when
+`projected.memory_config() == ttnn.L1_MEMORY_CONFIG` (:53). Within one tile the model's 1D
+decode matmul lands the projection in L1 (gdn/tp.py:1036-1042) and every slice inherits it;
+at 64 rows the prefill branch (tp_common.py:631-634) returns DRAM-interleaved and each
+16-row slice inherits that. The candidate the scope admits to
+(`gdn_direct_window_hardware_batch`, gdn_batched_conv with its window block replaced by
+`gdn_direct_window_device.execute`) accepts a DRAM or L1 piece itself
+(gdn_direct_window_device.py:56); only the qualification keys on L1.
+
+**Fix (ours):** `gdn_device_loop_state.resident_piece`: right after each slice is cut in
+`_decode_packed`, a piece not already L1-interleaved is copied there
+(`operations.to_memory_config(piece, L1)`) and the DRAM slice freed; the block owns the L1
+copy (freed with the result by `retain_checkpoint_histories`), never the freed slice, and a
+failed copy frees its DRAM slice before the block's own release. Within one tile the
+placement check is the only addition: no move, no free, the slice owned as before (the
+32-row tests now assert that). The scope's check is untouched. The data is identical; only
+the placement the kernel reads changes.
+
+**Scan of every scope, audit and assertion the 64-row forward and commit meet AFTER this
+point.** "Keys on" names what the check reads; the verdict is from the code, the device
+column says what only the device can tell.
+
+| Check (file:line) | Keys on | Verdict at 64 rows |
+| --- | --- | --- |
+| `gdn_direct_window_scope.run` :44-48 (shape) | (1, 16, 8240) exactly | passes: every piece is one 16-row segment, 8240 wide (v49 reached :53 with it) |
+| `gdn_direct_window_scope.run` :49-51 (options) | dma_windows, packed_checkpoints, norm_batch, defer_conv_publication all True per call | passes: `_recurrence` passes dma_windows True, packed_checkpoints True, `norm_batch = norm_batch_enabled(16, True)` (model_batch.recurrence_rows decides at the segment's 16 rows), `defer_conv_publication = commit_only and rows > 1`; unchanged from 32 |
+| `gdn_direct_window_scope.run` :53 (placement) | `memory_config() == L1_MEMORY_CONFIG` | FAILED on v49; FIXED by resident_piece |
+| candidate = gdn_batched_conv.run_batched_projected with :59-72 replaced: `validate_projected` (1, 16, 8240 or 8256) and four (1, 1, 5120) states; `norm_batch_enabled(16)`; `convolution_checkpoints(16, {16})` | shape, rows | passes, per piece as at 32 |
+| `gdn_direct_window_device.execute` :49-57: mesh (1, 2); projected (1, 16, 8240), history 4 x (1, 1, 5120), taps 4 x (1, 1, 5120), dt_bias/neg_exp_A (1, 1, 24); bf16, TILE, memory in (DRAM, L1); :59-60 grid >= 9x9; :78-80 no aliasing among inputs and outputs | shape, dtype, layout, placement (either), addresses | passes: the piece is L1, the entry's compact states DRAM, both accepted; per piece identical to M1 |
+| the candidate's tail: `z = sliced(projected, (0, 0, 5120), (1, 16, 8192))` (DRAM slice off the L1 piece), `gdn_vsplit.execute(..., output_memory=L1)` (:291-299: packed inputs and initial DRAM-interleaved bf16 TILE, z (1, 16, 3072), norm_w (1, 1, 128)) | placement, shape | passes: the device outputs are DRAM, `initial` is the entry's rec state; unchanged from 32 |
+| `_recurrence` post-checks (gdn_device_loop_state.py) deferred_conv_publication, norm_batch vs `norm_batch_enabled(16, ...)`, prefix_zero_reuse | rows = 16 | passes |
+| `DeviceLoopState.decode`: `validate_rows(64)`, `validate_segments`, native B == 8 and addresses, `entries` == 4 | rows, spans | passes (part 1 and 2) |
+| `gdn_multitoken_conv.finish_output`: `rows = output.shape[1]` = 64 (concat of four L1 (1, 16, 3072) outputs, L1), `_row_proj` -> prefill 2D config, DRAM out (row 8c), reshape (1, 1, 64, N), `tt_all_reduce` | none ours | passes in Python; the projection at M = 64 is the device's (row 8c) |
+| `gdn_records.retain_checkpoint_histories`: 5 histories per piece (states + 4 windows) x 4 = 20, all independent on both chips and all in `owned`; scratch not aliasing; releases the rest | addresses, ownership | passes: `owned` = the DRAM projection, four L1 pieces, each piece's own tensors, the joined output; the freed DRAM slices are never in it, so nothing is freed twice |
+| `RetainedGDNBlock(rows=64).append` -> `validate_packed_record`: segments cover [0, 64), 4 pieces each with `states.shape[0] == 16`, 4 entries and 4 carries of 5 | rows, per-segment shapes | passes (part 1 widened BLOCK_ROWS to 64) |
+| `commit_user(segment, prefix)` -> `segment_layers(user)` -> `gdn_commit_dma.prepare` at prefix <= 16, 64 traces captured at attach | prefix within 16 | passes: per user at 16 rows, exactly M1; `gdn_commit_dma.validate_shapes` never sees 64 |
+| `two_tile_decode.TwoTileAttentionDecode`: `_kv_shard_cfg(64)` -> 8 x 8 CoreGrid, one user per core (attention/tp.py:503-506) | B | passes in Python; `attn_decode_prep` at batch 64 is the device's (row 7c) |
+| `packed_cache_writer.SegmentedOrderedCacheWriter.__call__`: prepared K/V (1, 64, 32, 256), positions (64,), pages (64, page_width); height shard -> DRAM; two (1, 32, 32, 256) DRAM slices; `ordered_cache.validate_shapes` at 32; `update` demands DRAM for cache, piece, positions, pages and int32 row-major metadata | shape, placement | passes if the prep emits (1, B, 32, 256) as it does at 32 (`_kv_shard_cfg` shards (32, HD) per user); the tile metadata is fixture-uploaded DRAM int32 row-major (part 2); the 64-core shard's conversion is the device's |
+| `pooled_attention_replay.PackedReplayAttentionReader.__call__`: query (1, 64, 12, 256); per-segment DRAM slices (1, 16, 12, 256) into the pinned 16-row readers; concat in L1; `calls` +1 per layer | shape | passes: q from the prep is (1, B, NH, HD) DRAM as at 32; run()'s 16 per reader holds |
+| `_concat_heads_decode(gated, 64)` (attention/tp.py:375-409) | B | Python passes (gx 8, 64 cores, `out.shape[-2] != 64` slices if the op pads); the op at 64 users is the device's (row 7e) |
+| `prepared_target_features.capture`: layer output shape, dtype, layout == tap (1, 1, 64, 5120 sharded on dim 3), independent storage, `ttnn.copy` | shape, addresses | passes: the residual is (1, 1, 64, dim_frac) bf16 TILE DRAM, the taps allocated at block_rows |
+| `force_argmax.sample_rows(64)`: logits (1, 1, 64, vocab_frac) from the auto LM head (DRAM); two aligned 32-row slices; `sampler.sample` twice; `row_axis` exactly one 32-axis in the ids; distinct output addresses across the two calls; concat | shape, addresses | passes in Python; the sampler's output buffer identity across two untraced calls is the device's (the check refuses a reused buffer rather than joining one tile twice) |
+| `PackedVerifierEngine.verify`: two chip-local outputs, `reshape(-1)[:64]`, `segment_rows` slices | rows | passes (part 2) |
+| `ModelBatch.run` counts: 48 GDN, 2 writes per layer, 48 norm-batch (the combined result carries segment 0's `norm_batch` True), 16 per reader, working states calls 1 and checkpoint_calls 4, skipped clones 0, two-tile 129 / 16 / 64 | counts | passes |
+| `dflash_device.project_features(row_offset 0/16/32/48, count 16)`: `shape[2] >= offset + count` | rows | passes: 64 >= 64 |
+| `verifier_engine.adopt_packed`: `rows_per_user == len(ticket.tokens)` | 16 | passes |
+| `serving_packed_step`, `stage_packed`, `packed_shapes`, the pool's (4, 16) tables | shape | passes (part 2) |
+
+Nothing else of ours keys on a memory config, a shard spec or a 32 on this path. No
+qualification check was changed.
+
+**Device-side unknowns after this pass, in the order the next run meets them.** (1) The
+unaligned tiled DRAM slices at rows 16 and 48 (segment 0's slice at row 0 ran on v49; at
+32 rows the row-16 slice ran off an L1 tensor). (2) `to_memory_config` DRAM -> L1 of a
+(1, 16, 8240) tiled slice. (3) The direct-window candidate four times in one forward (its
+inputs per piece are M1's exactly). (4) `_row_proj` at M = 64 through the prefill 2D config
+(row 8c). (5) Layer 0's MLP: the unfused prefill arm at M = 64 (row 11b). (6) Layer 3, the
+first full-attention layer: the fused QKV 1D matmul at per_core_M 2 (7b), `attn_decode_prep`
+at batch 64 (7c), the 64-core height shard converted to DRAM and written as two ordered
+tiles, four 16-row pooled readers over their bundles, `nlp_concat_heads_decode` at 64 users
+(7e), wo at M = 64 (7f). (7) The final norm on `lm_head_core_grid` and the auto LM head at
+M = 64 (rows 13-14). (8) Two sampler tiles and their output identity. (9) The 64-row taps.
+(10) The trace capture of all of it, its memory, and the four in-trace restores on replay.
+(11) The per-user commits (M1's traces at a fourth carry).
