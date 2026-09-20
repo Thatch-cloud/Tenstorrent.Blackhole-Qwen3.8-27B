@@ -52,7 +52,7 @@ jobs:
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           cp serving-build-orchestrator/scripts/ci/test_serving_*.py "$context/scripts/ci/"
-          for name in dflash_device.py draft_attention_branch.py draft_mlp_branch.py draft_convolution.py draft_convolution_fused.py draft_convolution_fused_io.cpp; do
+          for name in dflash_device.py draft_attention_branch.py draft_mlp_branch.py draft_convolution.py draft_convolution_fused.py draft_convolution_fused_io.cpp verifier_engine.py verifier_pack.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in serving_runtime.py serving_gather_experiment.py gdn_grouped_gather.py gdn_grouped_gather_gate.py gdn_grouped_gather_scope.py; do

@@ -768,3 +768,39 @@ the KV cache" as repairable by overwrite, which a destructive GDN update is not.
 That design already exists here: the verify recurrence emits a checkpoint at every
 candidate prefix (`conv_prefixes`, `states` per row in `run_batched_projected`) and
 `restore_prefix` recovers the accepted one at commit.
+
+## Two audits converge on the two-user mechanism (2026-09-20)
+
+Independent code audits of shared-model hooks and of device-memory lifetimes
+reached the same mechanism, and this repo already met it once
+(`docs/experiment-execution.md:499-510`):
+
+A request's verify and commit traces are captured at admission. The captured
+forward allocates and FREES many per-chip intermediates during capture
+(`model_batch.py`, `gdn_multitoken_conv.finish_output`), but their DRAM addresses
+stay baked into the trace. A request admitted later allocates its persistent,
+REPLICATED draft buffers - `history`, `spare_history` (`dflash_device.py:74-78`),
+`DraftKVHistory` active/spare (`draft_kv_history.py:35-39`) - into those holes.
+When the first request's trace replays, each chip writes its own TP-shard
+activations over the second request's buffer, so the two replicas diverge: finite,
+O(1), nearly every element, first visible at that request's next proposal.
+
+This fits every measurement: one user runs forever (its buffers predate its own
+traces); disabling the proposal trace changed nothing (the VERIFY trace still
+replays); sharing collectives changed nothing; the failure is call=1. It predicts
+the victim is the later-admitted request.
+
+TT-Metal itself flags the condition - "Allocating device buffers is unsafe due to
+the existence of an active trace. These buffers may be corrupted once a trace is
+executed. (allocator.cpp:123)" - but note the warning is one-shot per process and
+appears once in single-user runs too, so it confirms the condition exists, not
+which allocation was hit.
+
+Confirmation: compare the two shards of the OTHER request's `history` and K-V
+immediately after a request's verify replay; replicated buffers must be equal.
+Fix, with precedent: allocate per-request persistent buffers from a pool reserved
+before any trace capture (`feature_prefix.allocate_prefix_pool`).
+
+The shared-GDN-carry bug (no per-request restore in the sequential path) is real
+and separately being fixed, but it is chip-symmetric and cannot produce this
+signature.
