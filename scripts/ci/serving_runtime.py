@@ -1,7 +1,9 @@
 """Explicit attachment of the admitted combined runtime to a loaded TT worker."""
 
 from contextlib import ExitStack, contextmanager
+from functools import partial
 import json
+import os
 
 from dflash_device import PreparedDraftWeights
 from serving_buffer_pool import ServingBufferPool
@@ -104,11 +106,34 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         weights = PreparedDraftWeights(operations, model.mesh_device, draft_layers, projection, selector,
             block_rows=16, live_query_qk=False, native_proposal_attention=True)
         scopes.callback(weights.close)
-        # One line with every pre-trace address - the pooled history pairs and each
-        # named shared weight - so a diverged address from the shard check can be
-        # placed against what was allocated before any request.
-        print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe(), draft_weights=weights.describe())),
-              flush=True)
+        # The device step. By default the sequential one - correct, not yet fast: one
+        # weight pass per user per round - and describe() records that cost so a benchmark
+        # reading it is not mistaken for the goal. QWEN_FAST_PACKED_STEP=1 builds the
+        # packed verify block instead, one 32-row pass serving every user, and builds it
+        # HERE: after the pool and the shared draft weights, whose buffers it restores
+        # from and checks, and before the lifecycle admits a request, whose traces would
+        # otherwise bake over its buffers (packed_verifier.py, CONSTRUCTION ORDER).
+        # Registered after the weights so it closes before them, with the scope. Off
+        # until the token-exact gate passes (docs/packed-device-step-plan-2026-09-20.md,
+        # section 6); the sequential step stays the serving default until then.
+        from serving_sequential_step import describe as describe_sequential_step, sequential_packed_step
+
+        packed_step, step_description = sequential_packed_step, describe_sequential_step()
+        if os.environ.get('QWEN_FAST_PACKED_STEP') == '1':
+            from packed_verifier import PackedVerifierEngine, m1_shape
+            from serving_packed_step import describe as describe_packed_step, packed_device_step
+
+            block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
+                                         shape=m1_shape(page_width), feature_taps=TARGET_TAPS)
+            scopes.callback(block.close)
+            packed_step = partial(packed_device_step, block=block)
+            step_description = dict(describe_packed_step(), block=block.describe())
+        # One line with every pre-trace address - the pooled history pairs, each named
+        # shared weight and, when built, the packed block's taps, checkpoints and carries -
+        # so a diverged address from the shard check can be placed against what was
+        # allocated before any request; and which device step serves the rounds.
+        print(json.dumps(dict(stage='serving_buffer_pool', **pool.describe(), draft_weights=weights.describe(),
+                              device_step=step_description)), flush=True)
 
         def capture_factory(position):
             owner.validate()
@@ -137,14 +162,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 request.close(state.req_id)
                 raise
 
-        # Correct, not yet fast: one weight pass per user per round. The batched
-        # verifier replaces this behind the same parameter, and describe() records
-        # the cost so a benchmark reading it is not mistaken for the goal.
-        from serving_sequential_step import sequential_packed_step
-
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
-            cancelled=cancelled, packed_step=sequential_packed_step)
+            cancelled=cancelled, packed_step=packed_step)
     except BaseException:
         scopes.close()
         raise

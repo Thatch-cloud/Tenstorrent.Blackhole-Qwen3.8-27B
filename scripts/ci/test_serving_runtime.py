@@ -1,4 +1,5 @@
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from types import SimpleNamespace
 import io
 import json
@@ -7,12 +8,15 @@ import unittest
 import torch
 from unittest.mock import Mock, patch
 
+from packed_verifier import m1_shape
+import serving_packed_step
 import serving_runtime
+import serving_sequential_step
 from test_serving_fast_policy import FastPolicyTests
 
 
 class RuntimeAttachmentTests(unittest.TestCase):
-    def exercise(self, fail=False):
+    def exercise(self, fail=False, packed=False):
         events = []
         model = SimpleNamespace(args=object(), mesh_device=object(),
             layers=[SimpleNamespace(is_full_attention=False, attention=object()) for _ in range(48)])
@@ -34,8 +38,11 @@ class RuntimeAttachmentTests(unittest.TestCase):
                                describe=Mock(return_value=dict(users=1)))
         weights = SimpleNamespace(close=Mock(side_effect=lambda: events.append('weights_close')), tensors=[],
                                   describe=Mock(return_value=dict(tensors=0, weights=[])))
+        block = SimpleNamespace(close=Mock(side_effect=lambda: events.append('block_close')),
+                                describe=Mock(return_value=dict(name='packed-block')))
         operations = Mock()
         fixtures = ('manifests', ['layer'] * 5, {'fc.weight': 'projection'}, {'norm.weight': 'selector'})
+        generator = Mock(return_value=Mock())
 
         def build_pool(*args, **kwargs):
             events.append('pool_build')
@@ -45,14 +52,20 @@ class RuntimeAttachmentTests(unittest.TestCase):
             events.append('weights_build')
             return weights
 
-        with patch.dict(sys.modules, {
-                'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=Mock(return_value=Mock())),
+        def build_block(*args, **kwargs):
+            events.append('block_build')
+            return block
+
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_STEP': '1' if packed else '0'}), \
+                patch.dict(sys.modules, {
+                'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
                 'models.tt_transformers.tt.ccl': SimpleNamespace(TT_CCL=Mock()),
                 'gdn_snapshot': SimpleNamespace(ActiveSnapshot=Mock())}), \
                 patch('dflash_combined_request.combined_runtime', side_effect=combined), \
                 patch.object(serving_runtime, 'ServingCacheOwner'), \
                 patch.object(serving_runtime, 'ServingBufferPool', side_effect=build_pool) as pooled, \
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
+                patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle) as install, \
                 patch('sys.stdout', new_callable=io.StringIO) as out:
@@ -61,10 +74,13 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         fixtures=fixtures, native_attention_evidence='native',
                         block_stream={'streams': 'serial', 'evidence': 'stream'},
                         kv_publication_evidence='dma', eos_ids=(99,), cancelled=lambda: False) as attached:
-                    # One stage line carrying both the pool and the named shared weights.
+                    # One stage line carrying the pool, the named shared weights and the
+                    # device step that serves the rounds - with the block when it was built.
                     lines = [json.loads(line) for line in out.getvalue().splitlines() if line.startswith('{')]
+                    step = (dict(serving_packed_step.describe(), block=dict(name='packed-block')) if packed
+                            else serving_sequential_step.describe())
                     self.assertEqual(lines, [dict(stage='serving_buffer_pool', users=1,
-                                                  draft_weights=dict(tensors=0, weights=[]))])
+                                                  draft_weights=dict(tensors=0, weights=[]), device_step=step)])
                     self.assertIs(attached['lifecycle'], lifecycle)
                     self.assertEqual(links.call_args.args[1], 4)
                     self.assertFalse(attached['serving_qualified'])
@@ -89,14 +105,35 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     # admitted runtime and before any request.
                     prepared.assert_called_once_with(operations, model.mesh_device, fixtures[1], fixtures[2], fixtures[3],
                         block_rows=16, live_query_qk=False, native_proposal_attention=True)
+                    packed_step = install.call_args.kwargs['packed_step']
+                    if packed:
+                        # The packed block: over the same 48 helpers and the pinned sampler, the
+                        # pool it restores from, the uploaded draft weights, the M1 shape at the
+                        # pool's page width and the five feature taps; the step is bound to it.
+                        packed_engine.assert_called_once()
+                        args, options = packed_engine.call_args.args, packed_engine.call_args.kwargs
+                        self.assertEqual((args[0], args[1], len(args[2])), (operations, model, 48))
+                        self.assertIs(args[3], generator.return_value)
+                        self.assertEqual(options, dict(pool=pool, shared_weights=weights, shape=m1_shape(68),
+                                                       feature_taps=(5, 19, 33, 47, 61)))
+                        self.assertIsInstance(packed_step, partial)
+                        self.assertIs(packed_step.func, serving_packed_step.packed_device_step)
+                        self.assertEqual((packed_step.args, packed_step.keywords), ((), dict(block=block)))
+                    else:
+                        # The serving default: no block is built, the sequential step is wired.
+                        packed_engine.assert_not_called()
+                        self.assertIs(packed_step, serving_sequential_step.sequential_packed_step)
                     events.append('request')
                     if fail:
                         raise RuntimeError('request failed')
             finally:
                 # Pool first and closed last; weights inside the admitted runtime; both
-                # outlive the lifecycle that lends them to devices.
-                self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build', 'request',
-                                          'lifecycle_close', 'weights_close', 'runtime_exit', 'pool_close'])
+                # outlive the lifecycle that lends them to devices. The block, when built,
+                # comes after the weights and before the lifecycle, and closes between them.
+                self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                                          *(['block_build'] if packed else []), 'request', 'lifecycle_close',
+                                          *(['block_close'] if packed else []), 'weights_close', 'runtime_exit',
+                                          'pool_close'])
 
     def test_combined_recipe_lives_until_request_traces_are_closed(self):
         self.exercise()
@@ -104,3 +141,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
     def test_request_failure_still_closes_lifecycle_before_recipe(self):
         with self.assertRaisesRegex(RuntimeError, 'request failed'):
             self.exercise(fail=True)
+
+    def test_the_packed_block_is_built_after_the_weights_and_before_the_lifecycle_only_when_asked(self):
+        self.exercise(packed=True)
+
+    def test_a_request_failure_closes_the_packed_block_after_the_lifecycle_and_before_the_weights(self):
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            self.exercise(fail=True, packed=True)

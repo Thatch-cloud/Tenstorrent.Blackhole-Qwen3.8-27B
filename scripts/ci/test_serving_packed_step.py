@@ -1,0 +1,468 @@
+"""The packed step: one verify pass for every user, each user's own commit in the
+scheduler's order, and every round the block cannot serve handed to the sequential step whole.
+
+Fakes in the shape of what the step drives: a block with the contract of
+packed_verifier.PackedVerifierEngine (segments bound to engines by their carry, predictions
+in entries order, commits one segment at a time with the last one fenced), and requests
+whose session, engine and runtime keep the state machines of greedy_session.GreedySession,
+VerifierEngine.adopt_packed/publish and DFlashRequestRuntime.publish."""
+
+import io
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from serving_fast_request import CommittedOutput
+import serving_packed_step
+from serving_packed_step import audit_log, describe, packed_device_step
+from serving_sequential_step import describe as describe_sequential
+import verifier_engine
+
+ROWS = 16
+TAPS = ('tap0', 'tap1', 'tap2', 'tap3', 'tap4')
+
+
+class FakeBlock:
+    """PackedVerifierEngine as the step sees it. Segments are bound to engines (by carry on
+    the real block), verify returns predictions and segments in entries order, and every
+    commit is recorded with whether it was the round's fence."""
+
+    def __init__(self, users=2, rows=ROWS):
+        self.shape = SimpleNamespace(users=users, rows_per_user=rows, block_rows=users * rows)
+        self.rows_per_user = rows
+        self.bound = {}
+        self.phase, self.pending_segments, self.rounds = 'idle', set(), 0
+        self.calls = []
+
+    def bind(self, engine, segment):
+        self.bound[id(engine)] = segment
+
+    def segment_of(self, engine):
+        if id(engine) not in self.bound:
+            raise ValueError('The request engine borrows no carry this block restores')
+        return self.bound[id(engine)]
+
+    def predictions_for(self, segment):
+        """The target's ids for segment u's rows."""
+        return [1000 + self.rows_per_user * segment + row for row in range(self.rows_per_user)]
+
+    def verify(self, entries):
+        if self.phase != 'idle':
+            raise ValueError('An idle packed block is required')
+        entries = list(entries)
+        segments = tuple(self.segment_of(entry['request'].engine) for entry in entries)
+        for entry in entries:
+            entry['request'].session.check_ticket(entry['request_id'], entry['ticket'])
+        self.calls.append(('verify', [entry['request_id'] for entry in entries]))
+        self.phase, self.pending_segments, self.rounds = 'verified', set(segments), self.rounds + 1
+        return [self.predictions_for(segment) for segment in segments], dict(segments=segments, users=self.shape.users)
+
+    def check_segment(self, segment):
+        if self.phase != 'verified' or segment not in self.pending_segments:
+            raise ValueError('Segment %r has no verified, uncommitted block' % (segment,))
+
+    def features(self, segment):
+        self.check_segment(segment)
+        return TAPS
+
+    def commit_user(self, segment, prefix):
+        self.check_segment(segment)
+        # packed_verifier.PackedVerifierEngine.commit_user fences exactly the commit that
+        # empties its pending segments; test_packed_verifier checks that rule on the real block.
+        fenced = self.pending_segments == {segment}
+        self.calls.append(('commit', segment, prefix, fenced))
+        self.pending_segments.discard(segment)
+        if not self.pending_segments:
+            self.phase = 'idle'
+
+    def describe(self):
+        return dict(name='packed-fake')
+
+
+class FakeSession:
+    """GreedySession's ticket, commit and abort, with greedy_verify.select_prefix's decision."""
+
+    def __init__(self, request_id, position):
+        self.request_id, self.position, self.seed = request_id, position, 5
+        self.phase, self.pending, self.finished = 'idle', None, False
+        self.emitted, self.aborted, self.epoch = [], 0, 0
+
+    def propose(self, tokens):
+        if self.phase != 'idle' or self.pending is not None:
+            raise ValueError('An unfinished idle request is required')
+        self.epoch += 1
+        self.pending = SimpleNamespace(request_id=self.request_id, epoch=self.epoch, position=self.position,
+                                       tokens=tuple(tokens))
+        self.phase = 'pending'
+        return self.pending
+
+    def check_ticket(self, request_id, ticket):
+        if request_id != self.request_id or self.phase != 'pending' or ticket is not self.pending:
+            raise ValueError('The current live block ticket is required')
+
+    def commit(self, request_id, ticket, predictions, publish):
+        self.check_ticket(request_id, ticket)
+        accepted = 0
+        for proposed, predicted in zip(ticket.tokens[1:], predictions):
+            if proposed != predicted:
+                break
+            accepted += 1
+        decision = SimpleNamespace(emitted=(*ticket.tokens[1:accepted + 1], predictions[accepted]),
+                                   accepted=accepted, state_rows=accepted + 1, finished=False)
+        self.phase = 'committing'
+        try:
+            if publish(decision.state_rows) is not None:
+                raise RuntimeError('Publication must return None')
+        except BaseException:
+            self.phase = 'failed'
+            raise
+        self.position += decision.state_rows
+        self.emitted.extend(decision.emitted)
+        self.pending, self.phase = None, 'idle'
+        return decision
+
+    def abort(self, request_id, ticket, restore):
+        self.check_ticket(request_id, ticket)
+        self.phase = 'committing'
+        try:
+            if restore(0) is not None:
+                raise RuntimeError('Abort must return None')
+        except BaseException:
+            self.phase = 'failed'
+            raise
+        self.aborted += 1
+        self.pending, self.phase = None, 'idle'
+
+    def fail_verification(self, request_id, ticket):
+        self.check_ticket(request_id, ticket)
+        self.phase = 'failed'
+
+
+class FakeEngine:
+    """VerifierEngine.adopt_packed and the packed branch of its publish."""
+
+    def __init__(self, session):
+        self.session, self.position = session, session.position
+        self.phase, self.pending, self.packed = 'idle', None, None
+        self.adopted = []
+
+    def adopt_packed(self, ticket, block, segment):
+        self.session.check_ticket(self.session.request_id, ticket)
+        if self.phase != 'idle' or self.pending is not None or ticket.position != self.position:
+            raise ValueError('Only an idle engine at the ticket frontier can adopt a packed verification')
+        if getattr(block, 'rows_per_user', None) != len(ticket.tokens):
+            raise ValueError("A packed block segment holding exactly this ticket's rows is required")
+        self.adopted.append((ticket, block, segment))
+        self.packed, self.phase, self.pending = (block, segment), 'verified', ticket
+
+    def verified_features_for_publication(self, ticket):
+        if self.phase != 'verified' or self.pending is not ticket or self.session.phase != 'committing':
+            raise ValueError('Feature publication requires the current committing verifier ticket')
+        block, segment = self.packed
+        return block.features(segment)
+
+    def publish(self, prefix):
+        ticket = self.pending
+        if (self.phase != 'verified' or ticket is None or self.session.pending is not ticket
+                or self.session.phase != 'committing' or not 0 <= prefix <= len(ticket.tokens)):
+            raise ValueError('Publication requires the live verified ticket during its owner decision')
+        self.phase = 'committing'
+        try:
+            block, segment = self.packed
+            block.commit_user(segment, prefix)
+            verifier_engine._resident = None
+            self.position += prefix
+            self.phase, self.pending, self.packed = 'idle', None, None
+        except BaseException:
+            self.phase = 'failed'
+            raise
+
+
+class FakeRuntime:
+    """DFlashRequestRuntime.publish: the features first, from the block at this user's
+    segment, then the target publication; a failed history publication fails the engine."""
+
+    def __init__(self, engine):
+        self.engine, self.features, self.published, self.fail = engine, None, [], None
+
+    def publish(self, prefix):
+        engine = self.engine
+        ticket = engine.session.pending
+        if engine.phase != 'verified' or engine.pending is not ticket or engine.session.phase != 'committing':
+            raise ValueError('Feature publication requires the current verified target transaction')
+        try:
+            if prefix:
+                self.features = engine.verified_features_for_publication(ticket)
+            if self.fail is not None:
+                raise self.fail
+            engine.publish(prefix)
+            self.published.append(prefix)
+        except BaseException:
+            engine.phase = 'failed'
+            raise
+
+
+class FakeRequest:
+    def __init__(self, request_id, position, stepped):
+        self.session = FakeSession(request_id, position)
+        self.engine = FakeEngine(self.session)
+        self.runtime = FakeRuntime(self.engine)
+        self.closed = self.cancelled = self.busy = False
+        self.collect_timings = False
+        self.stepped = stepped
+
+    def propose(self, predictions, accept, rows=ROWS):
+        """A ticket whose first `accept` proposals the target will agree with."""
+        return self.session.propose((self.session.seed, *predictions[:accept], *([0] * (rows - 1 - accept))))
+
+    def step(self, request_id, *, cancelled):
+        """What the sequential fallback drives: this request's own step."""
+        flag = cancelled()
+        self.stepped.append((request_id, flag))
+        return CommittedOutput(request_id, () if flag else (7,), self.session.position, flag, flag)
+
+
+def entry(request):
+    return dict(request_id=request.session.request_id, request=request, ticket=request.session.pending)
+
+
+def answers(*flags):
+    """A cancellation callback answering these in turn, then the last one forever."""
+    remaining = list(flags)
+
+    def cancelled():
+        if len(remaining) > 1:
+            return remaining.pop(0)
+        return remaining[0]
+
+    return cancelled
+
+
+class PackedStepTests(unittest.TestCase):
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block = FakeBlock()
+        self.stepped = []
+
+    def request(self, request_id, segment, position, accept, rows=ROWS, bind=True):
+        request = FakeRequest(request_id, position, self.stepped)
+        if bind:
+            self.block.bind(request.engine, segment)
+        request.propose(self.block.predictions_for(segment), accept, rows)
+        return request
+
+    def two(self):
+        """A in pool slot 0 (segment 0), B in slot 1 (segment 1), presented B first
+        (probe 35436807668 saw the scheduler present the pair as ['B', 'A'])."""
+        first = self.request('A', 0, 100, accept=15)
+        second = self.request('B', 1, 3000, accept=9)
+        return [entry(second), entry(first)]
+
+    def step(self, entries, cancelled=None):
+        return packed_device_step(entries, cancelled=cancelled or (lambda: False), block=self.block)
+
+    def test_one_verify_pass_serves_every_entry_and_each_commits_its_own_segment_in_order(self):
+        entries = self.two()
+        second, first = entries[0]['request'], entries[1]['request']
+        verifier_engine._resident = object()
+        outputs = self.step(entries)
+        # one verify over both, then B's commit (segment 1) and A's (segment 0), in the
+        # scheduler's order; only the last commit of the round is the fence
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 16, True)])
+        self.assertEqual(self.stepped, [], 'no request went through the sequential step')
+        self.assertEqual([output.request_id for output in outputs], ['B', 'A'])
+        self.assertEqual(outputs[0], CommittedOutput('B', tuple(self.block.predictions_for(1)[:10]), 3010, False))
+        self.assertEqual(outputs[1], CommittedOutput('A', tuple(self.block.predictions_for(0)[:16]), 116, False))
+        # adopt_packed took metrics['segments'][i]: B, entry 0, was segment 1 and A, entry 1, segment 0
+        self.assertEqual(second.engine.adopted, [(entries[0]['ticket'], self.block, 1)])
+        self.assertEqual(first.engine.adopted, [(entries[1]['ticket'], self.block, 0)])
+        # each publication took its features from the block at its own segment
+        self.assertEqual((second.runtime.features, second.runtime.published), (TAPS, [10]))
+        self.assertEqual((first.runtime.features, first.runtime.published), (TAPS, [16]))
+        for request in (first, second):
+            self.assertEqual((request.session.phase, request.session.pending, request.engine.phase), ('idle', None, 'idle'))
+            self.assertEqual(request.engine.position, request.session.position)
+            self.assertFalse(request.busy or request.cancelled)
+        self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
+        self.assertIsNone(verifier_engine._resident, 'slot 0 is nobody\'s after a packed round')
+        # the next round, presented the other way: A's commit first, B's is the fence
+        first.propose(self.block.predictions_for(0), accept=2)
+        second.propose(self.block.predictions_for(1), accept=15)
+        outputs = self.step([entry(first), entry(second)])
+        self.assertEqual(self.block.calls[3:], [('verify', ['A', 'B']), ('commit', 0, 3, False), ('commit', 1, 16, True)])
+        self.assertEqual([(output.request_id, output.position) for output in outputs], [('A', 119), ('B', 3026)])
+        self.assertEqual(self.block.rounds, 2)
+
+    def test_a_round_the_block_cannot_serve_goes_to_the_sequential_step_whole(self):
+        cases = {}
+        cases['a narrow ticket'] = [entry(self.request('B', 1, 3000, accept=7, rows=8)), entry(self.request('A', 0, 100, accept=15))]
+        cases['one survivor'] = [entry(self.request('A', 0, 100, accept=15))]
+        cases['more entries than the block serves'] = [entry(self.request(name, index, 100, accept=15))
+                                                       for index, name in enumerate('ABC')]
+        cases['an engine the block was not captured against'] = [entry(self.request('B', 1, 3000, accept=9)),
+                                                                 entry(self.request('C', 0, 100, accept=15, bind=False))]
+        for name, entries in cases.items():
+            with self.subTest(name=name):
+                self.stepped.clear()
+                outputs = self.step(entries)
+                self.assertEqual(self.stepped, [(item['request_id'], False) for item in entries])
+                self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in entries])
+                self.assertEqual(self.block.calls, [], 'the block was not touched')
+
+    def test_a_cancellation_before_the_verify_is_answered_by_each_requests_own_step(self):
+        entries = self.two()
+        outputs = self.step(entries, cancelled=lambda: True)
+        self.assertEqual(self.stepped, [('B', True), ('A', True)])
+        self.assertTrue(all(output.cancelled for output in outputs))
+        self.assertEqual(self.block.calls, [])
+        for item in entries:
+            self.assertEqual(item['request'].engine.adopted, [])
+
+    def test_a_cancellation_after_the_verify_aborts_every_user_through_the_block(self):
+        entries = self.two()
+        outputs = self.step(entries, cancelled=answers(False, True))
+        # prefix 0 for both, in order, the last one still the round's fence
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 0, False), ('commit', 0, 0, True)])
+        self.assertEqual(outputs, [CommittedOutput('B', (), 3000, True, True), CommittedOutput('A', (), 100, True, True)])
+        for item in entries:
+            request = item['request']
+            self.assertEqual((request.session.aborted, request.session.phase, request.session.pending), (1, 'idle', None))
+            self.assertTrue(request.cancelled)
+            self.assertFalse(request.busy)
+            self.assertEqual(request.runtime.features, None, 'an abort publishes no features')
+        self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
+        self.assertEqual(self.stepped, [])
+
+    def test_a_cancellation_between_two_commits_aborts_only_the_users_still_pending(self):
+        entries = self.two()
+        outputs = self.step(entries, cancelled=answers(False, False, True))
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 0, True)])
+        self.assertEqual(outputs, [CommittedOutput('B', tuple(self.block.predictions_for(1)[:10]), 3010, False),
+                                   CommittedOutput('A', (), 100, True, True)])
+        self.assertEqual([item['request'].cancelled for item in entries], [False, True])
+        self.assertEqual(self.block.phase, 'idle')
+
+    def test_a_failed_publication_fails_the_round_and_leaves_no_segment_undecided(self):
+        # B, first in the scheduler's order, fails its history publication before the
+        # block commits: B's segment is still pending and A was never adopted
+        entries = self.two()
+        second, first = entries[0]['request'], entries[1]['request']
+        second.runtime.fail = RuntimeError('history publication failure')
+        verifier_engine._resident = object()
+        with self.assertRaisesRegex(RuntimeError, 'history publication failure'):
+            self.step(entries)
+        self.assertEqual((second.session.phase, second.engine.phase), ('failed', 'failed'))
+        self.assertEqual((first.session.phase, first.engine.phase, first.engine.adopted), ('failed', 'idle', []))
+        # both segments released at prefix 0, so the block can serve or close; no trace ran
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 0, 0, False), ('commit', 1, 0, True)])
+        self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
+        self.assertFalse(first.busy or second.busy)
+        self.assertIsNone(verifier_engine._resident)
+        # A, second in order, fails after B committed: only A's segment is left to release
+        self.block = FakeBlock()
+        self.stepped = []
+        entries = self.two()
+        entries[1]['request'].runtime.fail = RuntimeError('history publication failure')
+        with self.assertRaises(RuntimeError):
+            self.step(entries)
+        self.assertEqual(self.block.calls, [('verify', ['B', 'A']), ('commit', 1, 10, False), ('commit', 0, 0, True)])
+        self.assertEqual(entries[0]['request'].session.position, 3010)
+        self.assertEqual(self.block.phase, 'idle')
+
+    def test_a_failure_in_the_verify_itself_touches_no_user(self):
+        entries = self.two()
+
+        def failing(entries):
+            raise RuntimeError('device failure')
+
+        self.block.verify = failing
+        with self.assertRaisesRegex(RuntimeError, 'device failure'):
+            self.step(entries)
+        for item in entries:
+            request = item['request']
+            # the real block fails every session itself; here the tickets are still pending, so the step does
+            self.assertEqual((request.session.phase, request.engine.adopted, request.busy), ('failed', [], False))
+        self.assertEqual(self.block.calls, [])
+
+    def test_refusals_come_before_any_device_work(self):
+        cases = {}
+        stranger = self.two()
+        stranger[0]['ticket'] = SimpleNamespace(request_id='someone-else', position=3000, tokens=stranger[0]['ticket'].tokens)
+        cases['a ticket for another request'] = stranger
+        replaced = self.two()
+        replaced[0]['ticket'] = SimpleNamespace(request_id='B', position=3000, tokens=replaced[0]['ticket'].tokens)
+        cases['a ticket that is not the pending one'] = replaced
+        for flag in ('busy', 'closed', 'cancelled'):
+            entries = self.two()
+            setattr(entries[1]['request'], flag, True)
+            cases['a %s request' % flag] = entries
+        for name, entries in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.step(entries)
+        with self.assertRaises(ValueError):
+            self.step([])
+        with self.assertRaises(ValueError):
+            packed_device_step(self.two(), cancelled=None, block=self.block)
+        with self.assertRaises(ValueError):
+            packed_device_step(self.two(), cancelled=lambda: False, block=None)
+        self.assertEqual((self.block.calls, self.stepped), ([], []))
+
+    def test_the_audit_line_names_the_segment_the_request_and_what_it_accepted(self):
+        def lines(entries, enabled, cancelled=None):
+            with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1' if enabled else '0'}), \
+                    patch('serving_packed_step.audit_log') as log:
+                self.step(entries, cancelled=cancelled)
+            return [item.args[0].format(**item.kwargs) for item in log.call_args_list]
+
+        self.assertEqual(lines(self.two(), False), [])
+        self.block = FakeBlock()
+        self.assertEqual(lines(self.two(), True), [
+            '[PACKED] request=B segment=1 position=3000 prefix=10 emitted=10 '
+            'predictions=[1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]',
+            '[PACKED] request=A segment=0 position=100 prefix=16 emitted=16 '
+            'predictions=[1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]'])
+        # an aborted user logs prefix 0; ids are cut to 48 characters so a line stays short
+        self.block = FakeBlock()
+        long_id = 'B' * 100
+        entries = [entry(self.request(long_id, 1, 32768, accept=9)), entry(self.request('A', 0, 100, accept=15))]
+        seen = lines(entries, True, cancelled=answers(False, True))
+        self.assertEqual(seen[0], '[PACKED] request=%s segment=1 position=32768 prefix=0 emitted=0 '
+                                  'predictions=[1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]' % ('B' * 48))
+        self.assertTrue(all(len(line) < 200 for line in seen), max(map(len, seen)))
+
+    def test_audit_log_prints_when_loguru_is_absent(self):
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            audit_log('[PACKED] request={request} segment={segment}', request='A', segment=0)
+        self.assertEqual(output.getvalue().strip(), '[PACKED] request=A segment=0')
+
+    def test_timings_are_recorded_for_a_request_that_collects_them(self):
+        entries = self.two()
+        second = entries[0]['request']
+        second.collect_timings, second.timings = True, []
+        second.prepared_timing, second.last_commit_time = (1.0, 1.5), None
+        self.step(entries)
+        (timing,) = second.timings
+        self.assertEqual((timing['position'], timing['rows'], timing['committed']), (3000, 16, 10))
+        self.assertEqual((timing['verifier']['packed'], timing['verifier']['segment'], timing['verifier']['segments']),
+                         (True, 1, (1, 0)))
+        self.assertEqual(set(timing), {'position', 'rows', 'committed', 'draft_ms', 'verify_host_ms', 'commit_host_ms',
+                                       'cycle_ms', 'outside_phases_ms', 'verifier'})
+        self.assertAlmostEqual(timing['draft_ms'], 500.0)
+        self.assertIsNone(second.prepared_timing)
+        self.assertIsNotNone(second.last_commit_time)
+        self.assertFalse(hasattr(entries[1]['request'], 'timings'), 'a request not collecting records nothing')
+
+    def test_it_reports_one_weight_pass_for_every_user_and_what_it_falls_back_to(self):
+        cost = describe()
+        self.assertIs(cost['batched'], True)
+        self.assertEqual(cost['weight_passes_per_round'], 'one for all users')
+        self.assertEqual(cost['fallback'], describe_sequential())
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '0'}):
+            self.assertIs(serving_packed_step.audit_enabled(), False)
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}):
+            self.assertIs(serving_packed_step.audit_enabled(), True)
+
+
+if __name__ == '__main__':
+    unittest.main()

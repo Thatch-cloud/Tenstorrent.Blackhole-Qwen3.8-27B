@@ -58,6 +58,9 @@ jobs:
           for name in serving_runtime.py serving_gather_experiment.py gdn_grouped_gather.py gdn_grouped_gather_gate.py gdn_grouped_gather_scope.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in packed_verifier.py serving_packed_step.py gdn_device_loop_state.py gdn_records.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"
